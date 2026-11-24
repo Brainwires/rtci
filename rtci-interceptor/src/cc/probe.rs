@@ -202,6 +202,7 @@ pub struct ProbeController {
     drop_probe: bool,
     /// When [`poll`](Self::poll) was last called.
     polled_at: Option<Instant>,
+    trace_at: Option<Instant>,
 }
 
 impl ProbeController {
@@ -225,6 +226,7 @@ impl ProbeController {
             drop: None,
             drop_probe: false,
             polled_at: None,
+            trace_at: None,
         }
     }
 
@@ -289,6 +291,25 @@ impl ProbeController {
         }
 
         self.started = true;
+        if self
+            .trace_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1))
+        {
+            self.trace_at = Some(now);
+            crate::probe_trace(
+                now,
+                format_args!(
+                    "poll target {:.0} sending {:.0} share {:.2} last_probe_ago {:?} drop {:?}",
+                    target,
+                    sending,
+                    sending / target.max(1.0),
+                    self.last_probe
+                        .map(|l| now.saturating_duration_since(l).as_secs_f64()),
+                    self.drop
+                        .map(|(b, at)| (b as u64, now.saturating_duration_since(at).as_secs_f64())),
+                ),
+            );
+        }
         let rate = if let Some(rate) = self.initial.pop() {
             Some(rate)
         } else if let Some(rate) = self.further.take() {
@@ -317,7 +338,15 @@ impl ProbeController {
         }?;
 
         let rate = rate.min(self.max_bitrate);
+        crate::probe_trace(
+            now,
+            format_args!(
+                "ask rate {:.0} target {:.0} sending {:.0} drop_probe {}",
+                rate, target, sending, self.drop_probe
+            ),
+        );
         if rate <= target {
+            crate::probe_trace(now, format_args!("suppressed: rate <= target"));
             // Nothing above the target is allowed, so there is nothing to ask.
             self.drop_probe = false;
             return None;

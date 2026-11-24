@@ -1534,6 +1534,9 @@ struct Outcome {
 fn run(setup: &Setup) -> Result<Outcome> {
     let seed = setup.seed;
     let mut world = World::connected(setup)?;
+    if std::env::var("RTC_PROBE_TRACE").is_ok() {
+        *rtci::interceptor::PROBE_TRACE_EPOCH.lock().unwrap() = Some(world.start);
+    }
     match setup.cap_at_target {
         None => {
             let t = world.now + Duration::from_secs(20);
