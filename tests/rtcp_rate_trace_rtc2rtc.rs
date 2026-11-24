@@ -772,6 +772,45 @@ fn trace_rtcp_of_a_call() -> Result<()> {
     Ok(())
 }
 
+/// The congestion control feedback cadence and RTCP against RFC 3550's 5% at five media rates
+/// (audio only at 24 kbit/s, audio and video one way above), under the default (`Rfc`): per
+/// rate the receiver's feedback packets per second and their longest gap, and all RTCP of both
+/// sides with the lower layers against 5% of the session bandwidth ([`rtcp_and_budget`]).
+/// Prints, asserts nothing; `ROW`/`BUDGET` lines for comparing branches.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_feedback_cadence_at_rates() -> Result<()> {
+    let rates = [
+        ("24 kbit/s audio", 60, 0),
+        ("100 kbit/s A+V", 60, 190),
+        ("300 kbit/s A+V", 60, 690),
+        ("1 Mbit/s A+V", 160, 2340),
+        ("2.5 Mbit/s A+V", 160, 6090),
+    ];
+    print_header();
+    for (name, audio_bytes, video_bytes) in rates {
+        let sc = Scenario {
+            name,
+            audio_bytes,
+            video_bytes,
+            seconds: 45,
+            ..BASE
+        };
+        let m = measure(sc, BehaviourProfile::Rfc, None)?;
+        print_row(&sc, BehaviourProfile::Rfc, &m);
+        let (rtcp, budget) = rtcp_and_budget(&m);
+        println!(
+            "BUDGET {name}: feedback {:.2}/s (longest gap {:.0} ms), RTCP {rtcp:.0} of {budget:.0} bit/s ({:.1}% of the budget), receiver's RTCP {:.0} bit/s, sender's {:.0} bit/s",
+            m.sides[1].cc,
+            m.sides[1].cc_gap_ms,
+            100.0 * rtcp / budget,
+            (m.sides[1].rtcp_octets + 28.0 * m.sides[1].rtcp_datagrams) * 8.0,
+            (m.sides[0].rtcp_octets + 28.0 * m.sides[0].rtcp_datagrams) * 8.0,
+        );
+    }
+    Ok(())
+}
+
 /// 1 Mbit/s of audio and video one way with `a=rtcp-rsize`, 12 s, a video packet lost at 8 s.
 const ONE_MBIT: Scenario = Scenario {
     name: "1 Mbit/s A+V one way, rsize",
