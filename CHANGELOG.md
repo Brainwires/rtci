@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **tooling** (up-watch): `scripts/upstream-watch.py` lists what webrtc-rs did since the fork last
+  looked: `webrtc-rs/rtc` commits after the merged one, its pull requests and issues opened or
+  updated since the triage day, and `webrtc-rs/webrtc` commits (`master`, `v0.17.x`). Both
+  points are FORK.md's (new row "Open upstream work last triaged"). Read-only GitHub API
+  calls; no workflow runs it.
+
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
   the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a

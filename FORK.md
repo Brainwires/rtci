@@ -16,6 +16,7 @@ This project descends from webrtc-rs `rtc` ([webrtc-rs/rtc](https://github.com/w
 |---|---|
 | Upstream | `webrtc-rs/rtc` `master` |
 | Last upstream commit merged | `0fbcaa74` (after v0.21.1, 2026-11-12) |
+| Open upstream work last triaged | 2026-11-24 (every open pull request and issue of `webrtc-rs/rtc`, and `webrtc-rs/webrtc` since 2026-11-01; `scripts/upstream-watch.py` lists what came after) |
 | Previous sync point (original fork point) | `bf30a00c` (2026-04-06) |
 | Fork master before this sync | `81bc7c6b` |
 | Fork release | `0.1.0` (tag `v0.1.0`), the first release under the `rtci` names. The version line restarts because crates.io ignores build metadata and could not order the earlier `0.22.0+brainwires.N` line; those releases (`0.22.0+brainwires.1` to `.6`) keep their tags `v0.22.0+brainwires.N`. Based on upstream 0.21.1. |
