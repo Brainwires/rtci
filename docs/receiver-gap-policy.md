@@ -10,7 +10,9 @@ should follow, and why. Nothing here changes engine behaviour.
 1. **Bound the wait in time, not in packets.** A gap that the sender will repair is repaired
    within a few round trips: the NACK generator asks a round trip apart while the packet is
    missing, the responder answers within the congestion controller's share
-   (`RetransmissionRateLimit`), and a repair is not resent within a round trip. Wait for a
+   (`RetransmissionRateLimit`), and a repair is not resent within 20 ms of leaving
+   (`MIN_RETRANSMIT_INTERVAL`; a request that crosses a repair in flight can be answered
+   again, and the copy arrives after the first). Wait for a
    missing packet about as long as that takes (the repair window: a few round-trip times, and no
    longer than the playout delay the application accepts, typically 200 ms to 1 s for
    interactive video). A bound in packets is a bound in time only at one bit rate: 256 packets
