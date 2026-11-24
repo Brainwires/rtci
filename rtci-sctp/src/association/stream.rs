@@ -404,21 +404,25 @@ impl Stream<'_> {
     /// `now` is the instant the caller is acting at: resetting the stream queues an outgoing
     /// chunk, so it is on the same write path as [`write_sctp`](Self::write_sctp).
     pub fn stop(&mut self, now: Instant) -> Result<()> {
-        let mut reset = false;
+        let (mut reset, mut abandon) = (false, false);
         if let Some(s) = self.association.streams.get_mut(&self.stream_identifier) {
-            if s.state == RecvSendState::Readable || s.state == RecvSendState::ReadWritable {
-                reset = true;
-            }
+            // This side's direction is reset once: not again when the peer's Incoming SSN Reset
+            // Request has reset it already.
+            reset = !s.outgoing_reset_started;
+            abandon = !s.reads_stopped;
+            s.outgoing_reset_started = true;
             s.state = ((s.state as u8) & 0x2).into();
         }
 
-        if reset {
+        if abandon {
             // Nothing reads the stream from now on: what it holds, and what still arrives on it
             // until the peer resets its direction, is abandoned. Held, it would take the
             // receive window for good (a peer that sends the data it had queued on the stream
             // before its reset, as RFC 6525 5.1.2 A3 asks, could fill it and never send that
             // reset), and hold the peer's reset "In progress" (`streams_awaiting_drain`).
             self.abandon_incoming();
+        }
+        if reset {
             // Reset the outgoing stream
             // https://tools.ietf.org/html/rfc6525
             self.association
@@ -651,6 +655,12 @@ pub struct StreamState {
     /// A reset of this outgoing stream was asked for and is not answered yet (RFC 6525
     /// 5.1.2 A1).
     pub(crate) outgoing_reset_pending: bool,
+    /// This side has reset its outgoing direction of the stream: at the application's close
+    /// (`Stream::stop`), or at the peer's Incoming SSN Reset Request. The peer's reset of its
+    /// own direction then completes the close and is not answered with another reset (RFC 8831
+    /// 6.7), which would reach the next channel to take the id. Kept apart from the
+    /// `RecvSendState` bits: the peer's direction stays readable until the peer resets it.
+    pub(crate) outgoing_reset_started: bool,
     /// The application stopped reading the stream (`Stream::stop`, `Stream::close`): what
     /// arrives on it is dropped, since nothing will read it (RFC 8831 6.7: the messages of a
     /// closed channel are "delivered (or abandoned)").
@@ -687,6 +697,7 @@ impl StreamState {
             buffered_amount_low: 0,
             buffered_amount_high: u32::MAX as usize,
             outgoing_reset_pending: false,
+            outgoing_reset_started: false,
             reads_stopped: false,
             held_writes: vec![],
             ordered_mid: 0,

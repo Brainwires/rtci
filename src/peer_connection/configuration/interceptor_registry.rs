@@ -2007,6 +2007,9 @@ pub(crate) fn create_stream_info(
             .iter()
             .map(|c| (c.payload_type, c.rtp_codec.mime_type.clone()))
             .collect(),
+        // Set by the sender or receiver of a stream whose FEC runs in an RTP session of its
+        // own (RFC 5109 section 14.1).
+        fec_session: None,
     }
 }
 

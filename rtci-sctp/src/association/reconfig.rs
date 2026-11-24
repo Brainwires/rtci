@@ -636,7 +636,7 @@ impl Association {
                 return Ok(true);
             }
             self.reconfig_requests.insert(rsn, p.clone());
-            let (result, mut echo) = self.perform_peer_outgoing_reset(p, true);
+            let (result, mut echo) = self.perform_peer_outgoing_reset(p);
             answer.respond(rsn, result);
             answer.echo.append(&mut echo);
         } else if let Some(p) = any.downcast_ref::<ParamIncomingResetRequest>() {
@@ -801,11 +801,10 @@ impl Association {
 
     /// RFC 6525 5.2.2: performs the peer's Outgoing SSN Reset Request `p` as far as it can
     /// be performed now. Returns the result to answer with and the streams whose outgoing
-    /// direction this side resets in turn (when `echo` allows it).
+    /// direction this side resets in turn.
     fn perform_peer_outgoing_reset(
         &mut self,
         p: &ParamOutgoingResetRequest,
-        echo: bool,
     ) -> (ReconfigResult, Vec<u16>) {
         // RFC 6525 5.2.2: a request without stream numbers is for every stream.
         let every_stream = p.stream_identifiers.is_empty();
@@ -843,8 +842,8 @@ impl Association {
                     // second half of a close this side started). Echoing it again would
                     // send a reset after the stream id is free, and reset the next channel
                     // that takes the id.
-                    let outgoing_open = (stream.state as u8) & 0x1 != 0;
-                    if echo && outgoing_open {
+                    let outgoing_open = !stream.outgoing_reset_started;
+                    if outgoing_open {
                         if self.pending_queue.holds_stream(*id) {
                             // What the application wrote to the stream before now is still
                             // to be sent, all or part of it without a TSN. RFC 6525 5.1.2 A3
@@ -870,9 +869,8 @@ impl Association {
                         }
                     }
                     self.unregister_stream(*id, AssociationError::Reset);
-                } else if echo
-                    && (self.my_max_num_inbound_streams == 0
-                        || *id < self.my_max_num_inbound_streams)
+                } else if self.my_max_num_inbound_streams == 0
+                    || *id < self.my_max_num_inbound_streams
                 {
                     // A stream this side never sent or received on (a pre-negotiated data
                     // channel left idle) has no state here, but the application still
@@ -973,9 +971,14 @@ impl Association {
             .collect();
         reached.sort_by_key(|p| p.reconfig_request_sequence_number);
         for request in reached {
+            // Performed late, the reset is answered as one performed at once is: with this
+            // side's own reset of the streams (RFC 8831 6.7). Each stream is performed (and
+            // unregistered) once, so none is answered twice; a stream still to drain is
+            // answered by `retry_deferred_resets`.
             let mut answer = ReconfigAnswer::default();
-            let (result, _) = self.perform_peer_outgoing_reset(&request, false);
+            let (result, mut echo) = self.perform_peer_outgoing_reset(&request);
             answer.respond(request.reconfig_request_sequence_number, result);
+            answer.echo.append(&mut echo);
             reply.append(&mut self.reconfig_answer_packets(answer));
         }
         Ok(())
@@ -1002,7 +1005,7 @@ impl Association {
 
         for p in pending {
             let mut answer = ReconfigAnswer::default();
-            let (result, mut echo) = self.perform_peer_outgoing_reset(&p, true);
+            let (result, mut echo) = self.perform_peer_outgoing_reset(&p);
             answer.respond(p.reconfig_request_sequence_number, result);
             answer.echo.append(&mut echo);
             for packet in self.reconfig_answer_packets(answer) {
@@ -1083,8 +1086,10 @@ impl Association {
             waiting.generations.push((id, Some(s.generation)));
             s.outgoing_reset_pending = true;
             // As after `Stream::stop`: this side has reset its direction of the stream, so
-            // the peer's own reset of it (RFC 8831 6.7) is not answered with another.
-            s.state = ((s.state as u8) & 0x2).into();
+            // the peer's own reset of it (RFC 8831 6.7) is not answered with another. The
+            // peer's direction is not touched (5.2.3): it stays readable, and what it holds is
+            // delivered before the peer's reset is performed (5.2.2).
+            s.outgoing_reset_started = true;
             let generation = s.generation;
             waiting.markers_left += 1;
             self.pending_queue.push_reset(ResetMarker {

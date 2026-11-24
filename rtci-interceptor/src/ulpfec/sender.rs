@@ -324,9 +324,17 @@ impl UlpfecSendInterceptor {
     ///   [`StreamInfo::payload_type_fec`] when its format is `ulpfec`; without one, RED when the
     ///   section negotiated `red` and `ulpfec`.
     ///
+    /// - A separate RTP session ([`StreamInfo::fec_session`]): a separate stream, whatever
+    ///   the builder and the media section's formats say.
+    ///
     /// `None`: the stream is not protected. A binder that names no formats (an empty
     /// `section_mime_types`) gets the builder's carriage as it is.
     fn negotiated_carriage(&self, info: &StreamInfo) -> Option<Carriage> {
+        // A FEC session of its own was negotiated for the stream (RFC 5109 section 14.1, an
+        // m= section grouped with the media's): that is where its FEC goes.
+        if info.fec_session.is_some() {
+            return Some(Carriage::Stream);
+        }
         if info.section_mime_types.is_empty() {
             return Some(self.carriage);
         }
@@ -889,25 +897,32 @@ impl Interceptor for UlpfecSendInterceptor {
         };
         // RFC 5109 section 13: "If 1 is signaled, only one level of FEC protection SHALL be
         // used in the stream": `onelevelonly=1` on the negotiated `ulpfec` format.
+        // The FEC stream of a separate stream: in an RTP session of its own
+        // ([`StreamInfo::fec_session`]), else the repair flow of the media's session.
+        let separate = match info.fec_session {
+            Some(session) => (Some(session.ssrc), Some(session.payload_type)),
+            None => (info.ssrc_fec, info.payload_type_fec),
+        };
         let fec_format = match carriage {
             Carriage::Red {
                 fec_payload_type, ..
             } => Some(fec_payload_type),
-            Carriage::Stream => info.payload_type_fec,
+            Carriage::Stream => separate.1,
         };
-        let one_level_only = fec_format.is_some_and(|payload_type| {
-            info.section_fmtp_lines
-                .iter()
-                .any(|(pt, fmtp)| *pt == payload_type && super::one_level_only_from_fmtp(fmtp))
-        });
+        let one_level_only = info
+            .fec_session
+            .is_some_and(|session| session.one_level_only)
+            || fec_format.is_some_and(|payload_type| {
+                info.section_fmtp_lines
+                    .iter()
+                    .any(|(pt, fmtp)| *pt == payload_type && super::one_level_only_from_fmtp(fmtp))
+            });
         let packetizer = match carriage {
             Carriage::Red { .. } => None,
             Carriage::Stream => {
                 // Both halves or neither, as for FlexFEC: a repair SSRC with no payload type has
                 // nothing to mark its packets with, and the reverse has nowhere to send them.
-                let (Some(ssrc_fec), Some(payload_type_fec)) =
-                    (info.ssrc_fec, info.payload_type_fec)
-                else {
+                let (Some(ssrc_fec), Some(payload_type_fec)) = separate else {
                     return;
                 };
                 Some(UlpfecStreamPacketizer::new(
