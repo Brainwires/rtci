@@ -5,6 +5,20 @@
 //! calls those `unsafe extern "C"` functions; this module is the crate's only `unsafe` code, and
 //! each call states the contract it meets. docs/video-pipeline.md 4.6 has the speed measured
 //! without assembly and what the default build can do in real time.
+//!
+//! # A hostile stream can end the process
+//!
+//! With rav1d 1.1.0, a malformed AV1 frame (one flipped bit is enough) makes the decoder panic,
+//! and because the panic happens inside rav1d's `extern "C"` functions, which cannot unwind,
+//! **the whole process aborts**. Nothing in this crate or in the application can catch it:
+//! `std::panic::catch_unwind` does not see it. A remote peer chooses what it sends, so with this
+//! feature on, any peer that can send AV1 can kill the application. The bug is rav1d's
+//! (memorysafety/rav1d issue 1497), fixed on its main branch (pull request 1503) but not in any
+//! release yet (issue 1521 asks for one).
+//!
+//! So: enable `av1` only for streams from a sender you trust, or run [`Av1Decoder`] in a
+//! separate process whose death you can survive. docs/video-pipeline.md 4.6 has the reproducer
+//! and what containment exists.
 
 use std::ptr::NonNull;
 
@@ -127,23 +141,17 @@ impl Av1Decoder {
         if data.is_empty() {
             return Err(DecodeError::Corrupt("empty temporal unit".into()));
         }
-        let mut buf = Dav1dData::default();
-        // SAFETY: `buf` is valid to write to; on success `buf.data` is an allocation of
-        // `data.len()` bytes that `buf` owns.
-        let ptr = unsafe { dav1d_data_create(Some(NonNull::from(&mut buf)), data.len()) };
-        if ptr.is_null() {
-            return Err(DecodeError::Corrupt("dav1d_data_create failed".into()));
-        }
-        // SAFETY: `ptr` points to `data.len()` writable bytes (above) that `data` cannot
-        // overlap (a fresh allocation).
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()) };
+        let mut buf = OwnedData::new(data)?;
         let mut picture: Option<DecodedPicture> = None;
         let mut status = 0;
-        // Send the data; when the decoder answers "again", take a picture out and retry.
+        // Send the data; when the decoder answers "again", take a picture out and retry. An
+        // early return here releases what the decoder has not taken (`OwnedData`'s drop):
+        // returning past it once leaked the data of every temporal unit whose picture could
+        // not be copied out (found by fuzzing, docs/video-pipeline.md 4.6).
         for _ in 0..4 {
-            // SAFETY: `ctx` is open (not closed until drop) and `buf` is valid to read and
+            // SAFETY: `ctx` is open (not closed until drop) and `buf.0` is valid to read and
             // write.
-            let r = unsafe { dav1d_send_data(Some(ctx), Some(NonNull::from(&mut buf))) };
+            let r = unsafe { dav1d_send_data(Some(ctx), Some(NonNull::from(&mut buf.0))) };
             status = r.0;
             if status == 0 || status != eagain() {
                 break;
@@ -152,10 +160,7 @@ impl Av1Decoder {
                 picture = Some(p);
             }
         }
-        if buf.sz > 0 {
-            // SAFETY: `buf` came from dav1d_data_create and is unreferenced once.
-            unsafe { dav1d_data_unref(Some(NonNull::from(&mut buf))) };
-        }
+        drop(buf);
         if status != 0 && status != eagain() {
             return Err(DecodeError::Corrupt(format!("dav1d_send_data: {status}")));
         }
@@ -225,6 +230,36 @@ impl Av1Decoder {
             height: h as u32,
             qp: None,
         })
+    }
+}
+
+/// One temporal unit's data in a dav1d buffer, released on drop unless the decoder took it
+/// (`dav1d_send_data` empties the buffer when it takes the data).
+struct OwnedData(Dav1dData);
+
+impl OwnedData {
+    fn new(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut buf = Self(Dav1dData::default());
+        // SAFETY: `buf.0` is valid to write to; on success it owns an allocation of
+        // `data.len()` bytes.
+        let ptr = unsafe { dav1d_data_create(Some(NonNull::from(&mut buf.0)), data.len()) };
+        if ptr.is_null() {
+            return Err(DecodeError::Corrupt("dav1d_data_create failed".into()));
+        }
+        // SAFETY: `ptr` points to `data.len()` writable bytes (above) that `data` cannot
+        // overlap (a fresh allocation).
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()) };
+        Ok(buf)
+    }
+}
+
+impl Drop for OwnedData {
+    fn drop(&mut self) {
+        if self.0.sz > 0 {
+            // SAFETY: the buffer came from dav1d_data_create and still holds its data; it is
+            // unreferenced once (dav1d_data_unref empties it).
+            unsafe { dav1d_data_unref(Some(NonNull::from(&mut self.0))) };
+        }
     }
 }
 

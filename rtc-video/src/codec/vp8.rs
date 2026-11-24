@@ -4,6 +4,8 @@
 //! were checked (the WebM test vectors bit for bit, libvpx's decode of the same streams,
 //! speed, fuzzing) and why a new crate from a new publisher is pinned.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use crate::decoder::{DecodeError, DecodedPicture, VideoDecoder};
 use crate::encoder::{EncodeError, EncodedPicture, VideoEncoder};
 use crate::frame::EncodedFrame;
@@ -16,6 +18,7 @@ pub const DEFAULT_MAX_PIXELS: u64 = 1920 * 1088;
 /// The VP8 decoder.
 pub struct Vp8Decoder {
     inner: vp8_decoder::Decoder,
+    max_pixels: u64,
     last: I420Buffer,
     has_picture: bool,
 }
@@ -33,6 +36,7 @@ impl Vp8Decoder {
         inner.set_max_pixels(DEFAULT_MAX_PIXELS);
         Self {
             inner,
+            max_pixels: DEFAULT_MAX_PIXELS,
             last: I420Buffer::default(),
             has_picture: false,
         }
@@ -40,6 +44,7 @@ impl Vp8Decoder {
 
     /// The largest picture (width times height) a key frame may announce.
     pub fn set_max_pixels(&mut self, max_pixels: u64) {
+        self.max_pixels = max_pixels;
         self.inner.set_max_pixels(max_pixels);
     }
 
@@ -48,8 +53,23 @@ impl Vp8Decoder {
     /// # Errors
     ///
     /// [`DecodeError::NeedKeyFrame`] before the first key frame and after an error;
-    /// [`DecodeError::Corrupt`] for a frame that does not decode.
+    /// [`DecodeError::Corrupt`] for a frame that does not decode, and for one that makes the
+    /// decoder panic: the panic is caught (the decoder is pure Rust, so it unwinds), the decoder
+    /// is replaced by a fresh one and waits for a key frame. No input was seen to do that
+    /// (docs/video-pipeline.md 4.6: fuzzed); this is the fence for one that does.
     pub fn decode_bytes(&mut self, data: &[u8]) -> Result<Option<DecodedPicture>, DecodeError> {
+        match catch_unwind(AssertUnwindSafe(|| self.decode_inner(data))) {
+            Ok(result) => result,
+            Err(_) => {
+                self.inner = vp8_decoder::Decoder::new();
+                self.inner.set_max_pixels(self.max_pixels);
+                self.has_picture = false;
+                Err(DecodeError::Corrupt("the VP8 decoder panicked".into()))
+            }
+        }
+    }
+
+    fn decode_inner(&mut self, data: &[u8]) -> Result<Option<DecodedPicture>, DecodeError> {
         match self.inner.decode(data) {
             Ok(Some(p)) => {
                 let view = I420 {

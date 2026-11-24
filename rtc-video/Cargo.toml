@@ -14,22 +14,31 @@ readme = "README.md"
 publish = false
 
 [package.metadata.docs.rs]
-features = ["engine", "vp8", "av1"]
+features = ["engine", "vp8", "av1", "isolation"]
 
 # The default features are pure Rust and need no system library: the workspace's CI installs
-# none. docs/video-pipeline.md 4.6 has the evidence for each codec feature.
+# none. The default build has no codec at all (it assembles, times and requests key frames for
+# every payload format, and decodes nothing): each codec is a feature the application chooses.
+# docs/video-pipeline.md 4.6 has the evidence for each codec feature and 4.7 the supply chain.
 [features]
-default = ["engine", "vp8"]
+default = ["engine"]
 # The glue that connects the receive pipeline to an `RTCRtpReceiver` of the `rtc` peer
 # connection. Without it the crate has no dependency on the engine.
 engine = ["dep:rtc"]
-# VP8 decode and encode in pure Rust (`vp8-decoder` / `vp8-encoder`, pinned to an exact version:
-# docs/video-pipeline.md 4.6 has the evaluation and the supply-chain note).
+# VP8 decode and encode in pure Rust (`vp8-decoder` / `vp8-encoder`, pinned to an exact version).
+# Opt-in until the owner decides on the supply chain of these crates (weeks old, one publisher):
+# docs/video-pipeline.md 4.7 has the facts and the recommendation.
 vp8 = ["dep:vp8-decoder", "dep:vp8-encoder"]
 # AV1 decode (`rav1d`) and encode (`rav1e`) in pure Rust, without their assembly (which needs
-# NASM): slower than the browsers' decoders, see docs/video-pipeline.md 4.6 for what runs in
-# real time.
+# NASM). WARNING: with rav1d 1.1.0 a malformed AV1 frame from the peer aborts the whole process
+# (a panic inside rav1d's C API, which no caller can catch; memorysafety/rav1d issue 1497, fixed
+# on its main branch, not released). Enable it only for senders you trust, or decode in a
+# separate process. rav1e is not real time without assembly. docs/video-pipeline.md 4.6.
 av1 = ["dep:rav1d", "dep:rav1e", "dep:libc"]
+# `codec::isolated`: runs a decoder in a child process, so that a decoder that crashes, aborts
+# or hangs on a hostile frame costs that frame, not the application. No dependency; it is the
+# one part of the crate that starts a process and a thread, and only when the application asks.
+isolation = []
 
 [dependencies]
 rtp.workspace = true
@@ -62,6 +71,11 @@ required-features = ["vp8", "av1"]
 name = "codecs"
 path = "tests/codecs.rs"
 required-features = ["vp8", "av1"]
+
+[[test]]
+name = "isolated"
+path = "tests/isolated.rs"
+required-features = ["isolation", "av1"]
 
 [[test]]
 name = "receive_rtc2rtc"
