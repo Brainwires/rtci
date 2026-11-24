@@ -1,16 +1,16 @@
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceServer,
 };
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodec;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::sansio::Protocol;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodec;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::sansio::Protocol;
 /// Integration test: verify that changing a transceiver's direction triggers
 /// an `OnNegotiationNeededEvent`, and that setting the same direction does not.
 ///
@@ -18,7 +18,7 @@ use rtc::sansio::Protocol;
 /// negotiation-needed flag, causing the peer connection to fire the event.
 use std::time::Instant;
 
-fn drain_events(pc: &mut rtc::peer_connection::RTCPeerConnection) -> Vec<RTCPeerConnectionEvent> {
+fn drain_events(pc: &mut rtci::peer_connection::RTCPeerConnection) -> Vec<RTCPeerConnectionEvent> {
     let mut events = vec![];
     while let Some(e) = pc.poll_event() {
         events.push(e);
@@ -60,7 +60,7 @@ fn ephemeral_port() -> u16 {
         .port()
 }
 
-fn build_pc(dtls_role: RTCDtlsRole, port: u16) -> rtc::peer_connection::RTCPeerConnection {
+fn build_pc(dtls_role: RTCDtlsRole, port: u16) -> rtci::peer_connection::RTCPeerConnection {
     let se = SettingEngineBuilder::new()
         .with_answering_dtls_role(dtls_role)
         .build();
@@ -106,7 +106,7 @@ fn test_set_direction_change_triggers_renegotiation() {
     let tid = offer_pc
         .add_transceiver_from_kind(
             RtpCodecKind::Audio,
-            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
         )
         .unwrap();
 

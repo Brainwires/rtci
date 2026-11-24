@@ -1,45 +1,45 @@
 /**
- * A reference Deno binding of rtc-ffi's driven layer: the browser's WebRTC classes
+ * A reference Deno binding of rtci-ffi's driven layer: the browser's WebRTC classes
  * (`RTCPeerConnection`, `RTCDataChannel`, `RTCRtpTransceiver` / `Sender` / `Receiver`,
  * `RTCSessionDescription`, `RTCIceCandidate`, events, `getStats`) over `Deno.dlopen`.
  *
  * Not a published package: the Denext project maintains its own binding; this one shows how
  * the C interface maps onto the browser API. Run with `--allow-ffi` (and `--allow-env` for
- * `RTC_FFI_LIB`).
+ * `RTCI_FFI_LIB`).
  *
  * The engine captures and encodes nothing: a local track is a kind and ids, and the
  * application writes encoded frames (`RTCRtpSender.writeFrame`) or RTP packets
  * (`RTCRtpSender.writeRtp`), and receives RTP (`RTCRtpReceiver`'s `rtp` event).
  *
- * The library: `RTC_FFI_LIB` when set, else `librtc_ffi.{so,dylib}` / `rtc_ffi.dll` beside
+ * The library: `RTCI_FFI_LIB` when set, else `librtci_ffi.{so,dylib}` / `rtci_ffi.dll` beside
  * this module. Nothing is downloaded.
  *
  * @module
  */
 
-const RTC_OK = 0;
-const RTC_EMPTY = 1;
-const RTC_ERR_BUFFER_TOO_SMALL = -2;
-const RTC_ERR_CLOSED = -8;
-/** The C interface version this binding was written for (`rtc_abi_version`). */
+const RTCI_OK = 0;
+const RTCI_EMPTY = 1;
+const RTCI_ERR_BUFFER_TOO_SMALL = -2;
+const RTCI_ERR_CLOSED = -8;
+/** The C interface version this binding was written for (`rtci_abi_version`). */
 export const ABI_VERSION = 1;
 
 function libraryFileName(): string {
   switch (Deno.build.os) {
     case "darwin":
-      return "librtc_ffi.dylib";
+      return "librtci_ffi.dylib";
     case "windows":
-      return "rtc_ffi.dll";
+      return "rtci_ffi.dll";
     default:
-      return "librtc_ffi.so";
+      return "librtci_ffi.so";
   }
 }
 
-/** Where the library is loaded from: `RTC_FFI_LIB`, else beside this module. */
+/** Where the library is loaded from: `RTCI_FFI_LIB`, else beside this module. */
 export function libraryPath(): string {
   let fromEnv: string | undefined;
   try {
-    fromEnv = Deno.env.get("RTC_FFI_LIB");
+    fromEnv = Deno.env.get("RTCI_FFI_LIB");
   } catch {
     // No --allow-env: the path beside the module.
   }
@@ -47,7 +47,7 @@ export function libraryPath(): string {
   const url = new URL(`./${libraryFileName()}`, import.meta.url);
   if (url.protocol !== "file:") {
     throw new Error(
-      `rtc-ffi: ${url} is not a local file; set RTC_FFI_LIB to the library's path`,
+      `rtci-ffi: ${url} is not a local file; set RTCI_FFI_LIB to the library's path`,
     );
   }
   const path = decodeURIComponent(url.pathname);
@@ -55,27 +55,27 @@ export function libraryPath(): string {
 }
 
 const symbols = {
-  rtc_abi_version: { parameters: [], result: "u32" },
-  rtc_last_error: { parameters: ["buffer", "usize"], result: "usize" },
-  rtc_string_free: { parameters: ["pointer"], result: "void" },
-  rtc_mux_new: { parameters: ["buffer", "buffer"], result: "i32" },
-  rtc_mux_addresses: { parameters: ["pointer", "buffer"], result: "i32" },
-  rtc_mux_free: { parameters: ["pointer"], result: "void" },
-  rtc_driven_new: {
+  rtci_abi_version: { parameters: [], result: "u32" },
+  rtci_last_error: { parameters: ["buffer", "usize"], result: "usize" },
+  rtci_string_free: { parameters: ["pointer"], result: "void" },
+  rtci_mux_new: { parameters: ["buffer", "buffer"], result: "i32" },
+  rtci_mux_addresses: { parameters: ["pointer", "buffer"], result: "i32" },
+  rtci_mux_free: { parameters: ["pointer"], result: "void" },
+  rtci_driven_new: {
     parameters: ["buffer", "buffer", "buffer", "pointer", "buffer"],
     result: "i32",
   },
-  rtc_driven_call: {
+  rtci_driven_call: {
     parameters: ["pointer", "buffer", "buffer", "buffer", "usize", "buffer"],
     result: "i32",
   },
-  rtc_driven_wait: { parameters: ["pointer", "u32"], result: "i32", nonblocking: true },
-  rtc_driven_next: {
+  rtci_driven_wait: { parameters: ["pointer", "u32"], result: "i32", nonblocking: true },
+  rtci_driven_next: {
     parameters: ["pointer", "buffer", "usize", "buffer", "buffer"],
     result: "i32",
   },
-  rtc_driven_close: { parameters: ["pointer"], result: "i32", nonblocking: true },
-  rtc_driven_free: { parameters: ["pointer"], result: "void" },
+  rtci_driven_close: { parameters: ["pointer"], result: "i32", nonblocking: true },
+  rtci_driven_free: { parameters: ["pointer"], result: "void" },
 } as const;
 
 type Library = Deno.DynamicLibrary<typeof symbols>;
@@ -84,11 +84,11 @@ let library: Library | undefined;
 function lib(): Library["symbols"] {
   if (!library) {
     library = Deno.dlopen(libraryPath(), symbols);
-    const abi = library.symbols.rtc_abi_version();
+    const abi = library.symbols.rtci_abi_version();
     if (abi !== ABI_VERSION) {
       library.close();
       library = undefined;
-      throw new Error(`rtc-ffi: the library has ABI ${abi}, this binding ${ABI_VERSION}`);
+      throw new Error(`rtci-ffi: the library has ABI ${abi}, this binding ${ABI_VERSION}`);
     }
   }
   return library.symbols;
@@ -107,7 +107,7 @@ function cstr(s: string | null | undefined): Uint8Array<ArrayBuffer> | null {
 
 function lastError(): string {
   const buf = new Uint8Array(4096);
-  const n = Number(lib().rtc_last_error(buf, BigInt(buf.length)));
+  const n = Number(lib().rtci_last_error(buf, BigInt(buf.length)));
   return decoder.decode(buf.subarray(0, Math.min(n, buf.length - 1)));
 }
 
@@ -127,7 +127,7 @@ function takeString(out: BigUint64Array<ArrayBuffer>): string {
   const ptr = Deno.UnsafePointer.create(out[0]);
   if (!ptr) return "null";
   const s = new Deno.UnsafePointerView(ptr).getCString();
-  lib().rtc_string_free(ptr);
+  lib().rtci_string_free(ptr);
   return s;
 }
 
@@ -151,7 +151,7 @@ export interface RTCServerOptions {
   iceLite?: boolean;
   /** A UDP (and TCP) port shared with other peer connections. */
   sharedPort?: RTCSharedPort;
-  /** Engine settings (rtc-ffi's settings JSON: `answeringDtlsRole`, `iceTimeouts`, ...). */
+  /** Engine settings (rtci-ffi's settings JSON: `answeringDtlsRole`, `iceTimeouts`, ...). */
   settings?: Record<string, unknown>;
 }
 
@@ -163,10 +163,10 @@ export class RTCSharedPort {
 
   constructor(options: { udp: string; tcp?: string }) {
     const out = new BigUint64Array(1);
-    check(lib().rtc_mux_new(cstr(JSON.stringify(options)), out), "RTCSharedPort");
+    check(lib().rtci_mux_new(cstr(JSON.stringify(options)), out), "RTCSharedPort");
     this.#handle = Deno.UnsafePointer.create(out[0]);
     const addresses = new BigUint64Array(1);
-    check(lib().rtc_mux_addresses(this.#handle, addresses), "RTCSharedPort");
+    check(lib().rtci_mux_addresses(this.#handle, addresses), "RTCSharedPort");
     const parsed = JSON.parse(takeString(addresses));
     this.udp = parsed.udp;
     this.tcp = parsed.tcp;
@@ -179,7 +179,7 @@ export class RTCSharedPort {
 
   /** Closes the port; close its peer connections first. */
   close(): void {
-    if (this.#handle) lib().rtc_mux_free(this.#handle);
+    if (this.#handle) lib().rtci_mux_free(this.#handle);
     this.#handle = null;
   }
 }
@@ -288,7 +288,7 @@ export class RTCRtpSender {
     readonly track: RTCLocalTrack | null,
   ) {}
 
-  /** The negotiated codecs and the SSRCs (rtc-ffi's `senderInfo`). */
+  /** The negotiated codecs and the SSRCs (rtci-ffi's `senderInfo`). */
   getParameters(): {
     ssrcs: number[];
     codecs: { payloadType: number; mimeType: string; clockRate: number }[];
@@ -517,7 +517,7 @@ export class RTCPeerConnection extends EventTarget {
     const { settings, sharedPort, ...driver } = options;
     const out = new BigUint64Array(1);
     check(
-      lib().rtc_driven_new(
+      lib().rtci_driven_new(
         cstr(JSON.stringify(configuration)),
         cstr(settings ? JSON.stringify(settings) : null),
         cstr(JSON.stringify(driver)),
@@ -533,11 +533,11 @@ export class RTCPeerConnection extends EventTarget {
   /** @internal Calls a method of the driven layer; the result's JSON parsed. */
   // deno-lint-ignore no-explicit-any
   _call(method: string, params: unknown, data?: Uint8Array): any {
-    if (!this.#handle) throw new RtcError(RTC_ERR_CLOSED, "InvalidStateError: closed");
+    if (!this.#handle) throw new RtcError(RTCI_ERR_CLOSED, "InvalidStateError: closed");
     const out = new BigUint64Array(1);
     const bytes = data ?? new Uint8Array(0);
     check(
-      lib().rtc_driven_call(
+      lib().rtci_driven_call(
         this.#handle,
         cstr(method),
         cstr(params === null || params === undefined ? null : JSON.stringify(params)),
@@ -552,9 +552,9 @@ export class RTCPeerConnection extends EventTarget {
 
   async #run(): Promise<void> {
     while (!this.#closing) {
-      const code = await lib().rtc_driven_wait(this.#handle, 100);
-      if (code === RTC_OK) this.#drain();
-      else if (code !== RTC_EMPTY) break;
+      const code = await lib().rtci_driven_wait(this.#handle, 100);
+      if (code === RTCI_OK) this.#drain();
+      else if (code !== RTCI_EMPTY) break;
     }
     this.#drain();
   }
@@ -564,19 +564,19 @@ export class RTCPeerConnection extends EventTarget {
     const jsonLen = new BigUint64Array(1);
     const dataLen = new BigUint64Array(1);
     for (;;) {
-      const code = lib().rtc_driven_next(
+      const code = lib().rtci_driven_next(
         this.#handle,
         this.#buffer,
         BigInt(this.#buffer.length),
         jsonLen,
         dataLen,
       );
-      if (code === RTC_EMPTY) return;
-      if (code === RTC_ERR_BUFFER_TOO_SMALL) {
+      if (code === RTCI_EMPTY) return;
+      if (code === RTCI_ERR_BUFFER_TOO_SMALL) {
         this.#buffer = new Uint8Array(Number(jsonLen[0] + dataLen[0]) * 2);
         continue;
       }
-      check(code, "rtc_driven_next");
+      check(code, "rtci_driven_next");
       const j = Number(jsonLen[0]);
       const item = JSON.parse(decoder.decode(this.#buffer.subarray(0, j)));
       const data = this.#buffer.slice(j, j + Number(dataLen[0]));
@@ -830,12 +830,12 @@ export class RTCPeerConnection extends EventTarget {
     this.#closing = true;
     this.#states.signalingState = "closed";
     this.#states.connectionState = "closed";
-    await lib().rtc_driven_close(this.#handle);
+    await lib().rtci_driven_close(this.#handle);
     await this.#pump;
     for (const c of this.#channels.values()) {
       if (c.readyState !== "closed") c._event("close");
     }
-    lib().rtc_driven_free(this.#handle);
+    lib().rtci_driven_free(this.#handle);
     this.#handle = null;
   }
 }

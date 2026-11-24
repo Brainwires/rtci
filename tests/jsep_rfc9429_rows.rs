@@ -9,12 +9,12 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, video_track,
 };
-use rtc::peer_connection::configuration::{
+use rtci::peer_connection::configuration::{
     RTCBundlePolicy, RTCConfigurationBuilder, RTCIceTransportPolicy, RTCRtcpMuxPolicy,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 const HOST: &str = "candidate:1 1 udp 2130706431 10.0.0.9 5000 typ host";
 
@@ -71,7 +71,7 @@ fn a_remote_candidate_needs_a_remote_description() -> TestResult {
 }
 
 fn with_remote_video_offer()
--> Result<rtc::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
+-> Result<rtci::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut pc = default_peer()?;
     let offer = crlf(&format!(
         "{SESSION}m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:v\na=sendrecv\n\
@@ -287,7 +287,7 @@ fn a_default_offer_and_answer_have_no_crypto_key_mgmt_or_ice_lite() -> TestResul
 }
 
 /// RFC 8839 section 5.1: a candidate line is read by its grammar, also when it is trickled
-/// (`addIceCandidate`) rather than in a description. Lines the rtc-ice reader would take but
+/// (`addIceCandidate`) rather than in a description. Lines the rtci-ice reader would take but
 /// the grammar refuses are refused: a foundation longer than 32 ice-chars or with another
 /// character, a priority of more than 10 digits, `type` for `typ`, an extension without a
 /// value, a second `raddr`. A line with `raddr` / `rport`, extensions and an mDNS name is
@@ -295,7 +295,7 @@ fn a_default_offer_and_answer_have_no_crypto_key_mgmt_or_ice_lite() -> TestResul
 #[test]
 fn a_trickled_candidate_is_checked_against_the_candidate_grammar() -> TestResult {
     let mut pc = with_remote_video_offer()?;
-    let add = |pc: &mut rtc::peer_connection::RTCPeerConnection, line: &str| {
+    let add = |pc: &mut rtci::peer_connection::RTCPeerConnection, line: &str| {
         pc.add_remote_candidate(RTCIceCandidateInit {
             candidate: line.to_owned(),
             sdp_mid: Some("v".to_owned()),

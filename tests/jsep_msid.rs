@@ -9,8 +9,8 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 fn offer(msid_lines: &str, source_lines: &str) -> String {
     crlf(&format!(
@@ -122,10 +122,10 @@ fn a_source_level_msid_is_used_when_there_is_no_msid_line() -> TestResult {
 /// simulcast section without it.
 #[test]
 fn local_msid_lines_carry_the_track_id_unless_it_is_left_out() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     let msid_lines = |appdata: Option<bool>| -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let mut pc = match appdata {
             None => default_peer()?,
@@ -170,7 +170,7 @@ fn local_msid_lines_carry_the_track_id_unless_it_is_left_out() -> TestResult {
 fn track_state(
     pc: &mut RTCPeerConnection,
     offer: String,
-) -> Result<rtc::media_stream::MediaStreamTrackState, Box<dyn std::error::Error>> {
+) -> Result<rtci::media_stream::MediaStreamTrackState, Box<dyn std::error::Error>> {
     remote_track(pc, offer)?;
     let id = pc.get_transceivers().next().expect("transceiver");
     let receiver = pc
@@ -194,10 +194,10 @@ fn track_state(
 /// MediaStreamTrack" either way.
 #[test]
 fn a_section_that_drops_its_msid_ends_the_track_only_when_asked() -> TestResult {
-    use rtc::media_stream::MediaStreamTrackState::{Ended, Live};
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::media_stream::MediaStreamTrackState::{Ended, Live};
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     let peer = |ends: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
@@ -274,7 +274,7 @@ fn msid_lines_stay_when_the_track_is_removed() -> TestResult {
 /// it.
 #[test]
 fn a_sender_in_no_stream_is_written_with_a_dash() -> TestResult {
-    use rtc::media_stream::MediaStreamTrack;
+    use rtci::media_stream::MediaStreamTrack;
     let renamed = |stream: &str| {
         let track = jsep_common::video_track("the-track", 0x0707_0708);
         MediaStreamTrack::new(
@@ -355,19 +355,22 @@ fn msid_ids_and_appdata_are_one_to_sixty_four_token_characters() -> TestResult {
 
     let offered = |stream: &str, track: &str| {
         let mut pc = default_peer()?;
-        pc.add_track(rtc::media_stream::MediaStreamTrack::new(
+        pc.add_track(rtci::media_stream::MediaStreamTrack::new(
             stream.to_owned(),
             track.to_owned(),
             "label".to_owned(),
-            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
-            vec![rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
-                rtp_coding_parameters: rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
-                    ssrc: Some(0x0808_0808),
+            rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+            vec![
+                rtci::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
+                    rtp_coding_parameters:
+                        rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
+                            ssrc: Some(0x0808_0808),
+                            ..Default::default()
+                        },
+                    codec: jsep_common::vp8(),
                     ..Default::default()
                 },
-                codec: jsep_common::vp8(),
-                ..Default::default()
-            }],
+            ],
         ))?;
         pc.create_offer(None)
             .map(|offer| offer.sdp)
@@ -399,10 +402,10 @@ fn msid_ids_and_appdata_are_one_to_sixty_four_token_characters() -> TestResult {
 #[test]
 fn two_sections_never_carry_the_same_msid_pair() -> TestResult {
     use jsep_common::{media_sections, video_track};
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
     let init = || RTCRtpTransceiverInit {
         direction: RTCRtpTransceiverDirection::Sendonly,
         streams: vec!["shared".to_owned()],
@@ -482,12 +485,12 @@ fn two_sections_never_carry_the_same_msid_pair() -> TestResult {
 /// announced with the `track` event; the same appdata again changes nothing.
 #[test]
 fn a_new_msid_appdata_is_a_new_track_only_when_asked() -> TestResult {
-    use rtc::media_stream::MediaStreamTrackState::Live;
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-    use rtc::sansio::Protocol;
+    use rtci::media_stream::MediaStreamTrackState::Live;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+    use rtci::sansio::Protocol;
     let peer = |renews: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;

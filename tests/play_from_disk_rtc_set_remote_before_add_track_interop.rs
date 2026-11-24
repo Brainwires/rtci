@@ -15,29 +15,29 @@ use tokio::sync::mpsc::{Sender, channel};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
-use rtc::media::io::ivf_reader::IVFReader;
-use rtc::media::io::ogg_reader::OggReader;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::interceptor::Registry as RtcRegistry;
+use rtci::media::io::ivf_reader::IVFReader;
+use rtci::media::io::ogg_reader::OggReader;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCIceConnectionState;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtp;
-use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCIceConnectionState;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtp;
+use rtci::rtp::packetizer::Packetizer;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, SSRC};
+use rtci::rtp_transceiver::{RTCRtpSenderId, SSRC};
 
 use shared::error::Error;
 use webrtc::api::APIBuilder;
@@ -177,8 +177,9 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
     log::info!("WebRTC offer with candidates ready");
 
     // Convert webrtc SDP to rtc SDP
-    let rtc_offer =
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_with_candidates.sdp.clone())?;
+    let rtc_offer = rtci::peer_connection::sdp::RTCSessionDescription::offer(
+        offer_with_candidates.sdp.clone(),
+    )?;
 
     // Create rtc peer (will be the answerer and sender)
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
@@ -221,7 +222,7 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
 
     // Use the default set of Interceptors
     let registry =
-        rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+        rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
             registry,
             &mut media_engine,
         )?;

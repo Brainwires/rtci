@@ -7,8 +7,8 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverId};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverId};
 use sansio::Protocol;
 
 fn direction_line(sdp: &str) -> String {
@@ -98,7 +98,7 @@ fn a_one_way_answer_does_not_ask_for_renegotiation() -> TestResult {
     Ok(())
 }
 
-fn count_negotiation_needed(pc: &mut rtc::peer_connection::RTCPeerConnection) -> usize {
+fn count_negotiation_needed(pc: &mut rtci::peer_connection::RTCPeerConnection) -> usize {
     let mut count = 0;
     while let Some(event) = pc.poll_event() {
         if matches!(event, RTCPeerConnectionEvent::OnNegotiationNeededEvent) {
@@ -121,7 +121,7 @@ fn a_provisional_answer_sets_the_current_direction() -> TestResult {
     offerer.set_local_description(now, offer.clone())?;
     answerer.set_remote_description(now, offer)?;
     let answer = answerer.create_answer(None)?;
-    let pranswer = rtc::peer_connection::sdp::RTCSessionDescription::pranswer(answer.sdp)?;
+    let pranswer = rtci::peer_connection::sdp::RTCSessionDescription::pranswer(answer.sdp)?;
     answerer.set_local_description(now, pranswer.clone())?;
     let answering = answerer.get_transceivers().next().expect("a transceiver");
     assert_eq!(
@@ -153,7 +153,7 @@ fn a_provisional_answer_sets_the_current_direction() -> TestResult {
 #[test]
 fn a_section_without_a_direction_takes_the_sessions_or_sendrecv() -> TestResult {
     use jsep_common::{SESSION, TRANSPORT, crlf};
-    use rtc::peer_connection::sdp::RTCSessionDescription;
+    use rtci::peer_connection::sdp::RTCSessionDescription;
     use std::time::Instant;
     for (session_line, section_line, answered) in [
         ("a=sendonly\n", "", "a=recvonly"),

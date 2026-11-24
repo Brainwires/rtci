@@ -1,0 +1,58 @@
+[package]
+name = "rtci-turn"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Sans-I/O TURN client (RFC 8656, RFC 6062 TCP allocations) for WebRTC"
+license.workspace = true
+repository.workspace = true
+keywords = ["webrtc", "turn", "relay", "nat-traversal", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs"]
+
+[features]
+default = ["crypto-ring"]
+crypto-ring = ["crypto/crypto-ring", "stun/crypto-ring"]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs"]
+metrics = []
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = [] }
+stun.workspace = true
+sansio.workspace = true
+crypto.workspace = true
+
+bytes.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
+chrono.workspace = true
+hex.workspace = true
+clap.workspace = true
+criterion.workspace = true
+crossbeam-channel.workspace = true
+ctrlc.workspace = true
+
+[[bench]]
+name = "bench"
+harness = false
+
+[[example]]
+name = "turn_client_udp"
+path = "examples/turn_client_udp.rs"
+bench = false
+
+[[example]]
+name = "turn_client_tcp"
+path = "examples/turn_client_tcp.rs"
+bench = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }

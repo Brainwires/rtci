@@ -8,9 +8,9 @@
 
 use std::time::Instant;
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 fn section(mid: &str, pt: u8, rtpmap: &str, fmtp: &str) -> String {
     let fmtp = if fmtp.is_empty() {

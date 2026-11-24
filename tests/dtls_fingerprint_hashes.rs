@@ -13,26 +13,26 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, keep, replace_lines};
-use rtc::crypto::HashAlgorithm;
-use rtc::peer_connection::certificate::{CertificateParams, RTCCertificate};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCDtlsTransportState;
+use rtci::crypto::HashAlgorithm;
+use rtci::peer_connection::certificate::{CertificateParams, RTCCertificate};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCDtlsTransportState;
 use std::time::{Duration, Instant};
 
 fn certificate() -> Result<RTCCertificate> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     Ok(RTCCertificate::generate(
         provider.crypto(),
-        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        rtci::crypto::SignatureScheme::EcdsaP256Sha256,
         CertificateParams::new(vec!["fingerprint-hashes".to_owned()])?,
     )?)
 }
 
 /// `a=fingerprint:<hash> <value>` for the certificate, upper-case as RFC 8122 writes it.
 fn fingerprint_line(certificate: &RTCCertificate, algorithm: HashAlgorithm) -> Result<String> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let fingerprint = certificate.fingerprint(provider.crypto(), algorithm)?;
     Ok(format!(
         "a=fingerprint:{} {}",
@@ -102,7 +102,7 @@ fn fails(what: &str, certificate: &RTCCertificate, fingerprints: &[String]) -> R
     assert!(
         !world.peers[1]
             .states
-            .contains(&rtc::peer_connection::state::RTCPeerConnectionState::Connected),
+            .contains(&rtci::peer_connection::state::RTCPeerConnectionState::Connected),
         "{what}: the answerer connected"
     );
     assert!(world.peers[1].channel.is_none(), "{what}");
@@ -187,7 +187,7 @@ fn the_most_preferred_hash_function_offered_decides() -> Result<()> {
 #[test]
 fn md5_and_md2_fingerprints_are_never_used() -> Result<()> {
     let certificate = certificate()?;
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let md5: Vec<String> = provider
         .crypto()
         .hash(

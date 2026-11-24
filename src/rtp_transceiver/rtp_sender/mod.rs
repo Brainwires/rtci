@@ -17,8 +17,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpSenderId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpSenderId;
 //! # fn example(sender_id: RTCRtpSenderId) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -38,8 +38,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpSenderId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpSenderId;
 //! # fn example(sender_id: RTCRtpSenderId) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -64,9 +64,9 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::media_stream::MediaStreamTrack;
-//! # use rtc::rtp_transceiver::RTCRtpSenderId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::media_stream::MediaStreamTrack;
+//! # use rtci::rtp_transceiver::RTCRtpSenderId;
 //! # fn example(
 //! #     sender_id: RTCRtpSenderId,
 //! #     new_track: MediaStreamTrack
@@ -85,8 +85,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpSenderId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpSenderId;
 //! # use rtp::packet::Packet;
 //! # use shared::error::Error;
 //! # fn example(
@@ -112,10 +112,10 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::media_stream::MediaStreamTrack;
-//! # use rtc::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
-//! # use rtc::rtp_transceiver::rtp_sender::{
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::media_stream::MediaStreamTrack;
+//! # use rtci::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
+//! # use rtci::rtp_transceiver::rtp_sender::{
 //! #     RTCRtpEncodingParameters, RTCRtpCodingParameters
 //! # };
 //! # fn example(video_track: MediaStreamTrack) -> Result<(), Box<dyn std::error::Error>> {

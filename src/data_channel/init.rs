@@ -15,7 +15,7 @@ use sctp::StreamId;
 /// ## Examples
 ///
 /// ```
-/// use rtc::data_channel::RTCDataChannelInit;
+/// use rtci::data_channel::RTCDataChannelInit;
 ///
 /// let init = RTCDataChannelInit {
 ///     ordered: false,

@@ -1,21 +1,21 @@
 //! W3C webrtc-svc `scalabilityMode` on encodings, with its `addTransceiver` and
 //! `setParameters` checks; the Dependency Descriptor among the default header extensions; and
-//! for encoded transforms (W3C webrtc-encoded-transform, RFC 9605), `rtc::sframe` and a
+//! for encoded transforms (W3C webrtc-encoded-transform, RFC 9605), `rtci::sframe` and a
 //! payload the RTP layer does not parse.
 
 use anyhow::Result;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::shared::error::Error;
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::shared::error::Error;
 use std::time::Instant;
 
-fn peer() -> Result<rtc::peer_connection::RTCPeerConnection> {
+fn peer() -> Result<rtci::peer_connection::RTCPeerConnection> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
@@ -42,10 +42,10 @@ fn encoding(rid: &str, mode: Option<&str>, mime: &str) -> RTCRtpEncodingParamete
 }
 
 fn add(
-    pc: &mut rtc::peer_connection::RTCPeerConnection,
+    pc: &mut rtci::peer_connection::RTCPeerConnection,
     kind: RtpCodecKind,
     encodings: Vec<RTCRtpEncodingParameters>,
-) -> rtc::shared::error::Result<RTCRtpSenderId> {
+) -> rtci::shared::error::Result<RTCRtpSenderId> {
     pc.add_transceiver_from_kind(
         kind,
         Some(RTCRtpTransceiverInit {
@@ -143,21 +143,21 @@ fn the_dependency_descriptor_is_offered_for_video() -> Result<()> {
     assert!(
         offer
             .sdp
-            .contains(rtc::rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI),
+            .contains(rtci::rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI),
         "{}",
         offer.sdp
     );
     Ok(())
 }
 
-/// Encoded transforms: a frame encrypted with `rtc::sframe` (RFC 9605, one ciphertext for the
+/// Encoded transforms: a frame encrypted with `rtci::sframe` (RFC 9605, one ciphertext for the
 /// whole frame) goes through the format-agnostic payloader in several packets and comes back
 /// decryptable: nothing parses it on the way.
 #[test]
 fn an_sframe_ciphertext_crosses_the_opaque_payloader() -> Result<()> {
-    use rtc::rtp::codec::opaque::{OpaqueDepacketizer, OpaquePayloader};
-    use rtc::rtp::packetizer::{Depacketizer, Payloader};
-    use rtc::sframe::{CipherSuite, SFrameContext};
+    use rtci::rtp::codec::opaque::{OpaqueDepacketizer, OpaquePayloader};
+    use rtci::rtp::packetizer::{Depacketizer, Payloader};
+    use rtci::sframe::{CipherSuite, SFrameContext};
     let key = [7u8; 16];
     let mut sender = SFrameContext::with_default_provider(CipherSuite::Aes128GcmSha256_128)?;
     sender.add_send_key(1, &key)?;
@@ -178,9 +178,9 @@ fn an_sframe_ciphertext_crosses_the_opaque_payloader() -> Result<()> {
 }
 
 /// A peer whose only video codec is VP8 (temporal layers only: L1T1 to L1T3).
-fn vp8_only_peer() -> Result<rtc::peer_connection::RTCPeerConnection> {
-    use rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
-    use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+fn vp8_only_peer() -> Result<rtci::peer_connection::RTCPeerConnection> {
+    use rtci::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
+    use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
     let mut media_engine = MediaEngine::default();
     media_engine.register_codec(
         RTCRtpCodecParameters {
@@ -199,10 +199,10 @@ fn vp8_only_peer() -> Result<rtc::peer_connection::RTCPeerConnection> {
 }
 
 fn set_mode(
-    pc: &mut rtc::peer_connection::RTCPeerConnection,
+    pc: &mut rtci::peer_connection::RTCPeerConnection,
     sender: RTCRtpSenderId,
     modes: &[Option<&str>],
-) -> rtc::shared::error::Result<()> {
+) -> rtci::shared::error::Result<()> {
     let mut handle = pc.rtp_sender(sender).expect("sender");
     let mut parameters = handle.get_parameters().clone();
     for (encoding, mode) in parameters.encodings.iter_mut().zip(modes) {
@@ -301,7 +301,7 @@ fn get_parameters_after_negotiation_returns_the_configured_mode() -> Result<()> 
     let answer = answerer.create_answer(None)?;
     answerer.set_local_description(now, answer.clone())?;
     offerer.set_remote_description(now, answer)?;
-    let mode = |pc: &mut rtc::peer_connection::RTCPeerConnection, s: RTCRtpSenderId| {
+    let mode = |pc: &mut rtci::peer_connection::RTCPeerConnection, s: RTCRtpSenderId| {
         pc.rtp_sender(s).expect("sender").get_parameters().encodings[0]
             .scalability_mode
             .clone()
@@ -332,7 +332,7 @@ fn get_parameters_returns_the_mode_the_encoder_configured() -> Result<()> {
     let answer = answerer.create_answer(None)?;
     answerer.set_local_description(now, answer.clone())?;
     offerer.set_remote_description(now, answer)?;
-    let mode = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+    let mode = |pc: &mut rtci::peer_connection::RTCPeerConnection| {
         pc.rtp_sender(sender)
             .expect("sender")
             .get_parameters()

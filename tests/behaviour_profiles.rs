@@ -6,7 +6,7 @@
 //!   are written by the engine too, but for the documented residual differences; what the
 //!   engine writes beyond them is its superset (capabilities Chrome lacks, which the profile
 //!   keeps), listed here;
-//! - two `rtc` peer connections under every pair of profiles connect and carry data and media
+//! - two `rtci` peer connections under every pair of profiles connect and carry data and media
 //!   both ways, with a renegotiation;
 //! - what `StrictRfc` refuses that `Chrome` takes.
 //!
@@ -15,24 +15,24 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::BehaviourProfile;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::BehaviourProfile;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -592,7 +592,7 @@ struct Peer {
     addr: SocketAddr,
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
-    open_channels: Vec<rtc::data_channel::RTCDataChannelId>,
+    open_channels: Vec<rtci::data_channel::RTCDataChannelId>,
     data: Vec<Vec<u8>>,
     rtp: Vec<Header>,
 }
@@ -786,7 +786,7 @@ impl World {
         };
         rtp_sender.write_rtp(
             now,
-            rtc::rtp::Packet {
+            rtci::rtp::Packet {
                 header,
                 payload: Bytes::from(vec![0x10u8; 100]),
             },
@@ -840,7 +840,7 @@ impl World {
     }
 }
 
-/// Two `rtc` peers under `profiles` connect, open a data channel and send on it both ways,
+/// Two `rtci` peers under `profiles` connect, open a data channel and send on it both ways,
 /// send audio and video one way, renegotiate from the other side and send media back.
 fn data_and_media_both_ways(profiles: [BehaviourProfile; 2]) -> Result<()> {
     let what = format!("{} -> {}", profiles[0], profiles[1]);
@@ -883,7 +883,7 @@ fn strict_rfc_and_strict_rfc_profiles_carry_data_and_media_both_ways() -> Result
     data_and_media_both_ways([BehaviourProfile::StrictRfc, BehaviourProfile::StrictRfc])
 }
 
-/// Between two `rtc` engines `StrictRfc` and `Chrome` interoperate: the engine reads either
+/// Between two `rtci` engines `StrictRfc` and `Chrome` interoperate: the engine reads either
 /// BUNDLE form, takes a new `a=tls-id`, and has no lenient form of its own to send. The
 /// refusals of `StrictRfc` are of what browsers write (below).
 #[test]

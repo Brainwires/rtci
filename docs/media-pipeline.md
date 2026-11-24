@@ -1,21 +1,21 @@
 # The media pipeline
 
-The engine (`rtc`) is a transport: it never encodes, decodes, captures or plays out media. A
+The engine (`rtci`) is a transport: it never encodes, decodes, captures or plays out media. A
 browser does all of that. This document describes the crates that add it beside the engine,
 what each part does, how to use it, and what was measured. Phase one is audio, complete; the
 next phases (video) are listed at the end for approval.
 
 The pipeline keeps the engine's rules:
 
-- **Sans-I/O.** Nothing in `rtc-audio` reads a clock, opens a device or starts a thread. The
+- **Sans-I/O.** Nothing in `rtci-audio` reads a clock, opens a device or starts a thread. The
   caller passes the time in and moves audio in and out in 10 ms frames; every test runs on a
-  virtual clock. Devices are a separate crate, `rtc-devices`, and open nothing until asked.
+  virtual clock. Devices are a separate crate, `rtci-devices`, and open nothing until asked.
 - **Pure Rust by default.** The default features need no system library (the workspace's CI
-  installs none). C code is opt-in: `rtc-audio/libopus` (the reference Opus, bundled and built
-  with CMake) and `rtc-devices/devices` (cpal, which links ALSA on Linux and CoreAudio /
+  installs none). C code is opt-in: `rtci-audio/libopus` (the reference Opus, bundled and built
+  with CMake) and `rtci-devices/devices` (cpal, which links ALSA on Linux and CoreAudio /
   WASAPI elsewhere).
 - **Usable without the peer connection.** Every part is a plain type: a codec, a jitter
-  buffer, a processor, a send pipeline. `rtc-audio::engine` (feature `engine`, on by default)
+  buffer, a processor, a send pipeline. `rtci-audio::engine` (feature `engine`, on by default)
   is the thin glue to an `RTCRtpSender` / `RTCRtpReceiver`.
 - **Measured.** Quality is asserted with numbers (SNR, segmental SNR, ERLE, concealment
   ratio, delay) on synthetic and speech-like signals, never by ear.
@@ -24,18 +24,18 @@ The pipeline keeps the engine's rules:
 
 | Crate | What | Default features | Opt-in |
 |---|---|---|---|
-| `rtc-audio` | codecs, the receive pipeline (jitter buffer), audio processing, the send pipeline, the engine glue | `opus` (opus-rs), `engine` | `libopus` |
-| `rtc-devices` | capture and playout: rings, device manager with hot-swap, rate conversion, a fake backend | none | `devices` (cpal) |
+| `rtci-audio` | codecs, the receive pipeline (jitter buffer), audio processing, the send pipeline, the engine glue | `opus` (opus-rs), `engine` | `libopus` |
+| `rtci-devices` | capture and playout: rings, device manager with hot-swap, rate conversion, a fake backend | none | `devices` (cpal) |
 
 ### Dependencies and licences
 
 | Dependency | Version | Licence | Used by | Feature | Pure Rust |
 |---|---|---|---|---|---|
-| `opus-rs` | 0.1.42 | BSD-3-Clause | `rtc-audio` | `opus` (default) | yes (a port of libopus 1.6; SILK, CELT, hybrid, FEC, DTX, PLC) |
-| `opusic-sys` | 0.7.7 | BSD-3-Clause (libopus itself BSD-3-Clause) | `rtc-audio` | `libopus` | no: bundled C, built with CMake |
-| `rtc` | workspace | MIT / Apache-2.0 | `rtc-audio` | `engine` (default) | as the engine (ring) |
-| `rtrb` | 0.4.1 | MIT OR Apache-2.0 | `rtc-devices` | always | yes |
-| `cpal` | 0.18.2 | Apache-2.0 | `rtc-devices` | `devices` | no: links ALSA (Linux), CoreAudio, WASAPI |
+| `opus-rs` | 0.1.42 | BSD-3-Clause | `rtci-audio` | `opus` (default) | yes (a port of libopus 1.6; SILK, CELT, hybrid, FEC, DTX, PLC) |
+| `opusic-sys` | 0.7.7 | BSD-3-Clause (libopus itself BSD-3-Clause) | `rtci-audio` | `libopus` | no: bundled C, built with CMake |
+| `rtci` | workspace | MIT / Apache-2.0 | `rtci-audio` | `engine` (default) | as the engine (ring) |
+| `rtrb` | 0.4.1 | MIT OR Apache-2.0 | `rtci-devices` | always | yes |
+| `cpal` | 0.18.2 | Apache-2.0 | `rtci-devices` | `devices` | no: links ALSA (Linux), CoreAudio, WASAPI |
 
 `cargo deny --all-features check licenses bans sources` passes with these (no GPL, LGPL, AGPL
 or MPL). Every dependency builds on the workspace's MSRV, 1.89.
@@ -54,9 +54,9 @@ owner) was read for what exists:
 
 | From `parolnet-media` | Here | How |
 |---|---|---|
-| `resample.rs`: polyphase Kaiser-windowed sinc resampler | `rtc-audio/src/dsp/resample.rs` | ported unchanged; `MultiResampler` (interleaved channels) added |
-| `audio_io.rs`: cpal microphone and speakers, stream-owning thread, real-time-safe callbacks | `rtc-devices/src/cpal_backend.rs` | ported and adapted to the `Backend` trait (interleaved device samples, any sample format) |
-| `opus.rs`: opus-rs, 48 kHz mono, 20 ms | `rtc-audio/src/codec/opus.rs` | the same backend, rewritten: mono and stereo, 10 to 60 ms, bitrate, FEC, DTX, PLC, the RFC 7587 parameters |
+| `resample.rs`: polyphase Kaiser-windowed sinc resampler | `rtci-audio/src/dsp/resample.rs` | ported unchanged; `MultiResampler` (interleaved channels) added |
+| `audio_io.rs`: cpal microphone and speakers, stream-owning thread, real-time-safe callbacks | `rtci-devices/src/cpal_backend.rs` | ported and adapted to the `Backend` trait (interleaved device samples, any sample format) |
+| `opus.rs`: opus-rs, 48 kHz mono, 20 ms | `rtci-audio/src/codec/opus.rs` | the same backend, rewritten: mono and stereo, 10 to 60 ms, bitrate, FEC, DTX, PLC, the RFC 7587 parameters |
 | `processing.rs`: AEC3 / NS / AGC2 through `sonora` | - | not ported: `sonora` needs Rust 1.91 (above) |
 
 Written here: G.711, G.722, the Opus packet reader (TOC, frame offsets, the LBRR flag), the
@@ -69,7 +69,7 @@ backend.
 
 ```text
  capture (any rate, mono/stereo)                                   playout (any device)
-        │  rtc-devices: ring → 48 kHz mono 10 ms                          ▲  rtc-devices: 48 kHz → device rate → ring
+        │  rtci-devices: ring → 48 kHz mono 10 ms                          ▲  rtci-devices: 48 kHz → device rate → ring
         ▼                                                                 │
  ┌──────────────── SendPipeline ────────────────┐         ┌──────────── JitterBuffer ─────────────┐
  │ AudioProcessing: HPF → AEC → suppressor      │         │ packet buffer (timestamp order, dups,  │
@@ -85,7 +85,7 @@ backend.
                 └──────────────► RTCPeerConnection ═══ network ═══ RTCPeerConnection ─────┘
 ```
 
-## Codecs (`rtc_audio::codec`)
+## Codecs (`rtci_audio::codec`)
 
 | Codec | Type | Rate / clock | Notes |
 |---|---|---|---|
@@ -128,7 +128,7 @@ takes event packets out of the stream (never into a decoder, RFC 7874 section 3)
 them as `ReceiveEvent::TelephoneEvent`. `dsp::dtmf` generates and detects (Goertzel) in-band
 DTMF tones for gateways to legacy audio.
 
-## The receive pipeline (`rtc_audio::jitter::JitterBuffer`)
+## The receive pipeline (`rtci_audio::jitter::JitterBuffer`)
 
 libwebrtc's NetEq equivalent. `insert(arrival, header, payload)` for every packet, `pull(now)`
 for every 10 ms of playout.
@@ -173,7 +173,7 @@ for every 10 ms of playout.
   `totalSamplesDuration`, and the in-band FEC counts. `AudioReceiver::update_stats` hands
   them to `RTCPeerConnection::update_audio_receiver_stats`, so `getStats()` reports them.
 
-## Processing (`rtc_audio::processing::AudioProcessing`)
+## Processing (`rtci_audio::processing::AudioProcessing`)
 
 10 ms frames of 48 kHz mono; `process_render` for what is about to be played,
 `process_capture` for what the microphone recorded. Each stage is switched on its own
@@ -191,7 +191,7 @@ for every 10 ms of playout.
 `stats()` gives `echoReturnLoss`, `echoReturnLossEnhancement` (for
 `update_audio_source_stats`), the delay found and the gain.
 
-## The send pipeline (`rtc_audio::send::SendPipeline`)
+## The send pipeline (`rtci_audio::send::SendPipeline`)
 
 Capture at any rate and channel count → 48 kHz → processing (mono; stereo sending bypasses
 it, RFC 7874 section 4) → level and voice flag → codec rate → encoder → `SendOutput::Packet`
@@ -221,7 +221,7 @@ skips the time and the next packet starts a talkspurt).
 `G7xxPayloader`; CN packets get the CN payload type and no marker), wraps in RED when asked,
 and writes with `write_rtp_with_audio_level`.
 
-## Devices (`rtc-devices`)
+## Devices (`rtci-devices`)
 
 `AudioDevices<B: Backend>`: one input and one output. Device callbacks only copy into or out
 of a wait-free SPSC ring (`rtrb`) and set atomics. `read_capture()` returns 10 ms frames of 48
@@ -236,8 +236,8 @@ and `cpal_backend::CpalBackend` (feature `devices`).
 ## How to use it
 
 ```rust,ignore
-use rtc_audio::engine::{AudioReceiver, AudioSender, AudioSenderOptions, OpusBackend};
-use rtc_audio::jitter::JitterBufferConfig;
+use rtci_audio::engine::{AudioReceiver, AudioSender, AudioSenderOptions, OpusBackend};
+use rtci_audio::jitter::JitterBufferConfig;
 
 // After negotiation (the remote answer applied):
 let mut sender = AudioSender::new(&mut pc, sender_id, now, AudioSenderOptions::default())?;
@@ -258,13 +258,13 @@ sender.update_stats(&mut pc);
 //   RTCMessage::RtcpPacket(_, packets) => sender.handle_rtcp(&packets)   // loss → FEC
 ```
 
-`rtc-audio/examples/audio-loopback.rs` is all of it in one headless program (WAV or synthetic
+`rtci-audio/examples/audio-loopback.rs` is all of it in one headless program (WAV or synthetic
 speech in, WAV and Ogg out, two peer connections over a lossy link in virtual time); the test
 environment's env stage runs it and decodes its Ogg output with GStreamer.
 
 ## Measured quality
 
-All numbers are from `cargo test -p rtc-audio -- --nocapture` (the `MEASURE` lines) in the
+All numbers are from `cargo test -p rtci-audio -- --nocapture` (the `MEASURE` lines) in the
 Linux test container (rust:1.92), on the virtual clock, deterministic (fixed seeds): the same
 numbers on every run. The speech-like source (`signal::SpeechLike`) talks 66 % of the time at
 an RMS of 0.049 (-26 dBFS) while active.
@@ -281,7 +281,7 @@ an RMS of 0.049 (-26 dBFS) while active.
 | G.722, tones 400 / 1000 / 3000 / 5000 Hz | SNR 59.0 / 47.3 / 41.4 / 22.0 dB (the last in the 2-bit upper band) |
 | G.722, speech-like | SNR 13.1 dB, segmental SNR 15.2 dB, delay 22 samples |
 | G.711 | every code word round-trips; error within half a segment step for every 16-bit value |
-| libopus against opus-rs (feature `libopus`) | each decodes the other's stream within 40 dB SNR, and the LBRR reader agrees with libopus's `opus_packet_has_lbrr`; every packet decodes with the encoder's final range-coder state both ways (opus-rs 16 to 510 kbit/s into libopus; libopus VoIP and audio modes, with and without FEC, into opus-rs); libopus's digital silence decodes in opus-rs to an RMS of 2.7e-6 (`codec::libopus::opus_interop`, GitHub's ubuntu-latest, the `rtc-audio against libopus` job) |
+| libopus against opus-rs (feature `libopus`) | each decodes the other's stream within 40 dB SNR, and the LBRR reader agrees with libopus's `opus_packet_has_lbrr`; every packet decodes with the encoder's final range-coder state both ways (opus-rs 16 to 510 kbit/s into libopus; libopus VoIP and audio modes, with and without FEC, into opus-rs); libopus's digital silence decodes in opus-rs to an RMS of 2.7e-6 (`codec::libopus::opus_interop`, GitHub's ubuntu-latest, the `rtci-audio against libopus` job) |
 
 ### Receive pipeline (jitter buffer alone)
 
@@ -304,7 +304,7 @@ an RMS of 0.049 (-26 dBFS) while active.
 
 ### rtc to rtc through the whole pipeline
 
-Two `rtc` peer connections, Opus at 32 kbit/s (FEC turned on by the reported loss), 25 ms
+Two `rtci` peer connections, Opus at 32 kbit/s (FEC turned on by the reported loss), 25 ms
 one-way delay plus 0 to 40 ms of uniform jitter per datagram (so packets reorder), loss as
 listed on every SRTP / SRTCP datagram both ways, 30 s each, seed 11
 (`tests/pipeline_rtc2rtc.rs`). The engine's `getStats()` reports the same `concealedSamples`.
@@ -350,9 +350,9 @@ events; playout capped at 200 ms of queue.
 
 | What | Where |
 |---|---|
-| Unit tests of every module (codecs, DSP, jitter buffer, processing, send pipeline, devices with the fake backend) | `cargo test -p rtc-audio -p rtc-devices`: GitHub CI (Linux, macOS, Windows), the test environment's unit stage |
-| rtc to rtc through the whole pipeline at 0 / 2 / 5 / 10 / 20 % loss (`rtc-audio/tests/pipeline_rtc2rtc.rs`) | the same |
-| libopus comparison (`codec::libopus` tests) | `cargo test -p rtc-audio --features libopus` (needs CMake): `cargo.yml`'s `rtc-audio against libopus` job |
+| Unit tests of every module (codecs, DSP, jitter buffer, processing, send pipeline, devices with the fake backend) | `cargo test -p rtci-audio -p rtci-devices`: GitHub CI (Linux, macOS, Windows), the test environment's unit stage |
+| rtc to rtc through the whole pipeline at 0 / 2 / 5 / 10 / 20 % loss (`rtci-audio/tests/pipeline_rtc2rtc.rs`) | the same |
+| libopus comparison (`codec::libopus` tests) | `cargo test -p rtci-audio --features libopus` (needs CMake): `cargo.yml`'s `rtci-audio against libopus` job |
 | The headless example, its Ogg output decoded by GStreamer | the test environment's env stage |
 | Browser decodes our Opus, we decode the browser's (`audio pipeline` cell of `webrtc.spec.mjs`; the received track plays unmuted, since Chromium measures `audioLevel` / `totalAudioEnergy` after a muted element's volume; the browser's own source is measured before Rust's decoding is judged; the cell's `pipeline-diagnostics` annotation holds both sides' measurements) | the test environment's interop stage (Chromium, Firefox, WebKit) |
 | cpal backend | compile-checked only (macOS here; Linux in the MSRV job, which installs libasound2-dev); no CI machine has audio hardware |
@@ -372,7 +372,7 @@ events; playout capped at 200 ms of queue.
 | Perceptual quality scores (PESQ / POLQA / ViSQOL) | M | licences; SNR, segmental SNR, ERLE and concealment ratio are measured instead |
 
 **Engine finding.** With the default interceptors, the RTP circuit breaker's congestion check
-(RFC 8083 section 4.3, `rtc-interceptor/src/circuit_breaker`) ceased a 64 kbit/s Opus flow
+(RFC 8083 section 4.3, `rtci-interceptor/src/circuit_breaker`) ceased a 64 kbit/s Opus flow
 about a second into every run of `tests/pipeline_rtc2rtc.rs`, at 0 % loss too, on 25 ms
 delay with 0 to 40 ms of reordering jitter, also with bandwidth probing off. The likely cause
 is the fraction lost of frequent reception reports counting reordered packets as lost, with
@@ -400,7 +400,7 @@ for that reason.
    encoding, `send_resolution` and the key-frame request event, simulcast encoders per RID,
    SVC encoders for the scalability modes the engine already signals, quality-limitation
    statistics.
-5. **Camera and screen capture** (`rtc-devices`, opt-in features): camera through a permissive
+5. **Camera and screen capture** (`rtci-devices`, opt-in features): camera through a permissive
    backend (`nokhwa`, Apache-2.0, as `parolnet-media` uses), screen capture per platform;
    pixel-format conversion to I420 (`yuv`, MIT / Apache-2.0).
 6. **Hardware acceleration**: VideoToolbox, Media Foundation, VA-API encoders and decoders

@@ -15,13 +15,13 @@
 //! fingerprint connects, and with it left at the default the same setup still fails.
 
 use anyhow::Result;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;

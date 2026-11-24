@@ -6,18 +6,18 @@
 
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::srflx::ReflexiveGathering;
-use rtc::peer_connection::state::RTCIceGatheringState;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{StreamCommand, StreamEvent};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::message::{BINDING_REQUEST, BINDING_SUCCESS, Message, Setter};
-use rtc::stun::xoraddr::XorMappedAddress;
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::srflx::ReflexiveGathering;
+use rtci::peer_connection::state::RTCIceGatheringState;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{StreamCommand, StreamEvent};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::message::{BINDING_REQUEST, BINDING_SUCCESS, Message, Setter};
+use rtci::stun::xoraddr::XorMappedAddress;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -34,7 +34,7 @@ struct Harness {
     sent: Vec<(Instant, TaggedBytesMut)>,
     events: Vec<RTCPeerConnectionEvent>,
     commands: Vec<StreamCommand>,
-    transmits: Vec<rtc::shared::stream::StreamTransmit>,
+    transmits: Vec<rtci::shared::stream::StreamTransmit>,
     /// Whether the harness serves the stream interface (the engine's TCP).
     serve_streams: bool,
 }
@@ -497,7 +497,7 @@ fn connects(
     h: &Harness,
     bound: SocketAddr,
     server: SocketAddr,
-) -> Vec<rtc::shared::stream::StreamId> {
+) -> Vec<rtci::shared::stream::StreamId> {
     h.commands
         .iter()
         .filter_map(|c| match c {
@@ -746,7 +746,7 @@ fn a_names_a_answer_first_waits_the_resolution_delay() -> Result<()> {
 /// engine takes that address.
 #[test]
 fn a_mapped_address_answer_of_an_old_server_is_taken() -> Result<()> {
-    use rtc::stun::addr::MappedAddress;
+    use rtci::stun::addr::MappedAddress;
     let server = a("192.0.2.10:3478");
     let mut h = Harness::new(&["stun:192.0.2.10:3478"], SettingEngine::default())?;
     h.add_host(HOST)?;

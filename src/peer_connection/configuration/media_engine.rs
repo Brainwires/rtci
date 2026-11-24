@@ -16,7 +16,7 @@
 //! ## Using Default Codecs
 //!
 //! ```
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut media_engine = MediaEngine::default();
@@ -31,8 +31,8 @@
 //! ## Registering Custom Codec
 //!
 //! ```
-//! use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
-//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind, RTCRtpCodecParameters};
+//! use rtci::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
+//! use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind, RTCRtpCodecParameters};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut media_engine = MediaEngine::default();
@@ -58,9 +58,9 @@
 //! ## Registering RTP Header Extension
 //!
 //! ```
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
-//! use rtc::rtp_transceiver::rtp_sender::{RtpCodecKind, RTCRtpHeaderExtensionCapability};
-//! use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::rtp_transceiver::rtp_sender::{RtpCodecKind, RTCRtpHeaderExtensionCapability};
+//! use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut media_engine = MediaEngine::default();
@@ -407,8 +407,8 @@ impl MediaEngineHeaderExtension {
 ///
 /// ```
 /// # use std::time::Instant;
-/// use rtc::peer_connection::RTCPeerConnectionBuilder;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -424,8 +424,8 @@ impl MediaEngineHeaderExtension {
 /// ## Custom Codec Configuration
 ///
 /// ```
-/// use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS, MIME_TYPE_VP8};
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind, RTCRtpCodecParameters};
+/// use rtci::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS, MIME_TYPE_VP8};
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind, RTCRtpCodecParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -633,7 +633,7 @@ impl MediaEngine {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    /// use rtci::peer_connection::configuration::media_engine::MediaEngine;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut media_engine = MediaEngine::default();
@@ -1018,8 +1018,8 @@ impl MediaEngine {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind, RTCRtpCodecParameters};
+    /// use rtci::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind, RTCRtpCodecParameters};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut media_engine = MediaEngine::default();

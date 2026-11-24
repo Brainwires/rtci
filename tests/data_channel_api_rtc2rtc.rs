@@ -8,13 +8,13 @@ mod dc_common;
 use anyhow::Result;
 use bytes::BytesMut;
 use dc_common::Pair;
-use rtc::data_channel::{RTCDataChannelInit, RTCDataChannelState};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::rtc_error::RTCErrorDetailType;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCSctpTransportState};
-use rtc::shared::error::Error;
-use rtc::statistics::StatsSelector;
+use rtci::data_channel::{RTCDataChannelInit, RTCDataChannelState};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCSctpTransportState};
+use rtci::shared::error::Error;
+use rtci::statistics::StatsSelector;
 use std::time::Duration;
 
 fn engine(role: RTCDtlsRole) -> SettingEngineBuilder {
@@ -149,7 +149,7 @@ fn buffered_amount_follows_the_queue_and_close_is_once() -> Result<()> {
 fn send_refuses_data_above_the_max_buffer_size() -> Result<()> {
     const SEND_BUFFER: usize = 16 * 1024 * 1024;
     fn fill(
-        channel: &mut rtc::data_channel::RTCDataChannel<'_>,
+        channel: &mut rtci::data_channel::RTCDataChannel<'_>,
         now: std::time::Instant,
         size: usize,
     ) -> (usize, Error) {
@@ -262,7 +262,7 @@ fn a_closed_channel_keeps_its_stats_object() -> Result<()> {
     let channel = channels[0];
     assert_eq!(
         channel.state,
-        rtc::data_channel::RTCDataChannelState::Closed
+        rtci::data_channel::RTCDataChannelState::Closed
     );
     assert_eq!(channel.messages_sent, 1);
     Ok(())
@@ -338,7 +338,7 @@ fn close_sends_what_was_queued_before_it() -> Result<()> {
 /// size") the result is the larger, this side's.
 #[test]
 fn max_message_size_follows_the_remote_attribute() -> Result<()> {
-    use rtc::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
+    use rtci::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
     let without = |sdp: &str| {
         sdp.lines()
             .filter(|l| !l.starts_with("a=max-message-size:"))
@@ -490,7 +490,7 @@ fn a_16_mib_burst_and_back_pressure_deliver_everything() -> Result<()> {
 /// transfer, starts again from its initial value.
 #[test]
 fn a_new_codepoint_restarts_the_associations_congestion_control() -> Result<()> {
-    use rtc::sansio::Protocol;
+    use rtci::sansio::Protocol;
     let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "low")?;
     let initial = pair
         .offerer
@@ -517,7 +517,7 @@ fn a_new_codepoint_restarts_the_associations_congestion_control() -> Result<()> 
 
     // The default priority is "low" (DSCP 0 for data, RFC 8837 Table 1); a "high" channel
     // makes it AF21.
-    let low = pair.offerer.pc.dscp(&rtc::shared::TaggedBytesMut {
+    let low = pair.offerer.pc.dscp(&rtci::shared::TaggedBytesMut {
         now,
         transport: Default::default(),
         message: BytesMut::from(&[23u8, 0xfe, 0xfd][..]),
@@ -532,7 +532,7 @@ fn a_new_codepoint_restarts_the_associations_congestion_control() -> Result<()> 
     let now = pair.now + Duration::from_millis(1);
     pair.now = now;
     pair.offerer.pc.handle_timeout(now)?;
-    let high = pair.offerer.pc.dscp(&rtc::shared::TaggedBytesMut {
+    let high = pair.offerer.pc.dscp(&rtci::shared::TaggedBytesMut {
         now,
         transport: Default::default(),
         message: BytesMut::from(&[23u8, 0xfe, 0xfd][..]),
@@ -553,7 +553,7 @@ fn a_new_codepoint_restarts_the_associations_congestion_control() -> Result<()> 
 /// DATA_CHANNEL_OPEN it received.
 #[test]
 fn a_data_channels_priority_defaults_to_low_and_reaches_the_peer() -> Result<()> {
-    use rtc::peer_connection::priority::RTCPriorityType;
+    use rtci::peer_connection::priority::RTCPriorityType;
     let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "default")?;
     assert_eq!(
         pair.offerer

@@ -9,9 +9,9 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn offer(formats: &str, lines: &str) -> String {
     crlf(&format!(
@@ -191,10 +191,10 @@ fn the_default_vp9_formats_leave_out_the_receiver_limits() -> TestResult {
 #[test]
 fn the_vp9_receiver_limits_setting_states_max_fr_and_max_fs() -> TestResult {
     let mut media_engine =
-        rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+        rtci::peer_connection::configuration::media_engine::MediaEngine::default();
     media_engine.register_default_codecs()?;
     media_engine.set_vp9_receiver_limits(true);
-    let mut pc = rtc::peer_connection::RTCPeerConnectionBuilder::new()
+    let mut pc = rtci::peer_connection::RTCPeerConnectionBuilder::new()
         .with_media_engine(media_engine)
         .build(Instant::now())?;
     pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;

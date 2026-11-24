@@ -6,28 +6,28 @@
 //! The peers exchange datagrams in memory, on a virtual clock.
 
 use anyhow::Result;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{
     ICE_SERVER_UNREACHABLE, RTCDataChannelEvent, RTCPeerConnectionEvent,
     RTCPeerConnectionIceErrorEvent,
 };
-use rtc::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::{
+use rtci::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::{
     RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState, RTCSignalingState,
 };
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidateInit, RTCIceTransportState, RTCSctpTransportState,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -451,7 +451,7 @@ fn close_sets_every_state_to_closed_without_an_event() -> Result<()> {
             .data_channel(channel)
             .expect("the channel")
             .ready_state(),
-        rtc::data_channel::RTCDataChannelState::Closed,
+        rtci::data_channel::RTCDataChannelState::Closed,
         "close() closes every data channel"
     );
     assert!(
@@ -1032,17 +1032,17 @@ fn remote_candidates_leave_out_the_peer_reflexive_ones_the_checks_found() -> Res
     let now = start + Duration::from_secs(1);
     let learned: Vec<_> = answerer
         .pc
-        .get_stats(now, rtc::statistics::StatsSelector::None)
+        .get_stats(now, rtci::statistics::StatsSelector::None)
         .iter()
         .filter_map(|entry| match entry {
-            rtc::statistics::report::RTCStatsReportEntry::RemoteCandidate(c) => {
+            rtci::statistics::report::RTCStatsReportEntry::RemoteCandidate(c) => {
                 Some(c.candidate_type)
             }
             _ => None,
         })
         .collect();
     assert!(
-        learned.contains(&rtc::peer_connection::transport::RTCIceCandidateType::Prflx),
+        learned.contains(&rtci::peer_connection::transport::RTCIceCandidateType::Prflx),
         "the answerer's agent learned the offerer as peer-reflexive: {learned:?}"
     );
     let answerer_ice = answerer
@@ -1274,7 +1274,7 @@ fn prohibited_remote_candidates_are_added_but_never_checked() -> Result<()> {
         .with_configuration(
             RTCConfigurationBuilder::new()
                 .with_ice_transport_policy(
-                    rtc::peer_connection::configuration::RTCIceTransportPolicy::Relay,
+                    rtci::peer_connection::configuration::RTCIceTransportPolicy::Relay,
                 )
                 .build(),
         )

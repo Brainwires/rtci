@@ -4,7 +4,7 @@ name: agent-test
 # and one command. It exists so that checking a change does not have to wait for a container slot
 # on our own machines: it never runs on the self-hosted pools, and it starts no other workflow.
 # Dispatch it through the ci tools with an owner, for example:
-#   ref: conf/some-branch   command: cargo test -p rtc-ice --no-fail-fast
+#   ref: conf/some-branch   command: cargo test -p rtci-ice --no-fail-fast
 on:
   workflow_dispatch:
     inputs:

@@ -7,16 +7,16 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, vp8};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpRidRestrictions, RtpCodecKind,
 };
-use rtc::shared::error::Error;
+use rtci::shared::error::Error;
 
 /// A track with one VP8 encoding per `(rid, max-width)`.
 fn simulcast_track(layers: &[(&str, Option<u64>)]) -> MediaStreamTrack {
@@ -582,7 +582,7 @@ fn an_offer_can_ask_to_receive_simulcast() -> TestResult {
     let mut offerer = default_peer()?;
     let id = offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let mut transceiver = offerer.rtp_transceiver(id).expect("the transceiver");
     assert!(
@@ -634,8 +634,8 @@ fn an_offer_can_ask_to_receive_simulcast() -> TestResult {
 /// (`codec_negotiation.rs::test_add_track_negotiates_non_first_codec`).
 #[test]
 fn simulcast_layers_without_rids_get_generated_rids() -> TestResult {
-    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-    use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+    use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtci::rtp_transceiver::RTCRtpTransceiverInit;
     for (given, expected) in [
         (["", "", ""], ["0", "1", "2"]),
         (["", "1", ""], ["0", "1", "2"]),
@@ -741,7 +741,7 @@ fn a_remote_offer_to_receive_simulcast_promotes_a_unicast_sender() -> TestResult
     pc.set_remote_description(now, remote_offer("recvonly", &extra)?)?;
     assert_eq!(
         sent_layers(&mut pc, sender).len(),
-        rtc::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
+        rtci::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
     );
     Ok(())
 }

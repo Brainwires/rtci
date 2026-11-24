@@ -29,11 +29,11 @@
 //!
 //! ```
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let provider = crypto::default_provider()?;
@@ -59,9 +59,9 @@
 //! ## Generate Certificate with Ed25519 (Highest Security)
 //!
 //! ```
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let provider = crypto::default_provider()?;
@@ -84,9 +84,9 @@
 //! ```no_run
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let provider = crypto::default_provider()?;
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //! use std::fs;
 //!
 //! // First run: Generate and save certificate
@@ -109,9 +109,9 @@
 //! ## Extract Fingerprints for SDP Signaling
 //!
 //! ```
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let provider = crypto::default_provider()?;
@@ -134,9 +134,9 @@
 //! ## Compare Certificate Algorithms
 //!
 //! ```
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //! use std::time::Instant;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -165,7 +165,7 @@
 //! ## Using External Certificate
 //!
 //! ```no_run
-//! use rtc::peer_connection::certificate::RTCCertificate;
+//! use rtci::peer_connection::certificate::RTCCertificate;
 //! use std::time::{SystemTime, Duration};
 //!
 //! # fn example(dtls_cert: dtls::crypto::Certificate) -> Result<(), Box<dyn std::error::Error>> {
@@ -257,9 +257,9 @@ pub const MAX_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60
 /// ## Generating a new certificate
 ///
 /// ```
-/// # use rtc::peer_connection::certificate::RTCCertificate;
-/// # use rtc::crypto::{self, SignatureScheme};
-/// # use rtc::peer_connection::certificate::CertificateParams;
+/// # use rtci::peer_connection::certificate::RTCCertificate;
+/// # use rtci::crypto::{self, SignatureScheme};
+/// # use rtci::peer_connection::certificate::CertificateParams;
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 ///     let provider = crypto::default_provider()?;
 /// // Generate ECDSA P-256 key pair and certificate
@@ -279,9 +279,9 @@ pub const MAX_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60
 /// ## Generating with Ed25519
 ///
 /// ```
-/// # use rtc::peer_connection::certificate::RTCCertificate;
-/// # use rtc::crypto::{self, SignatureScheme};
-/// # use rtc::peer_connection::certificate::CertificateParams;
+/// # use rtci::peer_connection::certificate::RTCCertificate;
+/// # use rtci::crypto::{self, SignatureScheme};
+/// # use rtci::peer_connection::certificate::CertificateParams;
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 ///     let provider = crypto::default_provider()?;
 /// // Generate Ed25519 key pair and certificate
@@ -304,9 +304,9 @@ pub const MAX_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60
 ///
 /// ```
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # use rtc::peer_connection::certificate::RTCCertificate;
-/// # use rtc::crypto::{self, SignatureScheme};
-/// # use rtc::peer_connection::certificate::CertificateParams;
+/// # use rtci::peer_connection::certificate::RTCCertificate;
+/// # use rtci::crypto::{self, SignatureScheme};
+/// # use rtci::peer_connection::certificate::CertificateParams;
 /// # let params = CertificateParams::new(vec!["localhost".to_owned()])?;
 /// # let provider = crypto::default_provider()?;
 /// # let certificate = RTCCertificate::generate(
@@ -331,11 +331,11 @@ pub const MAX_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60
 ///
 /// ```no_run
 /// # use std::time::Instant;
-/// # use rtc::peer_connection::RTCPeerConnectionBuilder;
-/// # use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-/// # use rtc::peer_connection::certificate::RTCCertificate;
-/// # use rtc::crypto::{self, SignatureScheme};
-/// # use rtc::peer_connection::certificate::CertificateParams;
+/// # use rtci::peer_connection::RTCPeerConnectionBuilder;
+/// # use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+/// # use rtci::peer_connection::certificate::RTCCertificate;
+/// # use rtci::crypto::{self, SignatureScheme};
+/// # use rtci::peer_connection::certificate::CertificateParams;
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 ///     let provider = crypto::default_provider()?;
 /// // Generate certificate
@@ -596,9 +596,9 @@ impl RTCCertificate {
     ///
     /// ```
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use rtc::peer_connection::certificate::RTCCertificate;
-    /// # use rtc::crypto::{self, SignatureScheme};
-    /// # use rtc::peer_connection::certificate::CertificateParams;
+    /// # use rtci::peer_connection::certificate::RTCCertificate;
+    /// # use rtci::crypto::{self, SignatureScheme};
+    /// # use rtci::peer_connection::certificate::CertificateParams;
     /// # let params = CertificateParams::new(vec!["localhost".to_owned()])?;
     /// # let provider = crypto::default_provider()?;
     /// # let original = RTCCertificate::generate(
@@ -800,9 +800,9 @@ impl RTCCertificate {
     /// # Examples
     ///
     /// ```no_run
-    /// # use rtc::peer_connection::certificate::RTCCertificate;
-    /// # use rtc::crypto;
-    /// # use rtc::dtls;
+    /// # use rtci::peer_connection::certificate::RTCCertificate;
+    /// # use rtci::crypto;
+    /// # use rtci::dtls;
     /// # use std::time::{SystemTime, Duration};
     /// # fn example(
     /// #     dtls_cert: dtls::crypto::Certificate
@@ -884,9 +884,9 @@ impl RTCCertificate {
     ///
     /// ```
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use rtc::peer_connection::certificate::RTCCertificate;
-    /// # use rtc::crypto::{self, SignatureScheme};
-    /// # use rtc::peer_connection::certificate::CertificateParams;
+    /// # use rtci::peer_connection::certificate::RTCCertificate;
+    /// # use rtci::crypto::{self, SignatureScheme};
+    /// # use rtci::peer_connection::certificate::CertificateParams;
     /// # let params = CertificateParams::new(vec!["localhost".to_owned()])?;
     /// # let provider = crypto::default_provider()?;
     /// # let certificate = RTCCertificate::generate(
@@ -952,9 +952,9 @@ impl RTCCertificate {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::certificate::RTCCertificate;
-    /// # use rtc::crypto::{self, SignatureScheme};
-    /// # use rtc::peer_connection::certificate::CertificateParams;
+    /// # use rtci::peer_connection::certificate::RTCCertificate;
+    /// # use rtci::crypto::{self, SignatureScheme};
+    /// # use rtci::peer_connection::certificate::CertificateParams;
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let provider = crypto::default_provider()?;
     /// let certificate = RTCCertificate::generate(

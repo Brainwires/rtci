@@ -959,7 +959,7 @@ fn srtp_profile(
 mod tests {
     //! Cipher-suite plumbing for issue #808.
     //!
-    //! `HandshakeConfig::local_cipher_suites` is `pub(crate)` to `rtc-dtls`, so these assert
+    //! `HandshakeConfig::local_cipher_suites` is `pub(crate)` to `rtci-dtls`, so these assert
     //! the setting reached the config *behaviourally*: a list that cannot be satisfied is
     //! rejected, which can only happen if it was applied rather than ignored.
 

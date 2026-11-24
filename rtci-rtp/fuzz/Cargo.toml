@@ -1,0 +1,92 @@
+[package]
+name = "rtci-rtp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+
+[dependencies.rtci-rtp]
+path = ".."
+
+[dependencies.rtci-shared]
+path = "../../rtci-shared"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parse_packet"
+path = "fuzz_targets/parse_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "depacketize_sequence"
+path = "fuzz_targets/depacketize_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_extensions"
+path = "fuzz_targets/header_extensions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payloaders"
+path = "fuzz_targets/payloaders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smpte336m_depacketize"
+path = "fuzz_targets/smpte336m_depacketize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dependency_descriptor"
+path = "fuzz_targets/dependency_descriptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "telephone_event"
+path = "fuzz_targets/telephone_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "layer_filters"
+path = "fuzz_targets/layer_filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "comfort_noise"
+path = "fuzz_targets/comfort_noise.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "red"
+path = "fuzz_targets/red.rs"
+test = false
+doc = false
+bench = false

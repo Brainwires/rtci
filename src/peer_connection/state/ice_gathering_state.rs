@@ -23,8 +23,8 @@ use std::fmt;
 /// ## Monitoring Gathering Progress
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCIceGatheringState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCIceGatheringState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -52,8 +52,8 @@ use std::fmt;
 /// ## Waiting for Gathering to Complete
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCIceGatheringState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCIceGatheringState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn example(event: RTCPeerConnectionEvent) -> bool {
 /// // Check if gathering is complete before sending offer
@@ -70,7 +70,7 @@ use std::fmt;
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCIceGatheringState;
+/// use rtci::peer_connection::state::RTCIceGatheringState;
 ///
 /// // Convert to string
 /// let state = RTCIceGatheringState::Gathering;
@@ -84,8 +84,8 @@ use std::fmt;
 /// ## Trickle ICE vs. Complete Gathering
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCIceGatheringState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCIceGatheringState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_gathering(event: RTCPeerConnectionEvent, use_trickle_ice: bool) {
 /// match event {

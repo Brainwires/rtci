@@ -28,8 +28,8 @@ use std::fmt;
 /// ## Monitoring ICE State Changes
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCIceConnectionState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCIceConnectionState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -67,7 +67,7 @@ use std::fmt;
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCIceConnectionState;
+/// use rtci::peer_connection::state::RTCIceConnectionState;
 ///
 /// // Convert state to string
 /// let state = RTCIceConnectionState::Connected;
@@ -81,7 +81,7 @@ use std::fmt;
 /// ## Checking for Active Connection
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCIceConnectionState;
+/// use rtci::peer_connection::state::RTCIceConnectionState;
 ///
 /// fn is_ice_active(state: RTCIceConnectionState) -> bool {
 ///     matches!(

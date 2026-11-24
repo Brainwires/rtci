@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 /// ## Identifying Candidate Types
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCIceCandidateType;
+/// use rtci::peer_connection::transport::RTCIceCandidateType;
 ///
 /// fn describe_candidate(candidate_type: RTCIceCandidateType) {
 ///     match candidate_type {
@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 /// ## Checking Server Requirements
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCIceCandidateType;
+/// use rtci::peer_connection::transport::RTCIceCandidateType;
 ///
 /// fn needs_stun_server(candidate_type: RTCIceCandidateType) -> bool {
 ///     matches!(candidate_type, RTCIceCandidateType::Srflx)
@@ -71,7 +71,7 @@ use serde::{Deserialize, Serialize};
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCIceCandidateType;
+/// use rtci::peer_connection::transport::RTCIceCandidateType;
 ///
 /// let host = RTCIceCandidateType::Host;
 /// assert_eq!(host.to_string(), "host");
@@ -83,7 +83,7 @@ use serde::{Deserialize, Serialize};
 /// ## Performance Characteristics
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCIceCandidateType;
+/// use rtci::peer_connection::transport::RTCIceCandidateType;
 ///
 /// fn estimate_latency(candidate_type: RTCIceCandidateType) -> &'static str {
 ///     match candidate_type {

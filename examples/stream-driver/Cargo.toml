@@ -1,5 +1,5 @@
 [package]
-name = "rtc-stream-driver"
+name = "rtci-stream-driver"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -22,19 +22,19 @@ all-features = true
 # RUSTSEC-2026-0491 (memory amplification from a response's record counts, reachable from any
 # name server the client asks) and DNSSEC advisories (not compiled in: no `dnssec-*` feature).
 dns-records = ["dep:hickory-resolver"]
-# `peer`: a whole `rtc` peer connection driven over sockets the driver owns, UDP included,
+# `peer`: a whole `rtci` peer connection driven over sockets the driver owns, UDP included,
 # gathering again by itself when a transport needs new candidates (`OnLocalCandidatesNeeded`).
-# On by default. `rtc` dev-depends on this crate without a version and without this feature,
-# so the two are published in the order rtc, then rtc-stream-driver.
+# On by default. `rtci` dev-depends on this crate without a version and without this feature,
+# so the two are published in the order rtc, then rtci-stream-driver.
 default = ["peer"]
-peer = ["dep:rtc", "dep:bytes"]
+peer = ["dep:rtci", "dep:bytes"]
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["ifaces"] }
 tokio.workspace = true
 socket2.workspace = true
 hickory-resolver = { version = "0.26.2", optional = true, default-features = false, features = ["tokio", "system-config"] }
-rtc = { version = "0.22.0", path = "../..", optional = true }
+rtci = { version = "0.1.0", path = "../..", optional = true }
 bytes = { workspace = true, optional = true }
 
 # The `peer` module's tests need the feature (on by default; off in the workspace jobs that

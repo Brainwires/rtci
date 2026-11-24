@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Crate rename
+
+<!-- rtci-rename:start -->
+- **Breaking: the crates are renamed from `rtc` / `rtc-*` to `rtci` / `rtci-*`, and the version line restarts at 0.1.0.** The root crate `rtc` is now `rtci` (`use rtci::...`), every `rtc-<x>` crate is `rtci-<x>` (library paths `rtc_<x>` -> `rtci_<x>`), the crate directories follow, and the repository becomes `Brainwires/rtci`. crates.io ignores the `+brainwires.N` build metadata of the old line, so it could not order those releases; the new line starts at 0.1.0 (tag `v0.1.0`) and the old tags stay. Cargo feature names are unchanged; W3C and IETF names (`RTCPeerConnection`, RTCP) are unchanged. The C interface follows: library `rtci_ffi` (was `rtc_ffi`), header `rtci.h`, include guard and exported names `rtc_` / `RTC_` -> `rtci_` / `RTCI_`. Made by `scripts/rename-to-rtci.py`; `docs/rename.md` says what a dependent changes.
+<!-- rtci-rename:end -->
+
 ### Breaking changes
 
 - **interceptors (congestion control)**: one GCC estimator (`conf/gcc-4-release`). The
@@ -69,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mean and 93 ms at the 95th percentile (2.8 ms and 10.8 ms); a flow that joins late has
   0.50 after 40 s (0.49), and 0.50 without probing (0.42); beside a TCP-like transfer the
   share is 0.22 with a 0.2 s buffer (0.19) and 0.25 with a 0.05 s buffer (0.37)
-  (`rtc-interceptor/tests/rfc8836_multi_flow.rs`).
+  (`rtci-interceptor/tests/rfc8836_multi_flow.rs`).
 - **statistics**: `availableOutgoingBitrate` keeps the congestion controller's estimate
   through the whole of a pacer pause. While the source was paused, the NACK responder's own
   target announcements (sent when its retransmission reserve moved) carried the zero target
@@ -165,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `without_sctp_max_retransmissions`. The `Chrome` profile's offers now place `a=ice-options` and
     leave out `a=ice-pacing` as Chromium's do; `tests/behaviour_profiles.rs` no longer accepts
     session-level `a=ice-options` or an extra `a=ice-pacing` under `Chrome`.
-  - Breaking: `ThresholdTimeBase` (rtc-interceptor) has a third variant, `ArrivalCapped`; its
+  - Breaking: `ThresholdTimeBase` (rtci-interceptor) has a third variant, `ArrivalCapped`; its
     `Departure` doc no longer calls it libwebrtc's.
   - Corrected notes: libwebrtc does not retransmit ICE connectivity checks at all (each is sent once,
     the 250 ms RTO is for server requests); DTLS 1.3 is not engine-only (libwebrtc's factory default is
@@ -175,7 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     policy).
 
 - **peer connection**: behaviour profiles (`conf/profile-1-behaviour-profiles`).
-  - `BehaviourProfile { Rfc, Chrome, StrictRfc }` (`rtc::peer_connection::configuration`), applied by
+  - `BehaviourProfile { Rfc, Chrome, StrictRfc }` (`rtci::peer_connection::configuration`), applied by
     `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
     `DefaultInterceptorOptions::for_profile`; `register_default_interceptors` (and `_with_handles`,
     `_without_congestion_control`, `configure_congestion_control`) take the options of the media
@@ -188,7 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Cargo feature `chrome-defaults`: `BehaviourProfile::default()`, and with it every
     `SettingEngine::default()`, `SettingEngineBuilder::new()`, `MediaEngine::default()` and
     `DefaultInterceptorOptions::default()`, is `Chrome`. Cargo unifies features: one crate of a build
-    that turns it on changes the defaults of every user of `rtc` in that build.
+    that turns it on changes the defaults of every user of `rtci` in that build.
     `BehaviourProfile::compiled_default()` reports it. CI: one job checks the workspace and runs the
     profile's tests with it.
   - New settings: `SettingEngineBuilder::with_ice_software` (the SOFTWARE attribute of ICE checks,
@@ -512,7 +518,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with `nowait` once the received SSRCs show two CNAMEs (6.2), and a local-pause PAUSED is
     repeated as often as the reported loss needs (6.4: 3 to 10).
   - RFC7728-6.2-2, 6.2-4, 6.2-5, 6.3-3, 6.4-2, 8.2-4, 8.5-1 are `tested`.
-- **rtc-sdp**: `o=` session ids and versions of any length (`conf/jsep-65-origin`, jsep17).
+- **rtci-sdp**: `o=` session ids and versions of any length (`conf/jsep-65-origin`, jsep17).
   `Origin::session_id` and `Origin::session_version` are now `SdpDecimal` (was `u64`): the
   `1*DIGIT` of RFC 8866 section 9 has no upper bound, and RFC 9429 section 5.8 has a JSEP
   endpoint accept compliant SDP beyond the 64 bits it generates. `SdpDecimal` keeps the digits
@@ -531,7 +537,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `register_default_codecs` adds `audio/red` 48000/2 (payload type 63, `a=fmtp:63 111/111`,
     after Opus), as Chromium and WebKit offer it (RFC 2198, RFC 8854 section 4.2). Default
     offers and answers to them now list it.
-  - New `RedAudioInterceptor` / `RedAudioBuilder` (`rtc-interceptor`), `Slot::Redundancy`
+  - New `RedAudioInterceptor` / `RedAudioBuilder` (`rtci-interceptor`), `Slot::Redundancy`
     (10_450) and `configure_audio_redundancy`; the peer connection installs it in any chain
     that does not fill the slot. A local Opus stream whose section negotiated RED is sent as
     RED with a copy of the previous packet; received RED is taken apart into Opus packets, a
@@ -552,7 +558,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     later packet's MID names (when that section's receiver has no stream), as one the engine
     placed already did (RFC 9143 section 9.2); a MID from a packet older than the one that
     moved the stream is not applied (RFC 7941 section 4.2.6).
-  - rtc-ice: new `Agent::replace_remote_candidates_pinning(now, candidates, local)`: two lite
+  - rtci-ice: new `Agent::replace_remote_candidates_pinning(now, candidates, local)`: two lite
     agents, the controlled one takes the local candidate an updated exchange names in
     `a=remote-candidates` (RFC 8839 section 4.4.2.2); the peer connection passes it.
   - Audit only: RFC8830-3.2.2-1 tested (stale note), 3.2.5-1 `conflict` (as 3-7),
@@ -576,7 +582,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `a=msid`: a section that would repeat an earlier section's msid-id and appdata (one
     track sent by two transceivers, which W3C allows) gets its appdata suffixed `-<n>`
     (RFC 8830 section 2).
-  - rtc-sdp: `a=charset` is read by `SessionDescription::unmarshal` (ISO-8859-1, US-ASCII,
+  - rtci-sdp: `a=charset` is read by `SessionDescription::unmarshal` (ISO-8859-1, US-ASCII,
     UTF-8; an unsupported set's text kept as octets) and `SessionDescription::charset`
     names it (RFC 8866 section 6.10). A relative `u=` reference is accepted (RFC 8866
     section 9). Breaking: `SessionDescription::uri` is an `Option<String>` (was
@@ -619,12 +625,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     characters is ignored like any malformed `a=msid` (RFC 8830 section 2); an audio or video
     section whose protocol is not RTP (`m=audio 9 udptl t38`) is answered rejected in its
     place instead of having its formats read as payload types (RFC 8866 section 5.14);
-    domain names in `o=` / `c=` / candidates follow the RFC 1035 label rules (rtc-sdp); with
+    domain names in `o=` / `c=` / candidates follow the RFC 1035 label rules (rtci-sdp); with
     BUNDLE the DTLS role is the tagged section's `a=setup` (RFC 8859 section 4.5; Firefox's
     later answers say `active` in the other sections).
   - A trickled candidate (`add_remote_candidate`) is checked against the RFC 8839 grammar,
     as the candidate lines of a description are.
-  - ICE (rtc-ice): application credentials are held to RFC 8839 section 5.4 (ufrag 4 to 32
+  - ICE (rtci-ice): application credentials are held to RFC 8839 section 5.4 (ufrag 4 to 32
     ice-chars, password 22 to 256): new errors `ErrLocalUfragInvalid`, `ErrLocalPwdInvalid`;
     a local srflx / prflx / relay candidate without a related address is refused
     (`ErrLocalCandidateWithoutRelatedAddress`, RFC 8839 section 5.1).
@@ -763,7 +769,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **audio** (`conf/ffi-mp-5`): the Opus sender's ceiling, without a `maxaveragebitrate`
   from the receiver, is RFC 7587 section 6.1's default, the top of section 3.1.1's range for
-  the mode (`rtc_audio::codec::fmtp::default_max_average_bitrate`: 12 kbit/s narrowband, 20
+  the mode (`rtci_audio::codec::fmtp::default_max_average_bitrate`: 12 kbit/s narrowband, 20
   wideband, 40 full-band speech, 64 mono music, 128 stereo music), not the codec's 510
   kbit/s; a stated `maxaveragebitrate` stays the limit (section 7.1, a MUST). In train 13
   round 5 the interop peer sent one voice stream at 343 kbit/s, the congestion controller's
@@ -777,7 +783,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own ceiling, which caps its encoding's share of the congestion controller's target beside
   `maxBitrate` (the lower applies) and gives the rest to the other encodings, without
   appearing in `getParameters()` (libwebrtc's encoder-defined bitrate range of an audio
-  stream). `rtc_audio::engine::AudioSender` sets it, so audio takes what its encoder can use
+  stream). `rtci_audio::engine::AudioSender` sets it, so audio takes what its encoder can use
   and video the rest. Test:
   `an_encoders_ceiling_caps_its_share_and_leaves_the_rest_to_the_others`.
 - **peer connection**: automatic SRTP re-keying has a tie-break (`conf/rekey-1-glare`). Two
@@ -803,7 +809,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts one event, the new SSRC's).
 - **congestion control, peer connection**: a new selected candidate pair is a new path for the
   congestion controllers also when the datagrams keep their addresses
-  (`conf/gcc-2-path-change`). The peer connection reads `PathChanged` (rtc-interceptor, an
+  (`conf/gcc-2-path-change`). The peer connection reads `PathChanged` (rtci-interceptor, an
   empty-RTCP carrier on the read leg, tagged with the transport's `RtpSession` when there are
   several) into the chain each time a transport's ICE agent selects another pair after its
   first; the TWCC-driven GCC (`GccInterceptor`) starts over from its start rate and forgets the
@@ -848,7 +854,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NackResponderBuilder::with_rate_limit`; `UpToTarget` in every profile until
     `conf/gcc-2-rfc-retransmission` changes the RFC default.
   - `ice.software-attribute` follows master's `with_ice_software` (an `Option<Option<String>>`
-    field): `Rfc` / `StrictRfc` / `Performance` send `rtc-ice` / `rtc-turn` and their versions,
+    field): `Rfc` / `StrictRfc` / `Performance` send `rtci-ice` / `rtci-turn` and their versions,
     `Chrome` sends no SOFTWARE in the ICE checks and responses and in the TURN requests either
     (none in libwebrtc's `Connection::BuildPingRequest`, `SendStunBindingResponse` or its TURN
     requests).
@@ -877,7 +883,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the actual codec" (`webrtc_voice_engine.cc`, `SetSendCodecs`). Chromium and WebKit
   list RED after Opus in their offers and in their answers to this engine, so neither side
   sends RED in a call between them by default.
-  - New `AudioRedundancy { WhenPreferred, Always, Never }` (`rtc-interceptor`, default
+  - New `AudioRedundancy { WhenPreferred, Always, Never }` (`rtci-interceptor`, default
     `WhenPreferred`), `RedAudioBuilder::with_audio_redundancy`,
     `SettingEngineBuilder::with_audio_redundancy` and
     `configure_audio_redundancy_with(registry, AudioRedundancy)` (new API).
@@ -895,7 +901,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
   continues the SCTP association updates `maxMessageSize` and what the association lets this
   side send from the remote `a=max-message-size` (it kept the first answer's).
-  `rtc_sctp::Association::set_max_message_size` is public (new API).
+  `rtci_sctp::Association::set_max_message_size` is public (new API).
 - **dtls** (audit-5, RFC 8835 section 3.5, RFC 7301): Application-Layer Protocol
   Negotiation in DTLS 1.2 (ServerHello) and DTLS 1.3 (EncryptedExtensions):
   `ConfigBuilder::with_alpn_protocols`, `State::application_protocol` (new API). A server
@@ -927,7 +933,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worse; `scripts/audit-count.py --check` requires the measurement test and its numbers.
   GCC-5.4-4 and RFC4585-3.5.2-5 are such rows, RFC7941-6-1 a `setting` for the recorded
   Firefox 152 offer; RFC9429-5.3.2-9, FLEXFEC03-5.1-5 and RFC7164-5-1 are `n/a`.
-  `rtc-interceptor` tests `congestion_feedback_rate.rs::rfc_4585_timing_of_congestion_feedback_measured_against_immediate`
+  `rtci-interceptor` tests `congestion_feedback_rate.rs::rfc_4585_timing_of_congestion_feedback_measured_against_immediate`
   and `gcc/overuse.rs::the_drafts_threshold_adapts_over_the_uncapped_arrival_gap` added.
 - **sctp** (sctp-14, RFC 9260 6.1 A, 6.2; travels with sec-12): a closed receive window always
   makes progress. With sec-12 every SACK that kept a_rwnd at 0 re-armed the one-RTO wait
@@ -1035,7 +1041,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **peer connection**: `RTCPeerConnection::unsent_media_packets()`: RTP and RTCP written but not
   sent (no ICE path, or an SRTP index already used), so media the engine cannot send is counted,
-  not lost unseen (`conf/rekey-2-no-loss`). `rtc-stream-driver`: `PeerDriver::unsent_datagrams()`
+  not lost unseen (`conf/rekey-2-no-loss`). `rtci-stream-driver`: `PeerDriver::unsent_datagrams()`
   for datagrams no socket sent.
 - **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
   (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
@@ -1051,7 +1057,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Gathering". Every route of `add_local_candidate` (the default transport, another one by
   `sdp_mid`) returns `ErrICECandidateAddressOfPreviousDtlsAssociation` unchanged for a refused
   address (tests below).
-- **rtc-stream-driver**: new `peer` module (feature `peer`, on by default; depends on `rtc`):
+- **rtci-stream-driver**: new `peer` module (feature `peer`, on by default; depends on `rtci`):
   `PeerDriver` drives a whole peer connection over sockets it owns, its UDP host sockets
   included (`PeerDriverConfig`: addresses, UDP port range, the TCP driver's settings). It
   gathers when a transport begins gathering, and on `OnLocalCandidatesNeeded` binds new UDP
@@ -1078,10 +1084,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
   both without parameters and with NULL parameters"); only the NULL form was before. The
   providers (ring, AWS-LC) verify the NULL form and give no raw RSA public operation, so when
-  one refuses such a signature, `rtc-crypto` checks the other form itself: `s^e mod n` with
+  one refuses such a signature, `rtci-crypto` checks the other form itself: `s^e mod n` with
   `num-bigint` (public values only; already in the graph through `der-parser`) and a whole
   comparison with the EMSA-PKCS1-v1_5 encoding, built, never parsed. New public functions
-  `rtc_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtc_crypto::rsa_pkcs1_hash`.
+  `rtci_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtci_crypto::rsa_pkcs1_hash`.
   Row RFC5246-4.7-1 `tested`
   (`crypto_test.rs::rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted`).
 
@@ -1089,7 +1095,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
   1.3 (it was `handshake_failure` / `certificate_required`). New
   `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
-  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
+  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtci-dtls`'s default) and
   `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
 - **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
   engine change; new tests, each checked by mutation in the container.
@@ -1150,7 +1156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `None` sends no SOFTWARE attribute at all, for an application that must not put an
   implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD make usage of
   the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
-  nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
+  nothing changes: `rtci-ice <version>` from ICE, `rtci-turn <version>` from TURN. A text of 128
   characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
   server-reflexive Binding requests of the engine's gatherer carry the ICE agent's SOFTWARE
   too (RFC 8489 sections 6.1 and 14.14: requests SHOULD; they carried none before), under the
@@ -1183,7 +1189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media pipeline, phase one: audio** (`conf/mp-1-audio-pipeline`). Two new crates beside the
   engine, sans-I/O, pure Rust by default; `docs/media-pipeline.md` describes them and the
   measured quality.
-  - `rtc-audio`: Opus encode / decode (opus-rs, pure Rust; the reference libopus with feature
+  - `rtci-audio`: Opus encode / decode (opus-rs, pure Rust; the reference libopus with feature
     `libopus`), the RFC 7587 parameters both ways (`OpusFmtp`, `OpusEncoderConfig::for_remote`),
     G.711 PCMU / PCMA and G.722, an Opus packet reader (TOC, frame offsets, the LBRR flag);
     the receive pipeline `JitterBuffer` (adaptive delay from the 95th percentile of relative
@@ -1197,18 +1203,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     loss, DTX, RFC 3389 SIDs, RFC 6464 levels); and `engine::{AudioSender, AudioReceiver}`,
     the glue to `RTCRtpSender` / `RTCRtpReceiver` (packetizing with the engine's payloaders,
     `write_rtp_with_audio_level`, RED, `target_bitrates`, RTCP loss, `getStats()` feeds).
-  - `rtc-devices`: capture and playout through real-time-safe rings, rate and channel
+  - `rtci-devices`: capture and playout through real-time-safe rings, rate and channel
     conversion to the pipeline's 48 kHz mono, device listing, selection, hot-swap and
     replacement of a failed device, a fake backend for tests, and cpal behind feature
     `devices`.
-  - `rtc-audio/examples/audio-loopback.rs`: WAV or synthetic speech through two peer
+  - `rtci-audio/examples/audio-loopback.rs`: WAV or synthetic speech through two peer
     connections over a lossy link and back to WAV and Ogg; run in the test environment's env
     stage, its Ogg decoded by GStreamer.
   - The interop peer's `{"media":"pipeline"}` scenario and the browser matrix cell "audio
     pipeline": the browser decodes the pipeline's Opus, the pipeline decodes the browser's.
-  - The root manifest optimises `rtc-audio` and `opus-rs` in the dev profile (their tests run
+  - The root manifest optimises `rtci-audio` and `opus-rs` in the dev profile (their tests run
     seconds of DSP); cargo.yml's MSRV job installs `libasound2-dev` for the `devices` feature.
-- **ffi**: `.github/workflows/release-binaries.yml` builds rtc-ffi's libraries and header for
+- **ffi**: `.github/workflows/release-binaries.yml` builds rtci-ffi's libraries and header for
   Linux x86_64 and aarch64 (glibc 2.17 with cargo-zigbuild, checked), macOS aarch64 (11.0) and
   x86_64 (10.13) and Windows x86_64 (MSVC), with `SHA256SUMS` and `manifest.json`; on a `v*`
   tag or by hand only, artifacts on a dispatch and attached to the tag's release on a tag, no
@@ -1221,30 +1227,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RTCRtpTransceiver` / `Sender` / `Receiver`, `RTCSessionDescription`, `RTCIceCandidate`, their
   events and `getStats` over `Deno.dlopen`, the server options as the second constructor
   argument, `RTCSharedPort`, and encoded media (`writeFrame`, `writeRtp`, the receiver's `rtp`
-  event). The library comes from `RTC_FFI_LIB` or beside the module; nothing is downloaded.
-- **ffi**: the driven layer of `rtc-ffi` (feature `driver`, on by default): `rtc_driven_*`, a
+  event). The library comes from `RTCI_FFI_LIB` or beside the module; nothing is downloaded.
+- **ffi**: the driven layer of `rtci-ffi` (feature `driver`, on by default): `rtci_driven_*`, a
   peer connection that owns its sockets and a thread running the reference tokio driver
-  (`examples/stream-driver`), driven by method name and JSON (`rtc_driven_call`, the
+  (`examples/stream-driver`), driven by method name and JSON (`rtci_driven_call`, the
   sans-I/O layer's own entry points on that thread), delivering events, data channel messages
-  and RTP / RTCP to a callback or a queue (`rtc_driven_wait`, `rtc_driven_next`); the server
+  and RTP / RTCP to a callback or a queue (`rtci_driven_wait`, `rtci_driven_next`); the server
   options of the driver (bind addresses, loopback and link-local opt-in, a port range for UDP
-  sockets and ICE-TCP listeners, the engine's TCP, 1:1 NAT, ICE-lite); and `rtc_mux_*`, one
+  sockets and ICE-TCP listeners, the engine's TCP, 1:1 NAT, ICE-lite); and `rtci_mux_*`, one
   UDP port and one passive ICE-TCP port shared by many driven connections, routed by ICE
   ufrag. Tested in Rust through the C declarations over loopback (`tests/driven.rs`) and by a C
   program compiled against the static library (`tests/c/loopback.c`, `tests/c_loopback.rs`).
-- **ffi**: `rtc-ffi`, a C ABI over the engine (`cdylib`, `staticlib` and `rlib`; header
-  `rtc-ffi/include/rtc.h`, generated by cbindgen and checked by the `C header up to date` job).
-  The sans-I/O layer (`rtc_pc_*`) is the Rust API one to one: configuration (W3C
+- **ffi**: `rtci-ffi`, a C ABI over the engine (`cdylib`, `staticlib` and `rlib`; header
+  `rtci-ffi/include/rtci.h`, generated by cbindgen and checked by the `C header up to date` job).
+  The sans-I/O layer (`rtci_pc_*`) is the Rust API one to one: configuration (W3C
   `RTCConfiguration`) and engine settings as JSON, descriptions and candidates as their W3C
   JSON, data channels, transceivers, senders and receivers by id, RTP written as packets or as
   encoded frames the library packetizes, `handle_read` / `poll_write` / `poll_read` /
   `poll_event` (JSON) / `poll_timeout` / `handle_timeout` with buffers the caller owns, the
   stream interface (ICE-TCP, TURN over TCP / TLS) with commands and events as JSON, and
   statistics as JSON. Time is the caller's monotonic nanoseconds. No panic crosses the
-  boundary (`RTC_ERR_PANIC`, the handle is poisoned), errors are status codes with a
-  per-thread message (`rtc_last_error`), every allocation has its free function, and
-  `rtc_debug_live_objects` counts what is not freed. `rtc_abi_version` is 1. Tested by two peer
-  connections that see each other only through the C declarations (`rtc-ffi/tests/`). The
+  boundary (`RTCI_ERR_PANIC`, the handle is poisoned), errors are status codes with a
+  per-thread message (`rtci_last_error`), every allocation has its free function, and
+  `rtci_debug_live_objects` counts what is not freed. `rtci_abi_version` is 1. Tested by two peer
+  connections that see each other only through the C declarations (`rtci-ffi/tests/`). The
   sans-I/O time boundary allows the one anchor read the nanoseconds need.
 
 ### Bug Fixes
@@ -1290,7 +1296,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three cargo-deny checks, the library advisory check included: they read every member's
   graph, not the root package's alone.
 - **peer connection**: one RTP packet lost per SRTP re-keying when the call ran over ICE-TCP
-  (`conf/rekey-2-no-loss`; the intermittent `rtc-stream-driver` re-keying loss, 1 to 17% of
+  (`conf/rekey-2-no-loss`; the intermittent `rtci-stream-driver` re-keying loss, 1 to 17% of
   runs). The re-keying's ICE restart moves the call to a new pair; the controlled side selects
   it first (on the nomination) and closed the TCP connection of the replaced pair at once (RFC
   6544 section 8), while the controlling side, until its own selection one round trip later,
@@ -1330,7 +1336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaces before replacing them (a discarded packet is still reported), and drops a lifetime
   warning of a key that is now retired, which would have asked for a renewal the handshake had
   just given.
-- **rtc-stream-driver**: `PeerDriver` handles a rolled-back local offer. The offer's
+- **rtci-stream-driver**: `PeerDriver` handles a rolled-back local offer. The offer's
   `OnLocalCandidatesNeeded` had retired the previous sockets and bound new ones; the rollback
   takes the restart back, but the driver kept the previous sockets marked retired (to be
   closed after the next selection, although they carry the media again) and the new ones open
@@ -1408,7 +1414,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new pair first dropped the packets the peer still sent on the previous pair before its
   own selection switched (the controlled side selects at the nomination request, the
   controlling one at its response): one packet lost at each renewal, seen through
-  `rtc-stream-driver` on macOS and Windows. The previous path's data is now taken for 5 s
+  `rtci-stream-driver` on macOS and Windows. The previous path's data is now taken for 5 s
   after the new pair is selected (`Agent::retired_media_path`, `RETIRED_MEDIA_PATH_GRACE`),
   and routed to its transport (`on_address`)
   (`data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received`).
@@ -1535,7 +1541,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a probe cluster's padding), the RTCP session (the Early SR answering an RTCP-SR-REQ, RFC 6051
   section 3.2) and the pause/resume interceptor (PAUSED or REFUSED answering a PAUSE, RFC 7728).
   The chain now takes what its read leg made down the write leg after each read and reports it
-  from `poll_timeout` until `poll_write` takes it (`rtc-interceptor/tests/read_work_is_due.rs`,
+  from `poll_timeout` until `poll_write` takes it (`rtci-interceptor/tests/read_work_is_due.rs`,
   over the reusable `tests/wakeup_common` helper). At the peer connection,
   `tests/driver_wakeup_rtc2rtc.rs` runs a call (ICE, DTLS, SCTP, a data channel, video with
   RTX, RTCP, probes) under a driver that checks at every sleep that nothing waits in
@@ -1585,7 +1591,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay files and `LICENSE.aiortc` are removed.
 - **docs**: the trailing space webrtc-rs 0.17.x writes in `a=rtcp-fb` without parameters breaks
   RFC 4585 section 4.2's `rtcp-fb-param` (cited now); Pion fixed it in v4.1.5 (pion/webrtc#3207,
-  PR #3218) and webrtc-rs on its default branch (`rtc` 718d405), so the notes name 0.17.x
+  PR #3218) and webrtc-rs on its default branch (`rtci` 718d405), so the notes name 0.17.x
   alone. RFC9429-5.8-1 keeps its verdict (`setting`); its note cites the grammar. The mDNS
   one-name-per-address rule is cited as draft-ietf-mmusic-mdns-ice-candidates-03 section 3.1.1
   (expired). `docs/conformance/w6.md` and `docs/interop.md` link the upstream reports:
@@ -1602,19 +1608,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default) are removed. Each crate directory has the licence texts (`LICENSE-MIT`,
   `LICENSE-APACHE`, copies of the root files with upstream's copyright line), which cargo did
   not package before.
-- **What is published**: `rtc-stream-driver`, the reference tokio driver for the engine's
+- **What is published**: `rtci-stream-driver`, the reference tokio driver for the engine's
   stream transports, is now a publishable crate with a README (it was `publish = false`, which
-  blocked publishing `rtc`: its versioned dev-dependency on the driver stays in the published
-  manifest). `rtc-signal`, the examples' signalling helper, is `publish = false` and the root
+  blocked publishing `rtci`: its versioned dev-dependency on the driver stays in the published
+  manifest). `rtci-signal`, the examples' signalling helper, is `publish = false` and the root
   crate's dev-dependency on it is path-only, so `cargo publish` drops it. The root crate's
   package holds `src/`, the two test files its unit tests include, the README and the licence
   texts (`include`): 222 files and 4.9 MB uncompressed, from 848 files and 21.7 MB (the
   examples' media fixtures, the test environment, documentation and CI files).
-- **READMEs**: `rtc-interceptor`, `rtc-interceptor-derive`, `rtc-mdns`, `rtc-media` and
-  `rtc-stream-driver` have one; the other crates' READMEs, which were upstream's logo and
+- **READMEs**: `rtci-interceptor`, `rtci-interceptor-derive`, `rtci-mdns`, `rtci-media` and
+  `rtci-stream-driver` have one; the other crates' READMEs, which were upstream's logo and
   upstream's CI / crates.io / docs.rs / Discord badges, are rewritten: what the crate is, the
   specifications it implements (with links to their clause audits), how it is used, the sans-I/O
-  note, the licence and the lineage. `rtc-sframe`'s README no longer says the engine has no SFrame
+  note, the licence and the lineage. `rtci-sframe`'s README no longer says the engine has no SFrame
   RTP payload format. The root README drops upstream's logo, badges and sponsors, the "What's New
   in 0.21" section and the links into upstream's tree; it gains a status section (the audit
   counts as of 2026-11-23, where the open rows and known issues are), the MSRV, the crypto and
@@ -1634,13 +1640,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (breaking changes at most 30, the other sections at most 15) with a link to `CHANGELOG.md`,
   commit links into this repository; the 0.22.0+brainwires.6 body renders at 24 KB instead of
   90 KB.
-- **Housekeeping**: `rtc-rtp`'s `header_extensions` fuzz target compiles again (it called
+- **Housekeeping**: `rtci-rtp`'s `header_extensions` fuzz target compiles again (it called
   `marshal_size` without the `MarshalSize` trait in scope); every fuzz workspace checks with
   `--cfg fuzzing`. `SECURITY.md`'s supported-versions table describes the current line.
   `oss-fuzz/project.yaml` (upstream's homepage and security address) is removed: the project is
   not enrolled in OSS-Fuzz; `oss-fuzz/README.md` says what the remaining files are for. FORK.md
   loses 25 table rows that merges had duplicated and a blank line that split its feature table.
-  cargo.yml's packaging comment no longer names rtc-crypto 0.21.0.
+  cargo.yml's packaging comment no longer names rtci-crypto 0.21.0.
 - **CI**: `scripts/check-changelog-released.py` (cargo.yml, test inventory job) fails when a
   released section of `CHANGELOG.md` differs from that section at the latest `v*` tag: merges
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
@@ -1655,19 +1661,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   99.7 % RFC behaviour tested, 16 MUST rows open) and its crate table says what is not
   published.
 
-- **New crates' packaging** (`conf/publish-2-ffi-mp-parts`, for the owner of `rtc-audio`,
-  `rtc-devices`, `rtc-ffi` and `release-binaries.yml`): `rtc-audio` and `rtc-devices` gain the
+- **New crates' packaging** (`conf/publish-2-ffi-mp-parts`, for the owner of `rtci-audio`,
+  `rtci-devices`, `rtci-ffi` and `release-binaries.yml`): `rtci-audio` and `rtci-devices` gain the
   README their manifests named, `LICENSE-MIT` / `LICENSE-APACHE` (without them `cargo package`
   failed) and `[package.metadata.docs.rs]` without the features that build or link C
   (`libopus`, `devices`); their explicit `documentation` URLs are removed. Both are publishable
-  after `rtc` (`cargo publish --workspace --dry-run` passed with them under the `rtci` names).
-  `rtc-ffi` stays `publish = false`: a C library delivered as built libraries and a header.
-  The root crate's dev-dependency on `rtc-audio` is path-only, so `cargo publish` drops it
-  (`rtc-audio` depends on `rtc`; with a version the two could not be published).
+  after `rtci` (`cargo publish --workspace --dry-run` passed with them under the `rtci` names).
+  `rtci-ffi` stays `publish = false`: a C library delivered as built libraries and a header.
+  The root crate's dev-dependency on `rtci-audio` is path-only, so `cargo publish` drops it
+  (`rtci-audio` depends on `rtci`; with a version the two could not be published).
   `release-binaries.yml` runs by `workflow_dispatch` only, until the owner decides how release
-  binaries are built; `docs/packaging.md` and `FORK.md` say so. Rename script: the root
-  `[profile.dev.package.rtc-audio]` table is not renamed (`--check` exits 1); the patch is in
-  the publish-2 report.
+  binaries are built; `docs/packaging.md` and `FORK.md` say so.
 
 ### Notes for integrators
 
@@ -1676,7 +1680,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 5.7). Keep the previous sockets (no longer retired), close or keep aside the ones
   bound for the event, and gather on the next event (the answer to the peer's colliding offer
   fires one when it sets up a new association). The crate's "Gathering" section says how;
-  `rtc-stream-driver`'s `PeerDriver` does it.
+  `rtci-stream-driver`'s `PeerDriver` does it.
 - **A transport that needs new candidates** (`conf/mt-10-gather-anew`): since the RFC 8842
   section 5.1 default, a new DTLS association (an ICE restart for one: `renew_dtls_association`,
   automatic SRTP re-keying, a peer's new `a=tls-id`; or the transport set up after an answer
@@ -1688,7 +1692,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the generation with an empty candidate for that mid, and keep the previous sockets open
   until a pair on a new one is selected (`SelectedCandidatePairChange` on that transport) or
   the transport closes. Engine-run STUN and TURN gathering follow the new host candidates by
-  themselves; the ICE-TCP listener is kept. `rtc_stream_driver::peer::PeerDriver` does all of
+  themselves; the ICE-TCP listener is kept. `rtci_stream_driver::peer::PeerDriver` does all of
   it. An application with one fixed socket sets
   `with_dtls_new_association_on_previous_addresses(true)` instead (no event; the candidates
   and addresses are kept). W3C gathering states: a restarting transport goes to "gathering"
@@ -1696,9 +1700,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport that replaced a closed one starts "new" (a new `RTCIceTransport`) and does the
   same. A rolled-back local offer takes its restart back (the previous candidates and
   addresses are in use again): sockets bound for it may be closed.
-- **Publishing order**: `rtc-stream-driver` now depends on `rtc` (feature `peer`), and the root
-  crate's dev-dependency on it has no version, so `rtc` is published before
-  `rtc-stream-driver` (docs/releasing.md).
+- **Publishing order**: `rtci-stream-driver` now depends on `rtci` (feature `peer`), and the root
+  crate's dev-dependency on it has no version, so `rtci` is published before
+  `rtci-stream-driver` (docs/releasing.md).
 
 - **ICE restart, answerer**: candidates gathered for the restart may be added as soon as the
   restart offer is applied (`set_remote_description`); they need not be added again after
@@ -1710,26 +1714,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
-- **ffi** (`conf/ffi-mp-5`): `rtc-ffi`'s `driven` and `c_loopback` tests declare
+- **ffi** (`conf/ffi-mp-5`): `rtci-ffi`'s `driven` and `c_loopback` tests declare
   `required-features = ["driver"]`. The workspace's crypto-baseline, provider-matrix and
-  coverage jobs build with `--no-default-features`, where the library has no `rtc_driven_*` /
-  `rtc_mux_*` symbols, and `tests/driven.rs` did not link (`rust-lld: undefined symbol:
-  rtc_driven_call`); cargo now skips both tests there.
+  coverage jobs build with `--no-default-features`, where the library has no `rtci_driven_*` /
+  `rtci_mux_*` symbols, and `tests/driven.rs` did not link (`rust-lld: undefined symbol:
+  rtci_driven_call`); cargo now skips both tests there.
 - **ffi** (`conf/ffi-mp-5`): `c_loopback` compares the C program's output line by line. On
   windows-latest the program exited 0 after printing its whole transcript, and the test failed
   at `stdout.ends_with("ok\n")`: the MSVC C runtime writes `"\n"` as `"\r\n"` to a text-mode
   stdout. The library was not at fault.
 - **audio** (`conf/ffi-mp-5`): opus-rs against the reference libopus, both ways
-  (`rtc-audio/src/codec/libopus.rs`, `opus_interop`): every packet one encodes decodes in the
+  (`rtci-audio/src/codec/libopus.rs`, `opus_interop`): every packet one encodes decodes in the
   other with the same final range-coder state (RFC 6716's conformance criterion), for opus-rs
   from 16 to 510 kbit/s and libopus in its VoIP and audio modes with and without FEC. The send
   pipeline at the congestion controller's share the interop peer reached (343.2 kbit/s, CELT,
   ~860-byte packets) decodes in libopus with the tone's level, and libopus's digital silence
-  decodes in opus-rs to an RMS of 2.7e-6. A new `cargo.yml` job, `rtc-audio against libopus`,
+  decodes in opus-rs to an RMS of 2.7e-6. A new `cargo.yml` job, `rtci-audio against libopus`,
   runs these with the `libopus` feature (CMake; installed from PyPI where the runner has none).
 - **ci** (`conf/ffi-mp-5`): `audit.yml`'s whole-workspace advisory check and its licences /
   bans / sources check pass `--workspace`, so they read every member's dependency graph (they
-  read the root package's alone, without `rtc-audio`, `rtc-devices` or `rtc-ffi`).
+  read the root package's alone, without `rtci-audio`, `rtci-devices` or `rtci-ffi`).
 - **rtc**: the paced chain's oldest-picture bound in the capacity-cap port is 11.75 s
   (`conf/gcc-8-paced-picture-guard`). It was 10 s, 1.6 % above the most one tree measured: with
   the ICE agent's SOFTWARE text 14 bytes long instead of 27 (the crate rename), seed 3 of the

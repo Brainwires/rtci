@@ -1,0 +1,46 @@
+[package]
+name = "rtci-mdns"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Sans-I/O mDNS (RFC 6762) querier and responder, as used for WebRTC mDNS ICE candidates"
+license.workspace = true
+repository.workspace = true
+keywords = ["mdns", "multicast-dns", "webrtc", "ice", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = ["ifaces"] }
+sansio.workspace = true
+
+bytes.workspace = true
+log.workspace = true
+socket2.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }
+
+[dev-dependencies]
+env_logger.workspace = true
+tokio.workspace = true
+clap.workspace = true
+chrono.workspace = true
+
+[[example]]
+name = "mdns_query"
+path = "examples/mdns_query.rs"
+
+[[example]]
+name = "mdns_server"
+path = "examples/mdns_server.rs"
+
+[[example]]
+name = "mdns_server_query"
+path = "examples/mdns_server_query.rs"

@@ -12,7 +12,7 @@
 //! agent's datagrams both ways. The relayed transport itself is UDP (RFC 8656).
 //!
 //! A `turns:...?transport=udp` server is reached over DTLS (RFC 7350): a client-role
-//! `rtc-dtls` association from a UDP host candidate's base, on the application's socket. Its
+//! `rtci-dtls` association from a UDP host candidate's base, on the application's socket. Its
 //! records leave through `poll_write` and are taken out of `handle_read` before ICE sees them
 //! (by the server's address on that base); the server's certificate is checked against the
 //! URI's host with the same roots or verifier as TLS. The TURN client runs over it with UDP's
@@ -29,7 +29,7 @@
 //! to each, staggered by the Connection Attempt Delay; the first answered keeps going, a later
 //! 401 is dropped, and an allocation a later answer made is deleted with a Refresh of LIFETIME
 //! 0. Permissions, channel bindings, refreshes and the 401 / 438 paths are the TURN client's
-//! (`rtc_turn::client`); the relayed candidate's `relayProtocol` is `udp`.
+//! (`rtci_turn::client`); the relayed candidate's `relayProtocol` is `udp`.
 
 use super::RTCPeerConnection;
 use super::streams::{TURN, tcp_context};

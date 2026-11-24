@@ -45,7 +45,7 @@ ALLOWLIST = Path("docs/sans-io-deterministic-time-allowlist.txt")
 
 # Roots holding sans-I/O protocol code. Integration tests under `tests/` are not scanned.
 SOURCE_ROOTS = ["src"]
-SOURCE_GLOB = "rtc-*/src"
+SOURCE_GLOB = "rtci-*/src"
 
 # Matched *without* requiring the call parentheses, because a clock read does not need them:
 # `unwrap_or_else(Instant::now)` passes the constructor as a function value and reads the ambient
@@ -54,7 +54,7 @@ SOURCE_GLOB = "rtc-*/src"
 #
 # `\b` before `Instant` is load-bearing: it stops `Instant::now` matching inside
 # `SystemInstant::now`, which is the *injected* form — it takes the caller's monotonic instant
-# and only reads the system clock, and is allow-listed once, in `rtc-shared/src/time.rs`.
+# and only reads the system clock, and is allow-listed once, in `rtci-shared/src/time.rs`.
 CLOCK_READS = re.compile(
     r"\bInstant::now\b"
     r"|\bSystemTime::now\b"
@@ -171,20 +171,20 @@ PERMANENT: dict[str, tuple[int, str]] = {
     #   * `now(now)` — an RTCP sender report carries real wall-clock time in NTP format, and a
     #     virtual instant would put a fictional timestamp on the wire, so this reads the system
     #     clock. The monotonic half is the caller's `now`, which is why the four sites that used
-    #     to hold an NTP baseline of their own (rtc-media ×2, rtc-rtp/packetizer,
-    #     rtc-interceptor/report/sender_stream) no longer read a clock at all.
+    #     to hold an NTP baseline of their own (rtci-media ×2, rtci-rtp/packetizer,
+    #     rtci-interceptor/report/sender_stream) no longer read a clock at all.
     #
     #   * `from_epoch(..)` — the inverse, for deserialization. `Instant` is opaque, so recovering
     #     one from a portable absolute timestamp needs both clocks read together. This is the
-    #     anchor that used to live in `rtc-shared/src/serde.rs` as 4 reads; serialization no
+    #     anchor that used to live in `rtci-shared/src/serde.rs` as 4 reads; serialization no
     #     longer needs any, so only the 2 on the deserialize side remain.
     #
     # Net across the workspace this is a reduction: serde.rs 4 -> 0, time.rs 1 -> 3.
-    "rtc-shared/src/time.rs": (3, "SystemInstant's construction and its epoch anchor"),
+    "rtci-shared/src/time.rs": (3, "SystemInstant's construction and its epoch anchor"),
 
     # Protocol fields specified as wall-clock time.
-    "rtc-dtls/src/handshake/handshake_random.rs": (1, "gmt_unix_time, RFC 5246 s7.4.1.2"),
-    "rtc-sdp/src/description/session.rs": (1, "SDP session version, RFC 4566 s5.2"),
+    "rtci-dtls/src/handshake/handshake_random.rs": (1, "gmt_unix_time, RFC 5246 s7.4.1.2"),
+    "rtci-sdp/src/description/session.rs": (1, "SDP session version, RFC 4566 s5.2"),
 
     # X.509 validity windows are wall-clock by definition; a virtual instant would accept an
     # expired certificate.
@@ -192,11 +192,11 @@ PERMANENT: dict[str, tuple[int, str]] = {
     "src/peer_connection/configuration/mod.rs": (1, "X.509 expiry check, W3C constructor step 3"),
     "src/peer_connection/transport/dtls/mod.rs": (1, "X.509 validity window"),
 
-    # The C ABI (rtc-ffi) takes the caller's time as nanoseconds; `Instant` is opaque, so they
+    # The C ABI (rtci-ffi) takes the caller's time as nanoseconds; `Instant` is opaque, so they
     # are mapped onto one anchor instant read once per process (`Instant` <-> epoch category).
     # Its driven layer owns sockets and a thread, so it is a driver and reads the clock (once,
     # in the same file).
-    "rtc-ffi/src/clock.rs": (2, "the C ABI's anchor for the caller's nanoseconds; the driven layer's clock"),
+    "rtci-ffi/src/clock.rs": (2, "the C ABI's anchor for the caller's nanoseconds; the driven layer's clock"),
 }
 
 HEADER = """\
@@ -271,7 +271,7 @@ def main() -> int:
     # are not at the workspace root, so report a configuration error rather than success — and in
     # particular never let `--snapshot` overwrite the allow-list with nothing.
     if not source_files():
-        print("No sans-I/O source found. Run from the workspace root, where src/ and rtc-*/ live.")
+        print("No sans-I/O source found. Run from the workspace root, where src/ and rtci-*/ live.")
         return 2
 
     found = scan()

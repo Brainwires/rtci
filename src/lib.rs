@@ -19,11 +19,11 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::transport::RTCIceServer;
-//! use rtc::peer_connection::sdp::RTCSessionDescription;
-//! use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::transport::RTCIceServer;
+//! use rtci::peer_connection::sdp::RTCSessionDescription;
+//! use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Create a peer connection with ICE servers
@@ -77,14 +77,14 @@
 //! This example demonstrates the full sans-I/O event loop pattern with all key API methods:
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, media_engine::MediaEngine};
-//! use rtc::peer_connection::transport::RTCIceServer;
-//! use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-//! use rtc::peer_connection::state::{RTCPeerConnectionState, RTCIceConnectionState};
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-//! use rtc::sansio::Protocol;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::{RTCConfigurationBuilder, media_engine::MediaEngine};
+//! use rtci::peer_connection::transport::RTCIceServer;
+//! use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+//! use rtci::peer_connection::state::{RTCPeerConnectionState, RTCIceConnectionState};
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+//! use rtci::sansio::Protocol;
 //! use std::time::{Duration, Instant};
 //! use tokio::net::UdpSocket;
 //! use bytes::BytesMut;
@@ -249,11 +249,11 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::transport::RTCIceServer;
-//! use rtc::peer_connection::sdp::RTCSessionDescription;
-//! use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::transport::RTCIceServer;
+//! use rtci::peer_connection::sdp::RTCSessionDescription;
+//! use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 //!
 //! # fn send_to_remote_peer(_: &str) {}
 //! # fn receive_from_remote_peer() -> String { String::new() }
@@ -462,13 +462,13 @@
 //! The transport's candidates are what
 //! [`RTCIceTransport::get_local_candidates`](peer_connection::transport::RTCIceTransport::get_local_candidates)
 //! returns, so the application can match its sockets against them once the connection is
-//! back in the stable state (`OnSignalingStateChangeEvent(Stable)`). `rtc-stream-driver`'s
+//! back in the stable state (`OnSignalingStateChangeEvent(Stable)`). `rtci-stream-driver`'s
 //! `PeerDriver` does that.
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::peer_connection::event::{RTCLocalCandidatesNeededEvent, RTCPeerConnectionEvent};
-//! use rtc::peer_connection::transport::RTCIceCandidateInit;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::peer_connection::event::{RTCLocalCandidatesNeededEvent, RTCPeerConnectionEvent};
+//! use rtci::peer_connection::transport::RTCIceCandidateInit;
 //! use std::net::UdpSocket;
 //!
 //! fn on_event(
@@ -503,7 +503,7 @@
 //! }
 //! ```
 //!
-//! The reference driver, `rtc-stream-driver`, does all of this by itself (its `peer`
+//! The reference driver, `rtci-stream-driver`, does all of this by itself (its `peer`
 //! module).
 //!
 //! An application with one fixed socket, which cannot move to a new port, turns it off with
@@ -525,10 +525,10 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
-//! use rtc::peer_connection::configuration::interceptor_registry::{
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::peer_connection::configuration::interceptor_registry::{
 //!     Registry, register_default_interceptors,
 //! };
 //!
@@ -558,10 +558,10 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
-//! use rtc::peer_connection::configuration::interceptor_registry::{
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::peer_connection::configuration::interceptor_registry::{
 //!     Registry,
 //!     configure_nack,
 //!     configure_rtcp_reports,
@@ -597,11 +597,11 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::configuration::interceptor_registry::{
+//! use rtci::peer_connection::configuration::interceptor_registry::{
 //!     Registry, register_default_interceptors,
 //! };
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
-//! use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 //!
 //! // No type parameter: this struct does not have to know the chain.
 //! struct Session {
@@ -631,13 +631,13 @@
 //! ### Creating and Using Data Channels
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::peer_connection::configuration::RTCConfiguration;
-//! use rtc::data_channel::RTCDataChannelInit;
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::peer_connection::configuration::RTCConfiguration;
+//! use rtci::data_channel::RTCDataChannelInit;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
 //! use std::time::Instant;
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::sansio::Protocol;
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::sansio::Protocol;
 //! use bytes::BytesMut;
 //!
 //! # fn example(mut pc: RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
@@ -680,11 +680,11 @@
 //! ### Adding Media Tracks with Codecs
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::media_stream::MediaStreamTrack;
-//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
-//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
-//! use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MIME_TYPE_OPUS};
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::media_stream::MediaStreamTrack;
+//! use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+//! use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+//! use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MIME_TYPE_OPUS};
 //!
 //! # fn example(mut pc: RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
 //! // Configure VP8 video codec
@@ -726,10 +726,10 @@
 //! ### Receiving Media Tracks
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::sansio::Protocol;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::sansio::Protocol;
 //! use std::collections::HashMap;
 //!
 //! # fn example(mut pc: RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
@@ -777,9 +777,9 @@
 //! ### Sending RTCP Packets (e.g., PLI for keyframes)
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::rtp_transceiver::RTCRtpReceiverId;
-//! use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::rtp_transceiver::RTCRtpReceiverId;
+//! use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 //! use std::time::Instant;
 //!
 //! # fn example(mut pc: RTCPeerConnection, receiver_id: RTCRtpReceiverId, media_ssrc: u32)

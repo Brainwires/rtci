@@ -1,6 +1,6 @@
 # Deno binding (reference example)
 
-`mod.ts` maps rtc-ffi's driven layer (`rtc_driven_*`, `rtc_mux_*`; see
+`mod.ts` maps rtci-ffi's driven layer (`rtci_driven_*`, `rtci_mux_*`; see
 [docs/packaging.md](../../docs/packaging.md)) onto the browser's WebRTC classes with
 `Deno.dlopen`: `RTCPeerConnection`, `RTCDataChannel`, `RTCRtpTransceiver`, `RTCRtpSender`,
 `RTCRtpReceiver`, `RTCSessionDescription`, `RTCIceCandidate`, their events and `getStats`.
@@ -16,7 +16,7 @@ anywhere (no JSR, no npm, no deno.land/x).
   (the engine's ICE-TCP and TURN over TCP / TLS, on by default), `natIps` and
   `natCandidateType` (1:1 NAT), `iceLite`, `sharedPort` (an `RTCSharedPort`: one UDP port, and
   optionally one ICE-TCP port, shared by many peer connections, routed by ICE ufrag), and
-  `settings` (rtc-ffi's engine settings JSON).
+  `settings` (rtci-ffi's engine settings JSON).
 - **No capture, no codecs run here.** A local track is `{kind, id, label, ssrc, codec}`; the
   application sends encoded media with `RTCRtpSender.writeFrame(frame, samples)` (the engine
   packetizes with the negotiated codec) or `writeRtp(packet)`, and receives RTP packets with
@@ -25,15 +25,15 @@ anywhere (no JSR, no npm, no deno.land/x).
 
 ## Loading the library
 
-`RTC_FFI_LIB` names the library file when set; otherwise `librtc_ffi.so` (Linux),
-`librtc_ffi.dylib` (macOS) or `rtc_ffi.dll` (Windows) beside `mod.ts`. There is no download
-logic: build the library (`cargo build -p rtc-ffi --release`, it lands in `target/release/`)
+`RTCI_FFI_LIB` names the library file when set; otherwise `librtci_ffi.so` (Linux),
+`librtci_ffi.dylib` (macOS) or `rtci_ffi.dll` (Windows) beside `mod.ts`. There is no download
+logic: build the library (`cargo build -p rtci-ffi --release`, it lands in `target/release/`)
 or take it from a release's artefacts (`docs/packaging.md`). The binding checks
-`rtc_abi_version()` at load.
+`rtci_abi_version()` at load.
 
 ```sh
-cargo build -p rtc-ffi --release
-RTC_FFI_LIB=target/release/librtc_ffi.so deno run --allow-ffi --allow-env bindings/deno/example.ts
+cargo build -p rtci-ffi --release
+RTCI_FFI_LIB=target/release/librtci_ffi.so deno run --allow-ffi --allow-env bindings/deno/example.ts
 ```
 
 ## Status

@@ -1,8 +1,12 @@
-# `rtc`
+# `rtci`
 
 <p align="center">
  <strong>Sans-I/O WebRTC implementation in Rust</strong>
 </p>
+
+<!-- rtci-lineage:start -->
+**rtci** (an RTC implementation) descends from webrtc-rs [`rtc`](https://github.com/webrtc-rs/rtc) as of upstream commit `0fbcaa74` and is developed independently; [FORK.md](FORK.md) lists what it carries over upstream. Its crates were renamed from `rtc` / `rtc-*` to `rtci` / `rtci-*` at 0.1.0. Upstream's licence and copyright notices are retained.
+<!-- rtci-lineage:end -->
 
 - [Overview](#overview)
 - [Status](#status)
@@ -24,7 +28,7 @@
 
 ## Overview
 
-`rtc` is a Rust implementation of [WebRTC](https://www.w3.org/TR/webrtc/) with a **sans-I/O architecture**: the
+`rtci` is a Rust implementation of [WebRTC](https://www.w3.org/TR/webrtc/) with a **sans-I/O architecture**: the
 protocol logic is separate from all I/O, so the application controls networking, threading and the async runtime.
 
 ### What is Sans-I/O?
@@ -60,14 +64,14 @@ WebRTC uses); every row names the code and the test that proves it. From
 browser or a deployed peer cannot interoperate with it by default. 16 MUST rows are open (1 untested,
 10 partial, 5 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
-in the repository's [issues](https://github.com/Brainwires/webrtc-rs-rtc/issues), security problems as
+in the repository's [issues](https://github.com/Brainwires/rtci/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
 
 ## Installation
 
 ```toml
 [dependencies]
-rtc = "0.22"
+rtci = "0.1"
 ```
 
 The crates use Rust edition 2024; the minimum supported Rust version is 1.89 (`rust-version` in the manifests,
@@ -80,25 +84,25 @@ Cargo features are **additive**: enabling both builds, and `ring` is preferred w
 
 ```toml
 # Default: the ring provider, no C toolchain required.
-rtc = "0.22"
+rtci = "0.1"
 
 # aws-lc-rs instead (pulls in the aws-lc-sys C toolchain).
-rtc = { version = "0.22", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtci = { version = "0.1", default-features = false, features = ["crypto-aws-lc-rs"] }
 ```
 
 There is **no process-global provider to install**. The provider is selected per peer connection through
 `SettingEngine::set_crypto_provider`, so two peer connections in one process may use different ones. Applications
 needing OpenSSL, a FIPS-validated module, an HSM, or a platform backend can implement the public traits themselves and
-validate the result against the bundled conformance suite (`rtc_crypto::conformance::assert_provider`, behind the
+validate the result against the bundled conformance suite (`rtci_crypto::conformance::assert_provider`, behind the
 `test-support` feature). The other features: `pem` (PEM certificate import in DTLS), `turn-tls-webpki-roots` (the Mozilla
 roots for TURN over TLS) and `openssl` / `vendored-openssl` (an OpenSSL AES-CTR cipher for SRTP).
 
-[`RTCCryptoProvider`]: rtc-crypto/README.md
+[`RTCCryptoProvider`]: rtci-crypto/README.md
 
 ## Sans-I/O Event Loop Pattern
 
 The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnection`: **bring the trait into scope with
-`use rtc::sansio::Protocol;` or none of these methods will resolve.**
+`use rtci::sansio::Protocol;` or none of these methods will resolve.**
 
 | Method | Direction | What it does |
 | --- | --- | --- |
@@ -123,15 +127,15 @@ Order matters only in that `poll_write` should be drained after anything that co
 ### Event Loop Example
 
 ```rust,no_run
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::sansio::Protocol;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use bytes::BytesMut;
@@ -245,7 +249,7 @@ needed only when the engine is to run TCP (ICE-TCP candidates, TURN over TCP or 
 tagged `TransportProtocol::TCP` there is one the application framed itself, for a TCP candidate
 it added on its own.
 
-**Streams** (`rtc::shared::stream`): the engine names its TCP connections and listeners by id
+**Streams** (`rtci::shared::stream`): the engine names its TCP connections and listeners by id
 and the application only owns the sockets. After each input:
 
 ```text
@@ -288,7 +292,7 @@ back-pressure signal: the engine holds a window of unacknowledged bytes per conn
 `SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
 application that never polls the stream interface gets no TCP candidate and nothing changes.
 
-**What is engine and what is driver.** The engine (`rtc`) decides and runs every protocol:
+**What is engine and what is driver.** The engine (`rtci`) decides and runs every protocol:
 which TCP candidates exist, which connections to open and when to close them, RFC 4571 and
 TURN framing, TLS and DTLS to TURN servers, the TURN client (UDP and TCP allocations), STUN
 Binding requests, the Happy Eyeballs race, NAPTR / SRV resolution order, ICE, DTLS, SCTP and
@@ -297,7 +301,7 @@ driver owns the sockets and nothing else: it binds, connects, accepts, reads, wr
 and resolves names when the engine says so, and reports what happened. The application owns
 its UDP sockets, signalling and the loop.
 
-**The reference driver** (crate `rtc-stream-driver`, in `examples/stream-driver`, published beside the
+**The reference driver** (crate `rtci-stream-driver`, in `examples/stream-driver`, published beside the
 engine) implements the stream half on tokio; its crate documentation has the command table and the
 loop. `cargo run --example stream-driver-loopback` runs two peer connections over loopback TCP
 through it with a data channel, the smallest complete program (the test environment runs it).
@@ -319,17 +323,17 @@ routes between connections: by the ufrag the first Binding request names (RFC 84
 ## Feeding ICE Candidates
 
 Because RTC does no I/O, it also does no candidate gathering: **you** bind the sockets, so **you** tell the connection
-which local candidates exist. Build them with the `rtc-ice` candidate constructors and hand each one to
+which local candidates exist. Build them with the `rtci-ice` candidate constructors and hand each one to
 `add_local_candidate`:
 
 ```rust,no_run
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
 use std::time::Instant;
 
-fn gather(pc: &mut rtc::peer_connection::RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
+fn gather(pc: &mut rtci::peer_connection::RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
             network: "udp".to_owned(),
@@ -380,7 +384,7 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
 - ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
 - ✅ **Media Tracks** - Audio/video RTP transport; the engine itself does not encode, decode, capture or play out
-- ✅ **Audio pipeline** (`rtc-audio`, `rtc-devices`) - Opus (pure Rust; libopus opt-in) with the RFC 7587 parameters,
+- ✅ **Audio pipeline** (`rtci-audio`, `rtci-devices`) - Opus (pure Rust; libopus opt-in) with the RFC 7587 parameters,
   in-band FEC and DTX, G.711, G.722, RED; a NetEq-style jitter buffer (adaptive and `jitterBufferTarget` delay,
   concealment, FEC recovery, comfort noise, accelerate / preemptive expand, clock-drift compensation, the W3C inbound
   audio statistics fed into `getStats`); echo cancellation, noise suppression, gain control, high-pass filter and
@@ -389,7 +393,7 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
-- **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
+- **Stream transports without sockets** - `rtci_shared::stream`: connection ids, listen / connect / close / reset
   commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
   back-pressure; `examples/stream-driver` is a tokio driver for it
 - **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
@@ -397,16 +401,16 @@ over SRTP and is subject to none of SCTP's flow control.
   verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
   `relayProtocol`; TURN over DTLS (RFC 7350) and over plain UDP on the application's socket as well (who gathers
   from `turn:` servers over UDP: `with_relay_gathering`)
-- **NAT-assisted candidates in the reference driver** - `rtc_stream_driver::nat_mapping` (opt-in, no dependency): a
+- **NAT-assisted candidates in the reference driver** - `rtci_stream_driver::nat_mapping` (opt-in, no dependency): a
   PCP (RFC 6887) MAP request with a NAT-PMP (RFC 6886) fallback to the gateway the application names; the mapping is
   added as a server-reflexive candidate with type preference 105 (RFC 6544 section 5.3)
-- **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
+- **Server-side sockets in the reference driver** - `rtci_stream_driver::sockets`: port ranges for UDP sockets and
   ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
   one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first
   check, `UfragMux`, `accept_by_ufrag`, `RTCPeerConnection::ice_username_fragment`); 1:1 NAT addresses
   (`with_nat_1to1_ips`) apply to every host candidate, the engine's TCP ones included
 - **Simulcast** - RID-based simulcast, sending and receiving
-- **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding, `RTCRtpSender::set_configured_scalability_mode`)
+- **SVC signalling in `rtci-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding, `RTCRtpSender::set_configured_scalability_mode`)
 - **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
   (draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`) and as published (RFC 8627, `video/flexfec`: masks,
   row / column / 2-D protection, retransmission); ULPFEC (RFC 5109) in RED, as browsers send it for video, through
@@ -417,7 +421,7 @@ over SRTP and is subject to none of SCTP's flow control.
   bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
 - **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
-- ✅ **A C interface** - `rtc-ffi` (`cdylib` / `staticlib`, header `rtc-ffi/include/rtc.h`): the sans-I/O API one to one
+- ✅ **A C interface** - `rtci-ffi` (`cdylib` / `staticlib`, header `rtci-ffi/include/rtci.h`): the sans-I/O API one to one
   (JSON configuration and events, caller-owned buffers, the caller's clock), and a driven layer that owns its sockets and
   a thread (port ranges, a shared UDP / ICE-TCP port, bind addresses, 1:1 NAT, ICE-lite); a reference Deno binding with
   the browser API in `bindings/deno/`; a release workflow for prebuilt libraries on five platforms (not run). See
@@ -434,11 +438,11 @@ interoperate with the RFC form. Every place where the engine and an RFC, or the 
 differently is a setting, and a `BehaviourProfile` sets all of them in one call:
 
 ```rust,no_run
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::BehaviourProfile;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::BehaviourProfile;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Chosen at run time, here by name ("rfc", "chrome", "strict-rfc", "performance"), or
@@ -471,10 +475,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads
-one from configuration. **At build time**, two cargo features of `rtc` change `BehaviourProfile::default()`, and with it
+one from configuration. **At build time**, two cargo features of `rtci` change `BehaviourProfile::default()`, and with it
 every `Default` / `new()` of those objects: `chrome-defaults` makes it `Chrome`, `performance-defaults` makes it
 `Performance`. With both on, `chrome-defaults` wins and the build prints a deprecation warning naming both.
-**Cargo unifies features: one crate of a build that turns a feature on changes the defaults of every user of `rtc` in
+**Cargo unifies features: one crate of a build that turns a feature on changes the defaults of every user of `rtci` in
 that build.** Prefer the explicit call; `BehaviourProfile::compiled_default()` says which default a build has.
 
 [docs/behaviour-profiles.md](docs/behaviour-profiles.md), generated from the table in the code and checked by CI, lists
@@ -517,8 +521,8 @@ cargo run --example data-channels-answer
 
 ## Crates
 
-The engine is the root crate, `rtc`; each protocol is a crate of its own, usable alone and re-exported by
-`rtc` (`rtc::ice`, `rtc::dtls`, ...). Each crate's README lists the specifications it implements.
+The engine is the root crate, `rtci`; each protocol is a crate of its own, usable alone and re-exported by
+`rtci` (`rtci::ice`, `rtci::dtls`, ...). Each crate's README lists the specifications it implements.
 RTC is built from composable crates, each implementing a specific protocol:
 
 ## RTC Crates
@@ -527,7 +531,7 @@ RTC is built from composable crates, each implementing a specific protocol:
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rtc"><img src="https://img.shields.io/crates/v/rtc.svg"></a>
     <br>
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Media<a href="https://crates.io/crates/rtc-media"><img src="https://img.shields.io/crates/v/rtc-media.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Audio (rtc-audio, rtc-devices)
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Audio (rtci-audio, rtci-devices)
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Interceptor<a href="https://crates.io/crates/rtc-interceptor"><img src="https://img.shields.io/crates/v/rtc-interceptor.svg"></a>
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DataChannel<a href="https://crates.io/crates/rtc-datachannel"><img src="https://img.shields.io/crates/v/rtc-datachannel.svg"></a>
     <br>
@@ -562,38 +566,38 @@ RTC is built from composable crates, each implementing a specific protocol:
 
 | Crate | What it is |
 | --- | --- |
-| `rtc` | The peer connection: JSEP negotiation, transports, media and data channels, statistics |
-| [`rtc-crypto`](rtc-crypto/README.md) | The provider-neutral cryptography interface, with the ring and aws-lc-rs providers |
-| [`rtc-shared`](rtc-shared/README.md) | Marshalling traits, transport context, replay detection, the stream transport interface |
-| [`rtc-ice`](rtc-ice/README.md) | The ICE agent (RFC 8445), trickle ICE, ICE-TCP, consent freshness |
-| [`rtc-stun`](rtc-stun/README.md) | STUN messages, integrity and a client (RFC 8489) |
-| [`rtc-turn`](rtc-turn/README.md) | The TURN client (RFC 8656, RFC 6062) |
-| [`rtc-mdns`](rtc-mdns/README.md) | mDNS querier and responder (RFC 6762) |
-| [`rtc-dtls`](rtc-dtls/README.md) | DTLS 1.2 and 1.3, DTLS-SRTP key export |
-| [`rtc-srtp`](rtc-srtp/README.md) | SRTP and SRTCP, AES-GCM, Cryptex |
-| [`rtc-sctp`](rtc-sctp/README.md) | SCTP (RFC 9260) for data channels |
-| [`rtc-datachannel`](rtc-datachannel/README.md) | Data channels and DCEP (RFC 8831, RFC 8832) |
-| [`rtc-rtp`](rtc-rtp/README.md) | RTP, header extensions, payload formats, SVC structures |
-| [`rtc-rtcp`](rtc-rtcp/README.md) | RTCP packets and feedback messages |
-| [`rtc-interceptor`](rtc-interceptor/README.md) | The RTP / RTCP pipeline: RTCP session, NACK, TWCC, GCC, pacing, FEC |
-| [`rtc-interceptor-derive`](rtc-interceptor-derive/README.md) | Macros for writing interceptors |
-| [`rtc-sdp`](rtc-sdp/README.md) | SDP parsing and serialization |
-| [`rtc-media`](rtc-media/README.md) | Media samples and container readers and writers |
-| [`rtc-sframe`](rtc-sframe/README.md) | SFrame end-to-end media encryption (RFC 9605) |
-| [`rtc-stream-driver`](examples/stream-driver/README.md) | The tokio driver for the engine's stream transports (it does I/O) |
+| `rtci` | The peer connection: JSEP negotiation, transports, media and data channels, statistics |
+| [`rtci-crypto`](rtci-crypto/README.md) | The provider-neutral cryptography interface, with the ring and aws-lc-rs providers |
+| [`rtci-shared`](rtci-shared/README.md) | Marshalling traits, transport context, replay detection, the stream transport interface |
+| [`rtci-ice`](rtci-ice/README.md) | The ICE agent (RFC 8445), trickle ICE, ICE-TCP, consent freshness |
+| [`rtci-stun`](rtci-stun/README.md) | STUN messages, integrity and a client (RFC 8489) |
+| [`rtci-turn`](rtci-turn/README.md) | The TURN client (RFC 8656, RFC 6062) |
+| [`rtci-mdns`](rtci-mdns/README.md) | mDNS querier and responder (RFC 6762) |
+| [`rtci-dtls`](rtci-dtls/README.md) | DTLS 1.2 and 1.3, DTLS-SRTP key export |
+| [`rtci-srtp`](rtci-srtp/README.md) | SRTP and SRTCP, AES-GCM, Cryptex |
+| [`rtci-sctp`](rtci-sctp/README.md) | SCTP (RFC 9260) for data channels |
+| [`rtci-datachannel`](rtci-datachannel/README.md) | Data channels and DCEP (RFC 8831, RFC 8832) |
+| [`rtci-rtp`](rtci-rtp/README.md) | RTP, header extensions, payload formats, SVC structures |
+| [`rtci-rtcp`](rtci-rtcp/README.md) | RTCP packets and feedback messages |
+| [`rtci-interceptor`](rtci-interceptor/README.md) | The RTP / RTCP pipeline: RTCP session, NACK, TWCC, GCC, pacing, FEC |
+| [`rtci-interceptor-derive`](rtci-interceptor-derive/README.md) | Macros for writing interceptors |
+| [`rtci-sdp`](rtci-sdp/README.md) | SDP parsing and serialization |
+| [`rtci-media`](rtci-media/README.md) | Media samples and container readers and writers |
+| [`rtci-sframe`](rtci-sframe/README.md) | SFrame end-to-end media encryption (RFC 9605) |
+| [`rtci-stream-driver`](examples/stream-driver/README.md) | The tokio driver for the engine's stream transports (it does I/O) |
 
 These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
-`rtc-signal`, the examples' signalling helper; the fuzz crates, the benchmark and the test environment's peers.
+`rtci-signal`, the examples' signalling helper; the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 
 ### Data Channels
 
 ```rust,no_run
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::sansio::Protocol;
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::sansio::Protocol;
 use std::time::Instant;
 
 fn open(pc: &mut RTCPeerConnection) -> Result<RTCDataChannelId, Box<dyn std::error::Error>> {
@@ -629,10 +633,10 @@ fn drive(pc: &mut RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
 ### Media Tracks
 
 ```rust,no_run
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 
@@ -662,8 +666,8 @@ fn add_video(
 ### Statistics
 
 ```rust,no_run
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::statistics::StatsSelector;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::statistics::StatsSelector;
 use std::time::Instant;
 
 fn report(pc: &mut RTCPeerConnection) {
@@ -690,8 +694,8 @@ WebRTC requires an external signaling channel (e.g. WebSocket, HTTP) to exchange
 description call takes the current instant:
 
 ```rust,no_run
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 use std::time::Instant;
 
 fn negotiate(
@@ -758,8 +762,8 @@ python3 scripts/check-test-parity.py      # every upstream test has a fork test,
 python3 scripts/check-fuzz-registry.py    # every fuzz target is listed for OSS-Fuzz and run by CI
 python3 scripts/check-workflow-pins.py    # actions pinned by SHA, no self-hosted runner for a fork PR
 
-# Fuzz one target (nightly toolchain and cargo-fuzz; each crate's fuzz/ directory, ./fuzz for `rtc`)
-cd rtc-sctp/fuzz && cargo fuzz run --debug-assertions endpoint_handle_datagrams
+# Fuzz one target (nightly toolchain and cargo-fuzz; each crate's fuzz/ directory, ./fuzz for `rtci`)
+cd rtci-sctp/fuzz && cargo fuzz run --debug-assertions endpoint_handle_datagrams
 ```
 
 ## Semantic Versioning

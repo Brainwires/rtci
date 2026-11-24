@@ -1,25 +1,25 @@
 [workspace]
 members = [
-    "rtc-audio",
-    "rtc-crypto",
-    "rtc-datachannel",
-    "rtc-devices",
-    "rtc-dtls",
-    "rtc-ffi",
-    "rtc-ice",
-    "rtc-interceptor",
-    "rtc-interceptor-derive",
-    "rtc-media",
-    "rtc-mdns",
-    "rtc-rtcp",
-    "rtc-rtp",
-    "rtc-sctp",
-    "rtc-sdp",
-    "rtc-sframe",
-    "rtc-shared",
-    "rtc-srtp",
-    "rtc-stun",
-    "rtc-turn",
+    "rtci-audio",
+    "rtci-crypto",
+    "rtci-datachannel",
+    "rtci-devices",
+    "rtci-dtls",
+    "rtci-ffi",
+    "rtci-ice",
+    "rtci-interceptor",
+    "rtci-interceptor-derive",
+    "rtci-media",
+    "rtci-mdns",
+    "rtci-rtcp",
+    "rtci-rtp",
+    "rtci-sctp",
+    "rtci-sdp",
+    "rtci-sframe",
+    "rtci-shared",
+    "rtci-srtp",
+    "rtci-stun",
+    "rtci-turn",
 ]
 resolver = "2"
 
@@ -28,45 +28,45 @@ opt-level = 0
 
 # The audio pipeline's tests run seconds of DSP and codec work on synthetic signals; unoptimised
 # they take minutes. Only these packages are optimised in the dev profile.
-[profile.dev.package.rtc-audio]
+[profile.dev.package.rtci-audio]
 opt-level = 2
 
 [profile.dev.package.opus-rs]
 opt-level = 2
 
 [workspace.package]
-version = "0.22.0+brainwires.6"
+version = "0.1.0"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
 # The lowest toolchain the workspace builds on (checked by the MSRV job of cargo.yml).
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/webrtc-rs/rtc"
+repository = "https://github.com/Brainwires/rtci"
 
 [workspace.dependencies]
-crypto = { version = "0.22.0", path = "rtc-crypto", package = "rtc-crypto", default-features = false }
-datachannel = { version = "0.22.0", path = "rtc-datachannel", package = "rtc-datachannel" }
-dtls = { version = "0.22.0", path = "rtc-dtls", package = "rtc-dtls", default-features = false }
-ice = { version = "0.22.0", path = "rtc-ice", package = "rtc-ice", default-features = false }
-interceptor = { version = "0.22.0", path = "rtc-interceptor", package = "rtc-interceptor" }
-interceptor-derive = { version = "0.22.0", path = "rtc-interceptor-derive", package = "rtc-interceptor-derive" }
-mdns = { version = "0.22.0", path = "rtc-mdns", package = "rtc-mdns" }
-media = { version = "0.22.0", path = "rtc-media", package = "rtc-media" }
-rtcp = { version = "0.22.0", path = "rtc-rtcp", package = "rtc-rtcp" }
-rtp = { version = "0.22.0", path = "rtc-rtp", package = "rtc-rtp" }
-sctp = { version = "0.22.0", path = "rtc-sctp", package = "rtc-sctp" }
-sdp = { version = "0.22.0", path = "rtc-sdp", package = "rtc-sdp" }
-sframe = { version = "0.22.0", path = "rtc-sframe", package = "rtc-sframe", default-features = false }
-shared = { version = "0.22.0", path = "rtc-shared", package = "rtc-shared", default-features = false }
-srtp = { version = "0.22.0", path = "rtc-srtp", package = "rtc-srtp", default-features = false }
-stun = { version = "0.22.0", path = "rtc-stun", package = "rtc-stun", default-features = false }
-turn = { version = "0.22.0", path = "rtc-turn", package = "rtc-turn", default-features = false }
+crypto = { version = "0.1.0", path = "rtci-crypto", package = "rtci-crypto", default-features = false }
+datachannel = { version = "0.1.0", path = "rtci-datachannel", package = "rtci-datachannel" }
+dtls = { version = "0.1.0", path = "rtci-dtls", package = "rtci-dtls", default-features = false }
+ice = { version = "0.1.0", path = "rtci-ice", package = "rtci-ice", default-features = false }
+interceptor = { version = "0.1.0", path = "rtci-interceptor", package = "rtci-interceptor" }
+interceptor-derive = { version = "0.1.0", path = "rtci-interceptor-derive", package = "rtci-interceptor-derive" }
+mdns = { version = "0.1.0", path = "rtci-mdns", package = "rtci-mdns" }
+media = { version = "0.1.0", path = "rtci-media", package = "rtci-media" }
+rtcp = { version = "0.1.0", path = "rtci-rtcp", package = "rtci-rtcp" }
+rtp = { version = "0.1.0", path = "rtci-rtp", package = "rtci-rtp" }
+sctp = { version = "0.1.0", path = "rtci-sctp", package = "rtci-sctp" }
+sdp = { version = "0.1.0", path = "rtci-sdp", package = "rtci-sdp" }
+sframe = { version = "0.1.0", path = "rtci-sframe", package = "rtci-sframe", default-features = false }
+shared = { version = "0.1.0", path = "rtci-shared", package = "rtci-shared", default-features = false }
+srtp = { version = "0.1.0", path = "rtci-srtp", package = "rtci-srtp", default-features = false }
+stun = { version = "0.1.0", path = "rtci-stun", package = "rtci-stun", default-features = false }
+turn = { version = "0.1.0", path = "rtci-turn", package = "rtci-turn", default-features = false }
 # The examples' signalling helper is not published: path only, so `cargo publish` drops the
 # root crate's dev-dependency on it.
-signal = { path = "examples/signal", package = "rtc-signal" }
-# The reference driver depends on `rtc` (its `peer` module), so the root crate's dev-dependency
+signal = { path = "examples/signal", package = "rtci-signal" }
+# The reference driver depends on `rtci` (its `peer` module), so the root crate's dev-dependency
 # on it has no version (`cargo publish` drops it) and leaves that feature off.
-stream-driver = { path = "examples/stream-driver", package = "rtc-stream-driver", default-features = false }
+stream-driver = { path = "examples/stream-driver", package = "rtci-stream-driver", default-features = false }
 
 # common dependencies
 sansio = "1"
@@ -139,7 +139,7 @@ core_affinity = "0.8.1"
 anyhow = "1.0.80"
 
 [package]
-name = "rtc"
+name = "rtci"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -179,7 +179,7 @@ turn-tls-webpki-roots = ["dep:webpki-roots"]
 # Makes `BehaviourProfile::default()` (and with it every `SettingEngine`, `MediaEngine` and
 # `DefaultInterceptorOptions` default) `BehaviourProfile::Chrome`: libwebrtc's defaults where
 # they differ from the RFCs' (docs/behaviour-profiles.md). Cargo unifies features: one crate of
-# a build that turns this on changes the defaults of every user of `rtc` in that build. Prefer
+# a build that turns this on changes the defaults of every user of `rtci` in that build. Prefer
 # `SettingEngineBuilder::with_behaviour_profile`.
 chrome-defaults = []
 # BehaviourProfile::Performance as the default profile (docs/behaviour-profiles.md). With
@@ -231,9 +231,9 @@ rand.workspace = true
 sansio.workspace = true
 shared.workspace = true
 # The interop peer's `pipeline` scenario sends and decodes audio with the audio pipeline (a
-# dev-dependency cycle cargo allows: rtc-audio depends on this crate's library). Path only, so
-# `cargo publish` drops it: rtc-audio is published after this crate, which it depends on.
-rtc-audio = { path = "rtc-audio" }
+# dev-dependency cycle cargo allows: rtci-audio depends on this crate's library). Path only, so
+# `cargo publish` drops it: rtci-audio is published after this crate, which it depends on.
+rtci-audio = { path = "rtci-audio" }
 ice.workspace = true
 signal.workspace = true
 stream-driver.workspace = true

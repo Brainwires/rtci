@@ -9,10 +9,10 @@ use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, mid_of, port_of,
     video_track,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::sansio::Protocol;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::sansio::Protocol;
 
 /// A transceiver stopped before it ever had an m= section gets no mid and no m= section.
 #[test]
@@ -20,11 +20,11 @@ fn a_stopped_transceiver_without_a_mid_gets_no_section() -> TestResult {
     let mut pc = default_peer()?;
     let kept = pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let stopped = pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     pc.rtp_transceiver(stopped).expect("transceiver").stop()?;
 
@@ -57,7 +57,7 @@ fn a_rejected_section_is_recycled_for_a_new_transceiver() -> TestResult {
     let mut answerer = default_peer()?;
     let first = offerer.add_track(video_track("first", 0x0e0f_0001))?;
     exchange(&mut offerer, &mut answerer)?;
-    let first_id = rtc::rtp_transceiver::RTCRtpTransceiverId::from(first);
+    let first_id = rtci::rtp_transceiver::RTCRtpTransceiverId::from(first);
     let old_mid = offerer
         .rtp_transceiver(first_id)
         .expect("transceiver")
@@ -98,7 +98,7 @@ fn a_rejected_section_is_recycled_for_a_new_transceiver() -> TestResult {
     // The mid is the transceiver's once the offer is applied (W3C 4.4.1.6).
     offerer.set_local_description(std::time::Instant::now(), offer.clone())?;
     let new_mid = offerer
-        .rtp_transceiver(rtc::rtp_transceiver::RTCRtpTransceiverId::from(second))
+        .rtp_transceiver(rtci::rtp_transceiver::RTCRtpTransceiverId::from(second))
         .expect("transceiver")
         .mid()
         .clone()
@@ -313,8 +313,8 @@ a=rtpmap:96 VP8/90000
 }
 
 /// Whether `pc` has a W3C track event waiting; drains its events.
-fn fired_track(pc: &mut rtc::peer_connection::RTCPeerConnection) -> bool {
-    use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+fn fired_track(pc: &mut rtci::peer_connection::RTCPeerConnection) -> bool {
+    use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
     let mut fired = false;
     while let Some(event) = pc.poll_event() {
         if matches!(
@@ -331,7 +331,7 @@ fn fired_track(pc: &mut rtc::peer_connection::RTCPeerConnection) -> bool {
 
 /// Answers `offer` on `pc` and applies the answer; returns the answer's SDP.
 fn answer_offer(
-    pc: &mut rtc::peer_connection::RTCPeerConnection,
+    pc: &mut rtci::peer_connection::RTCPeerConnection,
     offer: String,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let now = Instant::now();

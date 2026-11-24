@@ -1,5 +1,5 @@
 //! The peer connection's stream transports: the ICE-TCP candidates the engine gathers itself
-//! and the TCP connections they use (RFC 6544), carried through `rtc_shared::stream`.
+//! and the TCP connections they use (RFC 6544), carried through `rtci_shared::stream`.
 //!
 //! The application (the *driver*) owns the sockets and nothing else: it listens, connects,
 //! accepts, closes, reads and writes when the engine says so ([`RTCPeerConnection::poll_stream_command`],
@@ -278,7 +278,7 @@ pub(crate) fn tcp_context(local: SocketAddr, peer: SocketAddr) -> TransportConte
 impl RTCPeerConnection {
     /// The next thing the driver is to do with a socket: listen for, open, close or reset a
     /// TCP connection. Poll it, as `poll_write`, after each input. See
-    /// [`rtc::shared::stream`](shared::stream) for the commands and the module documentation
+    /// [`rtci::shared::stream`](shared::stream) for the commands and the module documentation
     /// of `streams` for who owns what.
     pub fn poll_stream_command(&mut self) -> Option<StreamCommand> {
         self.streams.driver_seen = true;
@@ -447,7 +447,7 @@ impl RTCPeerConnection {
     /// The ICE username fragment the peer's checks address this connection by (RFC 8445
     /// section 7.2.2: a Binding request's USERNAME is `<this ufrag>:<the peer's>`). A driver
     /// that shares one UDP port or one ICE-TCP listening port between peer connections routes
-    /// by it (`rtc-stream-driver`'s `UfragMux`); read it again after each local description,
+    /// by it (`rtci-stream-driver`'s `UfragMux`); read it again after each local description,
     /// since an ICE restart changes it. During a restart the previous one stays in use until
     /// the restart completes.
     pub fn ice_username_fragment(&self) -> String {

@@ -1,5 +1,5 @@
 //! The VP8 stream of `testenv_impairment::vp8_file_through_nack_and_jitter_buffer` (NACK, a
-//! jitter buffer, depacketized into an IVF file) between two `rtc` peers in virtual time, over a
+//! jitter buffer, depacketized into an IVF file) between two `rtci` peers in virtual time, over a
 //! model of the netem link that test runs on: `delay 40ms 20ms distribution normal loss 2%
 //! reorder 10% 50%` on each host's egress, the testenv driver's loop (a pass every 0.5 to 0.8
 //! ms, `handle_timeout` only when `poll_timeout` is due) and frames like its fixture's (one RTP
@@ -36,30 +36,30 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
-use rtc::interceptor::{JitterBufferBuilder, Registry, Slot};
-use rtc::media::io::Writer;
-use rtc::media::io::ivf_reader::{IVFFileHeader, IVFReader};
-use rtc::media::io::ivf_writer::IVFWriter;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::interceptor_registry::configure_nack;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
+use rtci::interceptor::{JitterBufferBuilder, Registry, Slot};
+use rtci::media::io::Writer;
+use rtci::media::io::ivf_reader::{IVFFileHeader, IVFReader};
+use rtci::media::io::ivf_writer::IVFWriter;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::interceptor_registry::configure_nack;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::packetizer::Packetizer;
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::net::SocketAddr;
@@ -648,13 +648,13 @@ fn run(setup: Setup, seed: u64) -> Result<Run> {
             && last_frame.is_none_or(|l| now - l >= Duration::from_millis(33))
         {
             let pk = packetizer.get_or_insert_with(|| {
-                rtc::rtp::packetizer::new_packetizer(
+                rtci::rtp::packetizer::new_packetizer(
                     now,
                     1200,
                     VP8_PT,
                     SSRC,
                     vp8_codec().payloader().unwrap(),
-                    Box::new(rtc::rtp::sequence::new_fixed_sequencer(1000)),
+                    Box::new(rtci::rtp::sequence::new_fixed_sequencer(1000)),
                     90000,
                 )
             });

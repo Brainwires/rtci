@@ -2,10 +2,10 @@
  * Two peer connections in one process, over loopback: a data channel echo and Opus frames,
  * the second peer on a shared port. Run from the repository root after building the library:
  *
- *     cargo build -p rtc-ffi --release
- *     RTC_FFI_LIB=target/release/librtc_ffi.so deno run --allow-ffi --allow-env bindings/deno/example.ts
+ *     cargo build -p rtci-ffi --release
+ *     RTCI_FFI_LIB=target/release/librtci_ffi.so deno run --allow-ffi --allow-env bindings/deno/example.ts
  *
- * (`librtc_ffi.dylib` on macOS, `rtc_ffi.dll` on Windows.) Exits 0 once the echo and an RTP
+ * (`librtci_ffi.dylib` on macOS, `rtci_ffi.dll` on Windows.) Exits 0 once the echo and an RTP
  * packet have arrived.
  */
 import { RTCPeerConnection, RTCSharedPort } from "./mod.ts";

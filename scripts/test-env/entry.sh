@@ -88,7 +88,7 @@ stage_unit() {
   local rc=$?
   echo "## unit: $(summarise "$A/unit.log") (exit $rc)" >> "$REPORT"
   grep -E '^test .* (FAILED|ignored, )' "$A/unit.log" | sed 's/^/    /' >> "$REPORT"
-  # The layer interop tests (scripts/test-env/peers/layers): rtc-dtls against dimpl, rtc-ice
+  # The layer interop tests (scripts/test-env/peers/layers): rtci-dtls against dimpl, rtci-ice
   # against librice's rice-proto, in a crate outside the workspace.
   cargo test --locked --manifest-path "$HERE/peers/layers/Cargo.toml" --target-dir "${CARGO_TARGET_DIR:-/target}/peers" \
     --no-fail-fast > "$A/layers.log" 2>&1
@@ -136,7 +136,7 @@ stage_env() {
   # The audio pipeline's headless example: synthetic speech through processing, Opus, two
   # peer connections over a 5 % loss / 40 ms jitter link, the jitter buffer; its WAV output
   # and the Opus packets that arrived (as Ogg, for GStreamer's independent decoder).
-  if cargo run -q -p rtc-audio --example audio-loopback -- --seconds 10 --loss 0.05 --jitter-ms 40 \
+  if cargo run -q -p rtci-audio --example audio-loopback -- --seconds 10 --loss 0.05 --jitter-ms 40 \
       --output "$A/audio-loopback.wav" --ogg "$M/received-audio-pipeline.ogg" > "$A/audio-loopback.log" 2>&1; then
     grep -E '^AUDIO-LOOPBACK' "$A/audio-loopback.log" >> "$REPORT"
   else

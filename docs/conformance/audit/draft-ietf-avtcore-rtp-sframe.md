@@ -7,10 +7,10 @@ key derivation are concrete there, and a later revision that changes them is a n
 and implemented on branch `conf/pc-18-sframe-transform`. RECOMMENDED counts as SHOULD; the
 "expected" of section 9.7 is counted as SHOULD.
 
-Scope: `rtc-rtp/src/codec/sframe/mod.rs` (`rtp`), `rtc-sframe/src/kdf.rs` (`kdf`),
+Scope: `rtci-rtp/src/codec/sframe/mod.rs` (`rtp`), `rtci-sframe/src/kdf.rs` (`kdf`),
 `src/rtp_transceiver/internal.rs` (`[[useSFrame]]`, `t`), `src/peer_connection/sdp/mod.rs`
 (`a=sframe`), `src/peer_connection/handler/endpoint.rs` and the sender's `write_rtp`. The engine
-does not encode or decode media: the application encrypts with `rtc::sframe`, fragments with
+does not encode or decode media: the application encrypts with `rtci::sframe`, fragments with
 `SFramePayloader` and reassembles with `SFrameReassembler`.
 
 Totals (36 rows):
@@ -19,7 +19,7 @@ Totals (36 rows):
 - SHOULD: tested 2 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 2
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 
-Tests: `st` = `rtc-rtp/src/codec/sframe/sframe_test.rs`, `kt` = `rtc-sframe/src/kdf_test.rs`,
+Tests: `st` = `rtci-rtp/src/codec/sframe/sframe_test.rs`, `kt` = `rtci-sframe/src/kdf_test.rs`,
 `sig` = `tests/encoded_transform_sframe_signalling.rs`, `e2e` = `tests/encoded_transform_sframe_rtc2rtc.rs`.
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
@@ -41,9 +41,9 @@ Tests: `st` = `rtc-rtp/src/codec/sframe/sframe_test.rs`, `kt` = `rtc-sframe/src/
 | SFRAMERTP-5.2-2 | 5.2 | MUST | Step 6: fragments that disagree on T are discarded | tested | rtp (SFrameReassembler, SFrameDepacketizer) | st::the_depacketizer_joins_s_to_e_and_discards_mixed_t | |
 | SFRAMERTP-5.2-3 | 5.2 | MUST | Step 7: fragments that disagree on the payload type are discarded | tested | rtp (SFrameReassembler) | st::the_reassembler_completes_frames_in_any_order | |
 | SFRAMERTP-5.2-4 | 5.2 | MUST | Steps 8 to 10: descriptors removed, payloads concatenated; metadata marker from the last packet, origin from T | tested | rtp (SFrameRtpFrame) | st::the_reassembler_completes_frames_in_any_order | |
-| SFRAMERTP-5.2-5 | 5.2 | MUST | Steps 11 to 13: decrypt (abort on failure); a raw frame goes to the pipeline, a packetized one to the payload type's depacketizer | tested | `rtc-sframe/src/context.rs` (decrypt), rtp (SFrameRtpFrame::origin, payload_type) | e2e::the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end | the application routes by origin and payload type |
+| SFRAMERTP-5.2-5 | 5.2 | MUST | Steps 11 to 13: decrypt (abort on failure); a raw frame goes to the pipeline, a packetized one to the payload type's depacketizer | tested | `rtci-sframe/src/context.rs` (decrypt), rtp (SFrameRtpFrame::origin, payload_type) | e2e::the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end | the application routes by origin and payload type |
 | SFRAMERTP-5.2-6 | 5.2 | SHOULD | A discarded frame is treated as lost (PLI / FIR) | n/a | rtp (SFrameReassembler::discarded) | | the application's recovery: it reads `discarded()` and writes the PLI / FIR on the receiver |
-| SFRAMERTP-5.3-1 | 5.3 | MUST | The SFrame metadata input is empty by default | tested | `rtc-sframe/src/context.rs` (encrypt, decrypt) | e2e::the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end | the application passes the metadata |
+| SFRAMERTP-5.3-1 | 5.3 | MUST | The SFrame metadata input is empty by default | tested | `rtci-sframe/src/context.rs` (encrypt, decrypt) | e2e::the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end | the application passes the metadata |
 | SFRAMERTP-6-1 | 6 | MUST | `a=sframe` is a media-level attribute, never at session level | tested | `src/peer_connection/sdp/mod.rs` (add_transceiver_sdp) | sig::an_sframe_transform_offers_and_answers_sframe | |
 | SFRAMERTP-6-2 | 6 | MUST | An answerer includes `a=sframe` only when the offer had it | tested | t (describe_sframe, note_remote_sframe) | sig::an_sframe_transform_offers_and_answers_sframe, sig::without_a_transform_the_transceiver_does_not_use_sframe | |
 | SFRAMERTP-6-3 | 6 | MUST | An answerer that requires SFrame rejects m-sections without `a=sframe` | tested | `src/peer_connection/internal.rs` (`generate_matched_sdp`: `sframe_closed`) | `tests/encoded_transform_sframe_signalling.rs::an_answerer_that_requires_sframe_rejects_a_section_without_it` | jsep9: a transceiver whose [[useSFrame]] is true answers a section offered without `a=sframe` rejected (port 0) |
@@ -57,6 +57,6 @@ Tests: `st` = `rtc-rtp/src/codec/sframe/sframe_test.rs`, `kt` = `rtc-sframe/src/
 | SFRAMERTP-7-2 | 7 | MUST | When used, every SSRC stream derives ssrc_key = HKDF-Expand(HKDF-Extract(SSRC, base_key), "SFrame 1.0 RTP Stream", Nh) | tested | kdf (derive_ssrc_key, hkdf_extract_salted) | kt::the_per_ssrc_key_is_hkdf_of_the_base_key_salted_with_the_ssrc, kt::salted_hkdf_matches_rfc5869_test_case_1, e2e::the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end | the HKDF is checked against RFC 5869 A.1 |
 | SFRAMERTP-7-3 | 7 | MUST | The SSRC is the 4-byte big-endian salt; the suite is the one the key is used with | tested | kdf (derive_ssrc_key) | kt::the_per_ssrc_key_is_hkdf_of_the_base_key_salted_with_the_ssrc | |
 | SFRAMERTP-8-1 | 8 | MUST | With ratcheting, the per-SSRC derivation is done once at the start, then each ratchet runs on the per-SSRC key | tested | kdf (ratchet_base_key, derive_ssrc_key) | kt::per_ssrc_keys_and_their_ratchets_match_the_draft_vectors | Appendix A vectors: `ratchet_base_key` on `derive_ssrc_key`'s output gives ssrc_key_a_1 / _2 and b; ratcheting the base key first does not (pc-24) |
-| SFRAMERTP-8-2 | 8 | MUST | The KID comes from key_generation and ratchet_steps as in RFC 9605 5.1 | tested | `rtc-sframe/src/key_id.rs` (SenderKeyIdLayout) | kt::per_ssrc_keys_and_their_ratchets_match_the_draft_vectors | RFC 9605 5.1 KIDs from key generation and ratchet step alone, so every stream has the same KID (pc-24) |
+| SFRAMERTP-8-2 | 8 | MUST | The KID comes from key_generation and ratchet_steps as in RFC 9605 5.1 | tested | `rtci-sframe/src/key_id.rs` (SenderKeyIdLayout) | kt::per_ssrc_keys_and_their_ratchets_match_the_draft_vectors | RFC 9605 5.1 KIDs from key generation and ratchet step alone, so every stream has the same KID (pc-24) |
 | SFRAMERTP-9.7-1 | 9.7 | SHOULD | Receivers bound the buffered packets and discard incomplete frames | tested | rtp (SFrameReassembler::new, max_buffered) | st::the_reassembler_bounds_what_it_holds | oldest evicted first; fragments older than a completed frame are kept for a late retransmission |
 | SFRAMERTP-10-1 | 10 | MAY | IANA registration of `a=sframe` | n/a | | | registry action |

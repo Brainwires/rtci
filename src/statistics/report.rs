@@ -119,9 +119,9 @@ impl RTCStatsReportEntry {
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::RTCPeerConnection;
-/// use rtc::statistics::StatsSelector;
-/// use rtc::statistics::stats::RTCStatsType;
+/// use rtci::peer_connection::RTCPeerConnection;
+/// use rtci::statistics::StatsSelector;
+/// use rtci::statistics::stats::RTCStatsType;
 /// use std::time::Instant;
 ///
 /// # fn example(peer_connection: &mut RTCPeerConnection) {

@@ -14,33 +14,33 @@ Nineteen crates, all at the workspace version. Dependencies come first: normal a
 dependencies, and dev-dependencies that carry a version (cargo keeps those in the published
 manifest, so they must resolve on crates.io too).
 
-1. `rtc-crypto`
-2. `rtc-interceptor-derive`
-3. `rtc-sframe`
-4. `rtc-shared`
-5. `rtc-dtls`
-6. `rtc-mdns`
-7. `rtc-rtcp`
-8. `rtc-rtp`
-9. `rtc-interceptor`
-10. `rtc-media`
-11. `rtc-sctp`
-12. `rtc-datachannel`
-13. `rtc-sdp`
-14. `rtc-srtp`
-15. `rtc-stun`
-16. `rtc-ice`
-17. `rtc-turn`
-18. `rtc`
-19. `rtc-stream-driver` (its default feature `peer` depends on `rtc`; the root crate's
+1. `rtci-crypto`
+2. `rtci-interceptor-derive`
+3. `rtci-sframe`
+4. `rtci-shared`
+5. `rtci-dtls`
+6. `rtci-mdns`
+7. `rtci-rtcp`
+8. `rtci-rtp`
+9. `rtci-interceptor`
+10. `rtci-media`
+11. `rtci-sctp`
+12. `rtci-datachannel`
+13. `rtci-sdp`
+14. `rtci-srtp`
+15. `rtci-stun`
+16. `rtci-ice`
+17. `rtci-turn`
+18. `rtci`
+19. `rtci-stream-driver` (its default feature `peer` depends on `rtci`; the root crate's
     dev-dependency on it has no version, so `cargo publish` drops it)
 
 The rename commit gives every crate its `rtci` name (`docs/rename.md`) and keeps this order.
 `scripts/rename-to-rtci.py` prints it and writes it into release.yml.
 
-Not published (`publish = false`): `rtc-signal` (the examples' signalling helper; the root
+Not published (`publish = false`): `rtci-signal` (the examples' signalling helper; the root
 crate's dev-dependency on it has no version, so `cargo publish` drops it), the fuzz crates
-(`fuzz/`, `rtc-*/fuzz/`), the benchmark (`benchmarks/aead-gcm`) and the test environment's
+(`fuzz/`, `rtci-*/fuzz/`), the benchmark (`benchmarks/aead-gcm`) and the test environment's
 peers (`scripts/test-env/peers/`). The root crate's package holds the library sources, the README
 and the licence texts only (`include` in `Cargo.toml`): the examples, integration tests,
 fixtures and documentation stay in the repository.
@@ -136,9 +136,9 @@ From a clean checkout of the release commit:
 
 ```sh
 # What goes into each package, and nothing large or unintended
-for p in rtc-crypto rtc-interceptor-derive rtc-sframe rtc-shared rtc-dtls rtc-mdns rtc-rtcp \
-         rtc-rtp rtc-interceptor rtc-media rtc-sctp rtc-datachannel rtc-sdp rtc-srtp \
-         rtc-stun rtc-ice rtc-turn rtc rtc-stream-driver; do
+for p in rtci-crypto rtci-interceptor-derive rtci-sframe rtci-shared rtci-dtls rtci-mdns rtci-rtcp \
+         rtci-rtp rtci-interceptor rtci-media rtci-sctp rtci-datachannel rtci-sdp rtci-srtp \
+         rtci-stun rtci-ice rtci-turn rtci rtci-stream-driver; do
   cargo package --list -p "$p" > "/tmp/$p.files"
 done
 
@@ -149,7 +149,7 @@ cargo publish --workspace --dry-run
 
 # A crate whose workspace dependencies are already on crates.io (or that has none) can be
 # checked on its own as well:
-cargo publish --dry-run -p rtc-crypto
+cargo publish --dry-run -p rtci-crypto
 ```
 
 `cargo publish -p <crate> --dry-run` on a crate whose workspace dependencies are not yet on
@@ -169,10 +169,10 @@ cargo publish --workspace
 or one crate at a time, in the order above:
 
 ```sh
-cargo publish -p rtc-crypto
-cargo publish -p rtc-interceptor-derive
+cargo publish -p rtci-crypto
+cargo publish -p rtci-interceptor-derive
 # ... every crate of the list, in order ...
-cargo publish -p rtc
+cargo publish -p rtci
 ```
 
 `cargo publish` returns only once the crate is in the crates.io index (it waits up to

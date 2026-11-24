@@ -1,4 +1,4 @@
-// Browser <-> webrtc-rs-rtc interop. Each test opens a page on a local origin (served by
+// Browser <-> rtci interop. Each test opens a page on a local origin (served by
 // Playwright, a secure context), loads peer.js and drives a session with
 // examples/interop-peer at RTC_INTEROP_WS.
 import { test, expect } from "@playwright/test";
@@ -230,7 +230,7 @@ test("reflect audio Opus", async ({ page }) => {
   expect(Object.keys(r.wire.sent).map(Number), JSON.stringify(r)).toEqual([opusOut]);
 });
 
-// The audio pipeline both ways (rtc-audio): Rust synthesises a 440 Hz tone at -15 dBFS peak,
+// The audio pipeline both ways (rtci-audio): Rust synthesises a 440 Hz tone at -15 dBFS peak,
 // encodes it with its own Opus encoder (opus-rs; processing off) and the browser must decode it
 // to audio with energy, by its own statistics (webrtc-stats totalAudioEnergy over
 // totalSamplesDuration is the mean square) or, where it reports neither, by a WebAudio
@@ -242,7 +242,7 @@ test("reflect audio Opus", async ({ page }) => {
 // - The browser's own source is measured too (`sourceRms`, the oscillator's track through an
 //   analyser): Rust decoding silence is a pipeline failure only when the browser sent sound.
 //   In round 5 Firefox sent Opus that decodes to an RMS of 2.66e-6, the value libopus's
-//   digital silence decodes to (rtc-audio's opus_interop test), from a context whose
+//   digital silence decodes to (rtci-audio's opus_interop test), from a context whose
 //   resume() the page did not await.
 // Everything measured is the `pipeline-diagnostics` annotation, pass or fail.
 test("audio pipeline: the browser decodes Rust's Opus and Rust decodes the browser's", async ({ page }) => {

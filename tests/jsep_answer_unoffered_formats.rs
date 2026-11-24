@@ -6,9 +6,9 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MIME_TYPE_VP9};
-use rtc::rtp_transceiver::RTCRtpTransceiverId;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MIME_TYPE_VP9};
+use rtci::rtp_transceiver::RTCRtpTransceiverId;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
 
 fn formats(section: &[String]) -> Vec<String> {
     section[0]

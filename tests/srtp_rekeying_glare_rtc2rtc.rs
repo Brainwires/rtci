@@ -1,6 +1,6 @@
 //! SRTP re-keying when both peers ask for a new DTLS association at once (glare).
 //!
-//! Two `rtc` peers send each other audio on a virtual clock with the same short SRTP key
+//! Two `rtci` peers send each other audio on a virtual clock with the same short SRTP key
 //! lifetime, so both reach the lifetime warning (RFC 5764 section 4.4) in the same step and
 //! both want a re-keying offer: a new `a=tls-id` (RFC 8842 section 5.5) with an ICE restart
 //! and a new 3-tuple (section 5.1). The application does what the W3C webrtc-pc "perfect
@@ -16,29 +16,29 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
-use rtc::peer_connection::event::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
+use rtci::peer_connection::event::{
     RTCDataChannelEvent, RTCPeerConnectionEvent, RTCPeerConnectionIceEvent, RTCTransportEvent,
     RTCTransportEventKind,
 };
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::{RTCSdpType, RTCSessionDescription};
-use rtc::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::{RTCSdpType, RTCSessionDescription};
+use rtci::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::srtp::keying::KeyLifetime;
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::srtp::keying::KeyLifetime;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
@@ -416,7 +416,7 @@ impl World {
             }
         }
         let stats = pc
-            .get_stats(self.now, rtc::statistics::StatsSelector::None)
+            .get_stats(self.now, rtci::statistics::StatsSelector::None)
             .transport()
             .map(|t| t.ice_local_username_fragment.clone());
         if stats
@@ -500,7 +500,7 @@ impl World {
                 }) => {
                     let role = self.peers[i]
                         .pc
-                        .get_stats(self.now, rtc::statistics::StatsSelector::None)
+                        .get_stats(self.now, rtci::statistics::StatsSelector::None)
                         .transport()
                         .map(|t| t.dtls_role);
                     self.log(format!(
@@ -711,8 +711,8 @@ fn run(scenario: Scenario) -> Result<Outcome> {
                         .expect("sender")
                         .write_rtp(
                             now,
-                            rtc::rtp::Packet {
-                                header: rtc::rtp::header::Header {
+                            rtci::rtp::Packet {
+                                header: rtci::rtp::header::Header {
                                     version: 2,
                                     payload_type: 111,
                                     sequence_number: sent,
@@ -1044,8 +1044,8 @@ fn a_packet_that_cannot_be_sent_is_counted() -> Result<()> {
     let ssrc = peer.ssrc;
     peer.pc.rtp_sender(sender).expect("sender").write_rtp(
         now,
-        rtc::rtp::Packet {
-            header: rtc::rtp::header::Header {
+        rtci::rtp::Packet {
+            header: rtci::rtp::header::Header {
                 version: 2,
                 payload_type: 111,
                 sequence_number: 5,
