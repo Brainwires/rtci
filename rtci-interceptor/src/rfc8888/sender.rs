@@ -47,7 +47,10 @@ fn ecn_of(codepoint: Option<EcnCodepoint>) -> Ecn {
 pub struct Rfc8888Builder {
     interval: Duration,
     adaptive_interval: bool,
-    feedback_share: f64,
+    /// See [`Self::with_feedback_share`]; `None`: the form's default.
+    feedback_share: Option<f64>,
+    /// See [`Self::with_rtcp_budget`].
+    rtcp_budget: Option<u64>,
     max_adaptive_interval: Duration,
     max_report_size: usize,
     sender_ssrc: Option<u32>,
@@ -60,7 +63,8 @@ impl Default for Rfc8888Builder {
         Self {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
-            feedback_share: crate::cc::feedback_cadence::FEEDBACK_SHARE,
+            feedback_share: None,
+            rtcp_budget: None,
             max_adaptive_interval: crate::cc::feedback_cadence::MAX_ADAPTIVE_INTERVAL,
             max_report_size: DEFAULT_MAX_REPORT_SIZE,
             sender_ssrc: None,
@@ -123,8 +127,26 @@ impl Rfc8888Builder {
     /// its lower layers, and the minimal compound packet around it without reduced-size
     /// RTCP). Default 0.05, RFC 3550 section 6.2's 5% for all of RTCP. A smaller share leaves
     /// room in the 5% for the regular reports (the `Performance` behaviour profile: 0.025).
+    ///
+    /// With [`Self::with_rtcp_budget`] it is the share of the session bandwidth instead
+    /// (default [`RTCP_BUDGET_FEEDBACK_SHARE`](crate::RTCP_BUDGET_FEEDBACK_SHARE), 3.75%).
     pub fn with_feedback_share(mut self, share: f64) -> Self {
-        self.feedback_share = share;
+        self.feedback_share = Some(share);
+        self
+    }
+
+    /// The RTCP budget form of the adaptive interval, with the session's least bandwidth in
+    /// bits per second (the RTCP session's
+    /// [`with_minimum_session_bandwidth`](crate::RtcpSessionBuilder::with_minimum_session_bandwidth)):
+    /// the feedback takes its share of the session bandwidth, the media measured both ways
+    /// (RFC 3550 section 6.2 sizes all of RTCP to it, and RFC 4585 section 3.2 makes feedback
+    /// "subject to the RTCP bandwidth constraints"), divided with the peer while this endpoint
+    /// sends media too; the interval is the time in which that holds one feedback packet, at
+    /// least 50 ms, and [`Self::with_max_adaptive_interval`] does not apply. A peer connection
+    /// uses it with `DefaultInterceptorOptions::rtcp_congestion_feedback_in_budget`. Off by
+    /// default (the share of the media received, libwebrtc's form).
+    pub fn with_rtcp_budget(mut self, minimum_session_bandwidth: u64) -> Self {
+        self.rtcp_budget = Some(minimum_session_bandwidth);
         self
     }
 
@@ -178,8 +200,21 @@ impl Rfc8888Builder {
             self.max_report_size,
             self.sender_ssrc,
         );
-        interceptor.cadence = FeedbackCadence::new(self.interval, self.adaptive_interval)
-            .with_limits(self.feedback_share, self.max_adaptive_interval);
+        let cadence = FeedbackCadence::new(self.interval, self.adaptive_interval);
+        interceptor.cadence = match self.rtcp_budget {
+            Some(floor) => cadence
+                .with_limits(
+                    self.feedback_share
+                        .unwrap_or(crate::cc::feedback_cadence::RTCP_BUDGET_FEEDBACK_SHARE),
+                    self.max_adaptive_interval,
+                )
+                .with_rtcp_budget(floor),
+            None => cadence.with_limits(
+                self.feedback_share
+                    .unwrap_or(crate::cc::feedback_cadence::FEEDBACK_SHARE),
+                self.max_adaptive_interval,
+            ),
+        };
         interceptor.epoch = self.wall_clock;
         interceptor
     }

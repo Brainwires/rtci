@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
   cannot take without a change of their own. Each such change is listed here. Git dependents
   that need the 0.1 API pin the tag `v0.1.0` or use the crates.io release.
+- **peer connection** (ccrows-12): `DefaultInterceptorOptions::congestion_feedback_share` is a
+  share of the session bandwidth when `rtcp_congestion_feedback_in_budget` is `true` (the
+  default), not of the media received; its default is 0.0375. Code that set 0.05 to mean "5% of
+  the media received" sets `rtcp_congestion_feedback_in_budget = false` (the `Chrome` form) or
+  a share of the session bandwidth. `congestion_feedback_max_interval` applies to the
+  media-received form only.
 - **interceptor** (fec-1): `StreamInfo` has a new public field, `fec_session` (ULPFEC in an RTP
   session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
   or `fec_session: None`.
@@ -155,6 +161,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
   `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
   packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
+- **RTCP stays inside RFC 3550's 5% of the session bandwidth with congestion control feedback
+  counted, and the feedback is sized to that budget (RFC 3550 6.2, RFC 4585 3.2: feedback is
+  "subject to the RTCP bandwidth constraints").** A 24 kbit/s audio call's RTCP was 12.2% of
+  the media by default (the transport-wide or RFC 8888 feedback came on top of the regular
+  reports' 5%), and at 100 and 300 kbit/s of video the connection's RTCP was 135% and 140% of
+  the budget. Now, by default:
+  - `DefaultInterceptorOptions::rtcp_congestion_feedback_in_budget` is `true` (was the
+    `Performance` profile's): the regular reports space out to what the feedback leaves, at
+    most 5 s apart. `Chrome` keeps `false` (libwebrtc's form). The RTCP session counts the
+    peer's feedback as the whole datagram, SRTCP fields and lower layers included, as it
+    counts its own (it counted only the feedback packets).
+  - Inside the budget the feedback cadence (TWCC and RFC 8888 generators) is derived from the
+    session bandwidth the RTCP budget is computed from, not from the media received:
+    `DefaultInterceptorOptions::congestion_feedback_share` is 0.0375 of the session bandwidth
+    (the media measured both ways, at least `rtcp_minimum_session_bandwidth`, or a negotiated
+    `b=AS` / `b=TIAS`), the receivers' three quarters of the 5% (RFC 3550 6.2: "1/4 of the
+    RTCP bandwidth be dedicated to participants that are sending data"), divided with the peer
+    while this endpoint sends media too; the interval is the time that holds one feedback
+    packet, at least 50 ms, with no fixed ceiling. New builder methods
+    `TwccReceiverBuilder::with_rtcp_budget` / `Rfc8888Builder::with_rtcp_budget` and the
+    constant `RTCP_BUDGET_FEEDBACK_SHARE`; the builders' own default stays the media-received
+    form. `congestion_feedback_max_interval` (250 ms, libwebrtc's) holds only the
+    media-received form (`Chrome`) and is no longer a governed profile row; `Performance`
+    takes the default's share.
+  - The feedback cadence counts what wraps a feedback packet on the wire: the SRTCP fields
+    (`RtcpSessionControl::SrtcpOverhead`), and without reduced-size RTCP an SR (not an RR)
+    once the endpoint sends media and an SDES with the session's CNAME (it assumed 28 octets
+    for both; real minimal compound packets are 36 to 100).
+  - Measured (`tests/rtcp_rate_trace_rtc2rtc.rs::measure_feedback_cadence_at_rates`, hosted,
+    one way, `a=rtcp-rsize`; all RTCP of both sides with lower layers against 5% of the
+    session bandwidth with lower layers, the 64 kbit/s floor): 24 kbit/s audio 98.7 to 102.8%
+    of the budget over the runs (the regular reports' timing; inside the trace test's 3%, RFC
+    3550 6.3.1's compensation; was 197%), feedback 2.9/s (was 4); 100 kbit/s audio and video 64% (was 135%), feedback 5.9/s (was 11.5);
+    300 kbit/s 77% (was 140%), 16/s (was 20); 1 Mbit/s 72% (was 99%) and 2.5 Mbit/s 66% (was
+    84%), 20/s either way. With video in both directions, or video coming back while the
+    received video pauses, the feedback stays at 50 ms. The first pass of this change
+    (`conf/ccrows-1-rtcp-budget`: 5% of the media received under a 500 ms ceiling) moved the
+    capacity-cap matrix's freeze over its 2 s bound on two seeds; this form does not (see
+    `tests/capacity_cap_video_rtc2rtc.rs`).
+  - `Performance` now differs from `Rfc` in two rows (`rtcp.t-rr-interval`,
+    `rtcp.minimum-session-bandwidth`). Its low-rate test measures RTCP as RFC 3550 6.2 does
+    (against the session bandwidth with lower layers and the profile's 16 kbit/s floor, not
+    RTCP octets over media octets): at 24 kbit/s audio 1718 of 2483 bit/s, feedback about
+    once a second.
+  - Audit: RFC3550-6.2-1's note (the fraction now holds with the feedback), RFC8888-4-1,
+    RFC8836-2-8b (stale: reduced-size RTCP is negotiated) and RFC8836-2-8c `tested`.
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
