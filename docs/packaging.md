@@ -128,7 +128,10 @@ compiler); no system library is needed at run time beyond libc.
   channel echo through the driven layer, then the leak check. `cargo test` builds the library
   as an rlib only, so the test builds the static library with a nested `cargo build` in a
   target directory of its own (under `target/tmp`); the link flags per platform are those of
-  the table above.
+  the table above. It compares the program's output line by line (the C runtime writes
+  `\r\n` for `\n` on Windows).
+- `driven` and `c_loopback` need the driven layer (`required-features = ["driver"]`): with
+  `--no-default-features` cargo skips them.
 
 ## The Deno example
 

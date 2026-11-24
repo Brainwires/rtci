@@ -267,7 +267,7 @@ an RMS of 0.049 (-26 dBFS) while active.
 | G.722, tones 400 / 1000 / 3000 / 5000 Hz | SNR 59.0 / 47.3 / 41.4 / 22.0 dB (the last in the 2-bit upper band) |
 | G.722, speech-like | SNR 13.1 dB, segmental SNR 15.2 dB, delay 22 samples |
 | G.711 | every code word round-trips; error within half a segment step for every 16-bit value |
-| libopus against opus-rs (feature `libopus`) | test written (`codec::libopus`): each decodes the other's stream within 40 dB SNR, and the LBRR reader agrees with libopus's `opus_packet_has_lbrr`; **not run** (the container image has no CMake) |
+| libopus against opus-rs (feature `libopus`) | each decodes the other's stream within 40 dB SNR, and the LBRR reader agrees with libopus's `opus_packet_has_lbrr`; every packet decodes with the encoder's final range-coder state both ways (opus-rs 16 to 510 kbit/s into libopus; libopus VoIP and audio modes, with and without FEC, into opus-rs); libopus's digital silence decodes in opus-rs to an RMS of 2.7e-6 (`codec::libopus::opus_interop`, GitHub's ubuntu-latest, the `rtc-audio against libopus` job) |
 
 ### Receive pipeline (jitter buffer alone)
 
@@ -338,9 +338,9 @@ events; playout capped at 200 ms of queue.
 |---|---|
 | Unit tests of every module (codecs, DSP, jitter buffer, processing, send pipeline, devices with the fake backend) | `cargo test -p rtc-audio -p rtc-devices`: GitHub CI (Linux, macOS, Windows), the test environment's unit stage |
 | rtc to rtc through the whole pipeline at 0 / 2 / 5 / 10 / 20 % loss (`rtc-audio/tests/pipeline_rtc2rtc.rs`) | the same |
-| libopus comparison (`codec::libopus` tests) | `cargo test -p rtc-audio --features libopus` (needs CMake) |
+| libopus comparison (`codec::libopus` tests) | `cargo test -p rtc-audio --features libopus` (needs CMake): `cargo.yml`'s `rtc-audio against libopus` job |
 | The headless example, its Ogg output decoded by GStreamer | the test environment's env stage |
-| Browser decodes our Opus, we decode the browser's (`audio pipeline` cell of `webrtc.spec.mjs`) | the test environment's interop stage (Chromium, Firefox, WebKit) |
+| Browser decodes our Opus, we decode the browser's (`audio pipeline` cell of `webrtc.spec.mjs`; the received track plays unmuted, since Chromium measures `audioLevel` / `totalAudioEnergy` after a muted element's volume; the browser's own source is measured before Rust's decoding is judged; the cell's `pipeline-diagnostics` annotation holds both sides' measurements) | the test environment's interop stage (Chromium, Firefox, WebKit) |
 | cpal backend | compile-checked only (macOS here; Linux in the MSRV job, which installs libasound2-dev); no CI machine has audio hardware |
 
 ## Not done in phase one
