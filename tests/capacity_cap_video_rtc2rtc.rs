@@ -1397,6 +1397,11 @@ struct Outcome {
     /// it can still report congestion for some hundreds of milliseconds after the cap goes;
     /// from 1 s on, the path is open and nothing should cut the estimate.
     target_at_lift: u32,
+    /// The lowest target the encoder followed from the cap's going to 1 s after it: the
+    /// reference of the recovery measure. The cap can go on the peak of a tooth of the
+    /// estimate's sawtooth, and that tooth's cut (its feedback, out of the capped link's queue)
+    /// then lands within some 0.3 s after the lift: it belongs to the cap, not to the recovery.
+    lift_reference: u32,
     recovery_falls: Vec<(Duration, u32, u32)>,
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
@@ -1508,6 +1513,12 @@ fn run(setup: &Setup) -> Result<Outcome> {
         window.iter().copied().max().unwrap_or(0),
     );
     let target_at_lift = target_at(&world.peers[0].targets, opened_at);
+    let lift_reference = world.peers[0]
+        .targets
+        .iter()
+        .filter(|t| t.0 > opened_at && t.0 <= opened_at + Duration::from_secs(1))
+        .map(|t| t.1)
+        .fold(target_at_lift, u32::min);
     let recovery_falls = world.peers[0]
         .targets
         .windows(2)
@@ -1578,6 +1589,7 @@ fn run(setup: &Setup) -> Result<Outcome> {
         recovery,
         recovery_window,
         target_at_lift,
+        lift_reference,
         recovery_falls,
         freeze,
         freeze_at,
@@ -1919,7 +1931,7 @@ fn measure_the_capacity_cap() -> Result<()> {
                         }
                         match run(&setup) {
                             Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} climb {} falls {} | estimate after {}",
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} reference {} climb {} falls {} | estimate after {}",
                                 o.before / 1000,
                                 o.capped_at.as_secs_f64(),
                                 o.freeze.as_secs_f64(),
@@ -1943,7 +1955,8 @@ fn measure_the_capacity_cap() -> Result<()> {
                                 o.recovery_window.0 / 1000,
                                 o.recovery_window.1 / 1000,
                                 o.recovery_window.2 / 1000,
-                                draft_climb_mean(o.target_at_lift) / 1000,
+                                o.lift_reference / 1000,
+                                draft_climb_mean(o.lift_reference) / 1000,
                                 o.recovery_falls.len(),
                                 o.estimate_after / 1000,
                             ),
@@ -1982,51 +1995,48 @@ fn draft_climb_mean(from: u32) -> u32 {
 /// discarded (no video packet written that never left, no `OnPacerDiscard`), the video
 /// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
 /// Once the cap goes, the target is never cut again and climbs at least about as fast as the
-/// draft's multiplicative increase from where the cap left it.
+/// draft's multiplicative increase from where the cap left it. Two seeds on one wall clock in an
+/// ordinary run; six seeds on each of the three wall clocks ([`ANCHORS`]) with `RTC_CAP_FULL`.
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
-    let outcomes: Result<Vec<_>> = seed_range(2, 6)
-        .map(|seed| {
-            let outcome = run(&Setup::new(seed, None)
-                .chain(Chain::Default)
-                .anchor(ANCHORS[0]))?;
-            println!("default chain seed {seed}: {outcome:?}");
-            Ok((seed, outcome))
-        })
-        .collect();
-    let outcomes = outcomes?;
-    for (seed, outcome) in &outcomes {
-        assert_eq!(0, outcome.pacer_dropped_late, "seed {seed}: {outcome:?}");
-        assert!(
-            outcome.pacer_discards.is_empty(),
-            "seed {seed}: {outcome:?}"
-        );
+    let anchors = if full() { &ANCHORS[..] } else { &ANCHORS[..1] };
+    let mut outcomes = Vec::new();
+    for seed in seed_range(2, 6) {
+        for (index, anchor) in anchors.iter().enumerate() {
+            let outcome = run(&Setup::new(seed, None).chain(Chain::Default).anchor(*anchor))?;
+            println!("default chain seed {seed} anchor {index}: {outcome:?}");
+            outcomes.push((format!("seed {seed} anchor {index}"), outcome));
+        }
+    }
+    for (cell, outcome) in &outcomes {
+        assert_eq!(0, outcome.pacer_dropped_late, "{cell}: {outcome:?}");
+        assert!(outcome.pacer_discards.is_empty(), "{cell}: {outcome:?}");
         assert!(
             !outcome.pauses.is_empty(),
-            "seed {seed}: never paused: {outcome:?}"
+            "{cell}: never paused: {outcome:?}"
         );
         // The pause is the pacer's word to the source and nothing else: the congestion
         // controller's estimate is never zero, and `availableOutgoingBitrate` reports the
         // estimate through every pause.
         assert!(
             outcome.lowest_estimate.is_some_and(|low| low >= MIN_BPS),
-            "seed {seed}: the estimator paused: {outcome:?}"
+            "{cell}: the estimator paused: {outcome:?}"
         );
         assert!(
             outcome
                 .lowest_outgoing
                 .is_some_and(|low| low >= f64::from(MIN_BPS)),
-            "seed {seed}: availableOutgoingBitrate lost the estimate in a pause: {outcome:?}"
+            "{cell}: availableOutgoingBitrate lost the estimate in a pause: {outcome:?}"
         );
         for after in &outcome.resumed_after {
             assert!(
                 *after <= Duration::from_secs(1),
-                "seed {seed}: no usable frame {after:?} after a pause ended: {outcome:?}"
+                "{cell}: no usable frame {after:?} after a pause ended: {outcome:?}"
             );
         }
         assert!(
             outcome.freeze <= Duration::from_secs(2),
-            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            "{cell}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
         );
         // Measured (hosted run 45334499296, six seeds): freeze 0.97 to 1.91 s, 1043 to
@@ -2051,7 +2061,7 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // that last most and some 15 % (6.8 s).
         assert!(
             outcome.lag <= Duration::from_millis(6_800),
-            "seed {seed}: a picture {:?} old: {outcome:?}",
+            "{cell}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         // The retransmissions, apart from the probe clusters' padding on the RTX stream
@@ -2063,12 +2073,19 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // growing, and fails if the padding is counted with them again.
         assert!(
             outcome.rtx_sent <= 72,
-            "seed {seed}: {} retransmissions: {outcome:?}",
+            "{cell}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
         // The recovery, against the target the cap left: from 1 s after the cap went it never
         // falls, and from 15 to 25 s after it its mean is at least nine tenths of the draft's
-        // multiplicative increase from the target at that instant ([`draft_climb_mean`]).
+        // multiplicative increase ([`draft_climb_mean`]) from the lowest target of the first
+        // second after the cap went (`Outcome::lift_reference`). Not the target at the lift
+        // instant: the cap can go on the peak of a tooth of the sawtooth under it, whose cut
+        // arrives with that tooth's feedback some 0.3 s later (rtci 0.1.0 with the draft's
+        // threshold time base, run 45416130268: 280 kbit/s at the lift, cut after it, 0.70 of
+        // the climb from 280 against 0.99 from the target after the cut; on the paced chain
+        // with the smoothed repairs, seed 4: 196 kbit/s at the lift, 169 after the cut, 0.85
+        // and 0.99). That cut is the cap's, as the falls in the first second are.
         // Not a fixed figure: once the path is open, a source that follows its target is not
         // application limited and no probe is due (`ProbeController`: the start, a further
         // probe after a confirming result, a large drop within the last 2 s, a sender under
@@ -2084,16 +2101,16 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // firing as the cap went, or a sender held under its target).
         assert!(
             outcome.recovery_falls.is_empty(),
-            "seed {seed}: the target fell after the cap went: {:?}: {outcome:?}",
+            "{cell}: the target fell after the cap went: {:?}: {outcome:?}",
             outcome.recovery_falls
         );
-        let climb = draft_climb_mean(outcome.target_at_lift);
+        let climb = draft_climb_mean(outcome.lift_reference);
         assert!(
             u64::from(outcome.recovery_window.1) * 10 >= u64::from(climb) * 9,
-            "seed {seed}: {} bit/s on average 15 to 25 s after the cap, under nine tenths of \
+            "{cell}: {} bit/s on average 15 to 25 s after the cap, under nine tenths of \
              the draft's climb from {} bit/s ({climb}): {outcome:?}",
             outcome.recovery_window.1,
-            outcome.target_at_lift
+            outcome.lift_reference
         );
     }
     Ok(())
