@@ -10,7 +10,10 @@
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use rtci::interceptor::{Registry, Slot, UlpfecReceiveBuilder, UlpfecSendBuilder};
+use rtci::interceptor::{
+    Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket, UlpfecReceiveBuilder,
+    UlpfecSendBuilder,
+};
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::{
     configure_ulpfec_sessions, register_default_interceptors,
@@ -32,10 +35,12 @@ use rtci::rtp_transceiver::{
     RTCRtpTransceiverInit,
 };
 use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtci::statistics::StatsSelector;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
@@ -50,6 +55,130 @@ struct OnTheWire {
     sequence_number: u16,
     marker: bool,
     lost: bool,
+    /// The transport-wide sequence number the packet carries in a one-byte header extension
+    /// element of id [`TRANSPORT_CC_ID`] (RFC 8285 section 4.2; the header is in the clear,
+    /// RFC 3711 section 3.1).
+    transport_wide_sequence_number: Option<u16>,
+}
+
+/// The id a FEC session's offer gives the transport-wide sequence number extension.
+const TRANSPORT_CC_ID: u8 = 1;
+
+/// The value of the one-byte header extension element `id` of an RTP packet, when it has one.
+fn one_byte_extension(data: &[u8], id: u8) -> Option<&[u8]> {
+    if data[0] & 0x10 == 0 {
+        return None;
+    }
+    let start = 12 + 4 * usize::from(data[0] & 0x0F);
+    let header = data.get(start..start + 4)?;
+    if header[..2] != [0xBE, 0xDE] {
+        return None;
+    }
+    let length = 4 * usize::from(u16::from_be_bytes([header[2], header[3]]));
+    let elements = data.get(start + 4..start + 4 + length)?;
+    let mut at = 0;
+    while at < elements.len() {
+        let byte = elements[at];
+        if byte == 0 {
+            at += 1;
+            continue;
+        }
+        let (element, len) = (byte >> 4, usize::from(byte & 0x0F) + 1);
+        if element == 15 {
+            return None;
+        }
+        let value = elements.get(at + 1..at + 1 + len)?;
+        if element == id {
+            return Some(value);
+        }
+        at += 1 + len;
+    }
+    None
+}
+
+/// What a peer's chain read of the per-packet congestion feedback about its own FEC streams.
+#[derive(Debug, Default)]
+struct FeedbackSeen {
+    /// The SSRCs the chain knows this peer's FEC session streams by.
+    fec_streams: Vec<u32>,
+    /// Transport-wide congestion control feedback naming one of them.
+    transport_cc: usize,
+    /// RFC 8888 reports with a block for one of them.
+    ccfb: usize,
+}
+
+/// Records, wire-most in the chain, the congestion feedback that arrives about this peer's
+/// FEC session streams.
+struct FeedbackRecorder {
+    seen: Arc<Mutex<FeedbackSeen>>,
+    read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
+}
+
+impl rtci::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FeedbackRecorder {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> std::result::Result<(), Error> {
+        if let Packet::Rtcp(packets) = &msg.message.packet {
+            let mut seen = self.seen.lock().unwrap();
+            for packet in packets {
+                let any = packet.as_any();
+                if let Some(cc) = any
+                    .downcast_ref::<rtci::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc>()
+                    && seen.fec_streams.contains(&cc.media_ssrc)
+                {
+                    seen.transport_cc += 1;
+                }
+                if let Some(report) = any
+                    .downcast_ref::<rtci::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport>()
+                    && report
+                        .report_blocks
+                        .iter()
+                        .any(|block| seen.fec_streams.contains(&block.media_ssrc))
+                {
+                    seen.ccfb += 1;
+                }
+            }
+        }
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read_queue.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> std::result::Result<(), Error> {
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write_queue.pop_front()
+    }
+
+    fn handle_timeout(&mut self, _now: Instant) -> std::result::Result<(), Error> {
+        Ok(())
+    }
+
+    fn poll_timeout(&mut self) -> Option<Instant> {
+        None
+    }
+}
+
+impl Interceptor for FeedbackRecorder {
+    fn bind_local_stream(&mut self, info: &StreamInfo) {
+        if info.mime_type.ends_with("/ulpfec") {
+            self.seen.lock().unwrap().fec_streams.push(info.ssrc);
+        }
+    }
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 
 struct Peer {
@@ -66,6 +195,8 @@ struct Peer {
     tracks: usize,
     /// The SSRCs of `OnUnassociatedRtpDiscarded` events (RFC 8830 section 3.1).
     unassociated: Vec<u32>,
+    /// The congestion feedback the chain read about this peer's FEC streams.
+    feedback: Arc<Mutex<FeedbackSeen>>,
 }
 
 /// The ULPFEC interceptors of a peer's chain.
@@ -102,6 +233,15 @@ impl Peer {
             FecChain::Helper => configure_ulpfec_sessions(registry),
             FecChain::None => registry,
         };
+        let feedback = Arc::new(Mutex::new(FeedbackSeen::default()));
+        let registry = registry.with(
+            Slot::from(400),
+            FeedbackRecorder {
+                seen: feedback.clone(),
+                read_queue: VecDeque::new(),
+                write_queue: VecDeque::new(),
+            },
+        );
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(
@@ -122,6 +262,7 @@ impl Peer {
             rtp: vec![],
             tracks: 0,
             unassociated: vec![],
+            feedback,
         })
     }
 
@@ -251,6 +392,9 @@ impl World {
                     sequence_number,
                     marker: data[1] & 0x80 != 0,
                     lost,
+                    transport_wide_sequence_number: one_byte_extension(&data, TRANSPORT_CC_ID)
+                        .filter(|value| value.len() == 2)
+                        .map(|value| u16::from_be_bytes([value[0], value[1]])),
                 });
                 if lost {
                     continue;
@@ -1430,5 +1574,80 @@ fn fec_before_the_first_media_packet_of_an_undeclared_stream_is_dropped_silently
     assert_eq!(fec_stats.len(), 1, "{fec_stats:?}");
     assert_eq!(fec_stats[0].fec_packets_received, 3);
     assert_eq!(fec_stats[0].packets_recovered, 2);
+    Ok(())
+}
+
+/// A FEC session's congestion feedback. The FEC session is an RTP session on a transport of
+/// its own (RFC 5109 section 14.1, which keeps it separate for "the use of different network
+/// paths"), with a congestion controller of its own: RFC 8836 section 2 controls each path,
+/// and the media's controller cannot see this one. So its section states what the media
+/// sections state for that: the transport-wide sequence number extension with
+/// `a=rtcp-fb:<pt> transport-cc` (draft-holmer-rmcat-transport-wide-cc-extensions-01 sections 3
+/// and 4) and `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 6); the answer keeps them, under the
+/// offer's extension id; every FEC packet carries a transport-wide sequence number of the
+/// session's own sequence, and the sender's chain gets per-packet feedback about its FEC
+/// stream, from the FEC session's transport.
+#[test]
+fn a_fec_session_carries_its_own_congestion_feedback() -> Result<()> {
+    let mut world = World::with_chains(true, FecChain::FixedAmount, FecChain::FixedAmount)?;
+    let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
+    let (offer, answer) = world.negotiate()?;
+    let twcc = rtci::sdp::extmap::TRANSPORT_CC_URI;
+    for (what, sdp) in [("offer", &offer), ("answer", &answer)] {
+        let fec = &sections(sdp)[1];
+        assert_eq!(
+            fec.iter()
+                .filter(|l| l.starts_with("a=extmap:"))
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![format!("a=extmap:{TRANSPORT_CC_ID} {twcc}").as_str()],
+            "{what}: {sdp}"
+        );
+        assert!(fec.contains(&"a=rtcp-fb:127 transport-cc"), "{what}: {sdp}");
+        assert!(fec.contains(&"a=rtcp-fb:127 ack ccfb"), "{what}: {sdp}");
+    }
+    let mids: Vec<String> = sections(&offer)
+        .iter()
+        .filter_map(|section| value(section, "mid").map(str::to_owned))
+        .collect();
+    world.gather()?;
+    world.run("connect", |p| p[0].connected && p[1].connected)?;
+    let fec_from = world.peers[0].addr_of(&mids[1])?;
+    for sequence_number in 0..100u16 {
+        world.send_video(
+            sender,
+            sequence_number,
+            u32::from(sequence_number / 5),
+            sequence_number % 5 == 4,
+        )?;
+        world.advance(Duration::from_millis(10))?;
+    }
+    world.advance(Duration::from_secs(1))?;
+
+    let numbers: Vec<Option<u16>> = world
+        .srtp
+        .iter()
+        .filter(|packet| packet.from == fec_from)
+        .map(|packet| packet.transport_wide_sequence_number)
+        .collect();
+    assert_eq!(numbers.len(), 20, "one FEC packet per frame");
+    let numbers: Vec<u16> = numbers
+        .into_iter()
+        .collect::<Option<_>>()
+        .context("every FEC packet carries a transport-wide sequence number")?;
+    for pair in numbers.windows(2) {
+        assert_eq!(
+            pair[1],
+            pair[0].wrapping_add(1),
+            "the session's own sequence: {numbers:?}"
+        );
+    }
+
+    let seen = world.peers[0].feedback.lock().unwrap();
+    assert_eq!(seen.fec_streams.len(), 1, "{seen:?}");
+    assert!(
+        seen.transport_cc + seen.ccfb > 0,
+        "feedback about the FEC stream reached the sender: {seen:?}"
+    );
     Ok(())
 }

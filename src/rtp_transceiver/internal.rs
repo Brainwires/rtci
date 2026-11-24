@@ -136,6 +136,65 @@ pub(crate) struct FecSessionFormat {
     pub(crate) clock_rate: u32,
     /// `onelevelonly=1` (section 13).
     pub(crate) one_level_only: bool,
+    /// The section's per-packet congestion feedback: a FEC session is an RTP session on a
+    /// transport and path of its own, with a congestion controller of its own (RFC 8836
+    /// section 2, RFC 8834 section 7), which needs it.
+    pub(crate) feedback: FecSessionFeedback,
+}
+
+/// The per-packet congestion control feedback a FEC session's section states: the
+/// transport-wide sequence number extension (`a=extmap`, draft-holmer-rmcat-transport-wide-cc-
+/// extensions-01 section 4) with `a=rtcp-fb:<pt> transport-cc`, and RFC 8888 `a=rtcp-fb:<pt>
+/// ack ccfb` (section 6), as the media sections state them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FecSessionFeedback {
+    /// The id of the transport-wide sequence number extension in the section, when it states
+    /// both the extension and `transport-cc` feedback for its format.
+    pub(crate) transport_cc_extension: Option<u8>,
+    /// `a=rtcp-fb:<pt> ack ccfb`.
+    pub(crate) ccfb: bool,
+}
+
+impl FecSessionFeedback {
+    /// What both sides stated: the feedback in use. The extension id is the remote
+    /// description's, which an answer takes from the offer (RFC 8285 section 6).
+    pub(crate) fn negotiated(local: Self, remote: Self) -> Self {
+        Self {
+            transport_cc_extension: remote
+                .transport_cc_extension
+                .filter(|_| local.transport_cc_extension.is_some()),
+            ccfb: local.ccfb && remote.ccfb,
+        }
+    }
+
+    /// The header extensions and RTCP feedback a stream of the FEC session is bound with, so
+    /// the chain numbers its packets and reports their arrival on the session's transport.
+    pub(crate) fn stream_info(
+        self,
+    ) -> (
+        Vec<interceptor::RTPHeaderExtension>,
+        Vec<interceptor::RTCPFeedback>,
+    ) {
+        let mut extensions = vec![];
+        let mut feedback = vec![];
+        if let Some(id) = self.transport_cc_extension {
+            extensions.push(interceptor::RTPHeaderExtension {
+                uri: ::sdp::extmap::TRANSPORT_CC_URI.to_owned(),
+                id: u16::from(id),
+            });
+            feedback.push(interceptor::RTCPFeedback {
+                typ: "transport-cc".to_owned(),
+                parameter: String::new(),
+            });
+        }
+        if self.ccfb {
+            feedback.push(interceptor::RTCPFeedback {
+                typ: "ack".to_owned(),
+                parameter: "ccfb".to_owned(),
+            });
+        }
+        (extensions, feedback)
+    }
 }
 
 /// What a transceiver that is a FEC session knows about it.
