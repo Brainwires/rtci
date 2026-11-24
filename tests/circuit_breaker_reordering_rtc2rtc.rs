@@ -40,8 +40,8 @@ const RECORDED_RTX_SSRC: u32 = 0x1234_5679;
 /// DTLS handshake, whose ephemeral keys no seed reaches, so the datagrams' bytes differ from
 /// run to run whatever the chain wrote; this is what the chain wrote. Retransmissions and
 /// probe padding on the RTX stream are left out: the NACK responder draws the RTX stream's
-/// first sequence number from `rand`. The CNAME of the SDES items is replaced by a fixed one:
-/// the peer connection draws it from `rand` too.
+/// first sequence number from `rand` (`normalised` masks what of it the receiver reports, and
+/// the CNAME, which the peer connection draws from `rand` too).
 struct WireTap {
     wire: Wire,
     read_queue: VecDeque<TaggedPacket>,
@@ -72,7 +72,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
             Packet::Rtcp(packets) if !packets.is_empty() => {
                 let packets: Vec<Box<dyn rtc::rtcp::Packet>> = packets
                     .iter()
-                    .map(|packet| without_cname(packet.as_ref()))
+                    .map(|packet| normalised(packet.as_ref()))
                     .collect();
                 Some(rtc::rtcp::packet::marshal(&packets)?.to_vec())
             }
@@ -90,23 +90,46 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
     }
 }
 
-/// `packet`, with the text of any SDES CNAME item replaced by a fixed one of the same length.
-fn without_cname(packet: &dyn rtc::rtcp::Packet) -> Box<dyn rtc::rtcp::Packet> {
+/// `packet` without what the peer connection draws from `rand`, which no seed reaches: the
+/// text of an SDES CNAME item is replaced by a fixed one of the same length, and the sequence
+/// numbers of the RTX stream (whose first one the NACK responder draws) reported in a
+/// reception report block or an RFC 8888 report block are zeroed.
+fn normalised(packet: &dyn rtc::rtcp::Packet) -> Box<dyn rtc::rtcp::Packet> {
+    use rtc::rtcp::receiver_report::ReceiverReport;
     use rtc::rtcp::source_description::{SdesType, SourceDescription};
-    let Some(sdes) = packet.as_any().downcast_ref::<SourceDescription>() else {
-        return packet.cloned();
-    };
-    let mut sdes = sdes.clone();
-    for item in sdes
-        .chunks
-        .iter_mut()
-        .flat_map(|chunk| chunk.items.iter_mut())
-    {
-        if item.sdes_type == SdesType::SdesCname {
-            item.text = Bytes::from(vec![b'c'; item.text.len()]);
+    use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+    let any = packet.as_any();
+    if let Some(sdes) = any.downcast_ref::<SourceDescription>() {
+        let mut sdes = sdes.clone();
+        for item in sdes
+            .chunks
+            .iter_mut()
+            .flat_map(|chunk| chunk.items.iter_mut())
+        {
+            if item.sdes_type == SdesType::SdesCname {
+                item.text = Bytes::from(vec![b'c'; item.text.len()]);
+            }
         }
+        Box::new(sdes)
+    } else if let Some(rr) = any.downcast_ref::<ReceiverReport>() {
+        let mut rr = rr.clone();
+        for block in rr.reports.iter_mut() {
+            if block.ssrc == RECORDED_RTX_SSRC {
+                block.last_sequence_number = 0;
+            }
+        }
+        Box::new(rr)
+    } else if let Some(ccfb) = any.downcast_ref::<CcFeedbackReport>() {
+        let mut ccfb = ccfb.clone();
+        for block in ccfb.report_blocks.iter_mut() {
+            if block.media_ssrc == RECORDED_RTX_SSRC {
+                block.begin_sequence = 0;
+            }
+        }
+        Box::new(ccfb)
+    } else {
+        packet.cloned()
     }
-    Box::new(sdes)
 }
 
 impl Interceptor for WireTap {
