@@ -304,9 +304,11 @@ fn an_offer_has_the_mandatory_audio_and_video_formats() -> TestResult {
     Ok(())
 }
 
-/// Section 5.8 with the deployed stacks: webrtc-rs 0.17 and Pion write a feedback without
-/// parameters as `a=rtcp-fb:96 goog-remb ` (a trailing space). By default white space at the
-/// end of a value is not held against it, so their offers are answered;
+/// Section 5.8 with a deployed stack: webrtc-rs 0.17.x writes a feedback without parameters
+/// as `a=rtcp-fb:96 goog-remb ` (a trailing space, which RFC 4585 section 4.2's
+/// `rtcp-fb-param` does not allow; fixed on webrtc-rs's default branch, `rtc` commit 718d405,
+/// and in Pion v4.1.5, pion/webrtc#3207). By default white space at the end of a value is not
+/// held against it, so its offers are answered;
 /// `with_strict_sdp_attribute_grammar(true)` is the strict RFC reading, which refuses it. A
 /// value that is malformed otherwise is refused either way.
 #[test]

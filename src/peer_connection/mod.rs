@@ -737,6 +737,7 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
         configuration::interceptor_registry::configure_rtcp_reports_from(
             registry,
             setting_engine.crypto_provider(),
+            setting_engine.behaviour_profile(),
         )
     };
     // RFC 5104 section 7.2: a party that signals a codec control message "must" be able to
@@ -4860,8 +4861,18 @@ impl RTCPeerConnection {
     /// transport takes a new association: each writes its own new `tls-id` in its sections
     /// and runs its own handshake when the answer is applied.
     pub fn renew_dtls_association(&mut self) {
+        self.request_dtls_renewal(false);
+    }
+
+    /// [`Self::renew_dtls_association`]; `srtp_rekeying`: asked for by the connection itself
+    /// because an SRTP master key neared its lifetime.
+    pub(crate) fn request_dtls_renewal(&mut self, srtp_rekeying: bool) {
         for id in self.pipeline_context.transports.ids() {
-            self.with_transport(id, |pc| pc.dtls_transport_mut().renewal_requested = true);
+            self.with_transport(id, |pc| {
+                let dtls = pc.dtls_transport_mut();
+                dtls.renewal_requested = true;
+                dtls.renewal_for_srtp_rekeying = srtp_rekeying;
+            });
         }
         self.ice_credentials_to_replace = self.local_ice_ufrags();
         self.trigger_negotiation_needed();

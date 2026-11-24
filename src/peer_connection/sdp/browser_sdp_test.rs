@@ -128,7 +128,8 @@ fn real_offers_are_accepted_as_remote_descriptions() {
 /// nothing else, so a new form a real writer uses is either tolerated and listed here or
 /// fixed.
 ///
-/// - white space at the end of an attribute value: webrtc-rs 0.17 (and Pion) write a feedback
+/// - white space at the end of an attribute value (in `a=rtcp-fb`, RFC 4585 section 4.2's
+///   `rtcp-fb-param` allows none): webrtc-rs 0.17.x (and Pion before v4.1.5) writes a feedback
 ///   without parameters as `a=rtcp-fb:96 goog-remb ` in the text `create_offer` and
 ///   `create_answer` return (`format!("{} {} {}", pt, typ, parameter)`); the description it
 ///   re-writes once candidates are gathered has no such space.

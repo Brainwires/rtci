@@ -113,12 +113,15 @@ impl<'a> DtlsHandler<'a> {
             return Ok(());
         };
         // RFC 9147 section 5.8.2: where ICE has measured the round trip time of the path,
-        // the retransmission timer starts from 1.5 times it.
+        // the retransmission timer starts from 1.5 times it (`DtlsFlightInterval`; libwebrtc's
+        // rule takes twice it).
         let dtls_handshake_config = match self.selected_pair_round_trip_time() {
             Some(round_trip_time) => Arc::new(
                 dtls_handshake_config.with_flight_interval(
-                    (round_trip_time + round_trip_time / 2)
-                        .max(crate::peer_connection::transport::dtls::MINIMUM_FLIGHT_INTERVAL),
+                    self.ctx
+                        .dtls_transport
+                        .flight_interval_rule
+                        .initial(Some(round_trip_time)),
                 ),
             ),
             None => dtls_handshake_config,
@@ -1096,6 +1099,17 @@ mod tests {
             srtp_required: bool,
             peer: impl FnOnce(dtls::config::ConfigBuilder) -> dtls::config::ConfigBuilder,
         ) -> Result<Self> {
+            Self::new_configured(role, peer_profiles, srtp_required, peer, |_| {})
+        }
+
+        /// As [`Self::new_with`], with the transport changed by `configure` before it starts.
+        fn new_configured(
+            role: RTCDtlsRole,
+            peer_profiles: Vec<SrtpProtectionProfile>,
+            srtp_required: bool,
+            peer: impl FnOnce(dtls::config::ConfigBuilder) -> dtls::config::ConfigBuilder,
+            configure: impl FnOnce(&mut DtlsTransport),
+        ) -> Result<Self> {
             use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
             use crate::peer_connection::transport::ice::role::RTCIceRole;
             use dtls::config::{ConfigBuilder, ExtendedMasterSecretType};
@@ -1117,6 +1131,7 @@ mod tests {
                 },
             )?;
             transport.srtp_required = srtp_required;
+            configure(&mut transport);
             // The remote role is the inverse of the one the transport takes.
             let remote_role = if role == RTCDtlsRole::Client {
                 RTCDtlsRole::Server
@@ -1489,13 +1504,54 @@ mod tests {
     /// at 1.5 times that, and never under 100 ms.
     #[test]
     fn the_client_flight_interval_follows_the_ice_round_trip_time() -> Result<()> {
+        use crate::peer_connection::configuration::setting_engine::DtlsFlightInterval;
         use std::time::Duration;
-        for (round_trip_time, expected) in [
-            (None, Duration::from_millis(400)),
-            (Some(0.2), Duration::from_millis(300)),
-            (Some(0.01), Duration::from_millis(100)),
+        for (rule, round_trip_time, expected) in [
+            (
+                DtlsFlightInterval::Rfc9147,
+                None,
+                Duration::from_millis(400),
+            ),
+            (
+                DtlsFlightInterval::Rfc9147,
+                Some(0.2),
+                Duration::from_millis(300),
+            ),
+            (
+                DtlsFlightInterval::Rfc9147,
+                Some(0.01),
+                Duration::from_millis(100),
+            ),
+            // libwebrtc's ComputeRetransmissionTimeout: twice the round trip, within 50 ms
+            // and 3 s, and 50 ms without one.
+            (
+                DtlsFlightInterval::Libwebrtc,
+                None,
+                Duration::from_millis(50),
+            ),
+            (
+                DtlsFlightInterval::Libwebrtc,
+                Some(0.2),
+                Duration::from_millis(400),
+            ),
+            (
+                DtlsFlightInterval::Libwebrtc,
+                Some(0.01),
+                Duration::from_millis(50),
+            ),
+            (
+                DtlsFlightInterval::Libwebrtc,
+                Some(2.0),
+                Duration::from_secs(3),
+            ),
         ] {
-            let mut pair = HandlerAndPeer::new(RTCDtlsRole::Client, vec![], false)?;
+            let mut pair = HandlerAndPeer::new_configured(
+                RTCDtlsRole::Client,
+                vec![],
+                false,
+                |builder| builder,
+                |transport| transport.flight_interval_rule = rule,
+            )?;
             if let Some(round_trip_time) = round_trip_time {
                 pair.stats.transport.selected_candidate_pair_id = "pair".to_owned();
                 pair.stats.ice_candidate_pairs.insert(
@@ -1507,11 +1563,11 @@ mod tests {
                 );
             }
             let error = pair.run();
-            assert!(error.is_none(), "{round_trip_time:?}: {error:?}");
+            assert!(error.is_none(), "{rule:?} {round_trip_time:?}: {error:?}");
             assert_eq!(
                 pair.context.dtls_transport.flight_interval,
                 Some(expected),
-                "{round_trip_time:?}"
+                "{rule:?} {round_trip_time:?}"
             );
             assert_eq!(
                 pair.context.dtls_transport.state(),

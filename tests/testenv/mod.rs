@@ -42,6 +42,9 @@ pub struct Env {
     pub turn_tcp: SocketAddr,
     pub turn_tls: SocketAddr,
     pub turn_tls_name: String,
+    /// A coturn whose TLS stops at 1.2 (`coturn/turnserver-tls12.conf`), for the TURN over
+    /// TLS 1.2 tests; the main server (`turn_tls`) speaks TLS 1.3 and 1.2.
+    pub turn_tls12: Option<SocketAddr>,
     pub user: String,
     pub pass: String,
     pub realm: String,
@@ -70,6 +73,9 @@ impl Env {
             turn_tcp: var("RTC_TESTENV_TURN_TCP").parse().unwrap(),
             turn_tls: var("RTC_TESTENV_TURN_TLS").parse().unwrap(),
             turn_tls_name: var("RTC_TESTENV_TURN_TLS_NAME"),
+            turn_tls12: std::env::var("RTC_TESTENV_TURN_TLS12")
+                .ok()
+                .map(|v| v.parse().unwrap()),
             user: var("RTC_TESTENV_TURN_USER"),
             pass: var("RTC_TESTENV_TURN_PASS"),
             realm: var("RTC_TESTENV_TURN_REALM"),
@@ -263,12 +269,11 @@ fn tls_client_config(env: &Env) -> Arc<rustls::ClientConfig> {
     let provider = rustls::crypto::CryptoProvider::get_default()
         .cloned()
         .expect("install_crypto_provider() first");
+    // TLS 1.3 and 1.2, rustls's defaults: the environment's coturn negotiates TLS 1.3 (the
+    // explicit 1.3 and 1.2 cells are in tests/testenv_turn_streams.rs).
     Arc::new(
-        // TLS 1.2 only: the environment's coturn (4.6, OpenSSL 3) answers every TLS 1.3
-        // ClientHello with a handshake_failure alert, `openssl s_client -tls1_3` included,
-        // instead of negotiating down. Its TLS 1.2 (ECDHE-ECDSA-AES-GCM) works.
         rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS12])
+            .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth(),

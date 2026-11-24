@@ -2436,6 +2436,12 @@ pub enum Error {
     /// ICETransport can only be called in ICETransportStateNew.
     #[error("ICETransport can only be called in ICETransportStateNew")]
     ErrICETransportNotInNew,
+    /// A local UDP candidate on a transport address the previous DTLS association used, given
+    /// for the new association that replaces it (RFC 8842 sections 5.1 and 6: a new 3-tuple).
+    #[error(
+        "local candidate on {0}, a transport address of the previous DTLS association: a new DTLS association needs a new local address or port (RFC 8842 section 5.1)"
+    )]
+    ErrICECandidateAddressOfPreviousDtlsAssociation(std::net::SocketAddr),
     /// Bad Certificate PEM format.
     #[error("bad Certificate PEM format")]
     ErrCertificatePEMFormatError,

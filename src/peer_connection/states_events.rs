@@ -10,8 +10,8 @@
 
 use super::RTCPeerConnection;
 use crate::peer_connection::event::{
-    RTCPeerConnectionEvent, RTCPeerConnectionIceErrorEvent, RTCPeerConnectionIceEvent,
-    RTCTransportEvent, RTCTransportEventKind,
+    RTCLocalCandidatesNeededEvent, RTCPeerConnectionEvent, RTCPeerConnectionIceErrorEvent,
+    RTCPeerConnectionIceEvent, RTCTransportEvent, RTCTransportEventKind,
 };
 use crate::peer_connection::handler::transport_set::{
     TransportAnnounced, aggregate_gathering_state,
@@ -362,6 +362,7 @@ impl RTCPeerConnection {
     /// The active transport starts gathering its ICE generation, unless it has already: the
     /// gatherer goes to "gathering", with its events.
     pub(crate) fn begin_gathering_generation(&mut self) {
+        self.announce_local_candidates_needed();
         let ufrag = self
             .ice_transport()
             .agent
@@ -376,6 +377,62 @@ impl RTCPeerConnection {
         }
         self.active_announced_mut().gathering_ufrag = Some(ufrag);
         self.set_gathering_state(RTCIceGatheringState::Gathering);
+    }
+
+    /// `OnLocalCandidatesNeeded` for the active transport, when it dropped its local
+    /// candidates (`IceTransport::candidates_needed`) and the local description has m=
+    /// sections on it: right before its gathering begins (W3C 5.6), so that the application
+    /// gathers the generation on new addresses (RFC 8842 section 5.1).
+    fn announce_local_candidates_needed(&mut self) {
+        if self.ice_transport().candidates_needed.is_none() {
+            return;
+        }
+        let active = self.pipeline_context.transports.active_id();
+        let mids: Vec<String> = self
+            .pending_local_description
+            .as_ref()
+            .or(self.current_local_description.as_ref())
+            .and_then(|description| description.parsed.as_ref())
+            .map(|description| {
+                description
+                    .media_descriptions
+                    .iter()
+                    .filter(|media| !crate::peer_connection::sdp::is_rejected_media(media))
+                    .filter_map(crate::peer_connection::sdp::get_mid_value)
+                    .filter(|mid| self.pipeline_context.transports.transport_id_for(mid) == active)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if mids.is_empty() {
+            // No section is on it yet: the description that sets one up tells.
+            return;
+        }
+        let Some(reason) = self.ice_transport_mut().candidates_needed.take() else {
+            return;
+        };
+        let ice = self.ice_transport();
+        let sdp_mline_index = ice
+            .local_media_section
+            .as_ref()
+            .filter(|(mid, _)| mids.first() == Some(mid))
+            .map(|(_, index)| *index);
+        let refused_addresses = if reason.needs_new_addresses() {
+            ice.previous_association_addresses.clone()
+        } else {
+            vec![]
+        };
+        let event = RTCLocalCandidatesNeededEvent {
+            ice_transport: ice.id,
+            dtls_transport: self.dtls_transport().id,
+            mids,
+            sdp_mline_index,
+            reason,
+            refused_addresses,
+        };
+        self.pipeline_context
+            .event_outs
+            .push_back(RTCPeerConnectionEvent::OnLocalCandidatesNeeded(event));
     }
 
     /// W3C 5.6 "the ICE agent has finished gathering" for the active transport's current

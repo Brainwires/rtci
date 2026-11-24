@@ -113,6 +113,12 @@ const MAX_REPORT_BLOCKS: usize = 31;
 /// The fraction lost (in 1/256: about 10%) from which a stream's report goes before the round
 /// robin when not every report fits (RFC 8083 section 4.3).
 const HIGH_LOSS_FRACTION: u8 = 26;
+/// The longest `T_rr_interval` the RTCP bandwidth left over by congestion control feedback
+/// stretches the regular reports to ([`RtcpSessionBuilder::with_congestion_feedback_in_budget`]),
+/// seconds: RFC 4585 section 5 (interworking with AVP) has `T_rr_interval` "SHOULD NOT be larger
+/// than five seconds" where RTP/AVP entities may take part.
+const MAX_BUDGET_T_RR_INTERVAL: f64 = 5.0;
+
 /// The least interval the session computes, in seconds. RTP/AVPF has no minimum for a
 /// point-to-point session (RFC 4585 3.5.1), so with enough bandwidth the calculated interval
 /// tends to nothing; a timer cannot.
@@ -307,6 +313,8 @@ pub struct RtcpSessionBuilder {
     point_to_point: Option<bool>,
     report_from_every_ssrc: bool,
     immediate_congestion_feedback: bool,
+    congestion_feedback_in_budget: bool,
+    minimum_session_bandwidth: u64,
     joins_on_start: bool,
     first_report_at_join: bool,
     random: Box<dyn RtcpRandom>,
@@ -326,6 +334,8 @@ impl Default for RtcpSessionBuilder {
             point_to_point: None,
             report_from_every_ssrc: false,
             immediate_congestion_feedback: true,
+            congestion_feedback_in_budget: false,
+            minimum_session_bandwidth: RTCP_SESSION_MIN_BANDWIDTH,
             joins_on_start: false,
             first_report_at_join: false,
             random: Box::new(ThreadRandom),
@@ -433,6 +443,35 @@ impl RtcpSessionBuilder {
         self
     }
 
+    /// Whether the congestion control feedback that leaves at once
+    /// ([`Self::with_immediate_congestion_feedback`]) counts against the RTCP bandwidth the
+    /// regular reports share (`true`), or comes on top of it (`false`, the default).
+    ///
+    /// With `true` the session measures the congestion control feedback it sends and receives
+    /// over the last two seconds, and spaces its regular reports so that they and the
+    /// feedback together stay inside the RTCP bandwidth (RFC 3550 section 6.2: 5% of the
+    /// session bandwidth): the regular interval computed with what the feedback leaves becomes
+    /// a `T_rr_interval` (RFC 4585 section 3.5.3, which suppresses regular reports inside it
+    /// and lets feedback through), no longer than five seconds. Regular reports become rarer
+    /// at low media rates and nothing else changes. Part of the `Performance` behaviour
+    /// profile.
+    pub fn with_congestion_feedback_in_budget(mut self, in_budget: bool) -> Self {
+        self.congestion_feedback_in_budget = in_budget;
+        self
+    }
+
+    /// The least session bandwidth the RTCP bandwidth is computed from when no `b=` line gives
+    /// one and the media is measured, bits per second. Default
+    /// [`RTCP_SESSION_MIN_BANDWIDTH`] (64 kbit/s). Below it the measured media rate is not
+    /// used, so a 24 kbit/s audio call reports as a 64 kbit/s one would (RFC 3550 section 6.2
+    /// lets the session bandwidth be the expected one). The `Performance` behaviour profile
+    /// takes 16 kbit/s, so the RTCP bandwidth follows the media down to there. Held to at
+    /// least 8 kbit/s, so a session with no media still reports.
+    pub fn with_minimum_session_bandwidth(mut self, bits_per_second: u64) -> Self {
+        self.minimum_session_bandwidth = bits_per_second.max(8_000);
+        self
+    }
+
     /// Whether the session joins only when told [`RtcpSessionControl::Start`] (`true`), or at
     /// the first control, packet or stream it is given (`false`, the default).
     ///
@@ -497,6 +536,8 @@ impl RtcpSessionBuilder {
             point_to_point: template.point_to_point,
             report_from_every_ssrc: template.report_from_every_ssrc,
             immediate_congestion_feedback: template.immediate_congestion_feedback,
+            congestion_feedback_in_budget: template.congestion_feedback_in_budget,
+            minimum_session_bandwidth: template.minimum_session_bandwidth,
             joins_on_start: template.joins_on_start,
             first_report_at_join: template.first_report_at_join,
             random: Box::new(random.clone()),
@@ -542,6 +583,11 @@ impl RtcpSessionBuilder {
             srtcp_overhead: 0,
             rate: RateWindow::default(),
             immediate_congestion_feedback: self.immediate_congestion_feedback,
+            congestion_feedback_in_budget: self.congestion_feedback_in_budget,
+            minimum_session_bandwidth: self.minimum_session_bandwidth,
+            congestion_feedback_rate: RateWindow::default(),
+            regular_size: 0.0,
+            sending_regular: false,
             outside_budget: false,
             pending: Vec::new(),
             repeats: Vec::new(),
@@ -803,6 +849,16 @@ pub struct RtcpSessionInterceptor {
     rate: RateWindow,
     /// Whether congestion control feedback leaves as soon as it is written.
     immediate_congestion_feedback: bool,
+    /// [`RtcpSessionBuilder::with_congestion_feedback_in_budget`].
+    congestion_feedback_in_budget: bool,
+    /// [`RtcpSessionBuilder::with_minimum_session_bandwidth`], bits per second.
+    minimum_session_bandwidth: u64,
+    /// The congestion control feedback sent and received, with SRTCP, over the last seconds.
+    congestion_feedback_rate: RateWindow,
+    /// The average size of this endpoint's regular compound packets per reporting SSRC.
+    regular_size: f64,
+    /// Set while a regular packet is sent.
+    sending_regular: bool,
     /// Set while a packet is sent outside the RTCP bandwidth's timing (immediate congestion
     /// feedback): it does not move the average packet size the regular interval rests on.
     outside_budget: bool,
@@ -994,6 +1050,19 @@ impl RtcpSessionInterceptor {
         if packets.is_empty() {
             return;
         }
+        if self.outside_budget {
+            self.congestion_feedback_rate
+                .add(now, wire_size(&packets) + self.srtcp_overhead);
+        }
+        if self.sending_regular {
+            let size = (wire_size(&packets) + self.srtcp_overhead) as f64
+                / reporting_ssrcs(&packets) as f64;
+            self.regular_size = if self.regular_size > 0.0 {
+                update_avg_rtcp_size(self.regular_size, size)
+            } else {
+                size
+            };
+        }
         // RFC 3550 6.3.6 with RFC 8108 5.3.1: the average takes the size per reporting SSRC.
         if !self.outside_budget {
             let size = (wire_size(&packets) + self.srtcp_overhead) as f64
@@ -1109,7 +1178,7 @@ impl RtcpSessionInterceptor {
                 } else {
                     measured
                 };
-                measured.max(RTCP_SESSION_MIN_BANDWIDTH as f64)
+                measured.max(self.minimum_session_bandwidth as f64)
             }
         }
     }
@@ -1250,6 +1319,40 @@ impl RtcpSessionInterceptor {
         let td = deterministic_interval(&self.interval_input(now, we_sent, initial, senders));
         let random = self.unit();
         randomized_interval(td, random).max(MIN_INTERVAL)
+    }
+
+    /// The `T_rr_interval` regular reports keep (RFC 4585 3.5.3), seconds: the configured or
+    /// negotiated one, or with [`RtcpSessionBuilder::with_congestion_feedback_in_budget`] the
+    /// regular interval in what the RTCP bandwidth leaves after the congestion control
+    /// feedback, whichever is longer (at most [`MAX_BUDGET_T_RR_INTERVAL`]).
+    fn effective_t_rr_interval(&self, index: usize, now: Instant) -> f64 {
+        if !self.congestion_feedback_in_budget {
+            return self.t_rr_interval;
+        }
+        let (rtcp_bw, sender_fraction) = self.rtcp_bandwidth(now);
+        let feedback = self.congestion_feedback_rate.bits_per_second(now) / 8.0;
+        let left = rtcp_bw - feedback;
+        let size = if self.regular_size > 0.0 {
+            self.regular_size
+        } else {
+            self.avg_rtcp_size
+        };
+        let budget = if left <= 0.0 {
+            MAX_BUDGET_T_RR_INTERVAL
+        } else {
+            let input = IntervalInput {
+                members: self.member_count().max(1),
+                senders: self.sender_count(now),
+                rtcp_bw: left,
+                sender_fraction,
+                we_sent: self.we_sent(index, now),
+                avg_rtcp_size: size,
+                t_min: 0.0,
+                initial: false,
+            };
+            deterministic_interval(&input).min(MAX_BUDGET_T_RR_INTERVAL)
+        };
+        self.t_rr_interval.max(budget)
     }
 
     // ---- joining ---------------------------------------------------------------------
@@ -1567,6 +1670,23 @@ impl RtcpSessionInterceptor {
         let size =
             (wire_size(packets) + self.srtcp_overhead) as f64 / reporting_ssrcs(packets) as f64;
         let mut goodbyes = 0;
+        let feedback: usize = packets
+            .iter()
+            .filter(|packet| {
+                let any = packet.as_any();
+                any.is::<TransportLayerCc>() || any.is::<CcFeedbackReport>()
+            })
+            .map(|packet| packet.marshal_size())
+            .sum();
+        if feedback > 0 {
+            // A reduced-size packet's SRTCP fields are the feedback's own.
+            let reduced = !packets.iter().any(|packet| {
+                let any = packet.as_any();
+                any.is::<SenderReport>() || any.is::<ReceiverReport>()
+            });
+            let overhead = if reduced { self.srtcp_overhead } else { 0 };
+            self.congestion_feedback_rate.add(now, feedback + overhead);
+        }
 
         for packet in packets {
             let any = packet.as_any();
@@ -2466,8 +2586,9 @@ impl RtcpSessionInterceptor {
                 RtcpProfile::Avp => RegularDecision::Send,
                 RtcpProfile::Avpf => {
                     let random = self.unit();
+                    let t_rr_interval = self.effective_t_rr_interval(index, tc);
                     regular_decision(
-                        self.t_rr_interval,
+                        t_rr_interval,
                         timing.t_rr_last,
                         tc,
                         random,
@@ -2509,7 +2630,9 @@ impl RtcpSessionInterceptor {
     /// A Regular RTCP packet led by the local SSRC `first`, and the timers of every SSRC it
     /// carried (RFC 8108 5.3.2, steps a to d).
     fn send_regular(&mut self, now: Instant, first: usize) {
+        self.sending_regular = true;
         let included = self.send_compound(now, first, Shape::Full);
+        self.sending_regular = false;
 
         // a. The SSRC whose timer expired transmitted at tc. b. Each SSRC aggregated with it
         // would have transmitted when its own timer passed reconsideration.

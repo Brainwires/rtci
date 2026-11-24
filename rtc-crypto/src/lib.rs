@@ -9,6 +9,7 @@ mod hkdf;
 #[cfg(feature = "openssl")]
 mod openssl_ctr;
 mod provider;
+mod rsa_pkcs1;
 mod secret;
 mod traits;
 
@@ -33,6 +34,7 @@ pub use hkdf::{hkdf_expand, hkdf_expand_label, hkdf_extract};
 #[cfg(feature = "openssl")]
 pub use openssl_ctr::openssl_aes_ctr;
 pub use provider::default_provider;
+pub use rsa_pkcs1::{rsa_pkcs1_hash, verify_rsa_pkcs1_without_digest_parameters};
 pub use secret::SecretVec;
 pub use traits::*;
 

@@ -27,7 +27,17 @@
 //!
 //! The WebSocket URL's query `?ssrc_per_clock_rate=1` builds the peer connection with
 //! `SettingEngineBuilder::with_ssrc_per_clock_rate(true)` (RFC 7160 section 4.1: a new SSRC
-//! per clock rate); without it, the engine's default (one SSRC across clock rates).
+//! per clock rate), and `?profile=chrome` (or `rfc`, `strict-rfc`, `performance`) under that
+//! behaviour profile (`docs/behaviour-profiles.md`): `SettingEngineBuilder::with_behaviour_profile`
+//! and `MediaEngine::for_profile`, the settings below applied after it. Without them the peer
+//! takes the build's default profile and its value. `?previous_addresses=1` builds it with
+//! `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)`: a new DTLS
+//! association keeps the transport's candidates and addresses. Without it (the RFC 8842
+//! section 5.1 default), when the engine says a transport needs new local candidates
+//! (`OnLocalCandidatesNeeded`: the transport set up after every m= section was rejected, or
+//! an ICE restart for a new association), the peer binds a new UDP socket, adds its host
+//! candidate for the event's section and trickles it to the browser; the previous socket
+//! keeps being read and written until the session ends.
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -61,6 +71,7 @@ use rtc::media::io::h26x_reader::H26xSampleReader;
 use rtc::media::io::ivf_reader::IVFReader;
 use rtc::media::io::ogg_reader::OggReader;
 use rtc::media_stream::{MediaStreamTrack, MediaStreamTrackId};
+use rtc::peer_connection::configuration::BehaviourProfile;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_simulcast_extension_headers, register_default_interceptors,
 };
@@ -129,21 +140,39 @@ async fn main() -> Result<()> {
         let (stream, from) = listener.accept().await?;
         let (ip, dir) = (cli.ice_ip, cli.media_dir.clone());
         tokio::spawn(async move {
-            let mut ssrc_per_clock_rate = false;
+            let mut ssrc_per_clock_rate = None;
+            let mut previous_addresses = false;
+            let mut profile = BehaviourProfile::default();
+            let mut unknown_profile = None;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
             #[allow(clippy::result_large_err)]
             let options = |request: &Request, response: Response| {
-                ssrc_per_clock_rate = request
-                    .uri()
-                    .query()
-                    .unwrap_or_default()
-                    .split('&')
-                    .any(|pair| pair == "ssrc_per_clock_rate=1");
+                for pair in request.uri().query().unwrap_or_default().split('&') {
+                    if pair == "ssrc_per_clock_rate=1" {
+                        ssrc_per_clock_rate = Some(true);
+                    } else if pair == "previous_addresses=1" {
+                        previous_addresses = true;
+                    } else if let Some(name) = pair.strip_prefix("profile=") {
+                        match BehaviourProfile::from_name(name) {
+                            Some(named) => profile = named,
+                            None => unknown_profile = Some(name.to_owned()),
+                        }
+                    }
+                }
                 Ok::<_, ErrorResponse>(response)
             };
             match tokio_tungstenite::accept_hdr_async(stream, options).await {
                 Ok(ws) => {
-                    if let Err(e) = Session::run(ws, ip, dir, ssrc_per_clock_rate).await {
+                    if let Some(name) = unknown_profile {
+                        eprintln!("session {from}: unknown profile {name:?}");
+                        return;
+                    }
+                    let options = SessionOptions {
+                        ssrc_per_clock_rate,
+                        previous_addresses,
+                        profile,
+                    };
+                    if let Err(e) = Session::run(ws, ip, dir, options).await {
                         eprintln!("session {from}: {e:#}");
                     }
                 }
@@ -371,6 +400,14 @@ fn renumber(next_sequence: &mut Option<u16>, p: &mut rtc::rtp::Packet) {
 /// An accepted ICE-TCP connection: frames for it go to its writer task.
 type TcpOut = mpsc::UnboundedSender<Vec<u8>>;
 
+/// What the WebSocket URL's query asks of a session.
+struct SessionOptions {
+    ssrc_per_clock_rate: Option<bool>,
+    /// `previous_addresses=1`: `with_dtls_new_association_on_previous_addresses(true)`.
+    previous_addresses: bool,
+    profile: BehaviourProfile,
+}
+
 struct Session {
     pc: RTCPeerConnection,
     sock: UdpSocket,
@@ -392,6 +429,9 @@ struct Session {
     /// Scenario `udp_blocked`: no ICE datagram leaves or is taken.
     udp_blocked: bool,
     candidates_added: bool,
+    /// A transport needed new local candidates (`OnLocalCandidatesNeeded`): its candidates,
+    /// gathered after the descriptions, are trickled to the browser.
+    trickle_local: bool,
     out: Vec<Value>,
     media: String,
     scenario: Value,
@@ -446,12 +486,17 @@ impl Session {
         ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
         ip: IpAddr,
         media_dir: String,
-        ssrc_per_clock_rate: bool,
+        options: SessionOptions,
     ) -> Result<()> {
+        let SessionOptions {
+            ssrc_per_clock_rate,
+            previous_addresses,
+            profile,
+        } = options;
         let (mut ws_tx, mut ws_rx) = ws.split();
         let sock = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
         let local = sock.local_addr()?;
-        let mut me = MediaEngine::default();
+        let mut me = MediaEngine::for_profile(profile);
         me.register_default_codecs()?;
         configure_simulcast_extension_headers(&mut me)?;
         let registry = register_default_interceptors(Registry::new(), &mut me)?;
@@ -461,13 +506,24 @@ impl Session {
         // holds what it sends to 16 KB (RFC 8831 section 6.6); the scenarios echo 64 KiB and
         // 256 KiB messages to a browser, so this peer sends as browsers do.
         let setting_engine = SettingEngineBuilder::new()
+            .with_behaviour_profile(profile)
             .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(
                 SctpMaxMessageSize::MAX_MESSAGE_SIZE,
             ))
             .with_sctp_message_size_limit_without_interleaving(false)
-            .with_multicast_dns_mode(MulticastDnsMode::QueryOnly)
-            .with_ssrc_per_clock_rate(ssrc_per_clock_rate)
-            .build();
+            .with_multicast_dns_mode(MulticastDnsMode::QueryOnly);
+        // The profile's value unless the URL names one (`Rfc`: a new SSRC per clock rate).
+        let setting_engine = if previous_addresses {
+            setting_engine.with_dtls_new_association_on_previous_addresses(true)
+        } else {
+            setting_engine
+        };
+        let setting_engine = match ssrc_per_clock_rate {
+            Some(per_clock_rate) => setting_engine.with_ssrc_per_clock_rate(per_clock_rate),
+            None => setting_engine,
+        }
+        .build();
+        println!("session on {local}: behaviour profile {profile}");
         let pc = RTCPeerConnectionBuilder::new()
             .with_media_engine(me)
             .with_setting_engine(setting_engine)
@@ -504,6 +560,7 @@ impl Session {
             udp_blocked: false,
             tcp_in,
             candidates_added: false,
+            trickle_local: false,
             out: vec![],
             media: String::new(),
             scenario: Value::Null,
@@ -756,6 +813,84 @@ impl Session {
             self.pc.add_local_candidate(candidate)?;
             self.transport_socks.push((sock, local, mid));
         }
+        Ok(())
+    }
+
+    /// `OnLocalCandidatesNeeded`: the transport of `needed.mids[0]` holds none of its local
+    /// candidates any more. When its previous addresses are refused (a new DTLS association
+    /// runs on a new 3-tuple, RFC 8842 section 5.1) a new UDP socket takes their place: the
+    /// previous one stays open (read and written as a transport socket) for the packets of the
+    /// pair still selected. Otherwise (`DiscardedBySetting`) the same socket's candidate is
+    /// given again. The candidate goes to the browser by trickle ICE.
+    fn gather_anew(
+        &mut self,
+        needed: &rtc::peer_connection::event::RTCLocalCandidatesNeededEvent,
+    ) -> Result<()> {
+        let Some(mid) = needed.mids.first().cloned() else {
+            return Ok(());
+        };
+        self.trickle_local = true;
+        let main = needed.refused_addresses.contains(&self.local)
+            || !self
+                .transport_socks
+                .iter()
+                .any(|(_, _, m)| needed.mids.contains(m));
+        let local = if !needed.reason.needs_new_addresses() {
+            if main {
+                self.local
+            } else {
+                self.transport_socks
+                    .iter()
+                    .find(|(_, _, m)| needed.mids.contains(m))
+                    .map(|(_, local, _)| *local)
+                    .unwrap_or(self.local)
+            }
+        } else {
+            let std_sock = std::net::UdpSocket::bind(SocketAddr::new(self.ice_ip, 0))?;
+            std_sock.set_nonblocking(true)?;
+            let sock = UdpSocket::from_std(std_sock)?;
+            let local = sock.local_addr()?;
+            if main {
+                // The previous socket is read and written as a transport socket from now on.
+                let previous = std::mem::replace(&mut self.sock, sock);
+                let previous_local = std::mem::replace(&mut self.local, local);
+                self.transport_socks.push((
+                    previous,
+                    previous_local,
+                    format!("previous:{previous_local}"),
+                ));
+            } else {
+                for entry in self
+                    .transport_socks
+                    .iter_mut()
+                    .filter(|(_, _, m)| needed.mids.contains(m))
+                {
+                    entry.2 = format!("previous:{}", entry.1);
+                }
+                self.transport_socks.push((sock, local, mid.clone()));
+            }
+            local
+        };
+        let host = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: local.ip().to_string(),
+                port: local.port(),
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()?;
+        let mut candidate = RTCIceCandidate::from(&host).to_json()?;
+        candidate.sdp_mid = Some(mid.clone());
+        candidate.sdp_mline_index = needed.sdp_mline_index;
+        self.pc.add_local_candidate(candidate)?;
+        self.pc.add_local_candidate(RTCIceCandidateInit {
+            sdp_mid: Some(mid),
+            sdp_mline_index: needed.sdp_mline_index,
+            ..Default::default()
+        })?;
         Ok(())
     }
 
@@ -1269,7 +1404,14 @@ impl Session {
             match e {
                 // Scenario `engine_tcp`: the engine's TCP candidates come after the
                 // description; they are trickled (RFC 8838).
-                RTCPeerConnectionEvent::OnIceCandidateEvent(ev) if self.driver.is_some() => {
+                RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => {
+                    if let Err(e) = self.gather_anew(&needed) {
+                        self.errors.push(format!("gathering anew: {e:#}"));
+                    }
+                }
+                RTCPeerConnectionEvent::OnIceCandidateEvent(ev)
+                    if self.driver.is_some() || self.trickle_local =>
+                {
                     if let Some(c) = ev.candidate.filter(|c| !c.end_of_candidates)
                         && let Ok(init) = c.to_json()
                     {
