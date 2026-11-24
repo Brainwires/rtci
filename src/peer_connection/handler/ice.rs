@@ -54,6 +54,9 @@ pub(crate) struct IceHandlerContext {
     /// there is one, if it came from a valid pair, instead of waiting for its retransmission.
     /// At most [`MAX_EARLY_DTLS_DATAGRAMS`], the latest kept.
     pub(crate) early_dtls: VecDeque<TaggedRTCMessageInternal>,
+    /// RTP and RTCP packets written while the transport had no path to send them on
+    /// (`RTCPeerConnection::unsent_media_packets`).
+    pub(crate) unsent_media: u64,
 }
 
 /// Most DTLS datagrams held before ICE has a path ([`IceHandlerContext::early_dtls`]): a
@@ -75,6 +78,7 @@ impl IceHandlerContext {
             lite_candidate_update: None,
             lite_candidate_update_raised: false,
             early_dtls: VecDeque::new(),
+            unsent_media: 0,
         }
     }
 }
@@ -194,6 +198,12 @@ impl<'a> IceHandler<'a> {
             }
             self.ctx.early_dtls.push_back(msg);
         } else {
+            // Media written with no path to send it on is lost: counted, so that it does not
+            // vanish unseen (`RTCPeerConnection::unsent_media_packets`).
+            if matches!(msg.message, RTCMessageInternal::Rtp(_)) {
+                self.ctx.unsent_media += 1;
+                debug!("rtp/rtcp written with no ICE path: not sent");
+            }
             trace!(
                 "drop message from {:?} to {:?} before ICE connection is connected",
                 msg.transport.peer_addr, msg.transport.local_addr
