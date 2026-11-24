@@ -54,6 +54,8 @@ use rtc::rtp_transceiver::{
 use rtc::sansio::Protocol;
 use rtc::shared::time::SystemInstant;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtc::statistics::StatsSelector;
+use rtc::statistics::report::RTCStatsReportEntry;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -405,6 +407,10 @@ struct Peer {
     key_requests_received: u32,
     /// When the application was told of a selected candidate pair, with the estimate then.
     pair_changes: Vec<(Duration, Option<u32>)>,
+    /// The lowest `availableOutgoingBitrate` of the nominated pair (webrtc-stats) and the
+    /// lowest estimate of the congestion controller, each read every 100 ms once there is one.
+    lowest_outgoing: Option<f64>,
+    lowest_estimate: Option<u32>,
     /// Octets of video frames the application wrote.
     video_octets: u64,
     /// (time, estimate) each time the congestion controller's estimate moved, looked at
@@ -659,6 +665,8 @@ impl Peer {
             pacer_discards: Vec::new(),
             key_requests_received: 0,
             pair_changes: Vec::new(),
+            lowest_outgoing: None,
+            lowest_estimate: None,
             video_octets: 0,
             estimates: Vec::new(),
         })
@@ -772,6 +780,19 @@ impl Peer {
             (None, Some(handles)) => Some(handles.congestion_control.target_bitrate() as u32),
             _ => None,
         }
+    }
+
+    /// `availableOutgoingBitrate` of the nominated candidate pair.
+    fn available_outgoing(&mut self, now: Instant) -> Option<f64> {
+        self.pc
+            .get_stats(now, StatsSelector::None)
+            .iter()
+            .find_map(|entry| match entry {
+                RTCStatsReportEntry::IceCandidatePair(pair) if pair.nominated => {
+                    pair.available_outgoing_bitrate
+                }
+                _ => None,
+            })
     }
 
     /// The estimator's delay-based and loss-based halves.
@@ -1072,6 +1093,18 @@ impl World {
                 self.peers[1].unusable,
             ));
             for peer in self.peers.iter_mut() {
+                if let Some(outgoing) = peer.available_outgoing(now) {
+                    peer.lowest_outgoing = Some(
+                        peer.lowest_outgoing
+                            .map_or(outgoing, |low| low.min(outgoing)),
+                    );
+                }
+                if let Some(estimate) = peer.estimate() {
+                    peer.lowest_estimate = Some(
+                        peer.lowest_estimate
+                            .map_or(estimate, |low| low.min(estimate)),
+                    );
+                }
                 if let Some(bps) = peer.media_target()
                     && bps != peer.target_bps
                 {
@@ -1342,6 +1375,10 @@ struct Outcome {
     pauses: Vec<(Duration, Duration)>,
     resumed_after: Vec<Duration>,
     unusable: u64,
+    /// The caller's lowest congestion estimate and lowest `availableOutgoingBitrate` of the
+    /// whole call (read every 100 ms): neither is the pause.
+    lowest_estimate: Option<u32>,
+    lowest_outgoing: Option<f64>,
 }
 
 /// The call: 20 s open, the caller's uplink capped at 300 kbit/s until 20 s after its
@@ -1464,27 +1501,31 @@ fn run(setup: &Setup) -> Result<Outcome> {
         pauses,
         resumed_after,
         unusable: callee.unusable,
+        lowest_estimate: caller.lowest_estimate,
+        lowest_outgoing: caller.lowest_outgoing,
     })
 }
 
-/// How long the cap is held in the permanent tests: 20 s on all six seeds, and 14, 17, 23 and
-/// 26 s on three. A bound that holds at one length only can be the phase of the estimate's
-/// climb at the instant the cap goes (the estimator this engine had until
-/// v0.22.0+brainwires.6 gave 945, 1192, 477 to 1316, 549 and 693 kbit/s twenty seconds after
-/// caps of these five lengths, whatever the retransmission rule).
-const CAP_LENGTHS: [(u64, std::ops::RangeInclusive<u64>); 5] = [
-    (20, 1..=6),
-    (14, 1..=3),
-    (17, 1..=3),
-    (23, 1..=3),
-    (26, 1..=3),
-];
+/// How long the cap is held in the permanent tests: 20 s on all six seeds ([`CAP_20`]), and
+/// 14, 17, 23 and 26 s on two ([`CAP_LENGTHS`]), each set a test of its own under each rule
+/// so that they run side by side (fourteen runs per rule; a third seed of each length is in
+/// `measure_the_capacity_cap`'s reach: `RTC_CAP_SECONDS=14,17,23,26 RTC_CAP_SEEDS=3`). A
+/// bound that holds at one length only can be the phase of the estimate's climb at the
+/// instant the cap goes (the estimator this engine had until v0.22.0+brainwires.6 gave 945,
+/// 1192, 477 to 1316, 549 and 693 kbit/s twenty seconds after caps of these five lengths,
+/// whatever the retransmission rule).
+const CAP_LENGTHS: [(u64, std::ops::RangeInclusive<u64>); 4] =
+    [(14, 1..=2), (17, 1..=2), (23, 1..=2), (26, 1..=2)];
+const CAP_20: [(u64, std::ops::RangeInclusive<u64>); 1] = [(20, 1..=6)];
 
-/// The cap lengths and seeds of [`CAP_LENGTHS`] under `rate_limit` (`None`: the engine's
-/// default), each outcome printed; with the cap's length and the seed.
-fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, u64, Outcome)>> {
+/// The cap `lengths` and their seeds under `rate_limit` (`None`: the engine's default), each
+/// outcome printed; with the cap's length and the seed.
+fn seeds(
+    rate_limit: Option<RetransmissionRateLimit>,
+    lengths: &[(u64, std::ops::RangeInclusive<u64>)],
+) -> Result<Vec<(u64, u64, Outcome)>> {
     let mut outcomes = Vec::new();
-    for (cap, seeds) in CAP_LENGTHS {
+    for (cap, seeds) in lengths.iter().cloned() {
         for seed in seeds {
             let mut setup = Setup::new(seed, rate_limit).anchor(ANCHORS[0]);
             setup.cap = Duration::from_secs(cap);
@@ -1552,19 +1593,27 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
 /// is asked for while it is missing, the retransmissions stay within the estimate, and the
 /// encoder leaves them room.
 ///
-/// The cap is held 14, 17, 20, 23 and 26 s ([`CAP_LENGTHS`]) and the same bounds hold at each
-/// ([`assert_the_call_holds`]): with the engine's GCC estimator behind the TWCC-driven
-/// interceptor (a loss-based estimate of its own, over-use backing off from the received
-/// rate, the estimate within one and a half times the received rate: draft-ietf-rmcat-gcc-02
-/// sections 5.5 and 6) the estimate holds about 250 kbit/s of the 300 under the cap and is
-/// at 1 to 1.35 Mbit/s twenty seconds after it, whenever the cap goes.
+/// The cap is held 20 s here and 14, 17, 23 and 26 s in the next test ([`CAP_LENGTHS`]), and
+/// the same bounds hold at each ([`assert_the_call_holds`]): with the engine's GCC estimator
+/// behind the TWCC-driven interceptor (a loss-based estimate of its own, over-use backing off
+/// from the received rate, the estimate not increased past one and a half times the received
+/// rate: draft-ietf-rmcat-gcc-02 sections 5.5 and 6) the estimate holds about 250 kbit/s of
+/// the 300 under the cap and is at 1 to 1.35 Mbit/s twenty seconds after it, whenever the cap
+/// goes.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()> {
     // Measured (hosted runs 45315535896, 45312738975): freeze 0.83 to 1.24 s at 20 s (0.88
     // to 1.75 s before retransmissions left oldest first), the oldest picture 2.26 to 3.21 s,
     // 43 to 66 retransmissions, 238 to 266 kbit/s under the cap, 988 to 1352 kbit/s twenty
     // seconds after it at every length.
-    assert_the_call_holds(&seeds(None)?, Duration::from_millis(3_500));
+    assert_the_call_holds(&seeds(None, &CAP_20)?, Duration::from_millis(3_500));
+    Ok(())
+}
+
+/// The same bounds whenever the cap goes: after 14, 17, 23 and 26 s.
+#[test]
+fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
+    assert_the_call_holds(&seeds(None, &CAP_LENGTHS)?, Duration::from_millis(3_500));
     Ok(())
 }
 
@@ -1578,7 +1627,18 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
     // freeze 0.84 to 1.29 s, the oldest picture 2.37 to 3.49 s, 42 to 78 retransmissions
     // (17 to 27 dropped at the link's queue, against 14 to 17 under the default).
     assert_the_call_holds(
-        &seeds(Some(RetransmissionRateLimit::UpToTarget))?,
+        &seeds(Some(RetransmissionRateLimit::UpToTarget), &CAP_20)?,
+        Duration::from_millis(4_000),
+    );
+    Ok(())
+}
+
+/// And under that setting whenever the cap goes: after 14, 17, 23 and 26 s.
+#[test]
+fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions_up_to_the_target()
+-> Result<()> {
+    assert_the_call_holds(
+        &seeds(Some(RetransmissionRateLimit::UpToTarget), &CAP_LENGTHS)?,
         Duration::from_millis(4_000),
     );
     Ok(())
@@ -1590,7 +1650,8 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
 #[test]
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
-    seeds(Some(RetransmissionRateLimit::Unlimited))?;
+    seeds(Some(RetransmissionRateLimit::Unlimited), &CAP_20)?;
+    seeds(Some(RetransmissionRateLimit::Unlimited), &CAP_LENGTHS)?;
     Ok(())
 }
 
@@ -1692,6 +1753,19 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         assert!(
             !outcome.pauses.is_empty(),
             "seed {seed}: never paused: {outcome:?}"
+        );
+        // The pause is the pacer's word to the source and nothing else: the congestion
+        // controller's estimate is never zero, and `availableOutgoingBitrate` reports the
+        // estimate through every pause.
+        assert!(
+            outcome.lowest_estimate.is_some_and(|low| low >= MIN_BPS),
+            "seed {seed}: the estimator paused: {outcome:?}"
+        );
+        assert!(
+            outcome
+                .lowest_outgoing
+                .is_some_and(|low| low >= f64::from(MIN_BPS)),
+            "seed {seed}: availableOutgoingBitrate lost the estimate in a pause: {outcome:?}"
         );
         for after in &outcome.resumed_after {
             assert!(
@@ -1870,15 +1944,17 @@ fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<(
             "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
         );
         // The estimator's own word on it: the loss it counted after the switch (the packets
-        // of the outage counted, some thirty of thirty-five, would read 0.8). The estimate
-        // itself may back off after the switch for what the new path shows (over-use sets it
-        // to 0.85 of the received rate: 178 kbit/s here), which is not the old path's loss.
+        // of the outage counted, some thirty of thirty-five, would read 0.8). And the
+        // estimate does not go under the start rate in the three seconds after the switch:
+        // the new path loses and queues nothing. (Until the bound by the received rate
+        // stopped lowering an estimate, it fell to 178 kbit/s here, one and a half times
+        // what arrived once the first key frame had left the measurement window.)
         assert!(
             outcome.most_loss_after < 0.1,
             "seed {seed}: the old path's packets counted as lost: {outcome:?}"
         );
         assert!(
-            outcome.lowest_after >= 150_000,
+            outcome.lowest_after >= 300_000,
             "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
         );
@@ -1911,7 +1987,7 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
             "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
         );
         assert!(
-            outcome.lowest_after >= 150_000,
+            outcome.lowest_after >= 300_000,
             "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
         );
@@ -1938,6 +2014,10 @@ struct OpenLinkOutcome {
     video_bits: [u64; 2],
     /// The same for the target the encoder followed (read every 100 ms).
     target_step_down: [Option<(Duration, u32, u32)>; 2],
+    /// The lowest target the encoder was given (zero is the pacer's pause) and the lowest
+    /// `availableOutgoingBitrate`.
+    lowest_target: [Option<u32>; 2],
+    lowest_outgoing: [Option<f64>; 2],
 }
 
 /// The call of ParolNet's `the_estimate_climbs_on_an_open_link`: thirty-five seconds on a
@@ -1962,6 +2042,8 @@ fn open_link_run(setup: &Setup) -> Result<OpenLinkOutcome> {
         last: [0, 1].map(|i| peers[i].estimates.last().map(|(_, bps)| *bps)),
         video_bits: [0, 1].map(|i| peers[i].video_octets * 8),
         target_step_down: [0, 1].map(|i| first_step_down(&peers[i].targets)),
+        lowest_target: [0, 1].map(|i| peers[i].targets.iter().map(|(_, bps)| *bps).min()),
+        lowest_outgoing: [0, 1].map(|i| peers[i].lowest_outgoing),
     })
 }
 
@@ -1990,6 +2072,19 @@ fn assert_the_estimate_climbs(setup: &Setup, outcome: &OpenLinkOutcome, by: Dura
             "{setup:?} {who}: {} bits of video in 35 s: {outcome:?}",
             outcome.video_bits[i]
         );
+        // No pause without a pacer queue, and where the peer connection has the estimate
+        // (the default chain) `availableOutgoingBitrate` never reports less than the start
+        // rate on this link.
+        assert!(
+            outcome.lowest_target[i].is_none_or(|low| low >= 300_000),
+            "{setup:?} {who}: a target under the start rate: {outcome:?}"
+        );
+        if setup.chain != Chain::ParolNet {
+            assert!(
+                outcome.lowest_outgoing[i].is_some_and(|low| low >= 300_000.0),
+                "{setup:?} {who}: availableOutgoingBitrate: {outcome:?}"
+            );
+        }
     }
 }
 
@@ -2055,6 +2150,10 @@ struct CameraOutcome {
     callee_at_end: Option<u32>,
     /// Usable video frames each side decoded.
     usable: [usize; 2],
+    /// The lowest target each encoder was given (zero is the pacer's pause) and the lowest
+    /// `availableOutgoingBitrate`.
+    lowest_target: [Option<u32>; 2],
+    lowest_outgoing: [Option<f64>; 2],
 }
 
 /// The call of ParolNet's `a_call_gains_and_loses_video_by_renegotiation`, on an open link:
@@ -2097,6 +2196,8 @@ fn camera_run(setup: &Setup) -> Result<CameraOutcome> {
         callee_at_off,
         callee_at_end: peers[1].estimate(),
         usable: [0, 1].map(|i| peers[i].usable_at.len()),
+        lowest_target: [0, 1].map(|i| peers[i].targets.iter().map(|(_, bps)| *bps).min()),
+        lowest_outgoing: [0, 1].map(|i| peers[i].lowest_outgoing),
     })
 }
 
@@ -2118,6 +2219,19 @@ fn assert_the_estimate_is_held(setup: &Setup, outcome: &CameraOutcome) {
             outcome.usable[i] > 100,
             "{setup:?} {who}: the other side's video was not seen: {outcome:?}"
         );
+        // What the application is told: never a pause (there is no pacer queue to drain),
+        // never under the start rate, and in the default chain `availableOutgoingBitrate`
+        // says the same.
+        assert!(
+            outcome.lowest_target[i].is_none_or(|low| low >= 300_000),
+            "{setup:?} {who}: a target under the start rate on a perfect link: {outcome:?}"
+        );
+        if setup.chain != Chain::ParolNet {
+            assert!(
+                outcome.lowest_outgoing[i].is_some_and(|low| low >= 300_000.0),
+                "{setup:?} {who}: availableOutgoingBitrate on a perfect link: {outcome:?}"
+            );
+        }
     }
     assert_eq!(
         Some(300_000),

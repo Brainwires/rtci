@@ -996,6 +996,56 @@ fn an_idle_sender_is_not_cut_for_missing_feedback() {
     assert_eq!(before, harness.handle.target_bitrate());
 }
 
+/// Feedback is missing only for packets that feedback covers. The video (transport-wide
+/// sequence numbers) stops; the audio, a stream that negotiated no per-packet feedback, goes
+/// on for five seconds. Nothing will ever report those packets, so no timer runs for them and
+/// the target stays where it was: before, they started the wait like any packet and the
+/// target was halved every 500 ms down to the floor on a path that had shown nothing.
+#[test]
+fn packets_of_a_stream_without_per_packet_feedback_do_not_start_the_wait_for_feedback() {
+    const AUDIO: u32 = LOCAL + 100;
+    let mut harness = Harness::new(Gcc::new(1_000_000.0, 50_000.0, 10_000_000.0));
+    harness.chain.bind_local_stream(&StreamInfo {
+        ssrc: AUDIO,
+        clock_rate: 48_000,
+        payload_type: 111,
+        ..Default::default()
+    });
+
+    // A second of video with feedback every 100 ms: the feedback has a rhythm.
+    let mut acknowledged = 0u16;
+    for index in 0..100u64 {
+        harness.send(ms(index * 10), 1200);
+        if index % 10 == 9 {
+            harness.acknowledge(ms(index * 10 + 5), acknowledged, 10, ms(10));
+            acknowledged += 10;
+        }
+    }
+    let before = harness.handle.target_bitrate();
+
+    // The camera goes off; the audio carries on, 50 packets a second.
+    for index in 0..250u16 {
+        let at = ms(1000 + u64::from(index) * 20);
+        let packet = rtp::Packet {
+            header: rtp::header::Header {
+                version: 2,
+                payload_type: 111,
+                sequence_number: index,
+                ssrc: AUDIO,
+                ..Default::default()
+            },
+            payload: vec![0u8; 150].into(),
+        };
+        let message = harness.tagged(at, Packet::Rtp(packet));
+        harness.chain.handle_write(message).expect("write");
+        harness.drain();
+        assert_eq!(None, harness.deadline(), "no feedback is awaited at {at:?}");
+        harness.tick(at);
+    }
+
+    assert_eq!(before, harness.handle.target_bitrate());
+}
+
 /// A receiver that holds its feedback to the RTCP bandwidth reports every few hundred
 /// milliseconds at a low media rate. That rhythm is not missing feedback: the timeout is three
 /// of the receiver's own intervals when those are longer than 500 ms.

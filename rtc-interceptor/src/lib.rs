@@ -334,7 +334,7 @@ pub use gcc::queue_limit::{
 pub use gcc::rate_calc::{DEFAULT_WINDOW as GCC_RATE_WINDOW, RateCalculator};
 pub use gcc::rate_control::{
     DEFAULT_DECREASE_FACTOR as GCC_DECREASE_FACTOR, DEFAULT_INCREASE_FACTOR as GCC_INCREASE_FACTOR,
-    DEFAULT_RATE_CONTROL_INTERVAL as GCC_RATE_CONTROL_INTERVAL, RateController,
+    DEFAULT_RATE_CONTROL_INTERVAL as GCC_RATE_CONTROL_INTERVAL, RateController, ReceivedRateBound,
 };
 pub use gcc::remb::{
     ABS_SEND_TIME_SLOT, ABS_SEND_TIME_URI, AbsSendTimeInterceptor, GOOG_REMB,

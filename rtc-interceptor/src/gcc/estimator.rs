@@ -4,7 +4,7 @@ use super::loss::LossController;
 use super::overuse::{OveruseDetector, Usage};
 use super::queue_limit::QueueLimitDetector;
 use super::rate_calc::RateCalculator;
-use super::rate_control::RateController;
+use super::rate_control::{RateController, ReceivedRateBound};
 use super::slope::SlopeEstimator;
 use super::threshold::ThresholdTimeBase;
 use crate::cc::estimator::{BandwidthEstimator, EstimatorStats};
@@ -117,6 +117,8 @@ pub struct Gcc {
     last_feedback: Option<Instant>,
     /// When a packet was last sent.
     last_sent: Option<Instant>,
+    /// When a packet that per-packet feedback will report was last sent.
+    last_reported_sent: Option<Instant>,
     /// When the missing-feedback cut next applies: set while packets sent after the last
     /// feedback are waiting for theirs.
     feedback_deadline: Option<Instant>,
@@ -185,6 +187,7 @@ impl Gcc {
             initial,
             last_feedback: None,
             last_sent: None,
+            last_reported_sent: None,
             feedback_deadline: None,
             feedback_timeout: DEFAULT_FEEDBACK_TIMEOUT,
             loss_capped_by_delay: true,
@@ -224,6 +227,22 @@ impl Gcc {
     /// [`RateController::with_one_decrease_per_round_trip`].
     pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
         self.delay_control = self.delay_control.with_one_decrease_per_round_trip(enabled);
+        self
+    }
+
+    /// What the bound of the estimate by the received rate (draft-ietf-rmcat-gcc-02 section
+    /// 5.5, `A_hat(i) < 1.5 * R_hat(i)`) does to an estimate above it: nothing but stop its
+    /// increase ([`ReceivedRateBound::LimitsIncrease`], the default), or bring it down to
+    /// the bound ([`ReceivedRateBound::Clamps`]). See [`ReceivedRateBound`].
+    ///
+    /// With the default an application that sends less than the estimate (audio alone, a
+    /// camera turned off, the first moments of a call) keeps the estimate it had: it is
+    /// lowered by over-use, by loss, and by feedback that stops while packets it covers are
+    /// sent, and by nothing else.
+    pub fn with_received_rate_bound(mut self, received_rate_bound: ReceivedRateBound) -> Self {
+        self.delay_control = self
+            .delay_control
+            .with_received_rate_bound(received_rate_bound);
         self
     }
 
@@ -405,11 +424,18 @@ impl BandwidthEstimator for Gcc {
         self.feedback_deadline = None;
     }
 
-    fn on_packet_sent(&mut self, now: Instant, _size: usize) {
+    /// A packet that no per-packet feedback will report: the flow is not paused, and its
+    /// feedback is not awaited.
+    fn on_unreported_packet_sent(&mut self, now: Instant, _size: usize) {
         if let Some(last) = self.last_sent {
             self.resume_after(now.saturating_duration_since(last));
         }
         self.last_sent = Some(now);
+    }
+
+    fn on_packet_sent(&mut self, now: Instant, size: usize) {
+        self.on_unreported_packet_sent(now, size);
+        self.last_reported_sent = Some(now);
         // Only once feedback has a rhythm (two reports) is its absence unexpected: a receiver
         // that never sends any is handled by the receiver-report fallback, and one that has
         // sent a single report has not yet shown how often it reports.
@@ -505,6 +531,7 @@ impl BandwidthEstimator for Gcc {
         self.loss_control.cap(self.target);
         self.loss_control.raise(self.target);
         self.last_sent = None;
+        self.last_reported_sent = None;
     }
 
     fn handle_timeout(&mut self, now: Instant) {
@@ -519,7 +546,7 @@ impl BandwidthEstimator for Gcc {
             // Keep counting only while packets are still going out.
             let timeout = self.effective_feedback_timeout();
             self.feedback_deadline = self
-                .last_sent
+                .last_reported_sent
                 .is_some_and(|sent| sent + timeout > deadline)
                 .then(|| deadline + timeout);
         }

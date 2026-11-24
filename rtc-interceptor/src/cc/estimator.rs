@@ -60,6 +60,12 @@ pub trait BandwidthEstimator: Send + Sync {
     /// an estimator tell "nothing was sent" from "something was sent and nothing came back".
     fn on_packet_sent(&mut self, _now: Instant, _size: usize) {}
 
+    /// A packet left for the network on a stream that negotiated no per-packet feedback (no
+    /// transport-wide sequence numbers, no RFC 8888): nothing will ever report it, so an
+    /// estimator that counts on feedback for what it sent ([`on_packet_sent`](Self::on_packet_sent))
+    /// must not wait for this packet's.
+    fn on_unreported_packet_sent(&mut self, _now: Instant, _size: usize) {}
+
     /// A round trip time measured from feedback: the instant a packet left to the instant the
     /// feedback naming it was read, less nothing, so it includes the receiver's reporting delay.
     fn on_round_trip_time(&mut self, _now: Instant, _round_trip_time: std::time::Duration) {}

@@ -21,16 +21,19 @@
 //! - Section 5.5: on over-use "A_hat(i) = beta * R_hat(i)", the received rate. The old one
 //!   multiplied its estimate by 0.85.
 //! - Section 5.5: "A_hat(i) < 1.5 * R_hat(i)". The old one had no such bound: its estimate
-//!   climbed to the maximum whatever was sent.
+//!   climbed to the maximum whatever was sent. Now the estimate is not increased past the
+//!   bound, and one that is above it is held.
 //!
 //! What an application polling the handle notices: the estimate no longer runs ahead of what
-//! is sent (at most one and a half times the rate the receiver reports as arriving, so a
-//! source that sends little is given a target near what it sends, and climbs from there when
-//! it sends more); feedback that stops while packets are sent halves the estimate
-//! ([`Gcc::with_feedback_timeout`]); a REMB or a TMMBR from the peer bounds it.
+//! is sent (it is not increased past one and a half times the rate the receiver reports as
+//! arriving); an estimate once reached is kept while the application sends less (audio
+//! alone, a camera turned off), and is lowered by over-use, by loss and by feedback that
+//! stops while packets are sent, which halves it ([`Gcc::with_feedback_timeout`]), and by
+//! nothing else ([`ReceivedRateBound`]); a REMB or a TMMBR from the peer bounds it.
 //!
 //! [`Gcc`]: crate::Gcc
 //! [`Gcc::with_feedback_timeout`]: crate::Gcc::with_feedback_timeout
+//! [`ReceivedRateBound`]: crate::ReceivedRateBound
 //! [`configure_congestion_control`]: https://docs.rs/rtc
 //!
 //! # Chain position
@@ -84,6 +87,7 @@ use crate::cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
 };
 use crate::gcc::estimator::{DEFAULT_INITIAL_BITRATE, Gcc};
+use crate::gcc::rate_control::ReceivedRateBound;
 use crate::stream_info::StreamInfo;
 use crate::{Interceptor, Packet, TaggedPacket, interceptor};
 use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
@@ -165,6 +169,7 @@ impl GccHandle {
 pub struct GccInterceptorBuilder<P> {
     min_bitrate_bps: u32,
     max_bitrate_bps: u32,
+    received_rate_bound: ReceivedRateBound,
     shared: Arc<Mutex<GccShared>>,
     _phantom: PhantomData<P>,
 }
@@ -187,6 +192,7 @@ impl<P> GccInterceptorBuilder<P> {
         let builder = Self {
             min_bitrate_bps: 30_000,
             max_bitrate_bps: 2_500_000,
+            received_rate_bound: ReceivedRateBound::default(),
             shared,
             _phantom: PhantomData,
         };
@@ -205,6 +211,15 @@ impl<P> GccInterceptorBuilder<P> {
         self
     }
 
+    /// What the bound of the estimate by the received rate does to an estimate above it
+    /// ([`Gcc::with_received_rate_bound`](crate::Gcc::with_received_rate_bound)): by default
+    /// it only stops the increase, so the estimate is kept while the application sends less
+    /// than it.
+    pub fn with_received_rate_bound(mut self, received_rate_bound: ReceivedRateBound) -> Self {
+        self.received_rate_bound = received_rate_bound;
+        self
+    }
+
     /// Build the interceptor factory closure.
     pub fn build(self) -> impl FnOnce(P) -> GccInterceptor<P> {
         move |inner| {
@@ -213,7 +228,8 @@ impl<P> GccInterceptorBuilder<P> {
                 f64::from(self.max_bitrate_bps).max(f64::from(self.min_bitrate_bps)),
             );
             // The estimate starts at 300 kbit/s, and starts over from there on a new path.
-            let estimator = Gcc::new(DEFAULT_INITIAL_BITRATE, min, max);
+            let estimator = Gcc::new(DEFAULT_INITIAL_BITRATE, min, max)
+                .with_received_rate_bound(self.received_rate_bound);
             let (control, handle) = CongestionControlBuilder::new(estimator).build_with_handle();
             GccInterceptor {
                 inner,
