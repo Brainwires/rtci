@@ -163,6 +163,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **congestion control, a congestion window over the octets in flight (libwebrtc's form, the
+  `Chrome` profile)** (`conf/ccnext2-3-congestion-window`): the feedback history counts the
+  octets in flight (sent and not yet named by any per-packet feedback, as libwebrtc's
+  `TransportFeedbackAdapter` counts its outstanding data: a feedback that names a packet takes it
+  and every packet before it out of flight). `CongestionControlBuilder::with_congestion_window`
+  / `DefaultInterceptorOptions::cc_congestion_window` keep libwebrtc's window over them: the
+  target times (the least of the recent feedbacks' longest round trips + 350 ms), averaged with
+  the window before, at least 3000 octets; while the octets in flight reach it the pacer holds
+  its queue but for one packet every 500 ms (`CongestionWindowState`, new, on the read leg).
+  `None` by default: none of draft-ietf-rmcat-gcc-02, RFC 8836 or RFC 8888 bounds the data in
+  flight (RFC 8836 requirement 10 asks for a reaction to missing feedback, which the
+  estimator's feedback timeout gives); the `Chrome` profile row `cc.congestion-window` is
+  `Some(350ms)` (`rate_control_settings.cc` at a222406d: `QueueSize:350` by default). Not
+  built: libwebrtc's encoder pushback (`DropFrame`). Measured in
+  `tests/capacity_cap_video_rtc2rtc.rs` (hosted run 45443488672, default chain): after a 4 s
+  outage and an ICE restart (six seeds) 182 kB into the dead path (136 to 138 kB in its first
+  1.3 s) against 333 kB (256 kB), and the callee frozen 0.26 s from one second after the
+  switch against 7.9 to 8.0 s (no frame to the end of the run); at the sudden capacity drop
+  (six seeds on three wall clocks) longest freeze 0.76 to 1.26 s (0.74 to 1.04), oldest
+  picture 5.26 to 7.82 s (3.87 to 7.08), 49 to 78 retransmissions (56 to 89), recovery mean
+  1084 to 2500 kbit/s (965 to 2500): worse at the drop, which is why it is not the default.
+  The chain without a pacer (ParolNet's) has nothing a window could hold.
+
 - **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
   time paired with the instant the peer connection is built, for the values it writes on the
   wall clock itself: the `o=` session version, the receivers' source timestamps and the NTP
