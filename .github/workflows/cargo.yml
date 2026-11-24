@@ -18,6 +18,7 @@ env:
 
 jobs:
   build:
+    timeout-minutes: 20
     name: Build
     strategy:
       matrix:
@@ -29,6 +30,7 @@ jobs:
         run: cargo build --verbose
 
   test:
+    timeout-minutes: 45
     # The name master's branch rules require (it carried the matrix's OS suffix before).
     name: Test (default backend) (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -156,6 +158,7 @@ jobs:
   # request), the clause audit's counts and the nested lock files (`cargo metadata --locked`,
   # the runner's preinstalled cargo). Python only: no build.
   test_inventory:
+    timeout-minutes: 20
     name: Test inventory, upstream parity, fuzz registry, workflows
     runs-on: ubuntu-latest
     steps:
@@ -186,6 +189,7 @@ jobs:
   # matrix: the workspace builds with it, and the profile's own tests pass with it (the other
   # suites assume the RFC defaults, which the feature replaces on purpose).
   chrome_defaults:
+    timeout-minutes: 30
     name: Feature chrome-defaults (check, profile tests)
     runs-on: ubuntu-latest
     env:
@@ -207,6 +211,7 @@ jobs:
 
   # The same for `performance-defaults` (BehaviourProfile::Performance as the default).
   performance_defaults:
+    timeout-minutes: 30
     name: Feature performance-defaults (check, profile tests)
     runs-on: ubuntu-latest
     env:
@@ -227,6 +232,7 @@ jobs:
           cargo test --package rtci --features performance-defaults --test behaviour_profiles --verbose
 
   crypto_backend_baseline:
+    timeout-minutes: 45
     name: Crypto baseline (${{ matrix.backend }})
     runs-on: ubuntu-latest
     # The whole workspace's test build of every feature set outgrew the hosted runner's disk
@@ -262,6 +268,7 @@ jobs:
         run: df -h
 
   rtci_crypto_provider_matrix:
+    timeout-minutes: 20
     name: rtci-crypto (${{ matrix.name }})
     runs-on: ubuntu-latest
     # No incremental cache and no debug info (panics still print file:line): the test build of
@@ -295,6 +302,7 @@ jobs:
         run: df -h
 
   rtci_crypto_custom_provider:
+    timeout-minutes: 20
     name: rtci-crypto (no built-in, custom provider)
     runs-on: ubuntu-latest
     # No incremental cache and no debug info (panics still print file:line): the test build of
@@ -318,6 +326,7 @@ jobs:
         run: df -h
 
   workspace_provider_matrix:
+    timeout-minutes: 45
     name: Workspace (${{ matrix.name }})
     runs-on: ubuntu-latest
     # The whole workspace's test build of every feature set outgrew the hosted runner's disk
@@ -362,6 +371,7 @@ jobs:
         run: df -h
 
   standalone_crate_checks:
+    timeout-minutes: 20
     name: Standalone crates (${{ matrix.backend }})
     runs-on: ubuntu-latest
     strategy:
@@ -396,6 +406,7 @@ jobs:
           cargo check --package rtci-media  --all-targets --verbose
 
   crypto_dependency_audit:
+    timeout-minutes: 10
     name: Crypto dependency boundary
     runs-on: ubuntu-latest
     steps:
@@ -420,6 +431,7 @@ jobs:
           fi
 
   sans_io_deterministic_time_audit:
+    timeout-minutes: 10
     name: Sans-I/O deterministic time boundary
     runs-on: ubuntu-latest
     steps:
@@ -433,6 +445,7 @@ jobs:
         run: python3 scripts/check-sans-io-deterministic-time.py
 
   package_publication_order:
+    timeout-minutes: 20
     name: cargo package (publication order)
     runs-on: ubuntu-latest
     steps:
@@ -474,6 +487,7 @@ jobs:
   # The workspace builds on its declared `rust-version` (the workspace manifest), every
   # feature. Dependencies resolve to versions that support that toolchain where one exists.
   msrv:
+    timeout-minutes: 30
     name: MSRV (rust-version, all features)
     runs-on: ubuntu-latest
     env:
@@ -491,6 +505,7 @@ jobs:
         run: cargo check --workspace --all-features --verbose
 
   rustfmt_and_clippy:
+    timeout-minutes: 30
     name: Check rustfmt style && run clippy
     runs-on: ubuntu-latest
     steps:
