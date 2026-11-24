@@ -174,15 +174,6 @@ pub enum RtcpSessionControl {
     TrrIntCleared,
     /// The endpoint leaves the session: every local SSRC says BYE.
     Leave,
-    /// The SSRC to report from while the endpoint sends no media, in place of one the session
-    /// draws: the SSRC the endpoint will give its first stream. RFC 8108 section 6.1: "An
-    /// endpoint that has never sent an RTP stream will have an SSRC that it uses for RTCP
-    /// reporting. If that endpoint wants to start sending an RTP stream, it is RECOMMENDED
-    /// that it use its existing SSRC for that stream". A local stream bound later under this
-    /// SSRC takes the reporting SSRC over, with no BYE and no new participant. Taken only
-    /// before the session first joins, and only when no source uses it; afterwards (and
-    /// after [`Self::Leave`]) the session draws its reporting SSRCs itself.
-    ReportingSsrc(u32),
     /// What identifies the local stream `ssrc` beyond the CNAME: the identification-tag of
     /// its m= section (RFC 9143 section 15.1, SDES `MID`), its RtpStreamId (RFC 8852 section
     /// 3.1) and, for a redundancy stream (RTX, FEC), the RepairedRtpStreamId of the stream it
@@ -290,6 +281,16 @@ pub enum RtcpSessionEvent {
     SourceTimedOut {
         /// The remote SSRC.
         ssrc: u32,
+    },
+    /// The SSRC the session reports from while the endpoint has no media SSRC, which it drew
+    /// itself; `None` once there is none (a stream took it over, it said BYE). RFC 8108
+    /// section 6.1: "An endpoint that has never sent an RTP stream will have an SSRC that it
+    /// uses for RTCP reporting. If that endpoint wants to start sending an RTP stream, it is
+    /// RECOMMENDED that it use its existing SSRC for that stream". A local stream bound under
+    /// this SSRC takes it over: the same participant, no BYE.
+    ReportingSsrc {
+        /// The reporting SSRC, or `None`.
+        ssrc: Option<u32>,
     },
     /// RFC 3550 6.4.1: the round-trip time to the receiver that reported on the local `ssrc`.
     RoundTripTime {
@@ -590,8 +591,7 @@ impl RtcpSessionBuilder {
             joins_on_start: self.joins_on_start,
             first_report_at_join: self.first_report_at_join,
             start_given: false,
-            preferred_reporter: None,
-            joined_once: false,
+            announced_reporter: None,
             started: false,
             left: false,
             locals: Vec::new(),
@@ -853,10 +853,8 @@ pub struct RtcpSessionInterceptor {
     first_report_at_join: bool,
     /// [`RtcpSessionControl::Start`] was given since the session was built or last left.
     start_given: bool,
-    /// [`RtcpSessionControl::ReportingSsrc`], until the session first joins.
-    preferred_reporter: Option<u32>,
-    /// Whether the session has joined since it was built (a rejoin draws a new reporting SSRC).
-    joined_once: bool,
+    /// The reporting SSRC last announced ([`RtcpSessionEvent::ReportingSsrc`]).
+    announced_reporter: Option<u32>,
     started: bool,
     left: bool,
     /// In the order they were bound.
@@ -1163,22 +1161,9 @@ impl RtcpSessionInterceptor {
                 self.departing.push(local);
             }
             (false, None) if !self.left => {
-                // RFC 8108 6.1: the SSRC the endpoint's first stream will have, when it is
-                // given one; it reports from it until the stream takes it over.
-                let ssrc = match self
-                    .preferred_reporter
-                    .take()
-                    .filter(|&ssrc| ssrc != 0 && !self.ssrc_in_use(ssrc))
-                {
-                    Some(ssrc) => ssrc,
-                    None => {
-                        let mut random =
-                            std::mem::replace(&mut self.random, Box::new(ThreadRandom));
-                        let ssrc = choose_ssrc(random.as_mut(), |ssrc| self.ssrc_in_use(ssrc));
-                        self.random = random;
-                        ssrc
-                    }
-                };
+                let mut random = std::mem::replace(&mut self.random, Box::new(ThreadRandom));
+                let ssrc = choose_ssrc(random.as_mut(), |ssrc| self.ssrc_in_use(ssrc));
+                self.random = random;
                 self.locals.push(Local::new(
                     ssrc,
                     Kind::Other,
@@ -1442,10 +1427,6 @@ impl RtcpSessionInterceptor {
         let joining = !self.started;
         if !self.started {
             self.started = true;
-            // The preferred reporting SSRC is for the first join only: once the session has
-            // started, a stream may have used it and said BYE.
-            self.joined_once = true;
-            self.preferred_reporter = None;
             // RFC 3550 6.3.2: avg_rtcp_size starts at the probable size of the first packet:
             // a report, an SDES with the CNAME, and a block for each stream bound so far.
             // RFC 3711 section 3.4: with the SRTCP fields.
@@ -1468,6 +1449,21 @@ impl RtcpSessionInterceptor {
             }
         }
         self.flush_departing(now);
+        self.announce_reporter(now);
+    }
+
+    /// Tells the application of a change of the session's own reporting SSRC
+    /// ([`RtcpSessionEvent::ReportingSsrc`]).
+    fn announce_reporter(&mut self, now: Instant) {
+        let reporter = self
+            .locals
+            .iter()
+            .find(|local| local.role == Role::Reporter)
+            .map(|local| local.ssrc);
+        if reporter != self.announced_reporter {
+            self.announced_reporter = reporter;
+            self.emit(now, RtcpSessionEvent::ReportingSsrc { ssrc: reporter });
+        }
     }
 
     // ---- the member table ------------------------------------------------------------
@@ -2784,11 +2780,6 @@ impl RtcpSessionInterceptor {
                 self.start_given = true;
             }
             RtcpSessionControl::Cname(cname) => self.cname = cname.clone(),
-            RtcpSessionControl::ReportingSsrc(ssrc) => {
-                if !self.joined_once {
-                    self.preferred_reporter = Some(*ssrc);
-                }
-            }
             RtcpSessionControl::Bandwidth(bandwidth) => self.bandwidth = *bandwidth,
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
             RtcpSessionControl::SrtcpOverhead(overhead) => {
@@ -2864,6 +2855,7 @@ impl RtcpSessionInterceptor {
                 self.repeats.clear();
                 self.early_at = None;
                 self.flush_departing(now);
+                self.announce_reporter(now);
                 return;
             }
         }
@@ -2994,7 +2986,7 @@ impl Interceptor for RtcpSessionInterceptor {
     /// from their first packet. A stream unbound a moment ago and bound again with the same
     /// SSRC (a renegotiation) carries on: no BYE, and its counts are kept. A stream bound under
     /// the session's reporting SSRC takes it over (RFC 8108 6.1, see
-    /// [`RtcpSessionControl::ReportingSsrc`]).
+    /// [`RtcpSessionEvent::ReportingSsrc`]).
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         self.record_dlrr_limit(info);
         let kind = Kind::of(&info.mime_type);

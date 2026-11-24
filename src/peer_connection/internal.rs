@@ -3546,12 +3546,12 @@ impl RTCPeerConnection {
     /// that it uses for RTCP reporting. If that endpoint wants to start sending an RTP
     /// stream, it is RECOMMENDED that it use its existing SSRC for that stream, since
     /// otherwise the participant count in the RTP session will be unnecessarily increased".
-    /// The sessions are told the SSRC before they join
-    /// ([`RtcpSessionControl::ReportingSsrc`](interceptor::RtcpSessionControl)), so it is
-    /// known here before it is used. The second and later streams get new SSRCs ("it will
-    /// need to generate a new SSRC for the second and any subsequent RTP streams"), and so
-    /// does every stream once a local stream has been described (the SSRC may then have said
-    /// BYE as the reporting SSRC).
+    /// The session announces its reporting SSRC
+    /// ([`RtcpSessionEvent::ReportingSsrc`](interceptor::RtcpSessionEvent)) when it draws it
+    /// (with its own random source, which an application may seed). The second and later
+    /// streams get new SSRCs ("it will need to generate a new SSRC for the second and any
+    /// subsequent RTP streams"), and so does every stream once a local stream has been
+    /// described (the SSRC may then have said BYE as the reporting SSRC).
     pub(super) fn unused_media_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
         let reporting = self
             .pipeline_context
@@ -3567,7 +3567,10 @@ impl RTCPeerConnection {
                         && sender.parked_ssrcs().next().is_none()
                 })
             });
-        if never_sent && reporting != 0 && !self.taken_ssrcs(minted).contains(&reporting) {
+        if let Some(reporting) = reporting
+            && never_sent
+            && !self.taken_ssrcs(minted).contains(&reporting)
+        {
             minted.push(reporting);
             return reporting;
         }

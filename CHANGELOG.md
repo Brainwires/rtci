@@ -12,11 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RFC 8108 section 6.1: an endpoint starts sending on the SSRC it reported from.** A
   connection that sends no media reported from an SSRC its RTCP session drew, and when its
   first stream started (a receiver that turns `sendrecv`, an `addTrack` after the call is up)
-  that SSRC said BYE and the stream joined as a second participant. The connection now draws
-  the reporting SSRC itself and gives it to its RTCP sessions before they join
-  (`RtcpSessionControl::ReportingSsrc`, new); the first media SSRC the connection mints is
-  that one, and the stream bound under it takes the reporting SSRC over: no BYE, one
-  participant, its reports become sender reports. Later streams, and SSRCs the application
+  that SSRC said BYE and the stream joined as a second participant. The RTCP session now
+  announces the reporting SSRC it draws (`RtcpSessionEvent::ReportingSsrc`, new; `None` once
+  the SSRC is a stream's or said BYE); the first media SSRC the connection mints is that one,
+  and the stream bound under it takes the reporting SSRC over: no BYE, one participant, its
+  reports become sender reports. Later streams, and SSRCs the application
   names in a track's codings, are unchanged. On the wire: a peer sees RTP and sender reports
   arrive from the SSRC that sent the receiver reports (as libwebrtc does with its own
   receiver-report SSRC), signalled in the next description as usual. Engine behaviour change
