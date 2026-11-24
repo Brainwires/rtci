@@ -232,6 +232,7 @@ pub(crate) mod adaptive_jitter_buffer;
 pub(crate) mod audio_red;
 pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
+pub(crate) mod fec_sent;
 pub(crate) mod fec_session;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
@@ -287,12 +288,16 @@ pub use circuit_breaker::{
     DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
     PacketSize as CircuitBreakerPacketSize,
 };
+pub use fec_sent::FecSent;
 pub use fec_session::FecSessionSsrcMap;
 pub use flexfec::bit_array::BitArray;
 pub use flexfec::coverage::{MAX_FEC_PACKETS, MAX_MEDIA_PACKETS, ProtectionCoverage};
 pub use flexfec::draft03::decoder::{FlexFec03Decoder, ParseError as FlexFecParseError};
-pub use flexfec::draft03::encoder::DRAFT03_MAX_MEDIA_PACKETS as FLEXFEC03_MAX_MEDIA_PACKETS;
 pub use flexfec::draft03::encoder::FlexFec03Encoder;
+pub use flexfec::draft03::encoder::{
+    DRAFT03_MAX_MEDIA_PACKETS as FLEXFEC03_MAX_MEDIA_PACKETS,
+    DRAFT03_MAX_REPAIR_PACKET_SIZE as FLEXFEC03_MAX_REPAIR_PACKET_SIZE,
+};
 pub use flexfec::draft03::receiver::{FlexFec03ReceiveBuilder, FlexFec03ReceiveInterceptor};
 pub use flexfec::draft03::sender::{
     DEFAULT_NUM_FEC_PACKETS, DEFAULT_NUM_MEDIA_PACKETS, FlexFec03SendBuilder,
@@ -424,11 +429,12 @@ pub use twcc::sender::{TwccSenderBuilder, TwccSenderInterceptor};
 pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
 pub use ulpfec::sender::{ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS};
 pub use ulpfec::{
-    FEC_HEADER_LENGTH as ULPFEC_HEADER_LENGTH, LONG_MASK_BITS as ULPFEC_LONG_MASK_BITS,
-    MAX_LEVELS as ULPFEC_MAX_LEVELS, ProtectionLevel as UlpfecProtectionLevel, RedFecPayload,
-    RedPlacement, SHORT_MASK_BITS as ULPFEC_SHORT_MASK_BITS, UlpfecDecoder, UlpfecDecoderStats,
-    UlpfecEncoder, UlpfecError, UlpfecLevel, UlpfecPacket, UlpfecReceiveBuilder,
-    UlpfecReceiveInterceptor, UlpfecRepair, UlpfecSendBuilder, UlpfecSendInterceptor,
+    FEC_HEADER_LENGTH as ULPFEC_HEADER_LENGTH, FecSessionPacket,
+    LONG_MASK_BITS as ULPFEC_LONG_MASK_BITS, MAX_LEVELS as ULPFEC_MAX_LEVELS,
+    ProtectionLevel as UlpfecProtectionLevel, RedFecPayload, RedPlacement,
+    SHORT_MASK_BITS as ULPFEC_SHORT_MASK_BITS, UlpfecDecoder, UlpfecDecoderStats, UlpfecEncoder,
+    UlpfecError, UlpfecLevel, UlpfecPacket, UlpfecReceiveBuilder, UlpfecReceiveInterceptor,
+    UlpfecReceiveStats, UlpfecRepair, UlpfecSendBuilder, UlpfecSendInterceptor,
     UlpfecStreamPacketizer, depacketize_red as depacketize_red_for_ulpfec,
     one_level_only_from_fmtp as ulpfec_one_level_only_from_fmtp,
     validate_scheme as validate_ulpfec_scheme,

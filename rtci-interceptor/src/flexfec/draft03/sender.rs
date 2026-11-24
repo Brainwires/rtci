@@ -283,10 +283,12 @@ impl FlexFec03SendInterceptor {
             // Queued for `poll_write`, which puts them back on the belt: a repair packet is a real
             // outgoing RTP packet and still needs every interceptor ahead — a transport-wide sequence
             // number, the pacer, and a place in the send history congestion control reads.
+            let fec_bytes = packet.payload.len();
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport,
-                message: AttributedPacket::new(Packet::Rtp(packet)),
+                message: AttributedPacket::new(Packet::Rtp(packet))
+                    .with(crate::FecSent::one(ssrc, fec_bytes)),
             });
         }
     }

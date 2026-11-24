@@ -73,6 +73,9 @@ fuzz_target!(|data: &[u8]| {
         3 => {
             let mut payloader = Vp8Payloader::default();
             payloader.enable_picture_id = config & 0x40 != 0;
+            // Both packetizations: partition by partition (the frame header and the token
+            // partition sizes parsed) and without regard to partitions.
+            payloader.ignore_partitions = config & 0x20 != 0;
             run(&mut payloader, Some(&mut Vp8Packet::default()), mtu, &frame)
         }
         4 => {

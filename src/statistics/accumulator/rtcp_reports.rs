@@ -120,16 +120,22 @@ impl RTCStatsAccumulator {
         // latest SR does not contain the DLRR report block"), and the DLRR block that came
         // with it, before or after it in the compound, gives the new one below.
         for packet in packets {
+            // RFC 7164 section 5.1: the timestamps of a sender report from near a leap second
+            // are ignored (its counts are not timestamps and are taken).
             if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>()
                 && let Some(stream) = self.inbound_rtp_streams.get_mut(&sr.ssrc)
             {
-                stream.on_rtcp_sr_received(
-                    u64::from(sr.packet_count),
-                    u64::from(sr.octet_count),
-                    sr.ntp_time,
-                    now,
-                );
-                stream.on_rtcp_sr_rtp_time(sr.rtp_time);
+                if shared::time::near_leap_second(sr.ntp_time) {
+                    stream.on_rtcp_sr_counts(u64::from(sr.packet_count), u64::from(sr.octet_count));
+                } else {
+                    stream.on_rtcp_sr_received(
+                        u64::from(sr.packet_count),
+                        u64::from(sr.octet_count),
+                        sr.ntp_time,
+                        now,
+                    );
+                    stream.on_rtcp_sr_rtp_time(sr.rtp_time);
+                }
             }
         }
 

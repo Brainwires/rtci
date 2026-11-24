@@ -207,6 +207,24 @@ fn test_chunk_forward_tsn_success() -> Result<()> {
     Ok(())
 }
 
+/// A FORWARD TSN chunk is read within its own length, not the buffer's. A chunk of length 4
+/// (no New Cumulative TSN) followed by four more bytes passed the buffer-length check and then
+/// read the TSN from an empty value, which panicked. From the wire every chunk is sliced to its
+/// length first (`parse_chunks`), so only a direct caller (the `chunk_chunk_forward_tsn_unmarshal`
+/// fuzz target) could reach it; the sibling of the error-cause length fixed in 3866ed31.
+#[test]
+fn test_chunk_forward_tsn_is_read_within_its_own_length() {
+    let short_chunk_then_bytes = Bytes::from_static(&[0xc0, 0x0, 0x0, 0x4, 0x0, 0x0, 0x0, 0x3]);
+    assert!(ChunkForwardTsn::unmarshal(&short_chunk_then_bytes).is_err());
+
+    // A whole chunk followed by bytes that are not its own: those bytes are not a stream entry.
+    let chunk_then_bytes =
+        Bytes::from_static(&[0xc0, 0x0, 0x0, 0x8, 0x0, 0x0, 0x0, 0x3, 0x0, 0x4, 0x0, 0x5]);
+    let parsed = ChunkForwardTsn::unmarshal(&chunk_then_bytes).expect("the chunk itself parses");
+    assert_eq!(parsed.new_cumulative_tsn, 3);
+    assert!(parsed.streams.is_empty());
+}
+
 #[test]
 fn test_chunk_forward_tsn_unmarshal_failure() -> Result<()> {
     let tests = vec![

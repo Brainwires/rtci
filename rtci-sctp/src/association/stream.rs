@@ -329,6 +329,14 @@ impl Stream<'_> {
             return Err(Error::ErrOutboundPacketTooLarge);
         }
 
+        // RFC 9260 6.9: with fragmentation turned off, "it MUST reject sends that exceed the
+        // current PMDCS".
+        if !self.association.fragmentation()
+            && source.remaining() > self.association.fragment_size() as usize
+        {
+            return Err(Error::ErrOutboundPacketTooLarge);
+        }
+
         let state: AssociationState = self.association.state();
         match state {
             AssociationState::ShutdownSent

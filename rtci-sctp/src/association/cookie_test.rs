@@ -121,6 +121,10 @@ fn the_association_is_made_from_the_cookie_alone() {
     let sent = sent_datagrams(&mut a, later);
     assert_eq!(1, chunks_of_type(&sent, CT_COOKIE_ACK.0).len());
     assert_eq!(1, chunks_of_type(&sent, CT_SACK.0).len());
+    // RFC 9260 3.3.12, 5.1 D, 5.1.5: the COOKIE ACK "MAY be bundled with any pending DATA
+    // chunks (and/or SACK chunks)": the SACK for the DATA that came with the cookie shares
+    // its packet.
+    assert_eq!(1, sent.len(), "the COOKIE ACK and the SACK in one packet");
     assert!(
         sent.iter().all(|d| d[4..8] == CLIENT_TAG.to_be_bytes()),
         "the peer's tag, from the cookie"

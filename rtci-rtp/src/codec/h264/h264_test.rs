@@ -440,3 +440,67 @@ fn test_h264_fua_reassembly_is_bounded_and_needs_a_start() -> Result<()> {
     }
     Ok(())
 }
+
+/// The Annex B splitter finds the start codes the byte-at-a-time scan it replaced found
+/// (webrtc-rs/rtc#336 by @g4lb): three- and four-byte codes, longer runs of zeros before one
+/// (the trailing zeros of the NAL unit before it go with the code), codes at the very start and
+/// end, codes with nothing between them, and no code at all. Inputs dense in zeros and ones, so
+/// every arrangement of them is met.
+#[test]
+fn annex_b_nal_units_are_those_a_byte_scan_finds() {
+    fn byte_scan(payload: &Bytes) -> Vec<Bytes> {
+        let next = |start: usize| -> Option<(usize, usize)> {
+            let mut zeros = 0;
+            for (i, &b) in payload[start..].iter().enumerate() {
+                if b == 0 {
+                    zeros += 1;
+                    continue;
+                } else if b == 1 && zeros >= 2 {
+                    return Some((start + i - zeros, zeros + 1));
+                }
+                zeros = 0;
+            }
+            None
+        };
+        let Some((mut at, mut len)) = next(0) else {
+            return vec![payload.clone()];
+        };
+        let mut nalus = vec![];
+        loop {
+            let nalu_start = at + len;
+            match next(nalu_start) {
+                Some((a, l)) => {
+                    nalus.push(payload.slice(nalu_start..a));
+                    (at, len) = (a, l);
+                }
+                None => {
+                    nalus.push(payload.slice(nalu_start..));
+                    return nalus;
+                }
+            }
+        }
+    }
+
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut byte = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        match state % 8 {
+            0..=3 => 0,
+            4 | 5 => 1,
+            _ => (state >> 8) as u8,
+        }
+    };
+    for len in 0..48 {
+        for _ in 0..2_000 {
+            let payload = Bytes::from((0..len).map(|_| byte()).collect::<Vec<u8>>());
+            assert_eq!(
+                annex_b_nal_units(&payload),
+                byte_scan(&payload),
+                "{:02x?}",
+                &payload[..]
+            );
+        }
+    }
+}

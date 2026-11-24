@@ -2,7 +2,7 @@
 
 use super::decoder::{UlpfecDecoder, UlpfecDecoderStats};
 use super::red::depacketize_red;
-use super::sender::{Carriage, StreamFilter, video_streams};
+use super::sender::{Carriage, StreamFilter, negotiated_carriage, video_streams};
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
@@ -25,6 +25,56 @@ use std::time::Instant;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UlpfecRepair;
 
+/// Marks an RTP packet as a FEC packet that arrived in a FEC session of its own (RFC 5109
+/// section 14.1), for a binder that learns which stream a FEC session protects only as its
+/// packets arrive. Carried as [`Attribute::Custom`].
+///
+/// Whoever drives the chain attaches it to each RTP packet read on a FEC session's transport,
+/// beside mapping the packet's SSRC ([`FecSessionSsrcMap`](crate::FecSessionSsrcMap)). The
+/// receive interceptor gives such a packet to the decoder of
+/// [`media_ssrc`](Self::media_ssrc), if it keeps one (a bound stream that passed the filter,
+/// [`UlpfecReceiveBuilder::sessions`] or the RED carriage), and passes it no further. It does
+/// the same for a stream bound with [`StreamInfo::fec_session`], which needs no mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FecSessionPacket {
+    /// The SSRC of the media stream the FEC session's stream protects: the SSRC the packet
+    /// had on the FEC session's transport (RFC 5109 section 7.2).
+    pub media_ssrc: u32,
+    /// The payload type of `ulpfec` in the FEC session's m= section. A packet of the session
+    /// with another payload type is not FEC and is discarded (RFC 3550 section 5.1: a
+    /// receiver "MUST ignore packets with payload types that it does not understand").
+    pub payload_type: u8,
+    /// This endpoint signalled `onelevelonly=1` for the session (RFC 5109 section 13): FEC
+    /// with more than one level is refused.
+    pub one_level_only: bool,
+}
+
+/// What the ULPFEC decoder of one protected stream has received and done so far.
+///
+/// The receive interceptor passes it application-ward as [`Attribute::Custom`] on an empty
+/// RTCP packet (a carrier, which the chain's terminus lets through) whenever it changed, so
+/// whoever drives the chain can report it: `rtci`'s peer connection puts it in the stream's
+/// webrtc-stats `fecPacketsReceived`, `fecBytesReceived` and `fecPacketsDiscarded`. The counts
+/// are totals since the stream was bound, so a carrier that is lost loses nothing.
+///
+/// FEC on a repair SSRC or in a FEC session of its own arrives as packets of its own, which
+/// the one who reads them off the wire can count; FEC blocks in RED packets of the media
+/// stream (RFC 5109 section 14.2) are known only here, and are counted in
+/// [`fec_packets_in_red`](Self::fec_packets_in_red).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UlpfecReceiveStats {
+    /// The protected media stream.
+    pub media_ssrc: u32,
+    /// FEC blocks that arrived in RED packets of the stream, whatever became of them.
+    pub fec_packets_in_red: u64,
+    /// Their octets: the FEC header, the level headers and the protected data (the block,
+    /// not the RED packet around it).
+    pub fec_bytes_in_red: u64,
+    /// The decoder's counters: what it took, rebuilt and discarded, from every carriage.
+    pub decoder: UlpfecDecoderStats,
+}
+
 /// Builder for [`UlpfecReceiveInterceptor`].
 ///
 /// # Example
@@ -41,6 +91,7 @@ pub struct UlpfecReceiveBuilder {
     carriage: Carriage,
     one_level_only: bool,
     forward_repair: bool,
+    decode_every_stream: bool,
     filter: StreamFilter,
 }
 
@@ -50,8 +101,21 @@ impl UlpfecReceiveBuilder {
             carriage,
             one_level_only: false,
             forward_repair: true,
+            decode_every_stream: false,
             filter: video_streams(),
         }
+    }
+
+    /// FEC in RTP sessions of their own (RFC 5109 section 14.1), told packet by packet
+    /// ([`FecSessionPacket`]): every bound stream that passes the filter has a decoder from
+    /// the start, fed with its media, so that the FEC of a session whose protected stream is
+    /// only known once packets arrive finds it. A stream bound with a repair flow of the
+    /// media's own session ([`StreamInfo::ssrc_fec`]) is read as [`stream`](Self::stream)
+    /// reads it.
+    pub fn sessions() -> Self {
+        let mut builder = Self::new(Carriage::Stream);
+        builder.decode_every_stream = true;
+        builder
     }
 
     /// FEC as a redundant encoding (RFC 5109 14.2): the protected streams arrive as RED packets
@@ -99,8 +163,12 @@ impl UlpfecReceiveBuilder {
             carriage: self.carriage,
             one_level_only: self.one_level_only,
             forward_repair: self.forward_repair,
+            decode_every_stream: self.decode_every_stream,
             filter: self.filter,
             decoders: HashMap::new(),
+            carriages: HashMap::new(),
+            in_red: HashMap::new(),
+            reported: HashMap::new(),
             repair_to_media: HashMap::new(),
             media_transport: HashMap::new(),
             read_queue: VecDeque::new(),
@@ -131,9 +199,18 @@ pub struct UlpfecReceiveInterceptor {
     carriage: Carriage,
     one_level_only: bool,
     forward_repair: bool,
+    decode_every_stream: bool,
     filter: StreamFilter,
     /// Decoders keyed by the media SSRC they protect.
     decoders: HashMap<u32, UlpfecDecoder>,
+    /// How each protected stream's FEC travels, with the payload types its section
+    /// negotiated (the builder's when the section lists none, or lists them under those
+    /// numbers).
+    carriages: HashMap<u32, Carriage>,
+    /// FEC blocks (and their octets) read from each protected stream's RED packets.
+    in_red: HashMap<u32, (u64, u64)>,
+    /// What was last passed on about each protected stream ([`UlpfecReceiveStats`]).
+    reported: HashMap<u32, UlpfecReceiveStats>,
     /// Separate stream: repair SSRC (and its payload type) to the media SSRC.
     repair_to_media: HashMap<u32, (u32, u8)>,
     /// Where each protected stream's media last arrived from. A packet rebuilt from a FEC
@@ -153,6 +230,36 @@ impl UlpfecReceiveInterceptor {
     /// The decoder's counters for the media stream `ssrc`.
     pub fn stats(&self, ssrc: u32) -> Option<UlpfecDecoderStats> {
         self.decoders.get(&ssrc).map(UlpfecDecoder::stats)
+    }
+
+    /// What this interceptor has received and done for the media stream `ssrc`.
+    pub fn receive_stats(&self, ssrc: u32) -> Option<UlpfecReceiveStats> {
+        let decoder = self.decoders.get(&ssrc)?;
+        let (fec_packets_in_red, fec_bytes_in_red) =
+            self.in_red.get(&ssrc).copied().unwrap_or_default();
+        Some(UlpfecReceiveStats {
+            media_ssrc: ssrc,
+            fec_packets_in_red,
+            fec_bytes_in_red,
+            decoder: decoder.stats(),
+        })
+    }
+
+    /// Pass [`UlpfecReceiveStats`] of `media_ssrc` application-ward if it changed.
+    fn report(&mut self, now: Instant, transport: shared::TransportContext, media_ssrc: u32) {
+        let Some(stats) = self.receive_stats(media_ssrc) else {
+            return;
+        };
+        if self.reported.get(&media_ssrc) == Some(&stats) {
+            return;
+        }
+        self.reported.insert(media_ssrc, stats);
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport,
+            message: AttributedPacket::new(Packet::Rtcp(Vec::new()))
+                .with(Attribute::Custom(Arc::new(stats))),
+        });
     }
 
     fn queue_recovered(
@@ -183,6 +290,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let of_fec_session = msg.message.custom::<FecSessionPacket>().copied();
         let Packet::Rtp(rtp_packet) = &mut msg.message.packet else {
             self.read_queue.push_back(msg);
             return Ok(());
@@ -190,6 +298,30 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
         let ssrc = rtp_packet.header.ssrc;
         let now = msg.now;
         let transport = msg.transport;
+
+        // A packet that arrived in a FEC session of its own, marked by whoever read it there:
+        // to the decoder of the stream it protects, and no further. A session's packet with
+        // another payload type, or for a stream this interceptor keeps no decoder for, ends
+        // here too: it is not media of any stream.
+        if let Some(session) = of_fec_session {
+            let recovered = match self.decoders.get_mut(&session.media_ssrc) {
+                Some(decoder) if rtp_packet.header.payload_type == session.payload_type => {
+                    match super::header::UlpfecPacket::parse(&rtp_packet.payload) {
+                        Ok(fec) if session.one_level_only && fec.levels.len() > 1 => Vec::new(),
+                        _ => decoder.push_fec(&rtp_packet.payload).unwrap_or_default(),
+                    }
+                }
+                _ => Vec::new(),
+            };
+            let transport = self
+                .media_transport
+                .get(&session.media_ssrc)
+                .copied()
+                .unwrap_or(transport);
+            self.queue_recovered(now, transport, recovered);
+            self.report(now, transport, session.media_ssrc);
+            return Ok(());
+        }
 
         // A packet of a separate FEC stream: to the decoder, and no further. It has an SSRC of
         // its own, so nothing behind this interceptor is waiting for its sequence number.
@@ -206,6 +338,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
                 .copied()
                 .unwrap_or(transport);
             self.queue_recovered(now, transport, recovered);
+            self.report(now, transport, media_ssrc);
             return Ok(());
         }
 
@@ -218,7 +351,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
         if let Carriage::Red {
             red_payload_type,
             fec_payload_type,
-        } = self.carriage
+        } = self.carriages.get(&ssrc).copied().unwrap_or(self.carriage)
         {
             if rtp_packet.header.payload_type == fec_payload_type {
                 // FEC by itself in a RED stream (RFC 5109 14.2 forbids it).
@@ -228,7 +361,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
                 let Ok(red) = depacketize_red(&rtp_packet.payload, fec_payload_type) else {
                     return Ok(());
                 };
+                let in_red = self.in_red.entry(ssrc).or_default();
                 for fec in &red.fec {
+                    in_red.0 += 1;
+                    in_red.1 += fec.len() as u64;
                     recovered.extend(decoder.push_fec(fec).unwrap_or_default());
                 }
                 match red.primary {
@@ -246,6 +382,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
                             self.read_queue.push_back(msg);
                         }
                         self.queue_recovered(now, transport, recovered);
+                        self.report(now, transport, ssrc);
                         return Ok(());
                     }
                 }
@@ -257,6 +394,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
         self.media_transport.insert(ssrc, transport);
         self.read_queue.push_back(msg);
         self.queue_recovered(now, transport, recovered);
+        self.report(now, transport, ssrc);
         Ok(())
     }
 
@@ -308,15 +446,18 @@ impl Interceptor for UlpfecReceiveInterceptor {
         if let Some((ssrc_fec, payload_type_fec)) = separate {
             self.repair_to_media
                 .insert(ssrc_fec, (info.ssrc, payload_type_fec));
-        } else if self.carriage == Carriage::Stream {
+        } else if self.carriage == Carriage::Stream && !self.decode_every_stream {
             return;
         }
         // RFC 5109 section 13: `onelevelonly=1` on this endpoint's `ulpfec` format of the
         // section ("what the receiver accepts to receive", section 14.3): FEC with more than
         // one level is refused.
+        // RFC 5109 section 14.2: the RED and FEC payload types are the section's, as the
+        // sender reads them (an answer keeps the offerer's numbers).
+        let carriage = negotiated_carriage(self.carriage, info).unwrap_or(self.carriage);
         let fec_format = separate
             .map(|(_, payload_type)| payload_type)
-            .or(match self.carriage {
+            .or(match carriage {
                 Carriage::Red {
                     fec_payload_type, ..
                 } => Some(fec_payload_type),
@@ -335,10 +476,14 @@ impl Interceptor for UlpfecReceiveInterceptor {
             info.ssrc,
             UlpfecDecoder::new(info.ssrc).with_one_level_only(one_level_only),
         );
+        self.carriages.insert(info.ssrc, carriage);
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.decoders.remove(&info.ssrc);
+        self.carriages.remove(&info.ssrc);
+        self.in_red.remove(&info.ssrc);
+        self.reported.remove(&info.ssrc);
         self.media_transport.remove(&info.ssrc);
         self.repair_to_media
             .retain(|_, (media, _)| *media != info.ssrc);

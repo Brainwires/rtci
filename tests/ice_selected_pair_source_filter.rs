@@ -188,3 +188,71 @@ async fn non_stun_datagrams_from_other_addresses_are_dropped() -> Result<()> {
     );
     Ok(())
 }
+
+/// RFC 5764 section 7.4: "If under such attack, implementations SHOULD prioritize decryption
+/// and verification of packets that either have known SSRCs or come from source addresses
+/// that match those of peers with which it has DTLS-SRTP associations." SRTP-shaped packets
+/// (RFC 7983 range 128-191) under made-up SSRCs from an address no check was answered from
+/// never reach decryption; the same packets from the peer's address do (and fail there).
+#[tokio::test]
+async fn srtp_shaped_packets_are_decrypted_only_from_the_peers_address() -> Result<()> {
+    let mut offer = Peer::new(RTCDtlsRole::Server).await?;
+    let mut answer = Peer::new(RTCDtlsRole::Client).await?;
+    let init = RTCDataChannelInit {
+        ordered: true,
+        negotiated: Some(NEGOTIATED_ID),
+        ..Default::default()
+    };
+    offer.pc.create_data_channel("srtp", Some(init.clone()))?;
+    answer.pc.create_data_channel("srtp", Some(init))?;
+    let sdp = offer.pc.create_offer(None)?;
+    offer
+        .pc
+        .set_local_description(Instant::now(), sdp.clone())?;
+    answer.pc.set_remote_description(Instant::now(), sdp)?;
+    let sdp = answer.pc.create_answer(None)?;
+    answer
+        .pc
+        .set_local_description(Instant::now(), sdp.clone())?;
+    offer.pc.set_remote_description(Instant::now(), sdp)?;
+    let start = Instant::now();
+    let mut open = false;
+    while start.elapsed() < TEST_TIMEOUT && !open {
+        pump(&mut offer, &mut answer).await?;
+        while offer.pc.poll_event().is_some() {}
+        while let Some(event) = answer.pc.poll_event() {
+            if let RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_)) = event {
+                open = true;
+            }
+        }
+        while offer.pc.poll_read().is_some() {}
+        while answer.pc.poll_read().is_some() {}
+    }
+    assert!(open, "the peers never connected");
+
+    // An RTP header (version 2, PT 96) under SSRC 0x0BADF00D, then junk where the payload
+    // and the authentication tag would be.
+    let mut forged = vec![0x80u8, 96, 0, 1, 0, 0, 0, 1, 0x0B, 0xAD, 0xF0, 0x0D];
+    forged.extend_from_slice(&[0x5A; 40]);
+    let send_from = |answer: &mut Peer, from: SocketAddr| {
+        for _ in 0..20 {
+            answer.buf[..forged.len()].copy_from_slice(&forged);
+            answer.handle_datagram(forged.len(), from);
+        }
+    };
+
+    let before = selected_pair_packets_received(&mut answer.pc);
+    send_from(&mut answer, "127.0.0.1:9".parse()?);
+    assert_eq!(
+        selected_pair_packets_received(&mut answer.pc),
+        before,
+        "SRTP from an address that is not the peer's reached the session"
+    );
+    send_from(&mut answer, offer.addr);
+    assert_eq!(
+        selected_pair_packets_received(&mut answer.pc),
+        before + 20,
+        "the same packets from the peer's address go on to SRTP"
+    );
+    Ok(())
+}

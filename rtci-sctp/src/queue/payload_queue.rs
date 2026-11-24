@@ -312,6 +312,19 @@ impl PayloadQueue {
             .collect()
     }
 
+    /// Takes every chunk, in TSN order, leaving the queue empty: the sent chunks of an
+    /// association that ended, which were not cumulatively acknowledged.
+    pub(crate) fn take_all(&mut self) -> Vec<ChunkPayloadData> {
+        let sorted = std::mem::take(&mut self.sorted);
+        let mut chunks = std::mem::take(&mut self.chunk_map);
+        self.message_tsns.clear();
+        self.n_bytes = 0;
+        sorted
+            .into_iter()
+            .filter_map(|tsn| chunks.remove(&tsn))
+            .collect()
+    }
+
     pub(crate) fn get_last_tsn_received(&self) -> Option<&u32> {
         self.sorted.back()
     }

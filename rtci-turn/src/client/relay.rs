@@ -162,6 +162,20 @@ impl RelayState {
             .get(ip)
             .is_some_and(|perm| perm.state() == PermState::Idle || perm.is_permitted(now))
     }
+
+    /// Drops the permission for `ip` after a CreatePermission the application asked for failed,
+    /// unless the server installed it meanwhile: a permission is per IP address (RFC 8656 §9),
+    /// so another request for the same address (another port) may have been granted while this
+    /// one was outstanding, and the refusal of one request takes nothing from the other.
+    pub(crate) fn forget_unless_permitted(&mut self, ip: IpAddr, now: Instant) {
+        if self
+            .perm_map
+            .get(&ip)
+            .is_some_and(|perm| !perm.is_permitted(now))
+        {
+            self.perm_map.remove(&ip);
+        }
+    }
 }
 
 /// A borrowed handle to one live allocation on the TURN server.
@@ -1076,7 +1090,7 @@ impl Relay<'_> {
         let allocation_gone = err.is(CODE_ALLOC_MISMATCH);
         if let Some(peer_addr) = peer_addr_opt {
             if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-                relay.perm_map.remove(&peer_addr.ip());
+                relay.forget_unless_permitted(peer_addr.ip(), now);
             }
             self.client
                 .events

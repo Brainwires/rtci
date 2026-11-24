@@ -622,3 +622,35 @@ fn the_default_init_announces_65535_streams_each_way() {
     let (_, outbound, inbound, _) = init_fields(&chunks_of(&init[0])[0]);
     assert_eq!((outbound, inbound), (u16::MAX, u16::MAX));
 }
+
+/// RFC 9260 6.9: "An implementation MAY allow the upper layer to disable fragmentation", and
+/// then "MUST react just like an implementation that does NOT support fragmentation, i.e., it
+/// MUST reject sends that exceed the current PMDCS". With `with_fragmentation(false)` a message
+/// one byte larger than a DATA chunk can carry is refused, and one that fits goes in one chunk;
+/// by default the larger one is sent in two fragments.
+#[test]
+fn an_upper_layer_can_turn_fragmentation_off() -> Result<()> {
+    for fragmentation in [true, false] {
+        let mut a =
+            create_association(TransportConfig::default().with_fragmentation(fragmentation));
+        a.set_state(AssociationState::Established);
+        a.cwnd = 1 << 20;
+        a.rwnd = 1 << 20;
+        let now = Instant::now();
+        let fits = a.fragment_size() as usize;
+        let ppi = PayloadProtocolIdentifier::Binary;
+        let mut s = a.open_stream(1, ppi)?;
+        s.write_sctp(now, &Bytes::from(vec![1u8; fits]), ppi)?;
+        let larger = s.write_sctp(now, &Bytes::from(vec![2u8; fits + 1]), ppi);
+        if fragmentation {
+            assert!(larger.is_ok());
+            assert_eq!(3, transmitted_data(&a.gather_outbound(now).0).len());
+        } else {
+            assert!(matches!(larger, Err(Error::ErrOutboundPacketTooLarge)));
+            let sent = transmitted_data(&a.gather_outbound(now).0);
+            assert_eq!(1, sent.len(), "the message that fits, whole");
+            assert!(sent[0].beginning_fragment && sent[0].ending_fragment);
+        }
+    }
+    Ok(())
+}
