@@ -24,9 +24,12 @@
 //! | `tail_gap` | at the end of the run, how long since the last picture less than 1 s old (a call that never recovers: 25 s and more) |
 //! | `resume` | from the capacity's return (the cap lifted, the new pair selected) to the next picture less than 1 s old; 99 when none came |
 //! | `settle` | from the capacity's return to the last instant the screen was more than 0.5 s old |
-//! | `audio_gap` | the longest time without an Opus packet arriving, from the drop on |
-//! | `audio_lost` | Opus packets that never arrived, from the drop on (20 ms each) |
+//! | `audio_gap` | the longest time without an Opus packet arriving, from the drop on (audio that never comes back: the rest of the run) |
+//! | `audio_share`, `audio_back` | the share of the audio of the time from the drop on that arrived: the caller's at the callee, the callee's at the caller |
+//! | `audio_lost` | the caller's Opus packets of that time that did not arrive (20 ms each) |
 //! | `audio_delay` | the most an Opus packet was delayed beyond the call's best |
+//! | `cb`, `cb_audio` | flows (of either peer) the RTP circuit breaker (RFC 8083) had ceased at the end, and how many of them are audio: the engine drops what is written on a ceased flow |
+//! | `disc`, `pc_failed` | how often a peer connection left Connected, and whether one reached Failed |
 //! | `recover` | from the capacity's return until the encoder's target is back to 0.4 of what it was before the drop; 99 when not within the 25 s observed |
 //! | `before`, `under`, `window` | kbit/s: the target before the drop, its median under the cap, its mean 15 to 25 s after the cap |
 //! | `reacted` | from the drop until the target is under 400 kbit/s (99: not within 5 s); in the outage, from the restart to the new pair |
@@ -34,6 +37,11 @@
 //! | `rtx`, `rtx_dropped`, `qdrops` | retransmissions sent and dropped at the link's queue, all queue drops (caller's uplink, whole call) |
 //! | `pli`, `keyframes`, `unusable`, `gaps` | key-frame requests the callee sent, key frames the caller made, frames without a reference, gaps the builder gave up for its time bound |
 //! | `discards` | the caller's `OnPacerDiscard` events |
+//! | `end` | the length of the call |
+//!
+//! A run is CLEAN when no flow was ceased and no peer left Connected (`cb` = 0, `disc` = 0).
+//! A short freeze with dead audio is not a good run: the tables give the shares over all runs
+//! and over the clean ones apart, and the audio requirement counts dead audio.
 //!
 //! # Cells
 //!
@@ -89,7 +97,8 @@
 //! **A TRIPWIRE** notices a regression against a recorded baseline. The baseline
 //! (`tests/fixtures/capacity-instrument-baseline.tsv`, written by
 //! `scripts/capacity-instrument.py baseline` from a large measurement of master) records, per
-//! cell and figure, a threshold (the baseline's median and 90th percentile, or a fixed limit)
+//! cell and figure, a threshold (the baseline's median and 90th percentile and a tenth of slack,
+//! or a fixed limit)
 //! and how many of the baseline's runs were beyond it. The tripwire counts this tree's runs
 //! beyond the same threshold and fails when that count is improbable under the baseline: more
 //! than the binomial critical value at [`TRIPWIRE_ALPHA`] = 0.002 for a share equal to the
@@ -222,11 +231,12 @@ fn fresh_times(frames: &[Shown], fresh: Duration) -> Vec<Duration> {
 }
 
 /// What the loudspeaker had in `from..to`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct Audio {
-    /// Packets sent after the last one that arrived before `from` and before the last one
-    /// that arrived by `to`, that never arrived.
+    /// Packets of that time that did not arrive in it (one is sent every 20 ms).
     lost: u64,
+    /// The share of that time's packets that arrived in it.
+    share: f64,
     /// The longest time without an arrival.
     gap: Duration,
     /// The most a packet was delayed beyond the least delayed packet of the call (a packet
@@ -237,30 +247,30 @@ struct Audio {
 fn audio(arrivals: &[(Duration, u16)], from: Duration, to: Duration) -> Audio {
     let times: Vec<Duration> = arrivals.iter().map(|arrival| arrival.0).collect();
     let (gap, _) = longest_gap(&times, from, to);
-    let Some(first) = arrivals.first() else {
-        return Audio {
-            lost: 0,
-            gap,
-            delay: Duration::ZERO,
-        };
-    };
+    let sent = (to.saturating_sub(from).as_millis() / 20) as u64;
+    let arrived = arrivals
+        .iter()
+        .filter(|(at, _)| *at >= from && *at <= to)
+        .count() as u64;
     // How late against a clock that ticks 20 ms a sequence number, in microseconds.
+    let first = arrivals.first().map_or(0, |arrival| arrival.1);
     let offset = |(at, seq): &(Duration, u16)| {
-        at.as_micros() as i128 - 20_000 * i128::from(seq.wrapping_sub(first.1))
+        at.as_micros() as i128 - 20_000 * i128::from(seq.wrapping_sub(first))
     };
     let best = arrivals.iter().map(offset).min().unwrap_or(0);
-    let inside = || arrivals.iter().filter(|(at, _)| *at >= from && *at <= to);
-    let delay = inside().map(offset).max().map_or(0, |worst| worst - best);
-    let start = arrivals.iter().rposition(|(at, _)| *at < from).unwrap_or(0);
-    let lost = match arrivals.iter().rposition(|(at, _)| *at <= to) {
-        Some(end) if end > start => {
-            let sent = u64::from(arrivals[end].1.wrapping_sub(arrivals[start].1));
-            sent.saturating_sub((end - start) as u64)
-        }
-        _ => 0,
-    };
+    let delay = arrivals
+        .iter()
+        .filter(|(at, _)| *at >= from && *at <= to)
+        .map(offset)
+        .max()
+        .map_or(0, |worst| worst - best);
     Audio {
-        lost,
+        lost: sent.saturating_sub(arrived),
+        share: if sent == 0 {
+            1.0
+        } else {
+            (arrived as f64 / sent as f64).min(1.0)
+        },
         gap,
         delay: Duration::from_micros(delay.max(0) as u64),
     }
@@ -299,7 +309,7 @@ fn paused(targets: &[(Duration, u32)], from: Duration, to: Duration) -> Duration
 // ---------------------------------------------------------------------------------------------
 
 /// The figures of a run, in the order they are printed (the module's table).
-const NAMES: [&str; 28] = [
+const NAMES: [&str; 34] = [
     "max_age",
     "age_p50",
     "age_p95",
@@ -327,6 +337,12 @@ const NAMES: [&str; 28] = [
     "unusable",
     "gaps",
     "discards",
+    "cb",
+    "cb_audio",
+    "disc",
+    "pc_failed",
+    "audio_share",
+    "audio_back",
     "end",
 ];
 
@@ -455,6 +471,8 @@ const OUTAGE: Duration = Duration::from_secs(4);
 /// One run of `cell`: its figures.
 fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
     let mut world = World::connected(&cell.setup(seed))?;
+    // A peer connection that fails is a figure of the run (`pc_failed`), not its end.
+    world.tolerate_failure = true;
     let t = world.now + OPEN_BEFORE + Duration::from_millis(phase_ms);
     world.advance(t)?;
     let before = target_at(&world.peers[0].targets, world.elapsed());
@@ -544,6 +562,13 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
         })
         .collect();
     let sound = audio(&callee.audio_arrivals, dropped_at, end);
+    // Every flow of either peer the circuit breaker ceased. A peer's audio SSRC is its base
+    // (0x1000_0000, 0x2000_0000), its video the next and the retransmissions the one after.
+    let ceased: Vec<u32> = world
+        .peers
+        .iter()
+        .flat_map(|peer| peer.breaker_ceased())
+        .collect();
     let link = &world.uplinks[0];
     let level = (f64::from(before) * RECOVERED_SHARE) as u32;
     let figures = [
@@ -580,18 +605,26 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
         callee.unusable as f64,
         callee.builder.skipped_gaps() as f64,
         caller.pacer_discards.len() as f64,
+        ceased.len() as f64,
+        ceased.iter().filter(|ssrc| *ssrc & 0xf == 0).count() as f64,
+        f64::from(caller.left_connected + callee.left_connected),
+        f64::from(u8::from(caller.failed || callee.failed)),
+        sound.share,
+        audio(&caller.audio_arrivals, dropped_at, end).share,
         seconds(end),
     ];
     Ok(Figures(figures))
 }
 
 /// A run of the ensemble: its figures, or why it did not complete.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct Row {
     cell: Cell,
     seed: u64,
     phase_ms: u64,
     figures: Result<Figures, String>,
+    /// How long the run took on this machine (never printed in the row: not a figure).
+    took: Duration,
 }
 
 impl Row {
@@ -641,11 +674,14 @@ fn run_rows(jobs: &[(Cell, u64, u64)], print: bool) -> Vec<Row> {
                     let Some(&(cell, seed, phase_ms)) = jobs.get(i) else {
                         break;
                     };
+                    let started = std::time::Instant::now();
+                    let figures = run_cell(cell, seed, phase_ms).map_err(|error| error.to_string());
                     let row = Row {
                         cell,
                         seed,
                         phase_ms,
-                        figures: run_cell(cell, seed, phase_ms).map_err(|error| error.to_string()),
+                        figures,
+                        took: started.elapsed(),
                     };
                     if print {
                         println!("{}", row.line());
@@ -736,7 +772,7 @@ fn quantile(values: &[f64], q: f64) -> f64 {
 }
 
 /// The figures a table shows.
-const TABLE: [&str; 12] = [
+const TABLE: [&str; 13] = [
     "max_age",
     "stale1",
     "stale2",
@@ -745,6 +781,7 @@ const TABLE: [&str; 12] = [
     "tail_gap",
     "resume",
     "audio_gap",
+    "audio_share",
     "audio_lost",
     "recover",
     "under",
@@ -754,10 +791,23 @@ const TABLE: [&str; 12] = [
 /// A cell's rows as a table: each figure's 10th, 50th and 90th percentile and maximum.
 fn table(cell: &str, rows: &[Row]) -> String {
     let completed = rows.iter().filter(|row| row.figures.is_ok()).count();
+    let count = |name: &str| {
+        rows.iter()
+            .filter(|row| row.value(name).is_some_and(|value| value > 0.0))
+            .count()
+    };
+    let took: Duration = rows.iter().map(|row| row.took).sum();
     let mut text = format!(
-        "{cell}: {} runs, {} did not complete\n  figure        p10     p50     p90     max\n",
+        "{cell}: {} runs, {} did not complete; the circuit breaker ceased a flow in {} (audio \
+         in {}), a peer left Connected in {} (failed in {}); {:.2} s of one core a run\n  \
+         figure        p10     p50     p90     max\n",
         rows.len(),
-        rows.len() - completed
+        rows.len() - completed,
+        count("cb"),
+        count("cb_audio"),
+        count("disc"),
+        count("pc_failed"),
+        took.as_secs_f64() / rows.len().max(1) as f64,
     );
     for name in TABLE {
         let values: Vec<f64> = rows.iter().filter_map(|row| row.value(name)).collect();
@@ -951,7 +1001,7 @@ const PR_SEED_BASE: u64 = 5000;
 /// receiver without a bound in both chains, then one dimension at a time from the reference
 /// (both directions, the queue's depth, loss on the reverse path) and the outage. The whole
 /// cross is `measure`'s and the dispatched comparison's.
-const PR_CELLS: [(&str, usize); 10] = [
+const PR_CELLS: [(&str, usize); 13] = [
     ("cap/paced/gap300/up/q300/rl0", 60),
     ("cap/paced/gap0/up/q300/rl0", 60),
     ("cap/nopacer/gap300/up/q300/rl0", 60),
@@ -962,7 +1012,121 @@ const PR_CELLS: [(&str, usize); 10] = [
     ("cap/paced/gap300/up/q1000/rl0", 30),
     ("cap/paced/gap300/up/q300/rl5", 30),
     ("outage/paced/gap300/up/q300/rl0", 30),
+    ("cap/parolnet/gap0/up/q300/rl0", 30),
+    // The cells a requirement is met in: the runs its test needs.
+    (MET_CAP, REQUIREMENT_RUNS),
+    (MET_OUTAGE, REQUIREMENT_RUNS),
 ];
+
+/// The cells in which the engine meets requirements today, asserted on every pull request:
+/// the capacity drop in ParolNet's chain (no pacer, the TWCC-driven estimator) with the
+/// reference receiver, and the outage in the default chain without the pacer.
+const MET_CAP: &str = "cap/parolnet/gap300/up/q300/rl0";
+const MET_OUTAGE: &str = "outage/nopacer/gap300/up/q300/rl0";
+
+/// The default chain's cells, where the requirements are known limits.
+const DEFAULT_CHAIN: &str = "cap/paced/gap300/up/q300/rl0";
+const DEFAULT_CHAIN_NO_BOUND: &str = "cap/paced/gap0/up/q300/rl0";
+const WITHOUT_PACER: &str = "cap/nopacer/gap300/up/q300/rl0";
+const BOTH_DIRECTIONS: &str = "cap/paced/gap300/both/q300/rl0";
+const OUTAGE_DEFAULT_CHAIN: &str = "outage/paced/gap300/up/q300/rl0";
+
+/// The rows of `cell` in the pull-request ensemble.
+fn pr_rows(cell: &str) -> Result<&'static [Row]> {
+    pr_ensemble()
+        .get(cell)
+        .map(Vec::as_slice)
+        .ok_or_else(|| anyhow!("{cell} is not in the pull-request ensemble"))
+}
+
+// Requirements the engine meets: asserted on every pull request, 300 runs each cell.
+
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_requirement_picture_in_parolnets_chain() -> Result<()> {
+    PICTURE.assert_met(MET_CAP, pr_rows(MET_CAP)?);
+    Ok(())
+}
+
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_requirement_freeze_in_parolnets_chain() -> Result<()> {
+    FREEZE.assert_met(MET_CAP, pr_rows(MET_CAP)?);
+    Ok(())
+}
+
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_requirement_audio_in_parolnets_chain() -> Result<()> {
+    AUDIO.assert_met(MET_CAP, pr_rows(MET_CAP)?);
+    Ok(())
+}
+
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_requirement_resume_after_an_outage_without_the_pacer() -> Result<()> {
+    RESUME.assert_met(MET_OUTAGE, pr_rows(MET_OUTAGE)?);
+    Ok(())
+}
+
+// Requirements the engine does NOT meet today. Not loosened: each test states the requirement
+// and fails when run (`-- --ignored known_limit_`), the attribute carries the share measured
+// on master, CHANGELOG "Known limits" tracks it, and the tripwires of the cell hold today's
+// level. When the engine meets one, its test moves up among the `ensemble_requirement_` ones.
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_picture_in_the_default_chain() -> Result<()> {
+    PICTURE.test(DEFAULT_CHAIN)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_freeze_in_the_default_chain() -> Result<()> {
+    FREEZE.test(DEFAULT_CHAIN)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_audio_in_the_default_chain() -> Result<()> {
+    AUDIO.test(DEFAULT_CHAIN)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_picture_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
+    PICTURE.test(DEFAULT_CHAIN_NO_BOUND)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_freeze_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
+    FREEZE.test(DEFAULT_CHAIN_NO_BOUND)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_picture_without_the_pacer() -> Result<()> {
+    PICTURE.test(WITHOUT_PACER)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_freeze_without_the_pacer() -> Result<()> {
+    FREEZE.test(WITHOUT_PACER)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_picture_with_both_directions_capped() -> Result<()> {
+    PICTURE.test(BOTH_DIRECTIONS)
+}
+
+#[test]
+#[ignore = "KNOWN LIMIT: PENDING"]
+fn known_limit_resume_after_an_outage_in_the_default_chain() -> Result<()> {
+    RESUME.test(OUTAGE_DEFAULT_CHAIN)
+}
 
 /// The pull-request ensemble's rows by cell, run once for all the tests that read it.
 fn pr_ensemble() -> &'static BTreeMap<&'static str, Vec<Row>> {
@@ -1223,18 +1387,30 @@ fn audio_is_measured_by_what_arrived() {
         }
     }
     let sound = audio(&arrivals, ms(9_000), ms(20_000));
+    // 550 packets belong to those 11 s; 525 arrived in them.
     assert_eq!(25, sound.lost);
+    assert!((sound.share - 525.0 / 550.0).abs() < 1e-9, "{sound:?}");
     assert_eq!(ms(200), sound.delay);
     // From number 499 (9.990 s) to number 525 (10.500 + 0.010 + 0.200 s).
     assert_eq!(ms(10_710 - 9_990), sound.gap);
     // Before the loss nothing is missing and nothing late.
     let quiet = audio(&arrivals, ms(2_000), ms(9_000));
     assert_eq!(
-        (0, ms(20), Duration::ZERO),
-        (quiet.lost, quiet.gap, quiet.delay)
+        (0, 1.0, ms(20), Duration::ZERO),
+        (quiet.lost, quiet.share, quiet.gap, quiet.delay)
     );
-    // Nothing at all is a gap as long as the window.
-    assert_eq!(ms(5_000), audio(&[], ms(1_000), ms(6_000)).gap);
+    // Audio that stops for good (a ceased flow) is lost to the end, and the gap is the rest.
+    let dead: Vec<_> = arrivals
+        .iter()
+        .copied()
+        .filter(|(at, _)| *at < ms(10_000))
+        .collect();
+    let sound = audio(&dead, ms(9_000), ms(20_000));
+    assert_eq!((500, ms(20_000 - 9_990)), (sound.lost, sound.gap));
+    assert!((sound.share - 50.0 / 550.0).abs() < 1e-9, "{sound:?}");
+    // Nothing at all.
+    let none = audio(&[], ms(1_000), ms(6_000));
+    assert_eq!((250, 0.0, ms(5_000)), (none.lost, none.share, none.gap));
 }
 
 #[test]
@@ -1351,6 +1527,7 @@ fn a_tripwire_allows_for_the_baseline_being_a_sample() {
         seed: 1,
         phase_ms: 0,
         figures,
+        took: Duration::ZERO,
     };
     let mut over = Figures([0.0; NAMES.len()]);
     over.0[0] = 1.5;

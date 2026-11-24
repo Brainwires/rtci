@@ -515,6 +515,10 @@ pub struct Peer {
     pub gap_wait: Option<Duration>,
     /// Every Opus packet received: when, and its sequence number.
     pub audio_arrivals: Vec<(Duration, u16)>,
+    /// How often the connection state left Connected, and whether it reached Failed
+    /// ([`World::tolerate_failure`]).
+    pub left_connected: u32,
+    pub failed: bool,
     pub decoder: ModelDecoder,
     pub usable_at: Vec<Duration>,
     /// How long after its capture each usable frame came out of the decoder.
@@ -809,6 +813,8 @@ impl Peer {
             },
             gap_wait: setup.gap_wait,
             audio_arrivals: Vec::new(),
+            left_connected: 0,
+            failed: false,
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
             usable_lag: Vec::new(),
@@ -967,6 +973,20 @@ impl Peer {
         )
     }
 
+    /// The SSRCs of this peer's flows that the RTP circuit breaker (RFC 8083) has ceased: the
+    /// engine drops what the application writes on them from then on. None in ParolNet's
+    /// chain, which has no breaker.
+    pub fn breaker_ceased(&self) -> Vec<u32> {
+        self.handles.as_ref().map_or_else(Vec::new, |handles| {
+            handles
+                .circuit_breaker
+                .ceased()
+                .into_iter()
+                .map(|(ssrc, _)| ssrc)
+                .collect()
+        })
+    }
+
     /// Every frame the builder has ready goes to the decoder: a usable one is on the screen
     /// from `at` (the call's time at `now`), with the lag from its capture.
     pub fn take_frames(&mut self, now: Instant, at: Duration) {
@@ -1069,6 +1089,9 @@ pub struct World {
     /// [`Setup::reverse_loss`] and the generator its losses are drawn from.
     pub reverse_loss: u32,
     pub loss_rng: Rng,
+    /// A peer connection that fails does not end the run ([`Peer::failed`] records it): for
+    /// a measurement that reports the failure as a figure. Off: the run ends with an error.
+    pub tolerate_failure: bool,
 }
 
 impl World {
@@ -1177,6 +1200,7 @@ impl World {
     pub fn events(&mut self, i: usize) -> Result<bool> {
         let at = self.elapsed();
         let now = self.now;
+        let tolerate_failure = self.tolerate_failure;
         let peer = &mut self.peers[i];
         let mut moved = false;
         while let Some(event) = peer.pc.poll_event() {
@@ -1184,9 +1208,16 @@ impl World {
             match event {
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
                     if state == RTCPeerConnectionState::Failed {
-                        bail!("peer {i} failed");
+                        if !tolerate_failure {
+                            bail!("peer {i} failed");
+                        }
+                        peer.failed = true;
                     }
-                    peer.connected = state == RTCPeerConnectionState::Connected;
+                    let connected = state == RTCPeerConnectionState::Connected;
+                    if peer.connected && !connected {
+                        peer.left_connected += 1;
+                    }
+                    peer.connected = connected;
                 }
                 RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => {
                     let estimate = peer.estimate();
@@ -1506,6 +1537,7 @@ impl World {
             sampling: false,
             samples: Vec::new(),
             reverse_loss: setup.reverse_loss,
+            tolerate_failure: false,
             loss_rng: Rng(setup.seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xfeed_beef),
         };
         let now = world.now;
