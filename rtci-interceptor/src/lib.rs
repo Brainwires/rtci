@@ -425,7 +425,7 @@ pub use rtpfb::history::History;
 pub use stream_info::{FecSessionStream, RTCPFeedback, RTPHeaderExtension, StreamInfo};
 pub use tst::{TstnResponderBuilder, TstnResponderInterceptor, TstrCommands, VbcmCommands};
 pub use twcc::receiver::{TwccReceiverBuilder, TwccReceiverInterceptor};
-pub use twcc::sender::{TwccSenderBuilder, TwccSenderInterceptor};
+pub use twcc::sender::{RetransmissionsReported, TwccSenderBuilder, TwccSenderInterceptor};
 pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
 pub use ulpfec::sender::{ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS};
 pub use ulpfec::{

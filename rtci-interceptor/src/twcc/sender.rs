@@ -4,12 +4,15 @@ use super::{flow_ssrcs, stream_supports_twcc};
 use crate::Interceptor;
 use crate::cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use crate::stream_info::StreamInfo;
-use crate::{Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
+use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
 use sansio::Protocol;
+use shared::TransportContext;
 use shared::error::Error;
 use shared::marshal::Marshal;
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Builder for the [`TwccSenderInterceptor`].
@@ -88,6 +91,25 @@ impl LocalStream {
     }
 }
 
+/// What transport-wide feedback reported on the retransmissions this interceptor numbered,
+/// since the last notice: each as (SSRC on the wire, sequence number of the packet it
+/// repairs; the original sequence number on an RTX stream, RFC 4588 section 4), the key the
+/// pacer's [`RetransmissionsLeft`](crate::RetransmissionsLeft) uses. The TWCC sender sends it
+/// application-ward on an empty RTCP carrier when a feedback packet reports on one; the NACK
+/// responder does not repair again a packet whose repair arrived, and answers at once a
+/// request for one whose repair was lost. Probe padding (no payload) is not reported. Read
+/// with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RetransmissionsReported {
+    /// The receiver got the retransmission.
+    pub received: Vec<(u32, u16)>,
+    /// The receiver reported it missing.
+    pub lost: Vec<(u32, u16)>,
+}
+
+/// The most retransmissions whose transport-wide number is remembered for the feedback.
+const REMEMBERED_RETRANSMISSIONS: usize = REMEMBERED;
+
 /// Numbers every departing RTP packet so the remote can report on it
 /// ([`draft-holmer-rmcat-transport-wide-cc-extensions-01`]).
 ///
@@ -112,6 +134,12 @@ pub struct TwccSenderInterceptor {
     /// Outbound packets ready for the next interceptor: what passed through, plus
     /// anything this one generated.
     write_queue: VecDeque<TaggedPacket>,
+    /// The retransmission (RTX) SSRCs of the numbered streams.
+    repair_flows: HashSet<u32>,
+    /// Transport-wide number → the retransmission it was given to, as
+    /// [`RetransmissionsReported`] names it, oldest first in `retransmission_order`.
+    retransmissions: HashMap<u16, (u32, u16)>,
+    retransmission_order: VecDeque<u16>,
 }
 
 impl TwccSenderInterceptor {
@@ -131,8 +159,44 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
     type Error = Error;
     type Time = Instant;
 
+    /// Transport-wide feedback passes on to the congestion controller's readers as it is; what
+    /// it reports on the retransmissions numbered here follows it on a carrier of its own
+    /// ([`RetransmissionsReported`]).
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        let now = msg.now;
+        let mut report = RetransmissionsReported::default();
+        if !self.retransmissions.is_empty()
+            && let Packet::Rtcp(ref packets) = msg.message.packet
+        {
+            for feedback in packets
+                .iter()
+                .filter_map(|packet| packet.as_any().downcast_ref::<TransportLayerCc>())
+            {
+                for acknowledgement in crate::rtpfb::convert::convert_twcc(feedback) {
+                    if let Some(key) = self
+                        .retransmissions
+                        .remove(&acknowledgement.sequence_number)
+                    {
+                        if acknowledgement.arrived {
+                            report.received.push(key);
+                        } else {
+                            report.lost.push(key);
+                        }
+                    }
+                }
+            }
+        }
         self.read_queue.push_back(msg);
+        if !report.received.is_empty() || !report.lost.is_empty() {
+            self.retransmission_order
+                .retain(|number| self.retransmissions.contains_key(number));
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                    .with(Attribute::Custom(Arc::new(report))),
+            });
+        }
         Ok(())
     }
 
@@ -141,6 +205,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
     }
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let retransmission = msg.message.has(&Attribute::Retransmission);
         if let Packet::Rtp(ref mut rtp_packet) = msg.message.packet
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
@@ -160,6 +225,30 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
                     seq
                 }
             };
+
+            // A retransmission with media in it (probe padding has none): remembered under its
+            // number, for the feedback to report on.
+            if retransmission {
+                let ssrc = rtp_packet.header.ssrc;
+                let repaired = if self.repair_flows.contains(&ssrc) {
+                    rtp_packet
+                        .payload
+                        .get(..2)
+                        .map(|osn| u16::from_be_bytes([osn[0], osn[1]]))
+                } else {
+                    Some(rtp_packet.header.sequence_number)
+                };
+                if let Some(repaired) = repaired
+                    && self.retransmissions.insert(seq, (ssrc, repaired)).is_none()
+                {
+                    if self.retransmission_order.len() >= REMEMBERED_RETRANSMISSIONS
+                        && let Some(oldest) = self.retransmission_order.pop_front()
+                    {
+                        self.retransmissions.remove(&oldest);
+                    }
+                    self.retransmission_order.push_back(seq);
+                }
+            }
 
             let tcc_ext = rtp::extension::transport_cc_extension::TransportCcExtension {
                 transport_sequence: seq,
@@ -213,12 +302,16 @@ impl Interceptor for TwccSenderInterceptor {
             for ssrc in flow_ssrcs(info) {
                 self.streams.insert(ssrc, LocalStream::new(hdr_ext_id));
             }
+            self.repair_flows.extend(info.ssrc_rtx);
         }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         for ssrc in flow_ssrcs(info) {
             self.streams.remove(&ssrc);
+        }
+        if let Some(ssrc_rtx) = info.ssrc_rtx {
+            self.repair_flows.remove(&ssrc_rtx);
         }
     }
 
