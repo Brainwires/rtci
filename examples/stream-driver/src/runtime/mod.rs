@@ -174,11 +174,6 @@ pub struct Transmit<'a> {
     /// `Some(n)`: `contents` is several datagrams of `n` bytes (the last may be shorter), for a
     /// socket that sends them in one call (GSO). The driver sends one datagram per transmit.
     pub segment_size: Option<usize>,
-    /// The address the datagram is to leave from, for a socket bound to the unspecified
-    /// address: the engine names one for each mDNS datagram (an answer leaves from the address
-    /// of its record, on that address's interface, RFC 6762 section 14). `None`: the socket's
-    /// own address, or the system's choice.
-    pub source: Option<IpAddr>,
 }
 
 /// What [`AsyncUdpSocket::poll_recv`] says about one buffer it filled.
@@ -347,7 +342,6 @@ impl<'a> dyn AsyncUdpSocket + 'a {
             contents: buf,
             traffic_class: 0,
             segment_size: None,
-            source: None,
         };
         std::future::poll_fn(|cx| self.poll_send(cx, &transmit)).await
     }
@@ -366,11 +360,10 @@ pub struct MulticastConfig {
     pub group: IpAddr,
     /// The port (5353 for mDNS).
     pub port: u16,
-    /// The addresses of the interfaces to join the group on: one membership per interface
-    /// that has one of them (the addresses of the group's family; an IPv6 address names its
-    /// interface by index, [`interface_index`]). Empty: the system's default interface only.
-    /// RFC 6762 section 14: a host on several links takes part in mDNS on each of them.
-    pub interfaces: Vec<IpAddr>,
+    /// The IPv4 interface to join on (`0.0.0.0`: the system's choice).
+    pub interface_v4: Ipv4Addr,
+    /// The IPv6 interface index to join on (0: the default interface).
+    pub interface_v6: u32,
     /// TTL / hop limit of what it sends, multicast and unicast (255 for mDNS, RFC 6762
     /// section 11).
     pub hop_limit: u32,
@@ -380,118 +373,17 @@ pub struct MulticastConfig {
 }
 
 impl MulticastConfig {
-    /// mDNS on `group` (224.0.0.251 or ff02::fb): port 5353, joined on the interfaces of
-    /// `interfaces` (the default interface when empty), hop limit 255, the port shared with
-    /// the host's other responders.
-    pub fn mdns(group: IpAddr, interfaces: Vec<IpAddr>) -> Self {
+    /// mDNS on `group` (224.0.0.251 or ff02::fb): port 5353, the default interface, hop limit
+    /// 255, the port shared with the host's other responders.
+    pub fn mdns(group: IpAddr) -> Self {
         Self {
             group,
             port: 5353,
-            interfaces,
+            interface_v4: Ipv4Addr::UNSPECIFIED,
+            interface_v6: 0,
             hop_limit: 255,
             reuse_address: true,
         }
-    }
-
-    /// The addresses of [`interfaces`](Self::interfaces) of the group's family.
-    pub fn interfaces_of_family(&self) -> impl Iterator<Item = IpAddr> + '_ {
-        let v4 = self.group.is_ipv4();
-        self.interfaces
-            .iter()
-            .copied()
-            .filter(move |ip| ip.is_ipv4() == v4 && !ip.is_unspecified())
-    }
-}
-
-/// The index of the interface that holds the IPv6 address `ip` (what `IPV6_MULTICAST_IF` and
-/// an IPv6 group membership name an interface by), `None` when no interface of the host holds
-/// it.
-pub fn interface_index(ip: Ipv6Addr) -> Option<u32> {
-    let interfaces = shared::ifaces::ifaces().ok()?;
-    let entry = interfaces
-        .iter()
-        .find(|i| matches!(i.addr, Some(SocketAddr::V6(a)) if *a.ip() == ip))?;
-    if let Some(SocketAddr::V6(a)) = entry.addr
-        && a.scope_id() != 0
-    {
-        return Some(a.scope_id());
-    }
-    name_to_index(&entry.name)
-}
-
-#[cfg(unix)]
-fn name_to_index(name: &str) -> Option<u32> {
-    let name = std::ffi::CString::new(name).ok()?;
-    // SAFETY: `name` is a NUL-terminated string that outlives the call.
-    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
-    (index != 0).then_some(index)
-}
-
-#[cfg(not(unix))]
-fn name_to_index(_: &str) -> Option<u32> {
-    None
-}
-
-/// The name of the interface that holds `ip`, `None` when no interface of the host holds it.
-pub fn interface_name(ip: IpAddr) -> Option<String> {
-    shared::ifaces::ifaces()
-        .ok()?
-        .into_iter()
-        .find(|i| i.addr.is_some_and(|a| a.ip() == ip))
-        .map(|i| i.name)
-}
-
-/// Applies a [`Transmit::source`] to a real multicast socket bound to the unspecified address:
-/// before a datagram to a multicast group, it sets the interface the datagram leaves by
-/// (`IP_MULTICAST_IF` to the source address, `IPV6_MULTICAST_IF` to the index of the interface
-/// that holds it) when it differs from the last one set. The system then sends from that
-/// interface's address: on Linux exactly the address given (`IP_MULTICAST_IF` with an address
-/// sets the source), on macOS and Windows the interface's address, the same one where the
-/// interface has one address of the family. For built-in and third-party runtimes whose sockets
-/// have a file descriptor.
-#[derive(Debug, Default)]
-pub struct MulticastInterfaceSelector {
-    last: std::sync::Mutex<Option<IpAddr>>,
-}
-
-impl MulticastInterfaceSelector {
-    /// Sets the interface of `transmit` on `socket`. A transmit to a unicast destination, or
-    /// without a source of the destination's family, changes nothing.
-    ///
-    /// # Errors
-    ///
-    /// The source is on no interface of the host, or the system refused the option: the
-    /// datagram is not to be sent from another interface instead.
-    pub fn apply(&self, socket: SockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
-        let destination = transmit.destination.ip();
-        let Some(source) = transmit.source.filter(|source| {
-            destination.is_multicast()
-                && !source.is_unspecified()
-                && source.is_ipv4() == destination.is_ipv4()
-        }) else {
-            return Ok(());
-        };
-        let mut last = self
-            .last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *last == Some(source) {
-            return Ok(());
-        }
-        match source {
-            IpAddr::V4(source) => socket.set_multicast_if_v4(&source)?,
-            IpAddr::V6(source) => {
-                let index = interface_index(source).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::AddrNotAvailable,
-                        format!("no interface holds {source}"),
-                    )
-                })?;
-                socket.set_multicast_if_v6(index)?;
-            }
-        }
-        *last = Some(source);
-        Ok(())
     }
 }
 
@@ -616,13 +508,11 @@ pub fn std_udp(local: SocketAddr) -> io::Result<std::net::UdpSocket> {
 
 /// A non-blocking std UDP socket joined as `config` says: for IPv4 what rtci-mdns'
 /// `MulticastSocket` builds (bound to the group on Linux, to 0.0.0.0 elsewhere), for IPv6
-/// `[::]:port`, IPv6 only; a membership of the group on every interface of
-/// [`MulticastConfig::interfaces`] (the default interface when there is none).
+/// `[::]:port`, IPv6 only.
 ///
 /// # Errors
 ///
-/// The bind failed, or no membership could be joined (an interface that refuses one is
-/// skipped while another joins).
+/// The bind or the join failed.
 pub fn std_multicast(config: &MulticastConfig) -> io::Result<std::net::UdpSocket> {
     let domain = match config.group {
         IpAddr::V4(_) => Domain::IPV4,
@@ -638,7 +528,6 @@ pub fn std_multicast(config: &MulticastConfig) -> io::Result<std::net::UdpSocket
         socket.set_reuse_port(true)?;
     }
     socket.set_nonblocking(true)?;
-    let interfaces: Vec<IpAddr> = config.interfaces_of_family().collect();
     match config.group {
         IpAddr::V4(group) => {
             socket.set_multicast_ttl_v4(config.hop_limit)?;
@@ -650,57 +539,16 @@ pub fn std_multicast(config: &MulticastConfig) -> io::Result<std::net::UdpSocket
                 Ipv4Addr::UNSPECIFIED
             };
             socket.bind(&SocketAddr::new(local.into(), config.port).into())?;
-            join_each(&interfaces, |interface| match interface {
-                Some(IpAddr::V4(interface)) => socket.join_multicast_v4(&group, &interface),
-                _ => socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED),
-            })?;
+            socket.join_multicast_v4(&group, &config.interface_v4)?;
         }
         IpAddr::V6(group) => {
             socket.set_multicast_hops_v6(config.hop_limit)?;
             socket.set_unicast_hops_v6(config.hop_limit)?;
             socket.bind(&SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), config.port).into())?;
-            join_each(&interfaces, |interface| {
-                let index = match interface {
-                    Some(IpAddr::V6(ip)) => interface_index(ip).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::AddrNotAvailable,
-                            format!("no interface holds {ip}"),
-                        )
-                    })?,
-                    _ => 0,
-                };
-                socket.join_multicast_v6(&group, index)
-            })?;
+            socket.join_multicast_v6(&group, config.interface_v6)?;
         }
     }
     Ok(socket.into())
-}
-
-/// Joins once per interface (`None`: the default one, when there is no interface): an error
-/// only when no membership was made. A second address of an interface already joined is
-/// refused by the system (`EADDRINUSE`) and changes nothing.
-fn join_each(
-    interfaces: &[IpAddr],
-    mut join: impl FnMut(Option<IpAddr>) -> io::Result<()>,
-) -> io::Result<()> {
-    if interfaces.is_empty() {
-        return join(None);
-    }
-    let mut first_error = None;
-    let mut joined = false;
-    for interface in interfaces {
-        match join(Some(*interface)) {
-            Ok(()) => joined = true,
-            Err(e) if e.kind() == io::ErrorKind::AddrInUse => joined = true,
-            Err(e) => {
-                first_error.get_or_insert(e);
-            }
-        }
-    }
-    match (joined, first_error) {
-        (false, Some(e)) => Err(e),
-        _ => Ok(()),
-    }
 }
 
 fn tcp_socket(addr: SocketAddr, reuse_address: bool) -> io::Result<Socket> {
