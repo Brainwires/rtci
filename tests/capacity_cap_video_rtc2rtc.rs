@@ -148,6 +148,9 @@ struct Setup {
     anchor: Option<Duration>,
     /// How long the cap stays after the estimate went under 400 kbit/s.
     cap: Duration,
+    /// The target the caller's encoder has reached when the cap arrives; after 20 s of call,
+    /// whatever the target, when `None`.
+    cap_at_target: Option<u32>,
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     video: [bool; 2],
@@ -161,6 +164,7 @@ impl Setup {
             chain: Chain::ParolNet,
             anchor: None,
             cap: Duration::from_secs(20),
+            cap_at_target: None,
             video: [true, true],
         }
     }
@@ -178,6 +182,12 @@ impl Setup {
 
     fn anchor(mut self, anchor: Duration) -> Self {
         self.anchor = Some(anchor);
+        self
+    }
+
+    /// The cap arrives when the caller's target has reached `bps`, not after 20 s.
+    fn capped_at_a_target_of(mut self, bps: u32) -> Self {
+        self.cap_at_target = Some(bps);
         self
     }
 }
@@ -1389,8 +1399,21 @@ struct Outcome {
 fn run(setup: &Setup) -> Result<Outcome> {
     let seed = setup.seed;
     let mut world = World::connected(setup)?;
-    let t = world.now + Duration::from_secs(20);
-    world.advance(t)?;
+    match setup.cap_at_target {
+        None => {
+            let t = world.now + Duration::from_secs(20);
+            world.advance(t)?;
+        }
+        Some(bps) => {
+            while world.peers[0].target_bps < bps {
+                if world.elapsed() > Duration::from_secs(40) {
+                    bail!("the target did not reach {bps} bit/s in 40 s");
+                }
+                let t = world.now + Duration::from_millis(100);
+                world.advance(t)?;
+            }
+        }
+    }
     let before = target_at(&world.peers[0].targets, world.elapsed());
     world.uplinks[0].set_profile(LinkProfile::capped_300k());
     let capped_at = world.elapsed();
@@ -1680,7 +1703,8 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 /// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
 /// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
 /// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
-/// `20`), each a comma-separated list.
+/// `20`), each a comma-separated list; `RTC_CAP_AT_TARGET` (the target in bit/s at which the
+/// cap arrives, instead of after 20 s).
 #[test]
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_the_capacity_cap() -> Result<()> {
@@ -1703,6 +1727,7 @@ fn measure_the_capacity_cap() -> Result<()> {
                             "unlimited" => RetransmissionRateLimit::Unlimited,
                             other => bail!("unknown rule {other}"),
                         };
+                        let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
                         let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
                             .chain(match chain.as_str() {
                                 "parolnet" => Chain::ParolNet,
@@ -1712,9 +1737,14 @@ fn measure_the_capacity_cap() -> Result<()> {
                             })
                             .anchor(ANCHORS[anchor.parse::<usize>()?]);
                         setup.cap = Duration::from_secs(seconds.parse()?);
+                        if let Some(bps) = &at_target {
+                            setup = setup.capped_at_a_target_of(bps.parse()?);
+                        }
                         match run(&setup) {
                             Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                o.before / 1000,
+                                o.capped_at.as_secs_f64(),
                                 o.freeze.as_secs_f64(),
                                 o.freeze_at.as_secs_f64(),
                                 o.lag.as_secs_f64(),
