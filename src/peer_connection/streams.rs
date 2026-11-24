@@ -475,7 +475,13 @@ impl RTCPeerConnection {
             );
             // RFC 6544 section 7.1: on a connection this agent opened, a first answer that is
             // not STUN closes it (the agent has failed the pairs of that remote candidate).
-            if first_answer && first > 3 {
+            // Two lite agents send no connectivity check (section 6.1): the first thing the
+            // peer sends on the connection is DTLS, and that is no failed check.
+            let lite_lite = {
+                let agent = &self.ice_transport_of(on).agent;
+                agent.is_lite() && agent.is_remote_lite()
+            };
+            if first_answer && first > 3 && !lite_lite {
                 debug!("{id}: the first answer is not STUN, the connection is closed");
                 self.streams.table.reset(id);
                 break;
