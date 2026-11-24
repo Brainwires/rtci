@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
   has a new public field (`..Default::default()` in a struct literal covers it).
 
+### Fixed
+
+- **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
+  arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
+  performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
+  TSN; it was then never answered with this side's own reset (RFC 8831 6.7), so the peer's
+  channel stayed "closing" and the stream id stayed taken there, and the reset of a stream with
+  no state here was not reported. It is now answered as a reset performed at once is. (2)
+  Whether this side has reset its direction of a stream (so that the peer's reset is not
+  answered with a second one) was the Readable bit of the stream's `RecvSendState`, which the
+  peer's Incoming SSN Reset Request cleared: the stream stopped being readable although the
+  peer had not reset its direction (RFC 6525 5.2.3), and its unread messages were dropped when
+  the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
+  the peer resets it. Engine behaviour change. Tests:
+  `rtci-sctp/src/association/reset_answer_test.rs`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
