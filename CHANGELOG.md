@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
+  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
+  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
+  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
+  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
+  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
+  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
+  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
+  test.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
