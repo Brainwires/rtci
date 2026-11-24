@@ -15,9 +15,9 @@ API is the default and tested too (`RULES.md`).
 |---|---|---|---|---|---|---|---|---|---|
 | MUST | 5033 | 25 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
 | SHOULD | 874 | 0 | 2 | 4 | 48 | 38 | 1 | 327 | 1294 |
-| MAY | 458 | 0 | 0 | 18 | 30 | 100 | 0 | 172 | 778 |
+| MAY | 462 | 0 | 0 | 14 | 30 | 100 | 0 | 172 | 778 |
 | PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
-| all | 6434 | 25 | 9 | 24 | 92 | 144 | 1 | 1166 | 7895 |
+| all | 6438 | 25 | 9 | 20 | 92 | 144 | 1 | 1166 | 7895 |
 
 ## RFC behaviour tested
 
@@ -28,7 +28,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 |---|---|---|---|---|---|
 | MUST | 5080 | 5065 | 99.7 | 5033 | 99.1 |
 | SHOULD | 967 | 876 | 90.6 | 874 | 90.4 |
-| MAY | 606 | 458 | 75.6 | 458 | 75.6 |
+| MAY | 606 | 462 | 76.2 | 462 | 76.2 |
 | PROC | 76 | 69 | 90.8 | 69 | 90.8 |
 
 ## Per file
@@ -46,7 +46,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-avtcore-rtp-sframe.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 11 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 12 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 15 |
-| `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 1 | 0 | 0 | 1 | 0 | 2 | 0 | 1 | 5 |
+| `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 2 | 0 | 0 | 0 | 0 | 2 | 0 | 1 | 5 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 8 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 35 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 10 |
@@ -235,7 +235,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8445.md` | MAY | 8 | 0 | 0 | 0 | 0 | 3 | 0 | 5 | 16 |
 | `rfc8446.md` | MUST | 230 | 0 | 0 | 0 | 0 | 0 | 0 | 83 | 313 |
 | `rfc8446.md` | SHOULD | 39 | 0 | 0 | 0 | 0 | 0 | 0 | 34 | 73 |
-| `rfc8446.md` | MAY | 17 | 0 | 0 | 1 | 0 | 0 | 0 | 30 | 48 |
+| `rfc8446.md` | MAY | 18 | 0 | 0 | 0 | 0 | 0 | 0 | 30 | 48 |
 | `rfc8489.md` | MUST | 105 | 0 | 0 | 0 | 0 | 0 | 0 | 14 | 119 |
 | `rfc8489.md` | SHOULD | 24 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 24 |
 | `rfc8489.md` | MAY | 6 | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 8 |
@@ -314,7 +314,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc9146.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9147.md` | MUST | 90 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 94 |
 | `rfc9147.md` | SHOULD | 51 | 0 | 0 | 0 | 1 | 0 | 0 | 8 | 60 |
-| `rfc9147.md` | MAY | 17 | 0 | 0 | 2 | 0 | 0 | 0 | 5 | 24 |
+| `rfc9147.md` | MAY | 19 | 0 | 0 | 0 | 0 | 0 | 0 | 5 | 24 |
 | `rfc9260.md` | MUST | 288 | 0 | 0 | 0 | 0 | 0 | 0 | 28 | 316 |
 | `rfc9260.md` | SHOULD | 162 | 0 | 0 | 0 | 5 | 0 | 0 | 23 | 190 |
 | `rfc9260.md` | MAY | 31 | 0 | 0 | 0 | 6 | 21 | 0 | 15 | 73 |
