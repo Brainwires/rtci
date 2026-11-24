@@ -102,6 +102,7 @@ impl UlpfecReceiveBuilder {
             filter: self.filter,
             decoders: HashMap::new(),
             repair_to_media: HashMap::new(),
+            media_transport: HashMap::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
         }
@@ -135,6 +136,10 @@ pub struct UlpfecReceiveInterceptor {
     decoders: HashMap<u32, UlpfecDecoder>,
     /// Separate stream: repair SSRC (and its payload type) to the media SSRC.
     repair_to_media: HashMap<u32, (u32, u8)>,
+    /// Where each protected stream's media last arrived from. A packet rebuilt from a FEC
+    /// packet is media of that stream, and the FEC may have come over another transport (a
+    /// FEC session of its own, RFC 5109 section 14.1).
+    media_transport: HashMap<u32, shared::TransportContext>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -195,6 +200,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
                 }
                 _ => Vec::new(),
             };
+            let transport = self
+                .media_transport
+                .get(&media_ssrc)
+                .copied()
+                .unwrap_or(transport);
             self.queue_recovered(now, transport, recovered);
             return Ok(());
         }
@@ -244,6 +254,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
 
         // A media packet: the decoder needs it to rebuild its neighbours, and it carries on.
         recovered.extend(decoder.push_media(rtp_packet));
+        self.media_transport.insert(ssrc, transport);
         self.read_queue.push_back(msg);
         self.queue_recovered(now, transport, recovered);
         Ok(())
@@ -281,8 +292,12 @@ impl Interceptor for UlpfecReceiveInterceptor {
         // own (RFC 5109 section 14.1), whichever carriage the builder names, since the
         // multiplexing is "indicated out of band" per stream (section 14). With the stream
         // carriage a repair flow that names no format is taken as ULPFEC.
-        let separate = match (info.ssrc_fec, info.payload_type_fec) {
-            (Some(ssrc_fec), Some(payload_type_fec))
+        //
+        // A FEC session of its own ([`StreamInfo::fec_session`], an m= section grouped with
+        // the media's): its stream, under the SSRC it has in this chain.
+        let separate = match (info.fec_session, info.ssrc_fec, info.payload_type_fec) {
+            (Some(session), _, _) => Some((session.ssrc, session.payload_type)),
+            (None, Some(ssrc_fec), Some(payload_type_fec))
                 if info.fec_is_ulpfec()
                     || (self.carriage == Carriage::Stream && info.mime_type_fec.is_empty()) =>
             {
@@ -308,6 +323,9 @@ impl Interceptor for UlpfecReceiveInterceptor {
                 Carriage::Stream => None,
             });
         let one_level_only = self.one_level_only
+            || info
+                .fec_session
+                .is_some_and(|session| session.one_level_only)
             || fec_format.is_some_and(|payload_type| {
                 info.section_fmtp_lines
                     .iter()
@@ -321,6 +339,7 @@ impl Interceptor for UlpfecReceiveInterceptor {
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.decoders.remove(&info.ssrc);
+        self.media_transport.remove(&info.ssrc);
         self.repair_to_media
             .retain(|_, (media, _)| *media != info.ssrc);
     }
