@@ -238,6 +238,7 @@ pub(crate) mod intervalpli;
 pub(crate) mod jitterbuffer;
 pub(crate) mod keyframe;
 pub(crate) mod nack;
+pub(crate) mod never_sent;
 pub(crate) mod ntp_timestamp;
 pub(crate) mod pacing;
 pub(crate) mod packet;
