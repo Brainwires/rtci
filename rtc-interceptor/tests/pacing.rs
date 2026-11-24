@@ -10,9 +10,10 @@
 //! instant the application enqueued.
 
 use rtc_interceptor::{
-    Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerQueueOverflow as QueueOverflow,
-    Packet, Registry, Slot, StreamInfo, TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerDiscard,
+    PacerQueueOverflow as QueueOverflow, Packet, Registry, Slot, StreamInfo, TaggedPacket,
 };
+use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::marshal::MarshalSize;
@@ -149,7 +150,31 @@ impl Harness {
         self.send_sized(at, sequence_number, PAYLOAD_BYTES);
     }
 
+    /// A video packet of stream 1 that is a frame of its own (the RTP timestamp follows the
+    /// sequence number), so a discard takes the packets it is meant to and no more.
     fn send_sized(&mut self, at: Duration, sequence_number: u16, payload_bytes: usize) {
+        self.send_frame_packet(
+            at,
+            1,
+            sequence_number,
+            u32::from(sequence_number) * 3000,
+            payload_bytes,
+        );
+    }
+
+    /// A full-sized packet of the frame with RTP timestamp `timestamp` of the stream `ssrc`.
+    fn send_of(&mut self, at: Duration, ssrc: u32, sequence_number: u16, timestamp: u32) {
+        self.send_frame_packet(at, ssrc, sequence_number, timestamp, PAYLOAD_BYTES);
+    }
+
+    fn send_frame_packet(
+        &mut self,
+        at: Duration,
+        ssrc: u32,
+        sequence_number: u16,
+        timestamp: u32,
+        payload_bytes: usize,
+    ) {
         self.chain
             .handle_write(TaggedPacket {
                 now: self.epoch + at,
@@ -159,13 +184,20 @@ impl Harness {
                         version: 2,
                         payload_type: 96,
                         sequence_number,
-                        ssrc: 1,
+                        timestamp,
+                        ssrc,
                         ..Default::default()
                     },
                     payload: vec![0u8; payload_bytes].into(),
                 })),
             })
             .expect("handle_write");
+    }
+
+    /// What the chain hands application-ward: the pacer's discard notices and key-frame
+    /// requests.
+    fn reads(&mut self) -> Vec<TaggedPacket> {
+        std::iter::from_fn(|| self.chain.poll_read()).collect()
     }
 
     /// A padding-only packet (RFC 3550 section 5.1), as the NACK responder fills a probe
@@ -826,6 +858,176 @@ fn by_default_a_full_queue_drops_its_oldest() {
         .map(|(sequence_number, _)| *sequence_number)
         .collect();
     assert_eq!(vec![0, 7, 8, 9], order);
+}
+
+/// The discard notices ([`PacerDiscard`]) among `reads`: (stream, sequence numbers, frames).
+fn discards(reads: &[TaggedPacket]) -> Vec<(u32, Vec<u16>, u32)> {
+    reads
+        .iter()
+        .filter_map(|read| read.message.custom::<PacerDiscard>())
+        .map(|discard| {
+            (
+                discard.ssrc,
+                discard.sequence_numbers.clone(),
+                discard.frames,
+            )
+        })
+        .collect()
+}
+
+/// The streams `reads` ask a key frame for: a Picture Loss Indication delivered to the
+/// application, as a receiver's would be.
+fn key_frame_requests(reads: &[TaggedPacket]) -> Vec<u32> {
+    reads
+        .iter()
+        .filter(|read| read.message.has(&Attribute::DeliverToApplication))
+        .filter_map(|read| match &read.message.packet {
+            Packet::Rtcp(packets) => Some(packets),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|packet| {
+            packet
+                .as_any()
+                .downcast_ref::<PictureLossIndication>()
+                .map(|pli| pli.media_ssrc)
+        })
+        .collect()
+}
+
+/// 12 kbit/s: one full-sized packet a second, so waits of seconds are easy to read.
+const SLOW: f64 = 12_000.0;
+
+/// What waited the 2 s bound is discarded whole frames at a time, with every other frame of
+/// its stream that waits: at one packet a second, stream 1's first frame (sequence numbers 0
+/// and 1, one left at once), its second (2, 3) and third (4, 5) are all queued at 0 s; at 2 s
+/// packet 1 has waited the bound, and 1 to 5 go, oldest first, three frames. A retransmission
+/// written at 0.5 s (ahead of them) left at 1 s, audio written at 1.5 s left when written,
+/// and stream 9's frame written at 0.7 s is another stream's and leaves after the discard.
+#[test]
+fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits() {
+    let mut harness = Harness::new();
+    harness.retarget(SLOW);
+    harness
+        .chain
+        .bind_local_stream(&rtc_interceptor::StreamInfo {
+            ssrc: 7,
+            mime_type: "audio/opus".to_owned(),
+            clock_rate: 48_000,
+            ..Default::default()
+        });
+    for (sequence_number, timestamp) in [(0, 0), (1, 0), (2, 3000), (3, 3000), (4, 6000), (5, 6000)]
+    {
+        harness.send_of(ms(0), 1, sequence_number, timestamp);
+    }
+    harness.drain();
+    harness.advance_to(ms(500));
+    harness.send_retransmission(ms(500), 900);
+    harness.advance_to(ms(700));
+    harness.send_of(ms(700), 9, 100, 0);
+    harness.drain();
+    harness.advance_to(ms(1_500));
+    harness.send_frame_packet(ms(1_500), 7, 5000, 0, 100);
+    harness.drain();
+    harness.advance_to(ms(5_000));
+
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 900, 5000, 100], order);
+    let reads = harness.reads();
+    assert_eq!(vec![(1, vec![1, 2, 3, 4, 5], 3)], discards(&reads));
+    let target = reads
+        .iter()
+        .find_map(|read| read.message.custom::<PacerDiscard>())
+        .map(|discard| discard.target_bitrate);
+    assert_eq!(Some(SLOW), target, "the target at the discard");
+}
+
+/// The stream that lost a frame needs a key frame, and the application is asked for it the
+/// way a receiver asks: a Picture Loss Indication for the stream, delivered to the
+/// application, once per discard that lost a frame. A repair flow (here the stream's FEC
+/// SSRC) has no key frame to ask for: its discard is announced, no key frame is asked for.
+#[test]
+fn a_discard_asks_the_application_for_a_key_frame_of_a_media_stream_only() {
+    let mut harness = Harness::new();
+    harness.retarget(SLOW);
+    harness
+        .chain
+        .bind_local_stream(&rtc_interceptor::StreamInfo {
+            ssrc: 1,
+            ssrc_fec: Some(11),
+            mime_type: "video/VP8".to_owned(),
+            clock_rate: 90_000,
+            ..Default::default()
+        });
+    // At one packet a second: 0 leaves at once, 1 at 1 s, and at 2 s 2 and then 50 have waited
+    // the bound.
+    harness.send_of(ms(0), 1, 0, 0);
+    harness.send_of(ms(0), 1, 1, 3000);
+    harness.send_of(ms(0), 1, 2, 6000);
+    harness.send_of(ms(0), 11, 50, 6000);
+    harness.drain();
+    harness.advance_to(ms(5_000));
+
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 1], order);
+    let reads = harness.reads();
+    assert_eq!(vec![(1, vec![2], 1), (11, vec![50], 1)], discards(&reads));
+    assert_eq!(vec![1], key_frame_requests(&reads));
+}
+
+/// The packets of a discarded frame that the application writes after the discard are
+/// discarded too (a frame with a packet missing is worth nothing), announced without a frame
+/// or a key-frame request of their own; the next frame of the stream is sent. At one packet a
+/// second, the frame of timestamp 3000 had its first packet (1) leave at 1 s, its second (2)
+/// discarded at 2 s, and its third (3), written at 2.1 s, goes the same way; the next frame
+/// (4) leaves when it is written.
+#[test]
+fn the_rest_of_a_discarded_frame_is_discarded_when_it_is_written() {
+    let mut harness = Harness::new();
+    harness.retarget(SLOW);
+    harness.send_of(ms(0), 1, 0, 0);
+    harness.send_of(ms(0), 1, 1, 3000);
+    harness.send_of(ms(0), 1, 2, 3000);
+    harness.drain();
+    harness.advance_to(ms(2_100));
+    harness.send_of(ms(2_100), 1, 3, 3000);
+    harness.drain();
+    harness.send_of(ms(2_200), 1, 4, 6000);
+    harness.drain();
+    harness.advance_to(ms(5_000));
+
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 1, 4], order);
+    let reads = harness.reads();
+    assert_eq!(vec![(1, vec![2], 1), (1, vec![3], 0)], discards(&reads));
+    assert_eq!(vec![1], key_frame_requests(&reads));
+}
+
+/// A full queue discards its oldest packet's frame with every frame of that stream that waits,
+/// and keeps the other streams' packets: stream 1's frames 1 and 3 go when packet 4 arrives at
+/// a queue of three (at 0.5 s), stream 9's packets 2 and 4 leave, one a second.
+#[test]
+fn a_full_queue_discards_the_oldest_frame_with_its_stream() {
+    let mut harness = Harness::with_queue(PACKET_BITS, QueueOverflow::default(), 3);
+    harness.retarget(SLOW);
+    harness.send_of(ms(0), 1, 0, 0);
+    harness.send_of(ms(0), 1, 1, 3000);
+    harness.send_of(ms(0), 9, 2, 0);
+    harness.send_of(ms(0), 1, 3, 6000);
+    harness.drain();
+    harness.advance_to(ms(500));
+    harness.send_of(ms(500), 9, 4, 3000);
+    harness.drain();
+    harness.advance_to(ms(1_900));
+
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 2], order, "one packet a second");
+    harness.advance_to(ms(3_500));
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 2, 4], order);
+    let reads = harness.reads();
+    assert_eq!(vec![(1, vec![1, 3], 2)], discards(&reads));
+    assert_eq!(vec![1], key_frame_requests(&reads));
 }
 
 /// The queue time is bounded (libwebrtc's pacer: an expected queue length of 2 s). A source

@@ -321,6 +321,10 @@ struct Peer {
     unusable: u64,
     last_keyframe_request: Option<Instant>,
     keyframe_requests: Vec<Duration>,
+    /// The sending side: every `OnPacerDiscard` (time, frames, packets), and the key-frame
+    /// requests (PLI / FIR) it was handed.
+    pacer_discards: Vec<(Duration, u32, usize)>,
+    key_requests_received: u32,
 }
 
 fn video_codec() -> RTCRtpCodec {
@@ -534,6 +538,8 @@ impl Peer {
             unusable: 0,
             last_keyframe_request: None,
             keyframe_requests: Vec::new(),
+            pacer_discards: Vec::new(),
+            key_requests_received: 0,
         })
     }
 
@@ -775,6 +781,9 @@ impl World {
                         peer.request_keyframe(now)?;
                     }
                 }
+                RTCPeerConnectionEvent::OnPacerDiscard {
+                    frames, packets, ..
+                } => peer.pacer_discards.push((at, frames, packets)),
                 _ => {}
             }
         }
@@ -809,6 +818,7 @@ impl World {
                     }) =>
                 {
                     peer.force_key = true;
+                    peer.key_requests_received += 1;
                 }
                 _ => {}
             }
@@ -1010,6 +1020,10 @@ struct Outcome {
     audio_dropped: u64,
     /// Video packets the caller's application wrote that never left its host.
     pacer_dropped: usize,
+    /// The caller's `OnPacerDiscard` events (time, frames, packets), and the key-frame requests
+    /// it was handed (the callee's and the pacer's).
+    pacer_discards: Vec<(Duration, u32, usize)>,
+    key_requests_received: u32,
     unusable: u64,
 }
 
@@ -1076,6 +1090,8 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
         rtx_dropped: world.uplinks[0].rtx_dropped,
         audio_dropped: world.uplinks[0].audio_dropped,
         pacer_dropped,
+        pacer_discards: caller.pacer_discards.clone(),
+        key_requests_received: caller.key_requests_received,
         unusable: callee.unusable,
     })
 }
@@ -1161,13 +1177,16 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 /// The same call through the engine's default interceptors (the pacer with its default
 /// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
 /// section 7 default), the video following the target the senders are given
-/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait):
-/// an application that follows the target never has a packet dropped by the pacer, on three
-/// seeds, and the video does not freeze for more than 2 s.
+/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait),
+/// on six seeds. When the cap comes the pacer holds video written at the old rate; what has
+/// waited its 2 s bound is discarded whole frames at a time, and the application is told
+/// (`OnPacerDiscard`) and asked for a key frame. Every video packet that never left the host
+/// was announced that way, every discard comes in the seconds after the cap, and the video
+/// does not freeze for more than 2 s.
 #[test]
-fn a_sender_following_the_lowered_target_loses_nothing_at_the_pacer() -> Result<()> {
+fn a_sender_following_the_lowered_target_loses_only_frames_discarded_at_the_cap() -> Result<()> {
     DEFAULT_CHAIN.with(|d| d.set(true));
-    let outcomes: Result<Vec<_>> = (1..=3)
+    let outcomes: Result<Vec<_>> = (1..=6)
         .map(|seed| {
             let outcome = run(seed, None)?;
             println!("default chain seed {seed}: {outcome:?}");
@@ -1177,7 +1196,17 @@ fn a_sender_following_the_lowered_target_loses_nothing_at_the_pacer() -> Result<
     DEFAULT_CHAIN.with(|d| d.set(false));
     let outcomes = outcomes?;
     for (seed, outcome) in &outcomes {
-        assert_eq!(0, outcome.pacer_dropped, "seed {seed}: {outcome:?}");
+        let announced: usize = outcome.pacer_discards.iter().map(|d| d.2).sum();
+        assert_eq!(
+            outcome.pacer_dropped, announced,
+            "seed {seed}: every video packet that never left was announced: {outcome:?}"
+        );
+        for (at, ..) in &outcome.pacer_discards {
+            assert!(
+                *at >= outcome.capped_at && *at <= outcome.capped_at + Duration::from_secs(6),
+                "seed {seed}: a discard at {at:?}, not at the cap: {outcome:?}"
+            );
+        }
         assert!(
             outcome.freeze <= Duration::from_secs(2),
             "seed {seed}: the video froze for {:?}: {outcome:?}",

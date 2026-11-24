@@ -106,6 +106,12 @@ pub enum Attribute {
     /// Rides outbound so the pacer reads it on the way past. A bitrate is connection state rather
     /// than a property of the packet carrying it — it travels this way because with no event
     /// channel there is nowhere else for it to go.
+    ///
+    /// What the application writes has to keep to this target. One that does not hear it
+    /// otherwise hears it from the pacer: media that waited the pacer's queue time bound is
+    /// discarded whole frames at a time, announced as [`PacerDiscard`](crate::PacerDiscard)
+    /// on the read leg (`RTCPeerConnectionEvent::OnPacerDiscard` in the peer connection) with a
+    /// key-frame request for the stream: **your source is above the target**.
     TargetBitrateChanged {
         /// The new target, in bits per second.
         bits_per_second: f64,

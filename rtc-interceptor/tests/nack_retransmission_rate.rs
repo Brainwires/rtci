@@ -6,9 +6,9 @@
 //! reserve; with libwebrtc's rule the retransmissions alone stay under the target.
 
 use rtc_interceptor::{
-    Attribute, AttributedPacket, Interceptor, MinimumTarget, NackResponderBuilder, Packet,
-    RTCPFeedback, Registry, RetransmissionRateLimit, RetransmissionReserve, Slot, StreamInfo,
-    TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, MinimumTarget, NackResponderBuilder, PacerBuilder,
+    PacerDiscard, Packet, RTCPFeedback, Registry, RetransmissionRateLimit, RetransmissionReserve,
+    Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::transport_feedbacks::transport_layer_nack::{
     TransportLayerNack, nack_pairs_from_sequence_numbers,
@@ -16,6 +16,7 @@ use rtcp::transport_feedbacks::transport_layer_nack::{
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::marshal::MarshalSize;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -461,5 +462,99 @@ fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
         "{} wake-ups for {} retransmissions: {wakes:?}",
         wakes.len(),
         left.len()
+    );
+}
+
+/// What the pacer discards (whole frames that waited its queue time bound) is never resent: the
+/// pacer tells the NACK responder application-ward of it which packets it discarded
+/// ([`PacerDiscard`] on its read leg), and the responder takes them out of its retransmission
+/// buffer, so a NACK for them is answered by nothing (RFC 4588 section 7: the sender "MAY
+/// selectively retransmit only the packets that it deems important"). Ten originals (frames of
+/// their own) written in 90 ms against a 12 kbit/s target: about one leaves every 0.7 s, and at
+/// 2 s the rest have waited the bound and are discarded. A NACK for all ten, with a target that
+/// has room for them, has exactly those that left resent.
+#[test]
+fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
+    let base = Instant::now();
+    let mut chain = Registry::new()
+        .with(
+            Slot::Pacer,
+            PacerBuilder::new().with_target_bitrate(12_000.0).build(),
+        )
+        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .build();
+    chain.bind_local_stream(&stream_info());
+
+    let mut left = BTreeSet::new();
+    let mut discarded = BTreeSet::new();
+    let take = |chain: &mut dyn Interceptor,
+                left: &mut BTreeSet<u16>,
+                discarded: &mut BTreeSet<u16>|
+     -> Vec<u16> {
+        let mut resent = Vec::new();
+        while let Some(tagged) = chain.poll_read() {
+            if let Some(discard) = tagged.message.custom::<PacerDiscard>() {
+                assert_eq!(SSRC, discard.ssrc);
+                discarded.extend(discard.sequence_numbers.iter().copied());
+            }
+        }
+        while let Some(tagged) = chain.poll_write() {
+            if let Packet::Rtp(packet) = &tagged.message.packet {
+                if packet.header.ssrc == SSRC {
+                    left.insert(packet.header.sequence_number);
+                } else {
+                    assert_eq!(RTX_SSRC, packet.header.ssrc);
+                    resent.push(u16::from_be_bytes([packet.payload[0], packet.payload[1]]));
+                }
+            }
+        }
+        resent
+    };
+    for sequence_number in 0..10u16 {
+        chain
+            .handle_write(TaggedPacket {
+                now: base + Duration::from_millis(10) * u32::from(sequence_number),
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 96,
+                        sequence_number,
+                        timestamp: u32::from(sequence_number) * 3000,
+                        ssrc: SSRC,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: vec![0u8; PAYLOAD].into(),
+                })),
+            })
+            .unwrap();
+        take(&mut chain, &mut left, &mut discarded);
+    }
+    let mut now = base;
+    while now < base + Duration::from_secs(3) {
+        now += Duration::from_millis(10);
+        chain.handle_timeout(now).unwrap();
+        take(&mut chain, &mut left, &mut discarded);
+    }
+    assert!(
+        !left.is_empty() && !discarded.is_empty(),
+        "{left:?} {discarded:?}"
+    );
+    assert!(left.is_disjoint(&discarded), "{left:?} {discarded:?}");
+    assert_eq!(10, left.len() + discarded.len(), "{left:?} {discarded:?}");
+
+    let all: Vec<u16> = (0..10).collect();
+    read_nack(&mut chain, now, &all, Some(10_000_000.0), None);
+    let mut resent = BTreeSet::new();
+    let until = now + Duration::from_secs(1);
+    while now < until {
+        resent.extend(take(&mut chain, &mut left, &mut discarded));
+        now += Duration::from_millis(10);
+        chain.handle_timeout(now).unwrap();
+    }
+    assert_eq!(
+        left, resent,
+        "resent only what left; discarded {discarded:?}"
     );
 }

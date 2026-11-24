@@ -228,6 +228,19 @@ impl RateWindow {
         self.sent.push_back((now, octets));
         self.octets += octets;
     }
+
+    /// Takes back `octets` added at `at`, if the entry is still in the window.
+    fn forget(&mut self, at: Instant, octets: usize) {
+        if let Some(entry) = self
+            .sent
+            .iter_mut()
+            .rev()
+            .find(|(sent, size)| *sent == at && *size == octets)
+        {
+            entry.1 = 0;
+            self.octets -= octets;
+        }
+    }
 }
 
 impl NackResponderBuilder {
@@ -825,6 +838,43 @@ impl NackResponderInterceptor {
         }
     }
 
+    /// Forgets the packets the pacer discarded ([`PacerDiscard`](crate::PacerDiscard)): out of
+    /// the retransmission buffer, so a NACK for one is answered by nothing (RFC 4588 section 7:
+    /// the sender "MAY selectively retransmit only the packets that it deems important"; a frame
+    /// the pacer gave up is not), out of the requests waiting, and out of the original packets
+    /// counted against the target, since they never used the link.
+    fn forget_discarded(&mut self, discard: &crate::PacerDiscard) {
+        if let Some(stream) = self.streams.get_mut(&discard.ssrc) {
+            for &seq in &discard.sequence_numbers {
+                let Some(packet) = stream.send_buffer.remove(seq) else {
+                    continue;
+                };
+                let slot = usize::from(seq) % stream.sent_at.len();
+                if let Some((sequence_number, at)) = stream.sent_at[slot]
+                    && sequence_number == seq
+                {
+                    self.originals.forget(at, packet.marshal_size());
+                    stream.sent_at[slot] = None;
+                }
+            }
+        }
+        let before = self.pending.len();
+        let asked = &mut self.pending_asked;
+        let octets = &mut self.pending_octets;
+        self.pending.retain(|entry| {
+            let discarded = entry.ssrc == discard.ssrc
+                && discard.sequence_numbers.contains(&entry.sequence_number);
+            if discarded {
+                asked.remove(&(entry.ssrc, entry.sequence_number));
+                *octets -= entry.octets;
+            }
+            !discarded
+        });
+        if self.pending.len() != before {
+            self.release_at = None;
+        }
+    }
+
     /// Handle a NACK request by queuing retransmissions.
     fn handle_nack(
         &mut self,
@@ -1005,6 +1055,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         {
             self.round_trip_time = Some(*rtt);
             self.release_at = None;
+        }
+
+        // Packets the pacer (wire-ward of here) discarded: never resent.
+        if let Some(discard) = msg.message.custom::<crate::PacerDiscard>() {
+            let discard = discard.clone();
+            self.forget_discarded(&discard);
         }
 
         // A probe cluster the congestion controller asks for: fill it.

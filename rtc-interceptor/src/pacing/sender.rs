@@ -4,11 +4,13 @@ use super::pacer::Pacer as LeakyBucket;
 use crate::Interceptor;
 use crate::StreamInfo;
 use crate::cc::probe::{ProbePacket, ProbeRequest};
-use crate::{Attribute, Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
+use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
+use shared::TransportContext;
 use shared::error::Error;
 use shared::marshal::MarshalSize;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,15 +32,17 @@ pub const DEFAULT_QUEUE_TIME_LIMIT: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum QueueOverflow {
-    /// The packet is dropped here (counted by [`PacerInterceptor::dropped`]): nothing leaves
-    /// above the target. The congestion controller's target is what the path carries (RFC
+    /// The media is discarded here, whole frames at a time (see [`PacerDiscard`]; counted by
+    /// [`PacerInterceptor::dropped`] and [`PacerInterceptor::discarded_frames`]): nothing
+    /// leaves above the target. The congestion controller's target is what the path carries (RFC
     /// 8836 section 2; RFC 8083 section 4 stops a flow that does not keep to it), so a sender
     /// that put the excess on the path anyway would fill the bottleneck's queue, lose there
     /// and drive the estimate to its floor: a 2.4 Mbit/s source on a 600 kbit/s link
     /// (`tests/gcc_rate_limited_link_rtc2rtc.rs`, and netem in
     /// `testenv_impairment::gcc_follows_a_rate_limited_link`) held a target of 500 to 590
     /// kbit/s this way, and fell to 100 kbit/s with [`QueueOverflow::Drain`]. The receiver
-    /// counts the dropped packets as lost, which they are.
+    /// counts the dropped packets as lost, which they are; the NACK responder does not resend
+    /// them, and the application is asked for a key frame (see [`PacerDiscard`]).
     #[default]
     Drop,
     /// libwebrtc's pacer (`drain_large_queues`, `MaybeUpdateMediaRateDueToLongQueue`): the
@@ -116,8 +120,10 @@ impl PacerBuilder {
     /// controller's target, the queue grows; a packet that would wait longer than this is
     /// dropped or drained above the target, as [`Self::with_queue_overflow`] says. The
     /// application learns that its source is above the target from the target itself
-    /// (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`), and from
-    /// [`PacerInterceptor::queue_time`].
+    /// (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`), from
+    /// [`PacerInterceptor::queue_time`], and, once media had to be discarded, from
+    /// [`PacerDiscard`] (`RTCPeerConnectionEvent::OnPacerDiscard` in the peer connection) and
+    /// the key-frame request that goes with it.
     pub fn with_queue_time_limit(mut self, limit: Option<Duration>) -> Self {
         self.queue_time_limit = limit;
         self
@@ -186,18 +192,24 @@ impl PacerBuilder {
 ///
 /// # Order of service
 ///
-/// 1. **Audio** (the packets of a stream bound with an `audio/` codec, and its repair flows)
-///    leaves the moment it is written, charged to the budget, which the packets behind it then
-///    wait out. A voice that waits behind a video backlog is the call breaking up.
-/// 2. **Other media** (video, retransmissions, FEC) waits in one queue and leaves as the
-///    budget allows: retransmissions in the order written, ahead of new media; new media in
-///    the order written. The **queue time bound** (2 s by default,
-///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's: by
-///    default ([`QueueOverflow::Drop`]) a packet that has waited the bound, or the oldest one
-///    when the queue is full, is dropped, so nothing leaves above the target;
+/// 1. **Audio** (the packets of a stream bound with an `audio/` codec) leaves the moment it is
+///    written, charged to the budget, which the packets behind it then wait out. A voice that
+///    waits behind a video backlog is the call breaking up.
+/// 2. **Audio retransmissions** leave the same way: an audio stream's repair flows (its RTX
+///    and FEC SSRCs, from [`Interceptor::bind_local_stream`]) count as audio, so an audio
+///    retransmission never waits behind video either.
+/// 3. **Video retransmissions** (`Attribute::Retransmission` on any other stream) wait in the
+///    media queue, in the order written, ahead of all new media (libwebrtc's
+///    `prioritized_packet_queue.cc`: "Send retransmissions before new media").
+/// 4. **Video and FEC** (every other RTP packet that is not padding) wait behind them, in the
+///    order written. The **queue time bound** (2 s by default,
+///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's (3 and 4):
+///    by default ([`QueueOverflow::Drop`]) what has waited the bound, or the oldest packet when
+///    the queue is full, is discarded, so nothing leaves above the target (a retransmission
+///    one packet at a time, new media whole frames at a time: see "Discarding media" below);
 ///    [`QueueOverflow::Drain`] raises the pacing rate above the target instead (libwebrtc's
 ///    `MaybeUpdateMediaRateDueToLongQueue`) and releases those packets over the budget.
-/// 3. **Padding** (padding-only packets, RFC 3550 section 5.1: the padding bit and no payload,
+/// 5. **Padding** (padding-only packets, RFC 3550 section 5.1: the padding bit and no payload,
 ///    which the NACK responder fills a probe cluster with) waits in a queue of its own and leaves
 ///    only when no media waits. A probe cluster is written as a burst of padding the moment it is
 ///    asked for; queued in line with the media it would hold every packet the application writes
@@ -217,6 +229,41 @@ impl PacerBuilder {
 /// that reaches the queue limit (4096 packets, far beyond what probing writes while media
 /// waits) discards the padding that arrives, counted by [`PacerInterceptor::padding_discarded`]:
 /// the one place padding can leave a hole, preferred to letting it go over the budget.
+///
+/// # Discarding media
+///
+/// With [`QueueOverflow::Drop`], new media the target has no room for is discarded **whole
+/// frames at a time**. A frame is the packets of one stream (SSRC) with one RTP timestamp (RFC
+/// 3550 section 5.1: the packets of one frame share it; the marker bit ends it). A frame with a
+/// packet missing is worth nothing to a decoder, and so is every later frame that refers to it,
+/// up to the next key frame; a frame that waited two seconds is stale anyway. So when the
+/// oldest new-media packet has waited the bound (or is the oldest of a full queue), the pacer
+/// discards every queued packet of its stream that is not a retransmission, oldest frame first,
+/// and the packets of the newest discarded frame the application writes after that. Nothing
+/// marks a key frame on this path (the application writes RTP packets, and only the codec's
+/// payload says which frame is a key frame), so no queued frame of the stream is kept as one:
+/// the key frame the application writes in answer to the request below is the next frame the
+/// stream sends, not one that waits behind the stale ones. Audio, retransmissions and padding
+/// are never discarded this way (audio is never queued, a retransmission is dropped alone,
+/// padding is sent late).
+///
+/// For every discard the pacer emits on its **read** leg (the application-ward direction, the
+/// only one that reaches the NACK responder application-ward of it) an empty RTCP carrier with
+/// [`PacerDiscard`]: the NACK responder removes those packets from its retransmission buffer, so
+/// a NACK for them is answered by nothing (RFC 4588 section 7: the sender "MAY selectively
+/// retransmit only the packets that it deems important"), and the peer connection hands the
+/// discard to the application (`RTCPeerConnectionEvent::OnPacerDiscard`). For a media stream
+/// (not a repair flow) it also emits a Picture Loss Indication (RFC 4585 section 6.3.1) for the
+/// stream, sender SSRC 0, marked [`Attribute::DeliverToApplication`]: the request a receiver
+/// that lost its picture sends, so an application that answers PLI with a key frame
+/// (`RTCMessage::RtcpPacket`, `RTCPeerConnectionEvent::OnKeyFrameRequest`) answers this too, at
+/// the target the frames it writes now are sized for.
+///
+/// libwebrtc does not discard in its pacer: when the expected queue time passes 2 s it pauses
+/// the encoder (target zero to the encoder, `modules/congestion_controller/rtp/control_handler.cc`)
+/// and drains the queue above the target ([`QueueOverflow::Drain`]); its frames are dropped
+/// before they are numbered. Here the application numbers its packets, so a discarded frame
+/// leaves a gap in the stream's sequence numbers that the receiver sees as loss.
 pub struct PacerInterceptor {
     pacer: LeakyBucket,
     /// The rate the bucket was set to before the queue time limit raised it, while it is
@@ -243,6 +290,14 @@ pub struct PacerInterceptor {
     forced: u64,
     /// Media packets dropped for want of room in the target ([`QueueOverflow::Drop`]).
     dropped: u64,
+    /// Frames of new media discarded whole ([`QueueOverflow::Drop`]).
+    discarded_frames: u64,
+    /// The repair flows (RTX, FEC SSRCs) of the bound streams other than audio: a discard on
+    /// one asks for no key frame.
+    repair_flows: HashSet<u32>,
+    /// The RTP timestamp of the newest frame discarded on each stream: its packets written
+    /// later are discarded too.
+    discarded_frame: HashMap<u32, u32>,
     /// Packets the budget has released, waiting to join the belt.
     released: VecDeque<TaggedPacket>,
     /// Inbound packets ready for the next interceptor.
@@ -272,6 +327,9 @@ impl PacerInterceptor {
             probe: None,
             forced: 0,
             dropped: 0,
+            discarded_frames: 0,
+            repair_flows: HashSet::new(),
+            discarded_frame: HashMap::new(),
         }
     }
 
@@ -302,9 +360,16 @@ impl PacerInterceptor {
     }
 
     /// How many media packets were dropped, overdue or to make room in a full queue
-    /// ([`QueueOverflow::Drop`]).
+    /// ([`QueueOverflow::Drop`]): the packets of the discarded frames and the retransmissions
+    /// dropped.
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// How many frames of new media were discarded whole ([`QueueOverflow::Drop`], see
+    /// "Discarding media" on [`PacerInterceptor`]).
+    pub fn discarded_frames(&self) -> u64 {
+        self.discarded_frames
     }
 
     /// How long the oldest queued media packet has waited at `now`, zero with none queued
@@ -455,6 +520,134 @@ impl PacerInterceptor {
         }
         self.released.push_back(packet);
     }
+
+    /// Whether `packet` is new media (not a retransmission) of the stream `ssrc`.
+    fn is_new_media_of(packet: &TaggedPacket, ssrc: u32) -> bool {
+        matches!(&packet.message.packet, Packet::Rtp(rtp) if rtp.header.ssrc == ssrc)
+            && !packet.message.has(&Attribute::Retransmission)
+    }
+
+    /// The stream of `packet` when it belongs to the frame discarded last on that stream; a
+    /// packet of a later frame ends that frame's discard.
+    fn continues_discard(&mut self, packet: &TaggedPacket) -> Option<u32> {
+        let Packet::Rtp(rtp) = &packet.message.packet else {
+            return None;
+        };
+        let ssrc = rtp.header.ssrc;
+        let discarded = *self.discarded_frame.get(&ssrc)?;
+        if discarded == rtp.header.timestamp {
+            return Some(ssrc);
+        }
+        self.discarded_frame.remove(&ssrc);
+        None
+    }
+
+    /// Discards the frame of the queued new-media packet at `index` and every other queued
+    /// frame of its stream (see "Discarding media" on [`PacerInterceptor`]).
+    fn discard_stream_of(&mut self, now: Instant, index: usize) {
+        let Some(Packet::Rtp(rtp)) = self.queue.get(index).map(|packet| &packet.message.packet)
+        else {
+            return;
+        };
+        let ssrc = rtp.header.ssrc;
+        let mut discarded = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.queue.len());
+        for packet in self.queue.drain(..) {
+            if Self::is_new_media_of(&packet, ssrc) {
+                discarded.push(packet);
+            } else {
+                kept.push_back(packet);
+            }
+        }
+        self.queue = kept;
+        let bits: f64 = discarded.iter().map(Self::bits_of).sum();
+        self.queued_bits = (self.queued_bits - bits).max(0.0);
+        self.discard(now, ssrc, &discarded);
+    }
+
+    /// Counts the discard of `packets` (new media of the stream `ssrc`, oldest first) and tells
+    /// the chain application-ward: the NACK responder and the application through
+    /// [`PacerDiscard`], and the application a key frame is needed.
+    fn discard(&mut self, now: Instant, ssrc: u32, packets: &[TaggedPacket]) {
+        let mut sequence_numbers = Vec::with_capacity(packets.len());
+        let mut octets = 0usize;
+        let mut frames = 0u32;
+        let mut newest = self.discarded_frame.get(&ssrc).copied();
+        for packet in packets {
+            if let Packet::Rtp(rtp) = &packet.message.packet {
+                sequence_numbers.push(rtp.header.sequence_number);
+                octets += rtp.marshal_size();
+                if newest != Some(rtp.header.timestamp) {
+                    frames += 1;
+                    newest = Some(rtp.header.timestamp);
+                }
+            }
+        }
+        if sequence_numbers.is_empty() {
+            return;
+        }
+        if let Some(timestamp) = newest {
+            self.discarded_frame.insert(ssrc, timestamp);
+        }
+        self.dropped += sequence_numbers.len() as u64;
+        self.discarded_frames += u64::from(frames);
+        let target_bitrate = self.target();
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(
+                PacerDiscard {
+                    ssrc,
+                    sequence_numbers,
+                    frames,
+                    octets,
+                    target_bitrate,
+                },
+            ))),
+        });
+        // A new frame lost (not only the rest of one already discarded): the stream needs a
+        // key frame, asked for the way a receiver asks, so the application's PLI handling
+        // answers it.
+        if frames > 0 && !self.repair_flows.contains(&ssrc) {
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+                    PictureLossIndication {
+                        sender_ssrc: 0,
+                        media_ssrc: ssrc,
+                    },
+                )]))
+                .with(Attribute::DeliverToApplication),
+            });
+        }
+    }
+}
+
+/// Media the pacer discarded for want of room in the target ([`QueueOverflow::Drop`]): whole
+/// frames of one stream (see "Discarding media" on [`PacerInterceptor`]).
+///
+/// The pacer sends it application-ward, on an empty RTCP carrier on its read leg, at the
+/// instant of the discard. The NACK responder removes the packets named here from its
+/// retransmission buffer (a NACK for them is answered by nothing) and from the original
+/// packets it counts against the target (they never used the link); the peer connection
+/// hands it to the application as `RTCPeerConnectionEvent::OnPacerDiscard`. It means **the
+/// source is above the target**: what the application writes has to come down to the target
+/// it is given (`Attribute::TargetBitrateChanged`, `RTCRtpSender::target_bitrates`). Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PacerDiscard {
+    /// The stream the packets were of.
+    pub ssrc: u32,
+    /// The sequence numbers of the packets discarded, oldest first.
+    pub sequence_numbers: Vec<u16>,
+    /// How many frames were discarded (0 when these packets are the rest of a frame already
+    /// discarded).
+    pub frames: u32,
+    /// The octets of the packets discarded (RTP header and payload).
+    pub octets: usize,
+    /// The pacer's target at the discard, bits per second.
+    pub target_bitrate: f64,
 }
 
 /// How long a probe cluster is held open for packets to fill it. A cluster that takes longer
@@ -556,6 +749,13 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         // Padding waits behind every other packet, and nothing waits behind it.
         let padding = Self::is_padding(&msg);
 
+        // The rest of a frame already discarded is worth nothing either.
+        let new_media = !padding && !msg.message.has(&Attribute::Retransmission);
+        if new_media && let Some(ssrc) = self.continues_discard(&msg) {
+            self.discard(msg.now, ssrc, std::slice::from_ref(&msg));
+            return Ok(());
+        }
+
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
         // may enter the path at once, so nothing is gained by holding the packet for a timer.
         // Queued padding is not in line ahead of media.
@@ -579,21 +779,36 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             return Ok(());
         }
 
-        if self.queue.len() >= self.queue_limit
-            && let Some(mut oldest) = self.queue.pop_front()
-        {
+        if self.queue.len() >= self.queue_limit {
             // Room for the arrival: the oldest goes (the newest is the one still worth
-            // sending). Dropped by default; with `Drain` it leaves now, over the budget.
-            let bits = Self::bits_of(&oldest);
-            self.queued_bits -= bits;
+            // sending). Discarded by default, a retransmission alone, new media with its
+            // stream's queued frames; with `Drain` it leaves now, over the budget.
+            let retransmission = self
+                .queue
+                .front()
+                .is_some_and(|oldest| oldest.message.has(&Attribute::Retransmission));
             match self.queue_overflow {
-                QueueOverflow::Drain => {
-                    self.pacer.consume(bits);
-                    oldest.now = msg.now;
-                    self.forced += 1;
-                    self.release(oldest, bits);
+                QueueOverflow::Drop if !retransmission => {
+                    self.discard_stream_of(msg.now, 0);
+                    if new_media && let Some(ssrc) = self.continues_discard(&msg) {
+                        self.discard(msg.now, ssrc, std::slice::from_ref(&msg));
+                        return Ok(());
+                    }
                 }
-                QueueOverflow::Drop => self.dropped += 1,
+                _ => {
+                    if let Some(mut oldest) = self.queue.pop_front() {
+                        let bits = Self::bits_of(&oldest);
+                        self.queued_bits -= bits;
+                        if self.queue_overflow == QueueOverflow::Drain {
+                            self.pacer.consume(bits);
+                            oldest.now = msg.now;
+                            self.forced += 1;
+                            self.release(oldest, bits);
+                        } else {
+                            self.dropped += 1;
+                        }
+                    }
+                }
             }
         }
 
@@ -646,9 +861,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                 .is_some_and(|limit| now.saturating_duration_since(head.now) >= limit);
             if overdue {
                 if self.queue_overflow == QueueOverflow::Drop {
-                    self.queue.pop_front();
-                    self.queued_bits = (self.queued_bits - bits).max(0.0);
-                    self.dropped += 1;
+                    // A retransmission is dropped alone; new media with every queued frame
+                    // of its stream (see "Discarding media").
+                    if head.message.has(&Attribute::Retransmission) {
+                        self.queue.pop_front();
+                        self.queued_bits = (self.queued_bits - bits).max(0.0);
+                        self.dropped += 1;
+                    } else {
+                        self.discard_stream_of(now, 0);
+                    }
                     continue;
                 }
                 self.pacer.consume(bits);
@@ -690,16 +911,24 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 }
 
 impl Interceptor for PacerInterceptor {
-    /// Audio streams (and their repair flows) are not queued behind others.
+    /// Audio streams (and their repair flows) are not queued behind others. The repair flows of
+    /// the other streams are remembered: a discard on one asks for no key frame.
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         if info.mime_type.to_ascii_lowercase().starts_with("audio/") {
             self.audio.extend(crate::twcc::flow_ssrcs(info));
+        } else {
+            self.repair_flows
+                .extend(info.ssrc_rtx.into_iter().chain(info.ssrc_fec));
         }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         for ssrc in crate::twcc::flow_ssrcs(info) {
             self.audio.remove(&ssrc);
+            self.discarded_frame.remove(&ssrc);
+        }
+        for ssrc in info.ssrc_rtx.into_iter().chain(info.ssrc_fec) {
+            self.repair_flows.remove(&ssrc);
         }
     }
 

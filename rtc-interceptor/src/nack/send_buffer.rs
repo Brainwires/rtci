@@ -105,6 +105,12 @@ impl SendBuffer {
 
         Some(packet)
     }
+
+    /// Takes the packet `seq` out of the buffer, so it can no longer be retransmitted.
+    pub(crate) fn remove(&mut self, seq: u16) -> Option<rtp::Packet> {
+        self.get(seq)?;
+        self.packets[(seq & self.mask) as usize].take()
+    }
 }
 
 #[cfg(test)]
