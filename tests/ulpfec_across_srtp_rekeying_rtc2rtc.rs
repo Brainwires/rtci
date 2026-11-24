@@ -1,13 +1,14 @@
-//! RFC 5109 section 11: "If the encryption keys change for the media stream, the FEC MUST use
-//! the new keys after the key change. ... the FEC packet generated over media packets that used
-//! the old and new keys SHOULD be encrypted with the new keys" (row RFC5109-11-3).
+//! RFC 5109 section 11: "the new key SHOULD be used to encrypt the FEC packets that are
+//! generated from a combination of payload packets encrypted by the old and new keys" (row
+//! RFC5109-11-3).
 //!
 //! Two `rtci` peers in virtual time, VP8 in RED with ULPFEC in RED packets of its own (the
 //! `Chrome` profile's form), one FEC packet for each two media packets, no NACK. The first
 //! media packet of a block leaves under the first DTLS association's SRTP keys; the sender
 //! then asks for a new association (`renew_dtls_association`, RFC 5764 section 4.1.2: new
 //! keys) and once its handshake is done the block's second media packet and its FEC packet
-//! leave under the new keys. The network loses one of the two media packets, and the receiver
+//! leave under the new keys, after the receiver stopped holding the old ones (RFC 5764
+//! section 4.3 lets it keep them a while). The network loses one of the two media packets, and the receiver
 //! rebuilds it from the other and the FEC packet, so the FEC was protected under keys the
 //! receiver holds, and computed over the packets whichever keys they left under (the encoder
 //! reads them before SRTP: `Slot::FecWireImage`).
@@ -354,7 +355,10 @@ fn block_across_a_key_change(lose: u16) -> Result<World> {
     // New keys: a new DTLS association on the same addresses (RFC 5764 section 4.1.2).
     world.peers[0].pc.renew_dtls_association();
     world.negotiate()?;
-    let until = world.now + Duration::from_secs(1);
+    // Past the time the receiver keeps the previous association's keys for packets still on
+    // their way (RFC 5764 section 4.3; 10 s in the engine): from here on only packets under
+    // the new keys can be read.
+    let until = world.now + Duration::from_secs(11);
     world.run_until(until)?;
     for (i, before) in tls_ids.iter().enumerate() {
         assert!(before.is_some());

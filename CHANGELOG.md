@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ULPFEC across an SRTP key change** (RFC 5109 section 11, row RFC5109-11-3 untested ->
+  tested): `tests/ulpfec_across_srtp_rekeying_rtc2rtc.rs` sends a FEC block whose first media
+  packet leaves under one DTLS association's keys and whose second media packet and FEC
+  packet leave under a new association's (`renew_dtls_association`), after the receiver
+  dropped the old keys; whichever media packet the network loses is rebuilt. No engine
+  change.
 - **Browser cell: the engine's ULPFEC in RED rebuilt by the browser.** `scenarios.spec.mjs`
   has Rust send VP8 in RED with ULPFEC (the `Chrome` profile's form), NACK off on both sides,
   and checks that the browser decodes every frame although Rust's sender discarded every
