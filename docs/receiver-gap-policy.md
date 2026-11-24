@@ -38,9 +38,22 @@ sequence numbers (`kMaxPacketAge`, line 34).
 - The next sample a gap was skipped before carries the count in `Sample::prev_dropped_packets`
   (with `prev_padding_packets` to tell padding from loss): that is the moment for rule 2's key
   frame request.
-- Not expressible in the builder today: skipping on a wall-clock deadline while nothing arrives,
-  and skipping everything older than a key frame the moment it is complete (rule 3). Both are the
-  video pipeline's to decide.
+- `with_max_gap_wait(duration)` bounds the wait in wall-clock time, also while nothing arrives
+  (off by default). The wait for the oldest missing packet runs from the arrival of the first
+  packet after it; once it has lasted `duration` the builder gives the gap up as `max_late`
+  does (the incomplete sample and the missing packets are dropped, counted in the next sample's
+  `prev_dropped_packets`, and building resumes at the next packet that starts a sample) and
+  raises a key-frame request, read with `take_key_frame_request()` (rule 2). The bound is
+  checked on `push` and `pop` with the `now` they are given; `poll_timeout()` names the instant
+  to call `pop` at while a gap waits. The generic `Depacketizer` cannot tell a key frame, so the
+  sample building resumes at may refer to what was lost: the key-frame request is what repairs
+  the picture. A gap filled before the bound changes nothing.
+- A receiver without a time bound freezes for the length of its packet window on a gap that
+  never fills: 256 packets were 8.6 s at 100 kbit/s in `tests/capacity_cap_video_rtc2rtc.rs`
+  (below).
+- Not expressible in the builder today: skipping everything older than a key frame the moment it
+  is complete (rule 3), for the same reason (the depacketizer cannot say which sample is a key
+  frame). That is the video pipeline's to decide.
 
 ## Measured
 
