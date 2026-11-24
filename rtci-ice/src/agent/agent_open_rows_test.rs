@@ -826,6 +826,93 @@ fn test_consent_checks_run_on_a_tcp_pair() {
     assert_eq!(a.state(), ConnectionState::Connected);
 }
 
+/// Consent on a TCP pair whose round trip is long (RFC 7675 Section 5.1: "consent checks MUST
+/// be performed over all transport connections, including TCP"): each consent request is
+/// answered 800 ms later, or 6 s later, more than the initial RTO, and each answer renews
+/// consent. The pair is never given up.
+#[test]
+fn test_consent_is_kept_on_a_tcp_pair_whose_round_trip_is_long() {
+    for round_trip in [800 * MS, 6000 * MS] {
+        let now = Instant::now();
+        let mut a = tcp_agent(now, 1);
+        // Responses on their way: when each arrives.
+        let mut in_flight: Vec<(Instant, Message)> = vec![];
+        let mut states = vec![];
+        let mut consent_requests = 0;
+        let until = now + Duration::from_secs(120);
+        let mut at = now;
+        loop {
+            in_flight.retain(|(arrival, response)| {
+                if *arrival > at {
+                    return true;
+                }
+                a.handle_read(TaggedBytesMut {
+                    now: at,
+                    transport: tcp_path(5001),
+                    message: BytesMut::from(&response.raw[..]),
+                })
+                .unwrap();
+                false
+            });
+            a.handle_timeout(at).unwrap();
+            while let Some(t) = a.poll_write() {
+                assert_eq!(t.transport.transport_protocol, TransportProtocol::TCP);
+                let mut m = Message {
+                    raw: t.message.to_vec(),
+                    ..Message::default()
+                };
+                m.decode().unwrap();
+                let response = peer_response(
+                    BINDING_SUCCESS,
+                    m.transaction_id,
+                    addr("192.168.0.2:40000"),
+                    None,
+                );
+                // The checks are answered at once; the consent requests after the round
+                // trip.
+                if a.get_selected_candidate_pair().is_some() {
+                    consent_requests += 1;
+                    in_flight.push((at + round_trip, response));
+                } else {
+                    in_flight.push((at, response));
+                }
+            }
+            states.extend(events(&mut a).into_iter().filter_map(|e| match e {
+                Event::ConnectionStateChange(s) => Some(s),
+                _ => None,
+            }));
+            let arrival = in_flight.iter().map(|(arrival, _)| *arrival).min();
+            let next = match (a.poll_timeout(), arrival) {
+                (Some(timer), Some(arrival)) => Some(timer.min(arrival)),
+                (timer, arrival) => timer.or(arrival),
+            };
+            match next {
+                Some(next) if next <= until => at = next.max(at + Duration::from_micros(1)),
+                _ => break,
+            }
+        }
+        assert!(
+            consent_requests >= 15,
+            "{consent_requests} consent requests"
+        );
+        assert!(
+            !states.contains(&ConnectionState::Failed),
+            "{round_trip:?}: {states:?}"
+        );
+        if round_trip < Duration::from_secs(5) {
+            assert!(
+                !states.contains(&ConnectionState::Disconnected),
+                "{round_trip:?}: {states:?}"
+            );
+        }
+        let (_, remote) = a.get_selected_candidate_pair().unwrap();
+        assert!(
+            until - remote.last_consent().unwrap() < Duration::from_secs(7),
+            "{round_trip:?}"
+        );
+    }
+}
+
 /// "After consent is lost, the same ICE credentials MUST NOT be used on the affected 5-tuple
 /// again. That means that a new session, or an ICE restart, is needed": the agent that lost
 /// consent is `Failed` and silent, and what a restart sends on the same 5-tuple carries
