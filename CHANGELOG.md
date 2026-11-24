@@ -538,14 +538,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not bound; a refused remote candidate (signalled, or an mDNS name's address) is never held or
   paired, and `add_remote_candidate` treats it as W3C webrtc-pc 4.4.2 "administratively
   prohibited"; a refused peer-reflexive source is not learned (RFC 8445 7.3.1.3) and so not
-  answered; a STUN or TURN server address the policy refuses, after its name resolved, is never
+  answered, a request that arrives before the peer's credentials included (RFC 8445 7.3: it
+  was answered at once, with only the destination policy asked; `conf/ice-24r-address-policy`);
+  a remote TCP candidate on a refused address gets no permission on the engine's TURN TCP
+  allocation (RFC 6062 5.3); a STUN or TURN server address the policy refuses, after its name resolved, is never
   sent anything (skipped as a failed address). The predicate sees IPv4-mapped IPv6 addresses
   as IPv4. With the "relay" ICE transport policy and a policy refusing private peers, no
   datagram leaves from or goes to a host address and none is signalled. The default allows
   everything and asks nothing: engine behaviour is unchanged without it.
   `with_remote_address_filter` is kept as it was (it refuses remote candidates and
   peer-reflexive sources only) and composes with the policy. Tests:
-  `rtci-ice` `address_policy_test.rs` (five), `tests/ice_address_policy.rs` (six). Audit:
+  `rtci-ice` `address_policy_test.rs` (six), `tests/ice_address_policy.rs` (seven),
+  `tests/turn_tcp_relay.rs` (two). The two-peer tests draw the engine's random numbers from a
+  seed and carry what a peer writes before time moves on: as first written, their loop
+  delivered the answer to a consent request (RFC 7675) only after the next timer, often the
+  requester's own end of the transaction, and the answerer then left the connected state on
+  54 of 200 seeds, with or without a policy. Audit:
   RFC8828-5.2-P5 is a new `tested` control row; notes on WEBRTC-4.4.1.4-4 and RFC8445-7.3.1.3-1.
 - **mDNS host candidates can fail closed (mdns-4, MDNSICE-3.1.1-6).** With mDNS
   `QueryAndGather`, a host candidate whose name cannot be registered (the application has no
