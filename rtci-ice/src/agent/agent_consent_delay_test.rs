@@ -205,11 +205,12 @@ fn test_consent_is_kept_when_the_round_trip_rises_above_the_rto() {
     }
 }
 
-/// The same path from the first check on. Its checks were retransmitted (the RTO of a check
-/// is 500 ms, RFC 8445 Section 14.3), so none of them gave a round-trip time (RFC 8489
+/// The same path from the first check on. Its checks were all retransmitted (the RTO of a
+/// check is 500 ms, RFC 8445 Section 14.3), so none of them gave a round-trip time (RFC 8489
 /// Section 6.2.1: none "from STUN transactions that result in the retransmission of a
 /// request"): the first consent requests wait on the initial RTO, and are answered within
-/// their transaction.
+/// their transaction. (Between two full agents a check cancelled before its retransmission
+/// and answered later usually gives a round-trip time; nothing guarantees one.)
 #[test]
 fn test_a_pair_whose_round_trip_is_long_from_the_first_check_keeps_consent() {
     let start = Instant::now();
@@ -668,6 +669,24 @@ fn test_the_path_kept_across_a_restart_keeps_consent_when_it_is_slow() {
         assert!(now + 120 * S - previous.last_consent < 7 * S + round_trip);
         assert!(previous.pending.len() <= 3, "{}", previous.pending.len());
     }
+}
+
+/// On the path kept across a restart too, the wait follows the round trip the answers show: a
+/// round trip that grows gradually to 12 s, past the 8 s of the initial RTO, keeps the path.
+#[test]
+fn test_the_wait_on_the_path_kept_across_a_restart_grows_with_the_round_trip() {
+    let (mut a, mut peer, now) = connected(config(true));
+    let path = a.media_path().unwrap();
+    a.restart(now, String::new(), String::new(), true).unwrap();
+    let mut round_trip = 20 * MS;
+    peer.run(&mut a, now, now + 600 * S, |_, _, _| {
+        round_trip = (round_trip * 5 / 4).min(12 * S);
+        Some(round_trip)
+    });
+    assert_eq!(round_trip, 12 * S);
+    assert_eq!(a.media_path(), Some(path));
+    let previous = a.previous_generation.as_ref().unwrap();
+    assert!(now + 600 * S - previous.last_consent < 7 * S);
 }
 
 /// The wait of a consent request on the path kept across a restart is the same `Rm` times

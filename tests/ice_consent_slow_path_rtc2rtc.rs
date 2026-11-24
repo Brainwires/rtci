@@ -451,7 +451,9 @@ fn a_connected_session_stays_connected_when_one_direction_becomes_slow() -> Resu
 }
 
 /// A path that is slow from the start (a round trip of 800 ms): the session is set up over
-/// it and stays `connected` for two minutes.
+/// it and stays `connected` for two minutes. (This one also held before the wait followed
+/// the RTO, by a check that was cancelled before its retransmission and answered later,
+/// which gave the pair a round-trip time: it guards the set-up over such a path.)
 #[test]
 fn a_session_set_up_over_a_slow_path_stays_connected() -> Result<()> {
     session_whose_delay_changes(7, 400 * MS, 30 * S, [400 * MS; 2], 120 * S)
