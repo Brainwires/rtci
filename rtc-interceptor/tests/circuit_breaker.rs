@@ -926,6 +926,54 @@ fn media_unusable_for_the_configured_period_ceases() {
     );
 }
 
+/// Section 4.4 judges usability by the loss the receiver reports, and the receiver counts every
+/// sequence number it did not receive as lost (RFC 3550 section 6.4.1), the ones the pacer
+/// discarded before they left included. Over the interval a report covers, the numbers the
+/// breaker never saw leave come out of the loss. Six seconds of 10 sequence numbers a second on
+/// VIDEO, each second reported with 6 of them lost (154/256, 60%, the cumulative count 6 up),
+/// against a bound of 50% for 5 s; with no round trip time known the congestion breaker does
+/// not run. With `discards`, numbers 3 to 8 of each second are numbered and never leave (2
+/// packets, a gap of 6, 2 packets): the corrected loss is 0 and the flow keeps running. Sent
+/// without gaps, the same reports are the path's loss: unusable from the first report (0.999 s),
+/// the flow ceases at the sixth (5.999 s).
+#[test]
+fn reported_loss_of_sequence_numbers_never_sent_does_not_make_the_media_unusable() {
+    let run = |discards: bool| {
+        let mut harness = Harness::new(CircuitBreakerBuilder::new().with_media_usability(
+            MediaUsability {
+                max_loss: 0.5,
+                max_round_trip_time: Duration::from_secs(2),
+                period: Duration::from_secs(5),
+            },
+        ));
+        for second in 0..6u64 {
+            let start = ms(second * 1000);
+            if discards {
+                harness.send_for(start, start + ms(250), VIDEO, 8);
+                harness.sequence = harness.sequence.wrapping_add(6);
+                harness.send_for(start + ms(500), start + ms(750), VIDEO, 8);
+            } else {
+                harness.send_for(start, start + ms(1000), VIDEO, 10);
+            }
+            let highest = (second as u32 + 1) * 10;
+            let lost = (second as i32 + 1) * 6;
+            harness.report_counts(start + ms(999), VIDEO, 154, highest, lost);
+        }
+        harness.handle.state(VIDEO)
+    };
+    assert_eq!(Some(CircuitBreakerState::Running), run(true));
+    assert!(
+        matches!(
+            run(false),
+            Some(CircuitBreakerState::Ceased {
+                reason: CircuitBreakerReason::MediaUnusable,
+                ..
+            })
+        ),
+        "the same reports for a stream that left whole"
+    );
+}
+
 /// Section 4.5: a halted flow is not restarted automatically, and a restart is refused until
 /// the interval that tripped the breaker has passed again.
 #[test]
