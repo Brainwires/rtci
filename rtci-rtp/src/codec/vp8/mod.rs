@@ -3,7 +3,11 @@ mod vp8_descriptor_test;
 #[cfg(test)]
 mod vp8_layers_test;
 #[cfg(test)]
+mod vp8_partitions_test;
+#[cfg(test)]
 mod vp8_test;
+
+mod partitions;
 
 use crate::packetizer::{Depacketizer, Payloader};
 use shared::error::{Error, Result};
@@ -56,6 +60,11 @@ pub struct Vp8Payloader {
     ///
     /// Lets a receiver detect loss within a frame, at one or two bytes per packet.
     pub enable_picture_id: bool,
+    /// Cut each frame at MTU boundaries without regard to its partitions, with `PID` 0 on
+    /// every packet and `S` on the first only (RFC 7741 section 4.4 allows it; libwebrtc's
+    /// packetizer does this). By default each partition starts a packet of its own, labelled
+    /// with its `PID` and `S` (sections 3, 4.2 and 4.4).
+    pub ignore_partitions: bool,
     picture_id: u16,
     /// `TL0PICIDX` of the last base layer frame sent.
     tl0_pic_idx: u8,
@@ -85,9 +94,17 @@ impl Vp8Payloader {
     /// The descriptor carries the PictureID when [`enable_picture_id`](Self::enable_picture_id)
     /// is set, `TL0PICIDX`, `TID` and `Y` when `info.temporal` is, `KEYIDX` when
     /// `info.key_idx` is, and `N` from `info.non_reference`. `TL0PICIDX` is incremented for
-    /// every frame with `TID` 0 and repeated on the frames above it. `S` is set on the frame's
-    /// first packet only and `PID` is 0 on all of them: the frame is cut at MTU boundaries
-    /// without regard to its partitions, which section 4.4 allows.
+    /// every frame with `TID` 0 and repeated on the frames above it.
+    ///
+    /// Each partition of the frame (the first partition with the frame header and the token
+    /// partition sizes, then each DCT token partition: RFC 6386 section 9) starts a packet of
+    /// its own, as RFC 7741 section 3 recommends: the packet's `PID` is the partition's index
+    /// (the eighth and ninth of a frame with eight token partitions share `PID` 7, the field's
+    /// largest value) and `S` is set on the first packet of each partition (sections 4.2,
+    /// 4.4). A partition larger than the MTU allows is cut over several packets. A frame
+    /// whose partition sizes cannot be read, or every frame with
+    /// [`ignore_partitions`](Self::ignore_partitions), is cut at MTU boundaries without
+    /// regard to its partitions, `S` on the first packet only and `PID` 0 (section 4.4).
     ///
     /// # Errors
     ///
@@ -192,30 +209,57 @@ impl Vp8Payloader {
         }
         let max_fragment_size = mtu - using_header_size;
 
-        let mut payloads = Vec::with_capacity(payload.len().div_ceil(max_fragment_size));
-        let mut payload_data_index: usize = 0;
-        while payload_data_index < payload.len() {
-            let current_fragment_size =
-                std::cmp::min(max_fragment_size, payload.len() - payload_data_index);
-            let mut out = BytesMut::with_capacity(using_header_size + current_fragment_size);
-            let mut first = 0u8;
-            if has_extension {
-                first |= 0x80; // X
+        // The byte ranges that each start a packet, with their PID.
+        let mut regions: Vec<(std::ops::Range<usize>, u8)> = Vec::new();
+        match (!self.ignore_partitions)
+            .then(|| partitions::vp8_partitions(payload))
+            .flatten()
+        {
+            Some(parts) => {
+                for (index, part) in parts.into_iter().enumerate() {
+                    // PID cannot be larger than 7: a ninth partition continues the eighth's.
+                    let pid = index.min(7) as u8;
+                    match regions.last_mut() {
+                        Some((last, last_pid)) if *last_pid == pid => last.end = part.end,
+                        _ if part.is_empty() => {}
+                        _ => regions.push((part, pid)),
+                    }
+                }
             }
-            if info.non_reference {
-                first |= 0x20; // N
-            }
-            if payload_data_index == 0 {
-                first |= 0x10; // S
-            }
-            out.put_u8(first);
-            out.put(&extension[..extension_len]);
-            out.put(
-                &*payload.slice(payload_data_index..payload_data_index + current_fragment_size),
-            );
-            payloads.push(out.freeze());
+            None => regions.push((0..payload.len(), 0)),
+        }
 
-            payload_data_index += current_fragment_size;
+        let mut payloads = Vec::with_capacity(
+            regions
+                .iter()
+                .map(|(r, _)| r.len().div_ceil(max_fragment_size))
+                .sum(),
+        );
+        for (region, pid) in regions {
+            let mut payload_data_index = region.start;
+            while payload_data_index < region.end {
+                let current_fragment_size =
+                    std::cmp::min(max_fragment_size, region.end - payload_data_index);
+                let mut out = BytesMut::with_capacity(using_header_size + current_fragment_size);
+                let mut first = pid;
+                if has_extension {
+                    first |= 0x80; // X
+                }
+                if info.non_reference {
+                    first |= 0x20; // N
+                }
+                if payload_data_index == region.start {
+                    first |= 0x10; // S: the first packet of a partition
+                }
+                out.put_u8(first);
+                out.put(&extension[..extension_len]);
+                out.put(
+                    &*payload.slice(payload_data_index..payload_data_index + current_fragment_size),
+                );
+                payloads.push(out.freeze());
+
+                payload_data_index += current_fragment_size;
+            }
         }
 
         self.picture_id += 1;
