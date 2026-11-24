@@ -394,6 +394,12 @@ pub struct DefaultInterceptorOptions {
     /// or on every update (draft-ietf-rmcat-gcc-02 section 5.5). See
     /// [`Gcc::with_one_decrease_per_round_trip`](interceptor::Gcc::with_one_decrease_per_round_trip).
     pub gcc_one_decrease_per_round_trip: bool,
+    /// What the bound of the congestion controller's estimate by the received rate
+    /// (draft-ietf-rmcat-gcc-02 section 5.5, `A_hat(i) < 1.5 * R_hat(i)`) does to an estimate
+    /// above it: stop its increase (the default: an application that sends less than the
+    /// estimate keeps it) or bring it down to the bound. See
+    /// [`Gcc::with_received_rate_bound`](interceptor::Gcc::with_received_rate_bound).
+    pub gcc_received_rate_bound: interceptor::ReceivedRateBound,
     /// Whether the abs-send-time header extension is offered on audio as well as on video
     /// ([`configure_abs_send_time`]). `false` by default: it serves the receive-side estimate
     /// (REMB), which runs on video; Chromium offers it on audio too.
@@ -479,6 +485,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "gcc_one_decrease_per_round_trip",
                 &self.gcc_one_decrease_per_round_trip,
             )
+            .field("gcc_received_rate_bound", &self.gcc_received_rate_bound)
             .field("abs_send_time_on_audio", &self.abs_send_time_on_audio)
             .field(
                 "receiver_reference_time_on_audio",
@@ -531,6 +538,7 @@ impl DefaultInterceptorOptions {
             twcc_rereport_received: false,
             gcc_threshold_time_base: interceptor::ThresholdTimeBase::Departure,
             gcc_one_decrease_per_round_trip: true,
+            gcc_received_rate_bound: interceptor::ReceivedRateBound::LimitsIncrease,
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
@@ -685,10 +693,12 @@ pub fn register_default_interceptors_with_options(
         let bandwidth_probing = options.bandwidth_probing;
         let threshold_time_base = options.gcc_threshold_time_base;
         let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
+        let received_rate_bound = options.gcc_received_rate_bound;
         move |session: usize| {
             let estimator = Gcc::default()
                 .with_threshold_time_base(threshold_time_base)
-                .with_one_decrease_per_round_trip(one_decrease_per_round_trip);
+                .with_one_decrease_per_round_trip(one_decrease_per_round_trip)
+                .with_received_rate_bound(received_rate_bound);
             CongestionControlBuilder::new(estimator)
                 .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)

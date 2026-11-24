@@ -387,7 +387,7 @@ macro_rules! governed_behaviours {
 }
 
 use ice::{FailedNomination, NominationAcceptance};
-use interceptor::{EcnInitiation, EcnMarking, ThresholdTimeBase};
+use interceptor::{EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase};
 
 governed_behaviours! {
     // ---- ICE ----
@@ -964,6 +964,18 @@ governed_behaviours! {
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_one_decrease_per_round_trip = v,
         read: |o: &DefaultInterceptorOptions| o.gcc_one_decrease_per_round_trip,
+    },
+    {
+        id: "gcc.received-rate-bound",
+        setting: "DefaultInterceptorOptions::gcc_received_rate_bound",
+        clause: "draft-ietf-rmcat-gcc-02 5.5",
+        rfc: ReceivedRateBound::LimitsIncrease => "LimitsIncrease",
+        chrome: ReceivedRateBound::LimitsIncrease => "LimitsIncrease",
+        strict_rfc: ReceivedRateBound::Clamps => "Clamps",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/aimd_rate_control.cc::AimdRateControl::ChangeBitrate @ a222406d (lines 235-249, 266): increase_limit = 1.5 * estimated_throughput + 10 kbit/s bounds the increase only (if (current_bitrate_ < increase_limit) ... std::min(increased_bitrate, increase_limit)); an estimate above it is left where it is (lines 244-246: 'If we have previously increased above the limit (for instance due to probing), we don't allow further changes'). Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_received_rate_bound = v,
+        read: |o: &DefaultInterceptorOptions| o.gcc_received_rate_bound,
     },
     {
         id: "pacer.queue-overflow",
