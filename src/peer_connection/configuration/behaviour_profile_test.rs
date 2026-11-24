@@ -436,6 +436,7 @@ fn the_performance_profile_differs_from_rfc_only_where_it_saves() {
             "rtcp.minimum-session-bandwidth",
             "cc.feedback-share",
             "cc.feedback-max-interval",
+            "cc.recovery-probing",
         ]
     );
 }
