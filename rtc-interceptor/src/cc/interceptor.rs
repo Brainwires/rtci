@@ -7,6 +7,7 @@ use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
 use crate::Interceptor;
 use crate::circuit_breaker::CircuitBreakerHandle;
+use crate::never_sent::NeverSent;
 use crate::rtpfb::acknowledgement::PacketReport;
 use crate::rtpfb::convert::FeedbackTimeline;
 use crate::rtpfb::history::History;
@@ -226,6 +227,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 remb: None,
                 round_trip_time: None,
                 departures: VecDeque::new(),
+                never_sent: HashMap::new(),
                 per_packet_feedback: false,
                 applied_max: None,
                 unnegotiated_tmmbr: self.unnegotiated_tmmbr,
@@ -366,6 +368,10 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     round_trip_time: Option<Duration>,
     /// Departure instants of the last second, for the packet rate a TMMBR limit depends on.
     departures: VecDeque<Instant>,
+    /// The sequence numbers each local SSRC jumped over on its way out, while receiver reports
+    /// are the loss-based controller's input: the packets the pacer discarded, which the
+    /// receiver counts as lost.
+    never_sent: HashMap<u32, NeverSent>,
     /// Whether TWCC or RFC 8888 feedback has ever been read.
     per_packet_feedback: bool,
     /// The external maximum last handed to the estimator.
@@ -744,8 +750,26 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         {
             for report in reports {
                 if self.streams.contains_key(&report.ssrc) {
-                    self.estimator
-                        .on_receiver_report(now, f64::from(report.fraction_lost) / 256.0);
+                    // The receiver counts every sequence number it did not receive as lost
+                    // (RFC 3550 section 6.4.1), the ones the pacer discarded before they left
+                    // included. Those are not the path's loss: over the interval the report
+                    // covers they are taken out of the count and the fraction is that of the
+                    // packets that left.
+                    let mut fraction_lost = f64::from(report.fraction_lost) / 256.0;
+                    if let Some(interval) =
+                        self.never_sent
+                            .get_mut(&report.ssrc)
+                            .and_then(|never_sent| {
+                                never_sent.on_report(
+                                    report.last_sequence_number,
+                                    report.cumulative_lost(),
+                                )
+                            })
+                        && interval.never_sent() > 0
+                    {
+                        fraction_lost = interval.fraction_lost();
+                    }
+                    self.estimator.on_receiver_report(now, fraction_lost);
                 }
             }
         }
@@ -1042,6 +1066,12 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                     // enqueue instant instead would charge its queueing delay to the network.
                     msg.now,
                 );
+                if !self.per_packet_feedback {
+                    self.never_sent
+                        .entry(rtp_packet.header.ssrc)
+                        .or_default()
+                        .on_sent(rtp_packet.header.sequence_number);
+                }
                 self.departures.push_back(msg.now);
                 if self.departures.len() > 4096 {
                     self.departures.pop_front();
@@ -1167,6 +1197,7 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
         for ssrc in flow_ssrcs(info) {
             self.streams.remove(&ssrc);
             self.ecn_counters.remove(&ssrc);
+            self.never_sent.remove(&ssrc);
         }
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
     }

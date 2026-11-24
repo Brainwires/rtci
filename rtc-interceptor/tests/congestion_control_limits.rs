@@ -806,6 +806,129 @@ fn gcc_backs_off_on_reported_loss_when_there_is_no_per_packet_feedback() {
     );
 }
 
+/// A receiver report on the local stream: extended highest sequence number received,
+/// cumulative number lost and fraction lost (in 1/256), as RFC 3550 section 6.4.1 has them.
+fn receiver_report(highest: u32, cumulative_lost: i32, fraction_lost: u8) -> Box<dyn rtcp::Packet> {
+    let mut block = rtcp::reception_report::ReceptionReport {
+        ssrc: LOCAL,
+        fraction_lost,
+        last_sequence_number: highest,
+        ..Default::default()
+    };
+    block.set_cumulative_lost(cumulative_lost);
+    Box::new(rtcp::receiver_report::ReceiverReport {
+        ssrc: REMOTE,
+        reports: vec![block],
+        ..Default::default()
+    })
+}
+
+/// Sends the sequence numbers `numbers` in order, 2 ms apart from `from`, except those
+/// `discarded` names: those are numbered and never leave, as after a pacer discard upstream
+/// of the interceptor (`PacerQueueOverflow::Drop`).
+fn send_numbers(
+    harness: &mut Harness,
+    from: Duration,
+    numbers: std::ops::Range<u32>,
+    discarded: impl Fn(u32) -> bool,
+) {
+    for (index, number) in numbers.enumerate() {
+        harness.sequence = number as u16;
+        if !discarded(number) {
+            harness.send(from + ms(2 * index as u64), 1200);
+        }
+    }
+    harness.sequence = harness.sequence.wrapping_add(1);
+}
+
+/// draft-ietf-rmcat-gcc-02 section 7 runs the loss-based controller on the fraction lost of
+/// the receiver's reports. The receiver counts every sequence number it did not receive as lost
+/// (RFC 3550 section 6.4.1), and the pacer, application-ward of the interceptor, discards
+/// media the target has no room for after the application numbered it. Those numbers never
+/// left: over the interval a report covers they come out of the loss, and the fraction is that
+/// of the packets that left.
+///
+/// 400 numbers, of which 150 to 249 never leave, and a report of 100 lost (64/256): the
+/// estimator is given no loss. Then 400 to 599, of which 400 to 449 never leave, and a report
+/// of 60 more lost: 10 of the 150 sent, (10 << 8) / 150 = 17/256 (RFC 3550 A.3). The same
+/// reports after a stream that left whole are the path's loss, passed on as reported.
+#[test]
+fn sequence_numbers_the_pacer_discarded_are_not_loss_to_the_loss_based_controller() {
+    let run = |discards: bool| {
+        let told = Told::default();
+        let mut harness = Harness::new(told.clone());
+        send_numbers(&mut harness, ms(0), 0..400, |number| {
+            discards && (150..250).contains(&number)
+        });
+        harness.receive(ms(1000), receiver_report(399, 100, 64));
+        send_numbers(&mut harness, ms(1000), 400..600, |number| {
+            discards && number < 450
+        });
+        harness.receive(ms(2000), receiver_report(599, 160, 76));
+        told.receiver_reports.lock().unwrap().clone()
+    };
+
+    assert_eq!(vec![0.0, 17.0 / 256.0], run(true));
+    assert_eq!(
+        vec![0.25, 76.0 / 256.0],
+        run(false),
+        "a stream that left whole"
+    );
+}
+
+/// The same across the wrap of the 16-bit sequence number: 65380 to 65535 and 0 to 243 are
+/// numbered, 65530 to 65535 and 0 to 93 (100 numbers) never leave, and the receiver reports
+/// its extended highest sequence number one cycle on.
+#[test]
+fn sequence_numbers_discarded_across_the_wrap_are_not_loss_to_the_loss_based_controller() {
+    let run = |discards: bool| {
+        let told = Told::default();
+        let mut harness = Harness::new(told.clone());
+        send_numbers(&mut harness, ms(0), 65_380..65_780, |number| {
+            discards && (65_530..65_630).contains(&number)
+        });
+        harness.receive(ms(1000), receiver_report((1 << 16) | 243, 100, 64));
+        told.receiver_reports.lock().unwrap().clone()
+    };
+
+    assert_eq!(vec![0.0], run(true));
+    assert_eq!(vec![0.25], run(false), "a stream that left whole");
+}
+
+/// And with `Gcc`: five seconds of reports of 25% loss that is all numbers the pacer
+/// discarded leave the target where it was or above, and the estimator's loss at zero; the
+/// same reports after a stream that left whole bring it down by 1 - 0.5 * 0.25 each.
+#[test]
+fn gcc_does_not_back_off_on_reported_loss_of_numbers_the_pacer_discarded() {
+    let run = |discards: bool| {
+        let mut harness = Harness::new(Gcc::new(1_000_000.0, 50_000.0, 10_000_000.0));
+        for second in 0..5u32 {
+            let first = second * 400;
+            send_numbers(
+                &mut harness,
+                ms(u64::from(second) * 1000),
+                first..first + 400,
+                |number| discards && (first + 150..first + 250).contains(&number),
+            );
+            harness.receive(
+                ms(u64::from(second) * 1000 + 999),
+                receiver_report(first + 399, (second as i32 + 1) * 100, 64),
+            );
+        }
+        (harness.handle.target_bitrate(), harness.handle.stats())
+    };
+
+    let (target, stats) = run(true);
+    assert!(target >= 1_000_000.0, "target fell to {target}");
+    assert_eq!(Some(0.0), stats.packet_loss);
+    let (target, _) = run(false);
+    let expected = 1_000_000.0 * 0.875f64.powi(5);
+    assert!(
+        (target - expected).abs() < 1.0,
+        "a stream that left whole: expected {expected}, got {target}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Missing feedback
 // ---------------------------------------------------------------------------------------------
