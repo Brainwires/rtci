@@ -343,6 +343,18 @@ pub const PROBE_PADDING_OCTETS: u8 = 255;
 /// us resend the same packets as fast as it can send RTCP (an amplifier).
 pub const MIN_RETRANSMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long after its retransmission a packet is not retransmitted again however often it is
+/// asked for: [`MIN_RETRANSMIT_INTERVAL`], or a round trip when the RTCP session has measured a
+/// longer one. A receiver asks again every round trip while the repair is on its way; a request
+/// that crossed the repair in flight is not a new loss. libwebrtc's packet history does the same
+/// (`modules/rtp_rtcp/source/rtp_packet_history.cc`, `VerifyRtt`: a packet "already
+/// retransmitted once, and the time since that even is lower than on RTT" is not resent).
+fn resend_interval(round_trip_time: Option<Duration>) -> Duration {
+    round_trip_time.map_or(MIN_RETRANSMIT_INTERVAL, |rtt| {
+        rtt.max(MIN_RETRANSMIT_INTERVAL)
+    })
+}
+
 /// Most retransmissions queued and not yet taken by `poll_write`. Past it further NACKed
 /// packets are not queued until the queue drains.
 pub const MAX_QUEUED_RETRANSMISSIONS: usize = 1024;
@@ -456,7 +468,11 @@ impl NackResponderInterceptor {
                     // Near the floor the retransmissions take the window's room first.
                     target
                 } else {
-                    target.saturating_sub(self.originals.octets)
+                    // What the originals leave, or the reserve the original media has already
+                    // been lowered by, whichever is more.
+                    target
+                        .saturating_sub(self.originals.octets)
+                        .max(Self::window_octets(self.announced_reserve))
                 }
             }
             RetransmissionRateLimit::UpToTarget => target,
@@ -565,6 +581,7 @@ impl NackResponderInterceptor {
     /// Sends the waiting retransmissions the rate limit has room for, oldest request first.
     fn release(&mut self, now: Instant) {
         let mut allowance = self.retransmission_allowance(now);
+        let resend_interval = resend_interval(self.round_trip_time);
         while let Some(entry) = self.pending.front() {
             if self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
                 break;
@@ -574,7 +591,7 @@ impl NackResponderInterceptor {
                 let recently = stream
                     .last_retransmit
                     .get(&seq)
-                    .is_some_and(|at| now.saturating_duration_since(*at) < MIN_RETRANSMIT_INTERVAL);
+                    .is_some_and(|at| now.saturating_duration_since(*at) < resend_interval);
                 if recently {
                     None
                 } else {
@@ -692,13 +709,23 @@ impl NackResponderInterceptor {
         let target = Self::window_octets(target_bps);
         let (originals, retransmitted) = (self.originals.octets, self.retransmitted.octets);
         let fits = match self.rate_limit {
-            RetransmissionRateLimit::WithinTarget if !self.at_floor() => freed_at(
-                &[&self.originals, &self.retransmitted],
-                (originals + retransmitted + size)
-                    .saturating_sub(target)
-                    .max(1),
-            )
-            .filter(|_| size <= target),
+            RetransmissionRateLimit::WithinTarget if !self.at_floor() => {
+                let by_share = freed_at(
+                    &[&self.originals, &self.retransmitted],
+                    (originals + retransmitted + size)
+                        .saturating_sub(target)
+                        .max(1),
+                )
+                .filter(|_| size <= target);
+                // The reserve frees as the retransmissions leave the window.
+                let reserve = Self::window_octets(self.announced_reserve);
+                let by_reserve = freed_at(
+                    &[&self.retransmitted],
+                    (retransmitted + size).saturating_sub(reserve).max(1),
+                )
+                .filter(|_| size <= reserve);
+                by_share.into_iter().chain(by_reserve).min()
+            }
             // Near the floor the room is the retransmissions' first: only they leaving the
             // window frees it.
             RetransmissionRateLimit::WithinTarget | RetransmissionRateLimit::UpToTarget => {
@@ -848,6 +875,7 @@ impl NackResponderInterceptor {
         }
 
         let ssrc = nack.media_ssrc;
+        let resend_interval = resend_interval(self.round_trip_time);
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
@@ -858,7 +886,7 @@ impl NackResponderInterceptor {
         // Forget suppression entries old enough not to matter.
         stream
             .last_retransmit
-            .retain(|_, at| now.saturating_duration_since(*at) < MIN_RETRANSMIT_INTERVAL);
+            .retain(|_, at| now.saturating_duration_since(*at) < resend_interval);
 
         // Every packet asked for joins the requests waiting, oldest request first (one asked
         // for again keeps its place and is asked for afresh), and leaves as the rate limit has
@@ -894,6 +922,10 @@ impl NackResponderInterceptor {
         }
         self.release_at = None;
         self.expire_pending(now);
+        // The original media is lowered by the reserve before any of these is sent (RFC 4588
+        // section 7: "the sender SHOULD NOT send retransmission packets without reducing the
+        // packet rate and bitrate of the original stream"); the retransmissions may then use it.
+        self.announce_reserve(now, false);
         self.release(now);
     }
 }
@@ -980,6 +1012,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         let now = msg.now;
+        let announced_before = self.announced_reserve;
         // The congestion controller's target, which the retransmissions are held to.
         let carries_target = if let Some(Attribute::TargetBitrateChanged { bits_per_second }) =
             msg.message.get(&Attribute::TargetBitrateChanged {
@@ -1032,6 +1065,25 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         // The application's target is the controller's less the reserve (RFC 4588 section
         // 7): lowered on the packet that carries it, or announced on a carrier of its own when
         // only the reserve moved.
+        if !carries_target
+            && self.announced_reserve != announced_before
+            && let Some(target_bps) = self.target_bps
+        {
+            // Moved while the NACK was read: the application hears of it here.
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
+                    Attribute::TargetBitrateChanged {
+                        bits_per_second: media_target(
+                            target_bps,
+                            self.announced_reserve,
+                            self.minimum_bps.unwrap_or(0.0),
+                        ),
+                    },
+                ),
+            });
+        }
         self.announce_reserve(now, !carries_target);
         if carries_target && self.announced_reserve > 0.0 {
             let (reserve, minimum) = (self.announced_reserve, self.minimum_bps.unwrap_or(0.0));
