@@ -16,7 +16,8 @@ use rtci::interceptor::{
 };
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::{
-    configure_ulpfec_sessions, register_default_interceptors,
+    CongestionFeedback, DefaultInterceptorOptions, configure_ulpfec_sessions,
+    register_default_interceptors_with_options,
 };
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
@@ -215,9 +216,25 @@ impl Peer {
     /// A peer with the default interceptors and `chain`; `accept`: whether it takes an
     /// offered FEC session.
     fn new(ip: &str, accept: bool, chain: FecChain) -> Result<Self> {
+        Self::with_feedback(ip, accept, chain, CongestionFeedback::default())
+    }
+
+    /// `new`, with the per-packet congestion feedback the standard interceptors offer.
+    fn with_feedback(
+        ip: &str,
+        accept: bool,
+        chain: FecChain,
+        congestion_feedback: CongestionFeedback,
+    ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        let mut options = DefaultInterceptorOptions::default();
+        options.congestion_feedback = congestion_feedback;
+        let (registry, _) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            &options,
+        )?;
         let registry = match chain {
             FecChain::FixedAmount => {
                 let mut encoder = UlpfecSendBuilder::stream()
@@ -319,11 +336,15 @@ impl World {
 
     /// `new`, with the ULPFEC interceptors of the offerer and of the answerer.
     fn with_chains(answerer_accepts: bool, offerer: FecChain, answerer: FecChain) -> Result<Self> {
+        Self::with_peers(
+            Peer::new("10.0.0.1", false, offerer)?,
+            Peer::new("10.0.0.2", answerer_accepts, answerer)?,
+        )
+    }
+
+    fn with_peers(offerer: Peer, answerer: Peer) -> Result<Self> {
         Ok(Self {
-            peers: [
-                Peer::new("10.0.0.1", false, offerer)?,
-                Peer::new("10.0.0.2", answerer_accepts, answerer)?,
-            ],
+            peers: [offerer, answerer],
             now: Instant::now(),
             srtp: vec![],
             rtcp: vec![],
@@ -1579,33 +1600,105 @@ fn fec_before_the_first_media_packet_of_an_undeclared_stream_is_dropped_silently
 
 /// A FEC session's congestion feedback. The FEC session is an RTP session on a transport of
 /// its own (RFC 5109 section 14.1, which keeps it separate for "the use of different network
-/// paths"), with a congestion controller of its own: RFC 8836 section 2 controls each path,
-/// and the media's controller cannot see this one. So its section states what the media
-/// sections state for that: the transport-wide sequence number extension with
-/// `a=rtcp-fb:<pt> transport-cc` (draft-holmer-rmcat-transport-wide-cc-extensions-01 sections 3
-/// and 4) and `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 6); the answer keeps them, under the
-/// offer's extension id; every FEC packet carries a transport-wide sequence number of the
-/// session's own sequence, and the sender's chain gets per-packet feedback about its FEC
-/// stream, from the FEC session's transport.
+/// paths"), with a congestion controller of its own: RFC 8836 section 2 controls each path, and
+/// the media's controller cannot see this one. So its section states what the media sections
+/// state for that: the transport-wide sequence number extension with `a=rtcp-fb:<pt>
+/// transport-cc` (draft-holmer-rmcat-transport-wide-cc-extensions-01 sections 3 and 4) and
+/// `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 6). The answer keeps "only one of the offered
+/// congestion control feedback mechanisms" (RFC 8888 section 6), RFC 8888 as for the media,
+/// and the sender's chain gets RFC 8888 reports about its FEC stream from the FEC session's
+/// transport.
 #[test]
 fn a_fec_session_carries_its_own_congestion_feedback() -> Result<()> {
-    let mut world = World::with_chains(true, FecChain::FixedAmount, FecChain::FixedAmount)?;
+    let (seen, numbers) = fec_session_feedback(CongestionFeedback::Negotiated, |offer, answer| {
+        let twcc = rtci::sdp::extmap::TRANSPORT_CC_URI;
+        let fec = &sections(offer)[1];
+        assert_eq!(
+            extmaps(fec),
+            vec![format!("a=extmap:{TRANSPORT_CC_ID} {twcc}")],
+            "{offer}"
+        );
+        assert!(fec.contains(&"a=rtcp-fb:127 transport-cc"), "{offer}");
+        assert!(fec.contains(&"a=rtcp-fb:127 ack ccfb"), "{offer}");
+        let fec = &sections(answer)[1];
+        assert!(extmaps(fec).is_empty(), "{answer}");
+        assert!(!fec.contains(&"a=rtcp-fb:127 transport-cc"), "{answer}");
+        assert!(fec.contains(&"a=rtcp-fb:127 ack ccfb"), "{answer}");
+    })?;
+    assert!(
+        seen.ccfb > 0,
+        "RFC 8888 reports about the FEC stream: {seen:?}"
+    );
+    assert_eq!(seen.transport_cc, 0, "{seen:?}");
+    assert!(numbers.iter().all(Option::is_none), "{numbers:?}");
+    Ok(())
+}
+
+/// The same with transport-wide congestion control only, as browsers offer it
+/// (`CongestionFeedback::Twcc` at both ends): the FEC section offers and answers the
+/// extension and `transport-cc`, every FEC packet carries a transport-wide sequence number of
+/// the FEC session's own sequence, and transport-cc feedback about the FEC stream reaches the
+/// sender.
+#[test]
+fn a_fec_session_carries_its_own_transport_wide_sequence() -> Result<()> {
+    let (seen, numbers) = fec_session_feedback(CongestionFeedback::Twcc, |offer, answer| {
+        let twcc = rtci::sdp::extmap::TRANSPORT_CC_URI;
+        for (what, sdp) in [("offer", offer), ("answer", answer)] {
+            let fec = &sections(sdp)[1];
+            assert_eq!(
+                extmaps(fec),
+                vec![format!("a=extmap:{TRANSPORT_CC_ID} {twcc}")],
+                "{what}: {sdp}"
+            );
+            assert!(fec.contains(&"a=rtcp-fb:127 transport-cc"), "{what}: {sdp}");
+            assert!(!fec.contains(&"a=rtcp-fb:127 ack ccfb"), "{what}: {sdp}");
+        }
+    })?;
+    assert!(
+        seen.transport_cc > 0,
+        "transport-cc feedback about the FEC stream: {seen:?}"
+    );
+    let numbers: Vec<u16> = numbers
+        .into_iter()
+        .collect::<Option<_>>()
+        .context("every FEC packet carries a transport-wide sequence number")?;
+    for pair in numbers.windows(2) {
+        assert_eq!(
+            pair[1],
+            pair[0].wrapping_add(1),
+            "the session's own sequence: {numbers:?}"
+        );
+    }
+    Ok(())
+}
+
+fn extmaps(section: &[&str]) -> Vec<String> {
+    section
+        .iter()
+        .filter(|l| l.starts_with("a=extmap:"))
+        .map(|l| (*l).to_owned())
+        .collect()
+}
+
+/// Two peers with `congestion_feedback` and a FEC session from the offerer, `check`ed on the
+/// offer and the answer; twenty frames, one FEC packet each. Returns the feedback the offerer's
+/// chain read about its FEC stream and the transport-wide sequence number of each FEC packet.
+fn fec_session_feedback(
+    congestion_feedback: CongestionFeedback,
+    check: impl Fn(&str, &str),
+) -> Result<(FeedbackSeen, Vec<Option<u16>>)> {
+    let mut world = World::with_peers(
+        Peer::with_feedback(
+            "10.0.0.1",
+            false,
+            FecChain::FixedAmount,
+            congestion_feedback,
+        )?,
+        Peer::with_feedback("10.0.0.2", true, FecChain::FixedAmount, congestion_feedback)?,
+    )?;
     let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
     let (offer, answer) = world.negotiate()?;
-    let twcc = rtci::sdp::extmap::TRANSPORT_CC_URI;
-    for (what, sdp) in [("offer", &offer), ("answer", &answer)] {
-        let fec = &sections(sdp)[1];
-        assert_eq!(
-            fec.iter()
-                .filter(|l| l.starts_with("a=extmap:"))
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![format!("a=extmap:{TRANSPORT_CC_ID} {twcc}").as_str()],
-            "{what}: {sdp}"
-        );
-        assert!(fec.contains(&"a=rtcp-fb:127 transport-cc"), "{what}: {sdp}");
-        assert!(fec.contains(&"a=rtcp-fb:127 ack ccfb"), "{what}: {sdp}");
-    }
+    check(&offer, &answer);
     let mids: Vec<String> = sections(&offer)
         .iter()
         .filter_map(|section| value(section, "mid").map(str::to_owned))
@@ -1623,7 +1716,6 @@ fn a_fec_session_carries_its_own_congestion_feedback() -> Result<()> {
         world.advance(Duration::from_millis(10))?;
     }
     world.advance(Duration::from_secs(1))?;
-
     let numbers: Vec<Option<u16>> = world
         .srtp
         .iter()
@@ -1631,23 +1723,7 @@ fn a_fec_session_carries_its_own_congestion_feedback() -> Result<()> {
         .map(|packet| packet.transport_wide_sequence_number)
         .collect();
     assert_eq!(numbers.len(), 20, "one FEC packet per frame");
-    let numbers: Vec<u16> = numbers
-        .into_iter()
-        .collect::<Option<_>>()
-        .context("every FEC packet carries a transport-wide sequence number")?;
-    for pair in numbers.windows(2) {
-        assert_eq!(
-            pair[1],
-            pair[0].wrapping_add(1),
-            "the session's own sequence: {numbers:?}"
-        );
-    }
-
-    let seen = world.peers[0].feedback.lock().unwrap();
+    let seen = std::mem::take(&mut *world.peers[0].feedback.lock().unwrap());
     assert_eq!(seen.fec_streams.len(), 1, "{seen:?}");
-    assert!(
-        seen.transport_cc + seen.ccfb > 0,
-        "feedback about the FEC stream reached the sender: {seen:?}"
-    );
-    Ok(())
+    Ok((seen, numbers))
 }

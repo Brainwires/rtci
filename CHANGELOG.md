@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states the per-packet congestion feedback the media sections state for the kind: the
   transport-wide sequence number extension (`a=extmap:1`, its own id in a section of its own)
   with `a=rtcp-fb:<pt> transport-cc`, and `a=rtcp-fb:<pt> ack ccfb` (RFC 8888), and an
-  answerer keeps what it runs of them under the offer's id. The FEC session's packets then
+  answerer keeps one of them (RFC 8888 section 6), RFC 8888 when both sides state it as for
+  the media, the extension under the offer's id. The FEC session's packets then
   carry the transport-wide sequence number of their own transport and are reported on, so that
   transport's congestion controller (each transport is a path, RFC 8836 section 2) has the
   feedback it ran without before. A section without these lines (an earlier peer) is taken as

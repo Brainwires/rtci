@@ -156,14 +156,19 @@ pub(crate) struct FecSessionFeedback {
 }
 
 impl FecSessionFeedback {
-    /// What both sides stated: the feedback in use. The extension id is the remote
-    /// description's, which an answer takes from the offer (RFC 8285 section 6).
+    /// What both sides stated: the feedback in use. One mechanism, as RFC 8888 section 6 has
+    /// an answer keep "only one of the offered congestion control feedback mechanisms": RFC
+    /// 8888 when both state it, as the media sections negotiate it
+    /// (`CongestionFeedback::Negotiated`), else transport-wide congestion control. The
+    /// extension id is the remote description's, which an answer takes from the offer (RFC
+    /// 8285 section 6).
     pub(crate) fn negotiated(local: Self, remote: Self) -> Self {
+        let ccfb = local.ccfb && remote.ccfb;
         Self {
             transport_cc_extension: remote
                 .transport_cc_extension
-                .filter(|_| local.transport_cc_extension.is_some()),
-            ccfb: local.ccfb && remote.ccfb,
+                .filter(|_| local.transport_cc_extension.is_some() && !ccfb),
+            ccfb,
         }
     }
 
