@@ -373,6 +373,21 @@ over SRTP and is subject to none of SCTP's flow control.
 - **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
 - **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
+- ✅ **ICE** (Interactive Connectivity Establishment) - NAT traversal with STUN/TURN, plus mDNS candidates
+- ✅ **DTLS** (Datagram Transport Layer Security) - Encryption for media and data
+- ✅ **SCTP** (Stream Control Transmission Protocol) - Reliable data channels
+- ✅ **RTP/RTCP** - Real-time media transport and control
+- ✅ **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
+- ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
+- ✅ **Media Tracks** - Audio/video RTP transport; the engine itself does not encode, decode, capture or play out
+- ✅ **Audio pipeline** (`rtc-audio`, `rtc-devices`) - Opus (pure Rust; libopus opt-in) with the RFC 7587 parameters,
+  in-band FEC and DTX, G.711, G.722, RED; a NetEq-style jitter buffer (adaptive and `jitterBufferTarget` delay,
+  concealment, FEC recovery, comfort noise, accelerate / preemptive expand, clock-drift compensation, the W3C inbound
+  audio statistics fed into `getStats`); echo cancellation, noise suppression, gain control, high-pass filter and
+  voice activity detection; a send pipeline following the congestion controller; capture and playout (cpal, opt-in).
+  Sans-I/O like the engine; see [docs/media-pipeline.md](docs/media-pipeline.md) for the measured quality
+- ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
+- ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
 - **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
   commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
@@ -504,6 +519,46 @@ cargo run --example data-channels-answer
 
 The engine is the root crate, `rtc`; each protocol is a crate of its own, usable alone and re-exported by
 `rtc` (`rtc::ice`, `rtc::dtls`, ...). Each crate's README lists the specifications it implements.
+RTC is built from composable crates, each implementing a specific protocol:
+
+## RTC Crates
+
+<p align="center">
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rtc"><img src="https://img.shields.io/crates/v/rtc.svg"></a>
+    <br>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Media<a href="https://crates.io/crates/rtc-media"><img src="https://img.shields.io/crates/v/rtc-media.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Audio (rtc-audio, rtc-devices)
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Interceptor<a href="https://crates.io/crates/rtc-interceptor"><img src="https://img.shields.io/crates/v/rtc-interceptor.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DataChannel<a href="https://crates.io/crates/rtc-datachannel"><img src="https://img.shields.io/crates/v/rtc-datachannel.svg"></a>
+    <br>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTP<a href="https://crates.io/crates/rtc-rtp"><img src="https://img.shields.io/crates/v/rtc-rtp.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTCP<a href="https://crates.io/crates/rtc-rtcp"><img src="https://img.shields.io/crates/v/rtc-rtcp.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SRTP<a href="https://crates.io/crates/rtc-srtp"><img src="https://img.shields.io/crates/v/rtc-srtp.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SCTP<a href="https://crates.io/crates/rtc-sctp"><img src="https://img.shields.io/crates/v/rtc-sctp.svg"></a>
+    <br>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DTLS<a href="https://crates.io/crates/rtc-dtls"><img src="https://img.shields.io/crates/v/rtc-dtls.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Crypto<a href="https://crates.io/crates/rtc-crypto"><img src="https://img.shields.io/crates/v/rtc-crypto.svg"></a>
+    <br>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">mDNS<a href="https://crates.io/crates/rtc-mdns"><img src="https://img.shields.io/crates/v/rtc-mdns.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">STUN<a href="https://crates.io/crates/rtc-stun"><img src="https://img.shields.io/crates/v/rtc-stun.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">TURN<a href="https://crates.io/crates/rtc-turn"><img src="https://img.shields.io/crates/v/rtc-turn.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">ICE<a href="https://crates.io/crates/rtc-ice"><img src="https://img.shields.io/crates/v/rtc-ice.svg"></a>
+    <br>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SDP<a href="https://crates.io/crates/rtc-sdp"><img src="https://img.shields.io/crates/v/rtc-sdp.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Shared<a href="https://crates.io/crates/rtc-shared"><img src="https://img.shields.io/crates/v/rtc-shared.svg"></a>
+</p>
+
+### Dependency Graph
+
+<p align="center">
+ <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc_crates_dep_graph.png" alt="RTC Crates Dependency Graph">
+</p>
+
+### Protocol Stack
+
+<p align="center">
+ <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc_stack.png" alt="RTC Protocols Stack">
+</p>
 
 | Crate | What it is |
 | --- | --- |

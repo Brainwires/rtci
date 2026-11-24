@@ -45,7 +45,10 @@
 //! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
-//! only counts (simulcast: packets per RID). `"negotiated":[{"label":..,"id":..,"ordered":..}]`
+//! only counts (simulcast: packets per RID); `{"media":"pipeline"}` sends a 440 Hz tone through
+//! the `rtc-audio` send pipeline (processing, Opus with FEC on reported loss, RFC 6464 levels)
+//! and decodes the browser's audio with its jitter buffer, reporting what it decoded under
+//! `"pipeline"`. `"negotiated":[{"label":..,"id":..,"ordered":..}]`
 //! creates pre-negotiated data channels. `"ice_tcp":true` adds a passive TCP candidate (RFC
 //! 6544) and `"udp":false` leaves out the UDP one. `"engine_tcp":true` has the engine gather
 //! its own TCP candidates and drive their connections through the stream interface and the
@@ -360,6 +363,17 @@ impl SeqCoverage {
     }
 }
 
+/// Scenario `pipeline`: audio through `rtc-audio` both ways.
+struct Pipeline {
+    sender_id: RTCRtpSenderId,
+    sender: Option<rtc_audio::engine::AudioSender>,
+    receiver: Option<rtc_audio::engine::AudioReceiver>,
+    tone: rtc_audio::signal::Tone,
+    next: Instant,
+    decoded_energy: f64,
+    decoded_samples: u64,
+}
+
 struct Outgoing {
     sender: RTCRtpSenderId,
     ssrc: u32,
@@ -474,6 +488,7 @@ struct Session {
     transports_at_rolled_back_offer: Vec<(String, String)>,
     transports_after_rollback: Vec<(String, String)>,
     connected: bool,
+    pipeline: Option<Pipeline>,
     state: String,
     /// The ICE transports whose DTLS transport reported "connected" in an
     /// `OnTransportEvent` (one per transport of the connection).
@@ -583,6 +598,7 @@ impl Session {
             transports_at_rolled_back_offer: vec![],
             transports_after_rollback: vec![],
             connected: false,
+            pipeline: None,
             state: "new".to_owned(),
             transports_connected: Default::default(),
             errors: vec![],
@@ -604,6 +620,11 @@ impl Session {
                 if o.source.is_some() {
                     wake = wake.min(o.next);
                 }
+            }
+            if let Some(p) = &s.pipeline
+                && s.connected
+            {
+                wake = wake.min(p.next);
             }
             let delay = wake
                 .saturating_duration_since(now)
@@ -1066,7 +1087,25 @@ impl Session {
                         "maxChannels": t.max_channels(),
                     })
                 });
+                let pipeline = self.pipeline.as_ref().map(|p| {
+                    let s = p
+                        .receiver
+                        .as_ref()
+                        .map(|r| r.stats().clone())
+                        .unwrap_or_default();
+                    json!({
+                        "packetsSent": p.sender.as_ref().map_or(0, |s| s.packets_sent()),
+                        "encoder": p.sender.as_ref().map(|s| s.pipeline().encoder_name()),
+                        "decodedSeconds": p.decoded_samples as f64 / 48_000.0,
+                        "decodedRms": (p.decoded_energy / p.decoded_samples.max(1) as f64).sqrt(),
+                        "totalSamplesReceived": s.total_samples_received,
+                        "concealedRatio": s.concealment_ratio(),
+                        "fecFramesRecovered": s.fec_frames_recovered,
+                        "meanDelayMs": s.mean_delay().map(|d| d.as_secs_f64() * 1000.0),
+                    })
+                });
                 self.out.push(json!({
+                    "pipeline": pipeline,
                     "type": "report",
                     "rtp": self.rtp_by_key,
                     "wireRtp": {
@@ -1261,6 +1300,20 @@ impl Session {
         };
         self.pc.set_rtp_header_encryption_policy(policy)?;
         self.media = sc["media"].as_str().unwrap_or("").to_owned();
+        if self.media == "pipeline" {
+            self.add_send_track("OPUS", false)?;
+            let sender_id = self.outgoing.last().map(|o| o.sender).expect("just added");
+            self.pipeline = Some(Pipeline {
+                sender_id,
+                sender: None,
+                receiver: None,
+                tone: rtc_audio::signal::Tone::new(48_000, 440.0, 0.25),
+                next: Instant::now(),
+                decoded_energy: 0.0,
+                decoded_samples: 0,
+            });
+            return Ok(());
+        }
         if self.media != "reflect" && self.media != "send" {
             return Ok(());
         }
@@ -1487,20 +1540,111 @@ impl Session {
                     for p in &packets {
                         *self.rtcp_by_type.entry(rtcp_name(&p.header())).or_default() += 1;
                     }
+                    if let Some(sender) = self.pipeline.as_mut().and_then(|p| p.sender.as_mut()) {
+                        sender.handle_rtcp(&packets);
+                    }
                 }
                 _ => {}
             }
         }
         if self.connected() {
             self.send_media()?;
+            self.run_pipeline();
         }
         Ok(())
+    }
+
+    /// Scenario `pipeline`: 10 ms of tone into the send pipeline and 10 ms out of the jitter
+    /// buffer for every 10 ms that passed.
+    fn run_pipeline(&mut self) {
+        let Some(p) = self.pipeline.as_mut() else {
+            return;
+        };
+        if p.sender.is_none() {
+            // Not until the answer named a payload type for the track.
+            match rtc_audio::engine::AudioSender::new(
+                &mut self.pc,
+                p.sender_id,
+                Instant::now(),
+                // A steady tone is what noise suppression removes and gain control holds:
+                // the interop cell checks the codec path, so only the voice detector runs.
+                rtc_audio::engine::AudioSenderOptions {
+                    processing: rtc_audio::processing::ProcessingConfig::OFF,
+                    ..Default::default()
+                },
+            ) {
+                Ok(s) => p.sender = Some(s),
+                Err(_) => return,
+            }
+            p.next = Instant::now();
+        }
+        let now = Instant::now();
+        let mut frames = 0;
+        while p.next <= now && frames < 20 {
+            frames += 1;
+            let mut samples = vec![0.0f32; 480];
+            p.tone.fill(&mut samples);
+            let frame = rtc_audio::AudioFrame {
+                samples,
+                sample_rate: 48_000,
+                channels: 1,
+            };
+            if let Some(sender) = p.sender.as_mut() {
+                if let Err(e) = sender.push_capture(&mut self.pc, p.next, &frame) {
+                    self.errors.push(format!("pipeline send: {e}"));
+                }
+                if frames == 1 {
+                    sender.update_network(&mut self.pc, p.next);
+                }
+            }
+            if let Some(receiver) = p.receiver.as_mut() {
+                let out = receiver.pull(p.next);
+                p.decoded_energy += out
+                    .samples
+                    .iter()
+                    .map(|v| f64::from(*v).powi(2))
+                    .sum::<f64>();
+                p.decoded_samples += out.samples.len() as u64;
+                if let Some(sender) = p.sender.as_mut() {
+                    // What plays here is the echo canceller's reference.
+                    sender.push_render(&out);
+                }
+            }
+            p.next += Duration::from_millis(10);
+        }
+        if p.next < now {
+            // Fell behind (the loop was busy): skip ahead rather than burst.
+            p.next = now;
+        }
+        if let Some(receiver) = p.receiver.as_mut() {
+            receiver.update_stats(&mut self.pc);
+        }
+        if let Some(sender) = p.sender.as_ref() {
+            sender.update_stats(&mut self.pc);
+        }
     }
 
     fn on_rtp(&mut self, track_id: MediaStreamTrackId, mut pkt: rtc::rtp::Packet) {
         let Some((kind, rid, receiver_id)) = self.tracks.get(&track_id).cloned() else {
             return;
         };
+        if let Some(p) = self.pipeline.as_mut()
+            && kind == RtpCodecKind::Audio
+        {
+            if p.receiver.is_none() {
+                p.receiver = rtc_audio::engine::AudioReceiver::new(
+                    &mut self.pc,
+                    receiver_id,
+                    rtc_audio::jitter::JitterBufferConfig::default(),
+                    1,
+                    rtc_audio::engine::OpusBackend::Rust,
+                )
+                .ok();
+            }
+            if let Some(r) = p.receiver.as_mut() {
+                r.handle_rtp(Instant::now(), &pkt);
+            }
+        }
         let mime = self
             .pc
             .rtp_receiver(receiver_id)
