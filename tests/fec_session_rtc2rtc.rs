@@ -17,7 +17,7 @@ use rtci::peer_connection::configuration::interceptor_registry::{
 };
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 use rtci::peer_connection::message::RTCMessage;
 use rtci::peer_connection::sdp::RTCSessionDescription;
 use rtci::peer_connection::state::RTCPeerConnectionState;
@@ -262,7 +262,7 @@ impl World {
                         }
                         peer.connected = state == RTCPeerConnectionState::Connected;
                     }
-                    RTCPeerConnectionEvent::OnTrack(_) => peer.tracks += 1,
+                    RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(_)) => peer.tracks += 1,
                     _ => {}
                 }
             }
@@ -758,11 +758,11 @@ fn the_fec_travels_in_its_own_session_under_the_media_ssrc_and_repairs_a_loss() 
 
 /// The chain `configure_ulpfec_sessions` builds, between two peers: the amount of FEC follows
 /// the loss the receiver reports (RFC 8854 section 8: "SHOULD only transmit the amount of FEC
-/// needed to protect against the observed packet loss"; RFC 5109 section 12). So no FEC
-/// leaves while no loss is reported, and once the receiver's reports show the loss, FEC
-/// travels in the FEC session and repairs what is lost from then on.
+/// needed to protect against the observed packet loss"; RFC 5109 section 12). While the
+/// receiver reports no loss, no FEC leaves; once its reports show loss, FEC travels in the FEC
+/// session and repairs what is lost from then on.
 #[test]
-fn with_the_default_helper_fec_starts_once_loss_is_reported_and_then_repairs_it() -> Result<()> {
+fn with_the_default_helper_the_amount_of_fec_follows_the_reported_loss() -> Result<()> {
     let mut world = World::new(true)?;
     let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
     let (offer, _) = world.negotiate()?;
@@ -778,26 +778,46 @@ fn with_the_default_helper_fec_starts_once_loss_is_reported_and_then_repairs_it(
     let media_payload_type = world.media_payload_type(sender);
     world.only_first_transmissions = Some((media_from, media_payload_type));
 
-    // Thirty frames a second of five packets, for ten seconds. The network loses the third
-    // packet of every other frame (a tenth of the packets), and every retransmission.
-    const FRAMES: u16 = 300;
+    // Thirty frames a second of five packets. Five seconds without loss, then ten seconds in
+    // which the network loses the third packet of every other frame (a tenth of the packets)
+    // and every retransmission.
+    const QUIET: u16 = 150;
+    const FRAMES: u16 = 450;
+    let mut fec_by_frame = vec![0usize; usize::from(FRAMES)];
     for frame in 0..FRAMES {
-        if frame % 2 == 0 {
+        if frame >= QUIET && frame % 2 == 0 {
             world.lose.insert((media_from, frame * 5 + 2));
         }
+        let before = world.srtp.iter().filter(|p| p.from == fec_from).count();
         for index in 0..5u16 {
             world.send_video(sender, frame * 5 + index, u32::from(frame), index == 4)?;
         }
         world.advance(Duration::from_millis(33))?;
+        fec_by_frame[usize::from(frame)] =
+            world.srtp.iter().filter(|p| p.from == fec_from).count() - before;
     }
     world.advance(Duration::from_millis(500))?;
 
+    // No loss reported: no FEC, in the last second before the loss began.
+    assert_eq!(
+        fec_by_frame[usize::from(QUIET) - 30..usize::from(QUIET)]
+            .iter()
+            .sum::<usize>(),
+        0,
+        "FEC that helps nothing is not sent: {fec_by_frame:?}"
+    );
+    // Loss reported: FEC, for every frame of the last second.
+    assert!(
+        fec_by_frame[usize::from(FRAMES) - 30..]
+            .iter()
+            .all(|sent| *sent >= 1),
+        "FEC for each frame once the loss is known: {fec_by_frame:?}"
+    );
     let fec: Vec<&OnTheWire> = world
         .srtp
         .iter()
         .filter(|packet| packet.from == fec_from)
         .collect();
-    assert!(!fec.is_empty(), "FEC is sent once the loss is known");
     assert!(
         fec.iter()
             .all(|packet| packet.ssrc == ssrc && packet.payload_type == 127),
@@ -811,15 +831,8 @@ fn with_the_default_helper_fec_starts_once_loss_is_reported_and_then_repairs_it(
             .all(|packet| packet.payload_type != 127),
         "no FEC in the media's session"
     );
-    // The first frame left before any report: its lost packet stays lost.
-    let received = &world.peers[1].rtp;
-    assert!(
-        !received
-            .iter()
-            .any(|packet| packet.header.sequence_number == 2),
-        "nothing repaired the first frame"
-    );
     // The last second: every frame complete, the lost packets rebuilt octet for octet.
+    let received = &world.peers[1].rtp;
     for frame in FRAMES - 30..FRAMES {
         for index in 0..5u16 {
             let sequence_number = frame * 5 + index;
