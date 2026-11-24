@@ -31,6 +31,8 @@ fn read_everything(session: &SessionDescription) {
     let _ = session.ice_pacing();
     let _ = session.identity();
     let _ = session.msid_semantic();
+    let _ = session.tool();
+    let _ = session.conference_type();
     let _ = session.direction();
     let _ = session.extmaps();
     let _ = session.extmap_allow_mixed();
@@ -102,6 +104,8 @@ fn read_everything(session: &SessionDescription) {
         let _ = media.ptime();
         let _ = media.maxptime();
         let _ = media.framerate();
+        let _ = media.orient();
+        let _ = media.quality();
         let _ = media.imageattrs();
         let _ = media.content();
         let _ = media.candidates();

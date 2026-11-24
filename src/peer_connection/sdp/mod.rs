@@ -3977,6 +3977,13 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
 /// `a=rtcp-fb` without parameters with a space, against RFC 4585 section 4.2's
 /// `rtcp-fb-param`; Pion did before v4.1.5).
 pub(crate) fn check_attribute_lines(desc: &SessionDescription, strict: bool) -> Result<()> {
+    // RFC 8866 section 6.7: "At most one occurrence of "a=recvonly", "a=sendrecv",
+    // "a=sendonly", or "a=inactive" MAY appear at session level, and at most one MAY appear
+    // in each media description": a level with two is ambiguous, and refused.
+    desc.direction()?;
+    for media in &desc.media_descriptions {
+        media.direction()?;
+    }
     let lines = desc.attributes.iter().chain(
         desc.media_descriptions
             .iter()
