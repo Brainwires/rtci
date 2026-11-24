@@ -700,6 +700,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What the RFC's wait does not cover: a round trip that jumps past 16 times the current RTO at
   once (20 ms to more than 8 s); `ConsentResponseWait::Fixed` does (see "Added").
   `iceCandidatePair.currentRoundTripTime` now also reflects the late answers.
+  Found on the way and left open (audit row RFC7675-1-1, `partial`): consent is kept per remote
+  candidate, not per candidate pair, so a response on another pair to the same remote
+  candidate renews the selected pair's consent.
   **Known limit of 0.1.0** (for its release notes): a connection can fail 30 s after a path's
   round trip rises above 500 ms although the path works.
   Tests: `rtci-ice/src/agent/agent_consent_delay_test.rs` (17 tests),
