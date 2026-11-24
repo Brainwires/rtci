@@ -1011,10 +1011,11 @@ fn gcc_is_stable_behind_an_aqm() {
 }
 
 /// draft-ietf-rmcat-gcc-02 section 5.4 adapts the threshold over t(i) - t(i-1), the arrival
-/// times of the groups on the receiver's clock; libwebrtc (and `ThresholdTimeBase::Departure`,
-/// the default) over the departure gap, capped at 100 ms. Both forms on the scenarios above:
-/// the draft's form holds every bound those tests hold the default to. The shares and delays
-/// each run prints are the comparison recorded in the audit (GCC-5.4-4).
+/// times of the groups on the receiver's clock (`ThresholdTimeBase::Arrival`, the default);
+/// `ThresholdTimeBase::Departure` (the default until 0.1.0, a setting since) over the gap
+/// between the readings on the sender's clock, capped at 100 ms. Both forms on the scenarios
+/// above hold the same bounds. The shares and delays each run prints are the comparison
+/// recorded in the audit (GCC-5.4-4).
 #[test]
 fn the_draft_threshold_time_base_meets_the_same_bounds() {
     const CAPACITY: f64 = 2_000_000.0;
