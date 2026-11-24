@@ -4352,8 +4352,9 @@ fn check_ice_credentials(ufrag: Option<&str>, pwd: Option<&str>) -> Result<()> {
 /// Why a remote `candidate` line that follows the grammar is to be ignored, rather than
 /// refuse its description (RFC 8839 section 5.1): its address is a fully qualified domain
 /// name ("An agent processing remote candidates MUST ignore "candidate" lines that include
-/// candidates with FQDNs"; an mDNS `.local` name is resolved, draft-ietf-mmusic-mdns-ice-
-/// candidates), or its transport or candidate type is one this agent does not know (both are
+/// candidates with FQDNs"; a host candidate's `<name>.local` is resolved by mDNS,
+/// draft-ietf-mmusic-mdns-ice-candidates section 3.2.1, and a `.local` name of more than one
+/// "." or on another candidate type is an FQDN like any other), or its transport or candidate type is one this agent does not know (both are
 /// extensible tokens in the grammar). `None`: the line is parsed as usual, and a line that does
 /// not follow the grammar still refuses the description.
 pub(crate) fn ignored_candidate_line(value: &str) -> Option<&'static str> {
@@ -4369,7 +4370,14 @@ pub(crate) fn ignored_candidate_line(value: &str) -> Option<&'static str> {
         return Some("an unknown candidate type");
     }
     let is_ip = address.parse::<std::net::IpAddr>().is_ok();
-    if !is_ip && !address.ends_with(".local") {
+    // draft-ietf-mmusic-mdns-ice-candidates section 3.2.1: only an address that ends with
+    // ".local" and has no other "." is resolved by mDNS (step 1 sends the rest to RFC 8445
+    // processing, where an FQDN is ignored), and only a host candidate carries one (section
+    // 3.1.2.2 hides host addresses alone).
+    let mdns_name = typ == "host"
+        && address.to_ascii_lowercase().ends_with(".local")
+        && address.matches('.').count() == 1;
+    if !is_ip && !mdns_name {
         let fqdn = address.split('.').all(|label| {
             !label.is_empty()
                 && label
