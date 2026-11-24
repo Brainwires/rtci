@@ -530,6 +530,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `an_ice_restart_with_the_same_addresses_starts_the_estimate_over` (ParolNet's chain) and
   `..._counts_no_old_loss_in_the_default_chain`, an ICE restart after a 4 s outage with the
   addresses unchanged; unit tests in `gcc/twcc_gcc` and `tests/congestion_control_limits.rs`.
+  Measured there (hosted run 45299712792): ParolNet's chain restarts at 300 kbit/s from 638
+  and never goes under 300 kbit/s after the switch; without the peer connection's carrier the
+  estimate stays at 638 kbit/s through the switch and one feedback cuts it (run 45300194903),
+  and with the restart but the old send times kept it falls to 153 kbit/s (45300201020). The
+  default chain counts no loss after the switch; with its history kept, a smoothed 18 %
+  (45300207507).
 
 - **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
   (`conf/red-1-send-policy`). jsep17 sent every Opus packet as RED, with a copy of the one
