@@ -2344,6 +2344,22 @@ pub(crate) struct RepairFlows {
     pub(crate) fec: bool,
 }
 
+/// Rejects a section of an answer that was written in full: port zero, and no `a=candidate`
+/// lines (RFC 8839 section 4.2.1.6: with the port set to zero "the agent SHOULD NOT include
+/// ICE-related SDP "candidate" attributes in that "m=" section"), nor `a=end-of-candidates`.
+/// Whether it took candidates out: the next section written takes them then.
+fn reject_written_section(media: &mut MediaDescription) -> bool {
+    media.media_name.port = RangedPort {
+        value: 0,
+        range: None,
+    };
+    let before = media.attributes.len();
+    media
+        .attributes
+        .retain(|a| a.key != "candidate" && a.key != "end-of-candidates");
+    media.attributes.len() != before
+}
+
 /// Makes a section of an initial offer bundle-only (RFC 9143 sections 6 and 7.2.1): port
 /// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
@@ -3016,11 +3032,10 @@ impl RTCPeerConnection {
                     BundleMode::Answer(offered) if !offered.is_empty() => {
                         // Outside the offered group under `must-bundle`: no transport but the
                         // BUNDLE one (RFC 9429 section 4.1.1).
-                        if let Some(desc) = d.media_descriptions.last_mut() {
-                            desc.media_name.port = RangedPort {
-                                value: 0,
-                                range: None,
-                            }
+                        if let Some(desc) = d.media_descriptions.last_mut()
+                            && reject_written_section(desc)
+                        {
+                            candidates_added = false;
                         }
                     }
                     // No BUNDLE group offered: every accepted section is a transport of its
@@ -3029,11 +3044,10 @@ impl RTCPeerConnection {
                     // type", must-bundle "any 'm=' sections other than the first").
                     BundleMode::Answer(_) => {
                         if without_transport {
-                            if let Some(desc) = d.media_descriptions.last_mut() {
-                                desc.media_name.port = RangedPort {
-                                    value: 0,
-                                    range: None,
-                                }
+                            if let Some(desc) = d.media_descriptions.last_mut()
+                                && reject_written_section(desc)
+                            {
+                                candidates_added = false;
                             }
                         } else {
                             with_transport.push(media_type);
@@ -4112,6 +4126,54 @@ pub(crate) fn decoding_dependencies(
         }
     }
     out
+}
+
+/// The tokens of an `a=group` line (its semantics first), `None` for another attribute.
+fn group_tokens(a: &sdp::description::common::Attribute) -> Option<Vec<&str>> {
+    (a.key == ATTR_KEY_GROUP).then(|| {
+        a.value
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect()
+    })
+}
+
+/// The `a=group` semantics this endpoint acts on: BUNDLE (RFC 9143), lip synchronization
+/// (RFC 5888 section 7) and decoding dependency (RFC 5583).
+const UNDERSTOOD_GROUP_SEMANTICS: [&str; 3] = ["BUNDLE", "LS", "DDP"];
+
+/// RFC 5888 section 9.3: "If a server receives an offer that contains empty "a=group" lines,
+/// it SHOULD add its capabilities also in the form of empty "a=group" lines to its answer."
+/// An offer with an `a=group` line that names no identification-tag is answered with an empty
+/// `a=group` line for each semantics this endpoint understands and the answer does not use.
+pub(crate) fn answer_group_capabilities(
+    offer: &SessionDescription,
+    answer: &mut SessionDescription,
+) {
+    let offered_empty = offer
+        .attributes
+        .iter()
+        .filter_map(group_tokens)
+        .any(|tokens| tokens.len() == 1);
+    if !offered_empty {
+        return;
+    }
+    for semantics in UNDERSTOOD_GROUP_SEMANTICS {
+        let used = answer
+            .attributes
+            .iter()
+            .filter_map(group_tokens)
+            .any(|tokens| tokens.first() == Some(&semantics));
+        if !used {
+            answer
+                .attributes
+                .push(sdp::description::common::Attribute::new(
+                    ATTR_KEY_GROUP.to_owned(),
+                    Some(semantics.to_owned()),
+                ));
+        }
+    }
 }
 
 /// RFC 5583 section 6.1 (with RFC 5888 section 9.2, which it follows) in an answer to

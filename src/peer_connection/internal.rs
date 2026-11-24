@@ -1386,6 +1386,9 @@ impl RTCPeerConnection {
             // RFC 5583 section 6.1: the offered decoding dependencies, kept for what the
             // answer accepts.
             crate::peer_connection::sdp::answer_decoding_dependencies(offer, &mut d);
+            // RFC 5888 section 9.3: empty `a=group` lines of the offer are answered with this
+            // endpoint's.
+            crate::peer_connection::sdp::answer_group_capabilities(offer, &mut d);
             // RFC 3264 section 6: "The 't=' line in the answer MUST be equal to the ones in
             // the offer" (a WebRTC offer says `t=0 0`, which the answer has already).
             if !offer.time_descriptions.is_empty() {
@@ -1417,7 +1420,17 @@ impl RTCPeerConnection {
             };
 
             if !parsed.media_descriptions.is_empty() {
-                let mut m = parsed.media_descriptions.remove(0);
+                // The first section the description does not reject: a section with port
+                // zero carries no candidates (RFC 8839 section 4.2.1.6). A bundle-only
+                // section has port zero too and is never first (RFC 9143 section 7.2.1).
+                let Some(at) = parsed
+                    .media_descriptions
+                    .iter()
+                    .position(|m| m.media_name.port.value != 0)
+                else {
+                    return Some(sd.clone());
+                };
+                let mut m = parsed.media_descriptions.remove(at);
                 m = match add_candidates_to_media_descriptions(
                     &candidates,
                     m,
@@ -1426,7 +1439,7 @@ impl RTCPeerConnection {
                     Ok(m) => m,
                     Err(_) => return Some(sd.clone()),
                 };
-                parsed.media_descriptions.insert(0, m);
+                parsed.media_descriptions.insert(at, m);
                 share_bundle_destination(&mut parsed);
                 self.populate_other_transports_candidates(&mut parsed);
             }

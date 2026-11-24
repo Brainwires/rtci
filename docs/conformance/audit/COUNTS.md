@@ -27,6 +27,10 @@ API is the default and tested too (`RULES.md`).
 | MAY | 445 | 0 | 0 | 20 | 34 | 107 | 0 | 172 | 778 |
 | PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
 | all | 6398 | 25 | 9 | 37 | 104 | 155 | 2 | 1165 | 7895 |
+| SHOULD | 860 | 0 | 0 | 10 | 53 | 40 | 4 | 327 | 1294 |
+| MAY | 449 | 0 | 0 | 18 | 34 | 106 | 0 | 171 | 778 |
+| PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
+| all | 6409 | 25 | 7 | 31 | 102 | 152 | 4 | 1165 | 7895 |
 
 ## RFC behaviour tested
 
@@ -44,6 +48,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | MAY | 607 | 445 | 73.3 | 445 | 73.3 |
 | SHOULD | 968 | 855 | 88.3 | 853 | 88.1 |
 | MAY | 606 | 445 | 73.4 | 445 | 73.4 |
+| SHOULD | 967 | 860 | 88.9 | 860 | 88.9 |
+| MAY | 607 | 449 | 74.0 | 449 | 74.0 |
 | PROC | 76 | 68 | 89.5 | 68 | 89.5 |
 
 ## Per file
@@ -73,8 +79,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc2198.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | `rfc2198.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc3264.md` | MUST | 47 | 0 | 0 | 0 | 0 | 0 | 0 | 8 | 55 |
-| `rfc3264.md` | SHOULD | 8 | 0 | 0 | 1 | 1 | 1 | 0 | 2 | 13 |
-| `rfc3264.md` | MAY | 21 | 0 | 0 | 0 | 0 | 2 | 0 | 2 | 25 |
+| `rfc3264.md` | SHOULD | 9 | 0 | 0 | 1 | 0 | 0 | 0 | 3 | 13 |
+| `rfc3264.md` | MAY | 22 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 25 |
 | `rfc3389.md` | MUST | 8 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 9 |
 | `rfc3389.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 1 | 3 |
 | `rfc3389.md` | MAY | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 1 | 3 |
@@ -140,8 +146,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc5780.md` | MUST | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `rfc5780.md` | MAY | 1 | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 3 |
 | `rfc5888.md` | MUST | 16 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 19 |
-| `rfc5888.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 1 | 3 |
-| `rfc5888.md` | MAY | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
+| `rfc5888.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 3 |
+| `rfc5888.md` | MAY | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
 | `rfc5928.md` | MUST | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 6 |
 | `rfc6062.md` | MUST | 19 | 0 | 0 | 0 | 0 | 0 | 0 | 5 | 24 |
 | `rfc6062.md` | MAY | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 4 |
@@ -293,8 +299,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8838.md` | SHOULD | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 13 |
 | `rfc8838.md` | MAY | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 8 |
 | `rfc8839.md` | MUST | 82 | 0 | 1 | 0 | 0 | 0 | 0 | 14 | 97 |
-| `rfc8839.md` | SHOULD | 3 | 0 | 0 | 0 | 1 | 2 | 0 | 2 | 8 |
-| `rfc8839.md` | MAY | 7 | 0 | 0 | 1 | 0 | 1 | 0 | 3 | 12 |
+| `rfc8839.md` | SHOULD | 4 | 0 | 0 | 0 | 0 | 2 | 0 | 2 | 8 |
+| `rfc8839.md` | MAY | 8 | 0 | 0 | 0 | 0 | 1 | 0 | 3 | 12 |
 | `rfc8841.md` | MUST | 46 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 53 |
 | `rfc8841.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 3 |
 | `rfc8841.md` | MAY | 3 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 4 |
@@ -317,12 +323,13 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8859.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `rfc8866.md` | MUST | 52 | 0 | 0 | 0 | 0 | 0 | 0 | 5 | 57 |
 | `rfc8866.md` | SHOULD | 13 | 0 | 0 | 2 | 0 | 1 | 0 | 10 | 26 |
+| `rfc8866.md` | SHOULD | 14 | 0 | 0 | 0 | 0 | 1 | 1 | 10 | 26 |
 | `rfc8866.md` | MAY | 24 | 0 | 0 | 0 | 7 | 4 | 0 | 3 | 38 |
 | `rfc8888.md` | MUST | 27 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 28 |
 | `rfc8888.md` | SHOULD | 7 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 8 |
 | `rfc8888.md` | MAY | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 5 |
 | `rfc9143.md` | MUST | 70 | 1 | 0 | 0 | 0 | 0 | 0 | 4 | 75 |
-| `rfc9143.md` | SHOULD | 4 | 0 | 0 | 1 | 0 | 0 | 0 | 1 | 6 |
+| `rfc9143.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 6 |
 | `rfc9143.md` | MAY | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 6 |
 | `rfc9146.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 14 |
 | `rfc9146.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
@@ -339,6 +346,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc9429.md` | MUST | 283 | 11 | 2 | 0 | 0 | 0 | 0 | 13 | 309 |
 | `rfc9429.md` | SHOULD | 10 | 0 | 1 | 0 | 2 | 0 | 0 | 6 | 19 |
 | `rfc9429.md` | MAY | 4 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 9 |
+| `rfc9429.md` | SHOULD | 10 | 0 | 0 | 0 | 2 | 0 | 1 | 6 | 19 |
+| `rfc9429.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 0 | 3 | 9 |
 | `rfc9443.md` | MUST | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 7 |
 | `rfc9443.md` | MAY | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 3 |
 | `rfc9605.md` | MUST | 27 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 32 |

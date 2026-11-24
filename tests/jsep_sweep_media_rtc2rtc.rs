@@ -459,6 +459,136 @@ fn recvonly_and_inactive_endpoints_still_send_rtcp() -> Result<()> {
     Ok(())
 }
 
+/// RFC 8866 section 6.7.3: an endpoint that is `sendonly` "SHOULD still receive and process
+/// RTCP". The offerer's section is sendonly once the answer is recvonly; the receiver reports
+/// the answerer sends for its video reach the offerer's outbound stream (its remote-inbound
+/// stats, with round trips measured from the reports' LSR / DLSR).
+#[test]
+fn a_sendonly_endpoint_processes_the_rtcp_it_receives() -> Result<()> {
+    use rtci::statistics::StatsSelector;
+    use rtci::statistics::report::RTCStatsReportEntry;
+    let mut world = World::new(
+        Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
+        Peer::new("10.0.0.2:5000", SettingEngineBuilder::new().build())?,
+    );
+    let sender = world.peers[0].pc.add_track(video_track())?;
+    let (offer, answer) = world.connect()?;
+    assert!(answer.contains("\r\na=recvonly\r\n"), "{answer}");
+    let vp8 = payload_type(&offer, "VP8/90000");
+    write(&mut world, sender, vp8, 100, 5)?;
+    world.run_for(Duration::from_secs(8), |_| false);
+    let now = world.now;
+    let report = world.peers[0].pc.get_stats(now, StatsSelector::None);
+    let remote_inbound = report
+        .iter()
+        .find_map(|entry| match entry {
+            RTCStatsReportEntry::RemoteInboundRtp(s) => Some(s),
+            _ => None,
+        })
+        .expect("the sendonly endpoint processed receiver reports (remote-inbound)");
+    assert!(
+        remote_inbound.round_trip_time_measurements > 0,
+        "{remote_inbound:?}"
+    );
+    Ok(())
+}
+
+/// RFC 9143 section 15: "endpoints need to be prepared for situations where the reception of
+/// the identification-tag is delayed and SHOULD NOT terminate sessions in such cases". Two
+/// video sections share their payload types, and the offer reaches the answerer without its
+/// `a=ssrc` lines and without the MID header extension: the first packets cannot be
+/// associated with a section (RFC 9143 section 9.2, "drop the packet") until the RTCP SDES MID
+/// item names the SSRC. The connection stays up, and once the MID has arrived the stream is
+/// delivered.
+#[test]
+fn a_late_identification_tag_does_not_end_the_session() -> Result<()> {
+    let mut world = World::new(
+        Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
+        Peer::new("10.0.0.2:5000", SettingEngineBuilder::new().build())?,
+    );
+    let sender = world.peers[0].pc.add_track(video_track())?;
+    world.peers[0].pc.add_track(MediaStreamTrack::new(
+        "s".to_owned(),
+        "w".to_owned(),
+        "w".to_owned(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(SSRC + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+    ))?;
+    let strip = |sdp: &str| {
+        sdp.split("\r\n")
+            .filter(|l| {
+                !l.starts_with("a=ssrc:")
+                    && !l.starts_with("a=ssrc-group:")
+                    && !(l.starts_with("a=extmap:") && l.contains("sdes:mid"))
+            })
+            .map(|l| format!("{l}\r\n"))
+            .collect::<String>()
+            .trim_end_matches("\r\n")
+            .to_owned()
+            + "\r\n"
+    };
+    let (offer, answer) = world.exchange_with(0, strip, keep)?;
+    assert!(!answer.contains("sdes:mid"), "{answer}");
+    world.trickle()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected()))?;
+    let vp8 = payload_type(&offer, "VP8/90000");
+
+    // Before any RTCP: nothing names the SSRC's section, the packets go nowhere.
+    let start = world.peers[1].rtp.len();
+    for n in 0..3u16 {
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("the sender")
+            .write_rtp(
+                now,
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
+                        version: 2,
+                        payload_type: vp8,
+                        sequence_number: 100 + n,
+                        timestamp: u32::from(100 + n) * 3000,
+                        ssrc: SSRC,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 100]),
+                },
+            )?;
+    }
+    world.run_for(Duration::from_millis(1), |_| false);
+    assert_eq!(world.peers[1].rtp.len(), start, "associated without a MID");
+
+    // The SDES MID item of the sender's RTCP arrives; the stream is delivered from then on.
+    world.run_for(Duration::from_secs(8), |_| false);
+    write(&mut world, sender, vp8, 200, 5)?;
+    let received = received_payload_types(&world);
+    assert!(
+        !received.is_empty(),
+        "the stream is delivered once its MID arrived"
+    );
+    for peer in &world.peers {
+        assert!(peer.connected(), "{:?}", peer.states);
+        assert!(
+            !peer.states.iter().any(|s| matches!(
+                s,
+                rtci::peer_connection::state::RTCPeerConnectionState::Failed
+                    | rtci::peer_connection::state::RTCPeerConnectionState::Closed
+            )),
+            "{:?}",
+            peer.states
+        );
+    }
+    Ok(())
+}
+
 /// RFC 8830 section 3.1: an RTP stream arriving in a section whose description signals no
 /// msid at all "creates a track" of the section's media type, associated by MID (RFC 9143
 /// section 9.2), in no MediaStream. The offer reaches the answerer without its `a=msid` and

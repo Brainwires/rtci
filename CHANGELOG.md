@@ -95,6 +95,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   webrtc-pc 4.2.5's; the test is split in two, one per form
   (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
   `max_bundle_is_ignored_when_set_to_be_ignored`).
+### Behaviour changes
+
+- **jsep**: an offer with empty `a=group` lines (RFC 5888 section 9.3 capability indication)
+  is answered with an empty `a=group` line for each semantics the engine understands and the
+  answer does not use (BUNDLE, LS, DDP) (`conf/jsep-77-small-rows`). Offers without such lines,
+  which is every browser's, are answered as before. Test:
+  `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
+- **jsep**: a section an answer rejects after writing it (outside the offered BUNDLE group
+  under `must-bundle`, or beyond what the bundle policy takes from an offer without BUNDLE)
+  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6); the
+  next section written takes them, and the local description puts the candidates in the first
+  section that is not rejected (it used to be the first section) (`conf/jsep-77-small-rows`). Test:
+  `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
+- **tests** (`conf/jsep-77-small-rows`): a late identification-tag does not end the session
+  (RFC 9143 section 15,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_late_identification_tag_does_not_end_the_session`); the
+  end-of-gathering event names its section (RFC 9429 section 4.1.20). RFC9143-15-3, RFC5888-6-5,
+  RFC8839-4.4.1.2.1-2, RFC9429-4.1.20-4, RFC3264-6.1-15 and 7-3 are `tested`, RFC3264-6.1-20 `n/a`.
+  RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
+  lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,
+  `rtci-dtls` `a_client_hello_offering_only_the_null_suite_is_refused`).
 
 ## [0.1.0] - 2026-11-24
 
