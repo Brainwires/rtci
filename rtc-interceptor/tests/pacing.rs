@@ -206,6 +206,12 @@ impl Harness {
     /// A retransmission (`Attribute::Retransmission`, as the NACK responder tags it) on the
     /// RTX stream.
     fn send_retransmission(&mut self, at: Duration, sequence_number: u16) {
+        self.send_retransmission_of(at, 3, sequence_number);
+    }
+
+    /// A retransmission under the SSRC `ssrc`, not bound as a repair flow, so the packet it
+    /// repairs is its own sequence number.
+    fn send_retransmission_of(&mut self, at: Duration, ssrc: u32, sequence_number: u16) {
         self.chain
             .handle_write(TaggedPacket {
                 now: self.epoch + at,
@@ -215,7 +221,7 @@ impl Harness {
                         version: 2,
                         payload_type: 97,
                         sequence_number,
-                        ssrc: 3,
+                        ssrc,
                         ..Default::default()
                     },
                     payload: vec![0u8; PAYLOAD_BYTES].into(),
@@ -482,6 +488,37 @@ fn retransmissions_leave_ahead_of_queued_new_media() {
     harness.advance_to(ms(200));
     let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
     assert_eq!(vec![1, 2, 500, 501, 3, 4, 5, 6, 7, 8, 9, 10], order);
+}
+
+/// Among the retransmissions waiting, a stream's oldest packet leaves first, whenever its
+/// retransmission was written (a receiver that plays in order waits for its oldest gap); the
+/// other streams' retransmissions keep their places, and the sequence number wraps. At 0 ms
+/// video 1 leaves at once and spends the one-packet budget, video 2 waits, and then, all at
+/// 0 ms: stream 4's 500, stream 3's 30, stream 4's 501, stream 3's 10 and 20, stream 5's 0 and
+/// 65535. Each retransmission goes ahead of the new media, in front of the first waiting
+/// retransmission of its stream that repairs a newer packet: 10 in front of 30, 20 between 10
+/// and 30, 65535 in front of 0 (0 is the newer, one past it); stream 4's 501 behind its 500.
+/// The queue is 500, 10, 20, 30, 501, 65535, 0 and then video 2, one leaving every 10 ms.
+#[test]
+fn retransmissions_of_a_stream_leave_oldest_packet_first() {
+    let mut harness = Harness::new();
+    harness.send(ms(0), 1);
+    harness.send(ms(0), 2);
+    harness.drain();
+    for (ssrc, sequence_number) in [
+        (4, 500),
+        (3, 30),
+        (4, 501),
+        (3, 10),
+        (3, 20),
+        (5, 0),
+        (5, 65_535),
+    ] {
+        harness.send_retransmission_of(ms(0), ssrc, sequence_number);
+    }
+    harness.advance_to(ms(200));
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![1, 500, 10, 20, 30, 501, 65_535, 0, 2], order);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -900,11 +937,19 @@ fn key_frame_requests(reads: &[TaggedPacket]) -> Vec<u32> {
 const SLOW: f64 = 12_000.0;
 
 /// What waited the 2 s bound is discarded whole frames at a time, with every other frame of
-/// its stream that waits: at one packet a second, stream 1's first frame (sequence numbers 0
-/// and 1, one left at once), its second (2, 3) and third (4, 5) are all queued at 0 s; at 2 s
-/// packet 1 has waited the bound, and 1 to 5 go, oldest first, three frames. A retransmission
-/// written at 0.5 s (ahead of them) left at 1 s, audio written at 1.5 s left when written,
-/// and stream 9's frame written at 0.7 s is another stream's and leaves after the discard.
+/// its stream that waits, when it was written into a pause (a source that does not follow it).
+/// At one packet a second (12 000 bits of budget a second, one packet of budget at most):
+/// stream 1's packet 0 leaves at once at 0 s, and its packet 1 (same frame), queued at 0 s,
+/// holds a second's worth, half the bound: the pause begins at 0 s, so 1 is a following
+/// source's and is never discarded for its age. Into the pause, at 0.3 s, stream 1 writes two
+/// frames (2 and 3, timestamp 3000; 4 and 5, timestamp 6000). A retransmission written at 0.5 s
+/// goes ahead of the new media and leaves at 1 s (a full budget); audio written at 1.5 s leaves
+/// when written (896 bits of the 6000 refilled since 1 s); 1 leaves when the budget is full
+/// again, at 1.5 + (12 000 - 5104) / 12 000 = 2.075 s. Then 2 heads the queue and, written at
+/// 0.3 s, has waited the bound at 2.3 s (its budget would come at 3.075 s): 2 to 5 go, oldest
+/// first, two frames. Stream 9's frame written at 1.2 s is another stream's: it stays, and
+/// leaves at 3.075 s, before it would have waited the bound itself (3.2 s). The pause holds
+/// throughout (a full packet stays queued until 3.075 s), so it began at 0 s for all of them.
 #[test]
 fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits() {
     let mut harness = Harness::new();
@@ -917,15 +962,18 @@ fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits
             clock_rate: 48_000,
             ..Default::default()
         });
-    for (sequence_number, timestamp) in [(0, 0), (1, 0), (2, 3000), (3, 3000), (4, 6000), (5, 6000)]
-    {
-        harness.send_of(ms(0), 1, sequence_number, timestamp);
+    harness.send_of(ms(0), 1, 0, 0);
+    harness.send_of(ms(0), 1, 1, 0);
+    harness.drain();
+    harness.advance_to(ms(300));
+    for (sequence_number, timestamp) in [(2, 3000), (3, 3000), (4, 6000), (5, 6000)] {
+        harness.send_of(ms(300), 1, sequence_number, timestamp);
     }
     harness.drain();
     harness.advance_to(ms(500));
     harness.send_retransmission(ms(500), 900);
-    harness.advance_to(ms(700));
-    harness.send_of(ms(700), 9, 100, 0);
+    harness.advance_to(ms(1_200));
+    harness.send_of(ms(1_200), 9, 100, 0);
     harness.drain();
     harness.advance_to(ms(1_500));
     harness.send_frame_packet(ms(1_500), 7, 5000, 0, 100);
@@ -933,9 +981,9 @@ fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits
     harness.advance_to(ms(5_000));
 
     let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
-    assert_eq!(vec![0, 900, 5000, 100], order);
+    assert_eq!(vec![0, 900, 5000, 1, 100], order);
     let reads = harness.reads();
-    assert_eq!(vec![(1, vec![1, 2, 3, 4, 5], 3)], discards(&reads));
+    assert_eq!(vec![(1, vec![2, 3, 4, 5], 2)], discards(&reads));
     let target = reads
         .iter()
         .find_map(|read| read.message.custom::<PacerDiscard>())
@@ -947,6 +995,12 @@ fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits
 /// way a receiver asks: a Picture Loss Indication for the stream, delivered to the
 /// application, once per discard that lost a frame. A repair flow (here the stream's FEC
 /// SSRC) has no key frame to ask for: its discard is announced, no key frame is asked for.
+///
+/// At one packet a second: 0 leaves at once at 0 s; 1 and 2, queued at 0 s, start the pause
+/// (a second's worth or more queued, half the bound) and leave at 1 s and 2 s. Written into
+/// the pause at 0.3 s, stream 1's 3 and its FEC flow's 50 wait behind them; at 2.3 s 3 heads
+/// the queue having waited the bound (its budget would come at 3 s) and is discarded, and
+/// then 50, written at the same instant, has too.
 #[test]
 fn a_discard_asks_the_application_for_a_key_frame_of_a_media_stream_only() {
     let mut harness = Harness::new();
@@ -960,48 +1014,107 @@ fn a_discard_asks_the_application_for_a_key_frame_of_a_media_stream_only() {
             clock_rate: 90_000,
             ..Default::default()
         });
-    // At one packet a second: 0 leaves at once, 1 at 1 s, and at 2 s 2 and then 50 have waited
-    // the bound.
     harness.send_of(ms(0), 1, 0, 0);
     harness.send_of(ms(0), 1, 1, 3000);
     harness.send_of(ms(0), 1, 2, 6000);
-    harness.send_of(ms(0), 11, 50, 6000);
+    harness.drain();
+    harness.advance_to(ms(300));
+    harness.send_of(ms(300), 1, 3, 9000);
+    harness.send_of(ms(300), 11, 50, 9000);
     harness.drain();
     harness.advance_to(ms(5_000));
 
     let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
-    assert_eq!(vec![0, 1], order);
+    assert_eq!(vec![0, 1, 2], order);
     let reads = harness.reads();
-    assert_eq!(vec![(1, vec![2], 1), (11, vec![50], 1)], discards(&reads));
+    assert_eq!(vec![(1, vec![3], 1), (11, vec![50], 1)], discards(&reads));
     assert_eq!(vec![1], key_frame_requests(&reads));
 }
 
 /// The packets of a discarded frame that the application writes after the discard are
 /// discarded too (a frame with a packet missing is worth nothing), announced without a frame
 /// or a key-frame request of their own; the next frame of the stream is sent. At one packet a
-/// second, the frame of timestamp 3000 had its first packet (1) leave at 1 s, its second (2)
-/// discarded at 2 s, and its third (3), written at 2.1 s, goes the same way; the next frame
-/// (4) leaves when it is written.
+/// second: 0 leaves at once at 0 s; 1 and 2, queued at 0 s, start the pause and leave at 1 s
+/// and 2 s. Written into the pause at 0.3 s, the first two packets (3, 4) of the frame of
+/// timestamp 3000 head the queue at 2 s and have waited the bound at 2.3 s (their budget would
+/// come at 3 s): discarded, one frame. Its third packet (5), written at 2.4 s, goes the same
+/// way; the next frame (6), written at 3.1 s with a full budget (refilled since 2 s, capped at
+/// one packet) and nothing queued, leaves when it is written.
 #[test]
 fn the_rest_of_a_discarded_frame_is_discarded_when_it_is_written() {
     let mut harness = Harness::new();
     harness.retarget(SLOW);
     harness.send_of(ms(0), 1, 0, 0);
-    harness.send_of(ms(0), 1, 1, 3000);
-    harness.send_of(ms(0), 1, 2, 3000);
+    harness.send_of(ms(0), 1, 1, 0);
+    harness.send_of(ms(0), 1, 2, 0);
     harness.drain();
-    harness.advance_to(ms(2_100));
-    harness.send_of(ms(2_100), 1, 3, 3000);
+    harness.advance_to(ms(300));
+    harness.send_of(ms(300), 1, 3, 3000);
+    harness.send_of(ms(300), 1, 4, 3000);
     harness.drain();
-    harness.send_of(ms(2_200), 1, 4, 6000);
+    harness.advance_to(ms(2_400));
+    harness.send_of(ms(2_400), 1, 5, 3000);
     harness.drain();
+    harness.advance_to(ms(3_100));
+    harness.send_of(ms(3_100), 1, 6, 6000);
+    harness.drain();
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 1, 2, 6], order, "6 left when it was written");
     harness.advance_to(ms(5_000));
 
     let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
-    assert_eq!(vec![0, 1, 4], order);
+    assert_eq!(vec![0, 1, 2, 6], order);
     let reads = harness.reads();
-    assert_eq!(vec![(1, vec![2], 1), (1, vec![3], 0)], discards(&reads));
+    assert_eq!(vec![(1, vec![3, 4], 1), (1, vec![5], 0)], discards(&reads));
     assert_eq!(vec![1], key_frame_requests(&reads));
+}
+
+/// What a source that follows the pause wrote is never discarded for its age (see "Pausing the
+/// source" on `PacerInterceptor`): six packets written at 0 s against one packet a second, the
+/// second of them starting the pause, and nothing written after. Each leaves when the budget
+/// has a packet's worth again, 0 at once and then one a second, 5 at 5 s, long past the 2 s
+/// bound; no discard, no key-frame request. Driven deadline by deadline to 10 s: every
+/// deadline the pacer asks for after a timeout is later than the instant just handled (no
+/// spin on a bound that does not apply), and none is asked for once the queue is empty.
+#[test]
+fn media_written_before_the_pause_is_never_discarded_for_its_age() {
+    let mut harness = Harness::new();
+    harness.retarget(SLOW);
+    for sequence_number in 0..6u16 {
+        harness.send(ms(0), sequence_number);
+    }
+    harness.drain();
+    let mut handled = ms(0);
+    let mut wakes = 0;
+    while let Some(due) = harness.next_timeout() {
+        assert!(
+            due > handled,
+            "a deadline at {due:?} after the timeout at {handled:?}: a spin"
+        );
+        assert!(due <= ms(10_000), "a deadline at {due:?}");
+        wakes += 1;
+        assert!(wakes <= 20, "{wakes} wake-ups for six packets");
+        harness.tick(due);
+        handled = due;
+    }
+    harness.tick(ms(10_000));
+
+    let schedule = harness.schedule();
+    let order: Vec<u16> = schedule.iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 1, 2, 3, 4, 5], order, "every packet left, in order");
+    for (sequence_number, at) in schedule {
+        let expected = ms(1_000 * u64::from(sequence_number));
+        assert!(
+            at.abs_diff(expected) <= ms(1),
+            "{sequence_number} left at {at:?}, not at {expected:?}"
+        );
+    }
+    let reads = harness.reads();
+    assert!(discards(&reads).is_empty(), "nothing discarded");
+    assert!(
+        key_frame_requests(&reads).is_empty(),
+        "no key frame asked for"
+    );
 }
 
 /// A full queue discards its oldest packet's frame with every frame of that stream that waits,

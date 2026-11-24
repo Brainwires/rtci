@@ -273,6 +273,42 @@ fn a_held_back_retransmission_is_due_when_the_window_has_room() {
     );
 }
 
+/// Requests waiting for the rate limit are answered a stream's oldest packet first, whenever
+/// each was asked for: a receiver that plays in order waits for its oldest gap, and a packet
+/// asked for again because its repair was lost would otherwise wait behind every newer one. At
+/// 80 kbit/s with libwebrtc's rule nine retransmissions of 1014 octets fit a second: a NACK
+/// for 0 to 8 at 400 ms takes the window, a NACK for 30 at 500 ms and one for 10 at 600 ms
+/// wait, and at 1.4 s, when the nine have left the window, both leave: 10 first.
+#[test]
+fn waiting_requests_are_answered_oldest_packet_first() {
+    let base = Instant::now();
+    let mut chain = responder(up_to_target());
+    send(&mut chain, base, 40);
+    let at = base + Duration::from_millis(400);
+    let first: Vec<u16> = (0..9).collect();
+    assert_eq!(9, nack(&mut chain, at, &first, Some(80_000.0)));
+    assert_eq!(
+        0,
+        nack(&mut chain, at + Duration::from_millis(100), &[30], None)
+    );
+    assert_eq!(
+        0,
+        nack(&mut chain, at + Duration::from_millis(200), &[10], None)
+    );
+    let due = chain.poll_timeout().expect("two wait");
+    assert_eq!(at + Duration::from_secs(1), due);
+    chain.handle_timeout(due).unwrap();
+    while chain.poll_read().is_some() {}
+    let mut order = Vec::new();
+    while let Some(tagged) = chain.poll_write() {
+        if let Packet::Rtp(packet) = &tagged.message.packet {
+            assert_eq!(RTX_SSRC, packet.header.ssrc);
+            order.push(u16::from_be_bytes([packet.payload[0], packet.payload[1]]));
+        }
+    }
+    assert_eq!(vec![10, 30], order);
+}
+
 /// A request the receiver stops making is dropped after `PENDING_REQUEST_LIFETIME` (the
 /// receiver asks again every round trip while it misses the packet); one it makes again stays.
 /// At 8 kbit/s no retransmission ever fits the window.
@@ -474,9 +510,15 @@ fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
 /// ([`PacerDiscard`] on its read leg), and the responder takes them out of its retransmission
 /// buffer, so a NACK for them is answered by nothing (RFC 4588 section 7: the sender "MAY
 /// selectively retransmit only the packets that it deems important"). Ten originals (frames of
-/// their own) written in 90 ms against a 12 kbit/s target: about one leaves every 0.7 s, and at
-/// 2 s the rest have waited the bound and are discarded. A NACK for all ten, with a target that
-/// has room for them, has exactly those that left resent.
+/// their own, 8096 bits each) against a 12 kbit/s target (a budget of 12 000 bits at most), the
+/// clock advanced in 10 ms steps. 0 is written at 0 ms and leaves at once (3904 bits left); 1
+/// and 2, written at 10 and 20 ms, queue, and with 2 the queue holds 1.35 s at the target,
+/// half the 2 s bound or more: the pause begins at 20 ms, and 1 and 2 are a following
+/// source's, never discarded for their age. 3 to 9 are written into the pause, 300 to 360 ms.
+/// One leaves each time the budget has 8096 bits again: 1 at 350 ms, 2 at 1030 ms, 3 at
+/// 1700 ms; 4 would at 2380 ms, but written at 310 ms it has waited the bound at 2310 ms, and
+/// 4 to 9 are discarded. A NACK for all ten, with a target that has room for them, has
+/// exactly those that left (0 to 3) resent.
 #[test]
 fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
     let base = Instant::now();
@@ -514,32 +556,40 @@ fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
         }
         resent
     };
-    for sequence_number in 0..10u16 {
-        chain
-            .handle_write(TaggedPacket {
-                now: base + Duration::from_millis(10) * u32::from(sequence_number),
-                transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
-                    header: rtp::header::Header {
-                        version: 2,
-                        payload_type: 96,
-                        sequence_number,
-                        timestamp: u32::from(sequence_number) * 3000,
-                        ssrc: SSRC,
-                        marker: true,
-                        ..Default::default()
-                    },
-                    payload: vec![0u8; PAYLOAD].into(),
-                })),
-            })
-            .unwrap();
-        take(&mut chain, &mut left, &mut discarded);
-    }
+    let written_at = |sequence_number: u16| match sequence_number {
+        0..=2 => Duration::from_millis(10) * u32::from(sequence_number),
+        _ => {
+            Duration::from_millis(300) + Duration::from_millis(10) * u32::from(sequence_number - 3)
+        }
+    };
     let mut now = base;
-    while now < base + Duration::from_secs(3) {
-        now += Duration::from_millis(10);
-        chain.handle_timeout(now).unwrap();
-        take(&mut chain, &mut left, &mut discarded);
+    for step in 0..=300u32 {
+        now = base + Duration::from_millis(10) * step;
+        if step > 0 {
+            chain.handle_timeout(now).unwrap();
+            take(&mut chain, &mut left, &mut discarded);
+        }
+        for sequence_number in (0..10u16).filter(|n| base + written_at(*n) == now) {
+            chain
+                .handle_write(TaggedPacket {
+                    now,
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                        header: rtp::header::Header {
+                            version: 2,
+                            payload_type: 96,
+                            sequence_number,
+                            timestamp: u32::from(sequence_number) * 3000,
+                            ssrc: SSRC,
+                            marker: true,
+                            ..Default::default()
+                        },
+                        payload: vec![0u8; PAYLOAD].into(),
+                    })),
+                })
+                .unwrap();
+            take(&mut chain, &mut left, &mut discarded);
+        }
     }
     assert!(
         !left.is_empty() && !discarded.is_empty(),
@@ -547,6 +597,12 @@ fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
     );
     assert!(left.is_disjoint(&discarded), "{left:?} {discarded:?}");
     assert_eq!(10, left.len() + discarded.len(), "{left:?} {discarded:?}");
+    assert_eq!(
+        BTreeSet::from([0, 1, 2, 3]),
+        left,
+        "discarded {discarded:?}"
+    );
+    assert_eq!(BTreeSet::from_iter(4..10u16), discarded);
 
     let all: Vec<u16> = (0..10).collect();
     read_nack(&mut chain, now, &all, Some(10_000_000.0), None);
