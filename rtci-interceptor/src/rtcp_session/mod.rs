@@ -282,6 +282,16 @@ pub enum RtcpSessionEvent {
         /// The remote SSRC.
         ssrc: u32,
     },
+    /// The SSRC the session reports from while the endpoint has no media SSRC, which it drew
+    /// itself; `None` once there is none (a stream took it over, it said BYE). RFC 8108
+    /// section 6.1: "An endpoint that has never sent an RTP stream will have an SSRC that it
+    /// uses for RTCP reporting. If that endpoint wants to start sending an RTP stream, it is
+    /// RECOMMENDED that it use its existing SSRC for that stream". A local stream bound under
+    /// this SSRC takes it over: the same participant, no BYE.
+    ReportingSsrc {
+        /// The reporting SSRC, or `None`.
+        ssrc: Option<u32>,
+    },
     /// RFC 3550 6.4.1: the round-trip time to the receiver that reported on the local `ssrc`.
     RoundTripTime {
         /// The local SSRC the report block was about.
@@ -581,6 +591,7 @@ impl RtcpSessionBuilder {
             joins_on_start: self.joins_on_start,
             first_report_at_join: self.first_report_at_join,
             start_given: false,
+            announced_reporter: None,
             started: false,
             left: false,
             locals: Vec::new(),
@@ -842,6 +853,8 @@ pub struct RtcpSessionInterceptor {
     first_report_at_join: bool,
     /// [`RtcpSessionControl::Start`] was given since the session was built or last left.
     start_given: bool,
+    /// The reporting SSRC last announced ([`RtcpSessionEvent::ReportingSsrc`]).
+    announced_reporter: Option<u32>,
     started: bool,
     left: bool,
     /// In the order they were bound.
@@ -1436,6 +1449,21 @@ impl RtcpSessionInterceptor {
             }
         }
         self.flush_departing(now);
+        self.announce_reporter(now);
+    }
+
+    /// Tells the application of a change of the session's own reporting SSRC
+    /// ([`RtcpSessionEvent::ReportingSsrc`]).
+    fn announce_reporter(&mut self, now: Instant) {
+        let reporter = self
+            .locals
+            .iter()
+            .find(|local| local.role == Role::Reporter)
+            .map(|local| local.ssrc);
+        if reporter != self.announced_reporter {
+            self.announced_reporter = reporter;
+            self.emit(now, RtcpSessionEvent::ReportingSsrc { ssrc: reporter });
+        }
     }
 
     // ---- the member table ------------------------------------------------------------
@@ -2827,6 +2855,7 @@ impl RtcpSessionInterceptor {
                 self.repeats.clear();
                 self.early_at = None;
                 self.flush_departing(now);
+                self.announce_reporter(now);
                 return;
             }
         }
@@ -2955,7 +2984,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
 impl Interceptor for RtcpSessionInterceptor {
     /// A stream this endpoint sends: its SSRC reports from now on, and its RTX and FEC SSRCs
     /// from their first packet. A stream unbound a moment ago and bound again with the same
-    /// SSRC (a renegotiation) carries on: no BYE, and its counts are kept.
+    /// SSRC (a renegotiation) carries on: no BYE, and its counts are kept. A stream bound under
+    /// the session's reporting SSRC takes it over (RFC 8108 6.1, see
+    /// [`RtcpSessionEvent::ReportingSsrc`]).
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         self.record_dlrr_limit(info);
         let kind = Kind::of(&info.mime_type);
@@ -2970,8 +3001,16 @@ impl Interceptor for RtcpSessionInterceptor {
                 &[]
             };
             if let Some(index) = self.local_index(ssrc) {
-                self.locals[index].stream.set_clock_rate(info.clock_rate);
-                self.locals[index].stream.set_payload_clock_rates(rates);
+                let local = &mut self.locals[index];
+                if local.role == Role::Reporter {
+                    // RFC 8108 6.1: the endpoint starts sending on the SSRC it reports from;
+                    // the SSRC stays the same participant (its timer and SRTCP context carry
+                    // on), now with a media type and the stream's clock rate.
+                    local.kind = kind;
+                    local.role = role;
+                }
+                local.stream.set_clock_rate(info.clock_rate);
+                local.stream.set_payload_clock_rates(rates);
                 continue;
             }
             let mut local = match self.departing.iter().position(|local| local.ssrc == ssrc) {

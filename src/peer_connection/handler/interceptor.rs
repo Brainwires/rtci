@@ -119,6 +119,11 @@ pub(crate) struct InterceptorHandlerContext {
     /// `source_departure_ends_track`: a track ends when every one of its SSRCs is here.
     /// Bounded by `MAX_REMOTE_CNAMES`.
     departed_sources: HashSet<SSRC>,
+    /// The SSRC an RTCP session reports from while the connection sends no media, as the
+    /// session announced it (`RtcpSessionEvent::ReportingSsrc`); the first media SSRC the
+    /// connection mints is this one (RFC 8108 section 6.1,
+    /// `RTCPeerConnection::unused_media_ssrc`).
+    pub(crate) reporting_ssrc: Option<SSRC>,
 }
 
 impl InterceptorHandlerContext {
@@ -172,6 +177,7 @@ impl Default for InterceptorHandlerContext {
             source_departure_ends_track: false,
             mid_moves: Default::default(),
             departed_sources: Default::default(),
+            reporting_ssrc: None,
         }
     }
 }
@@ -900,6 +906,9 @@ impl<'a> InterceptorHandler<'a> {
                     })
                 });
                 log::warn!("ssrc collision: a remote source uses the local ssrc {ssrc}");
+                if Some(*ssrc) == self.ctx.reporting_ssrc {
+                    self.ctx.reporting_ssrc = Some(*replacement);
+                }
                 if is_sender && self.ctx.ssrc_collisions.insert(*ssrc) {
                     for transceiver in self.rtp_transceivers.iter_mut() {
                         let Some(sender) = transceiver.sender_mut() else {
@@ -924,6 +933,8 @@ impl<'a> InterceptorHandler<'a> {
             }
             // RFC 3550 6.3.5: the remote source timed out; it is gone as after a BYE.
             RtcpSessionEvent::SourceTimedOut { ssrc } => self.source_left(now, *ssrc),
+            // RFC 8108 6.1: the SSRC the first stream is to be sent on.
+            RtcpSessionEvent::ReportingSsrc { ssrc } => self.ctx.reporting_ssrc = *ssrc,
             _ => {}
         }
     }
