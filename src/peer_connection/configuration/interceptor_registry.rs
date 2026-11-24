@@ -430,17 +430,23 @@ pub struct DefaultInterceptorOptions {
     /// the media is measured. 64 kbit/s by default. See
     /// [`RtcpSessionBuilder::with_minimum_session_bandwidth`](interceptor::RtcpSessionBuilder::with_minimum_session_bandwidth).
     pub rtcp_minimum_session_bandwidth: u64,
-    /// The share of the media received that congestion control feedback (transport-wide and
-    /// RFC 8888) is sized to. 0.05 by default. See
-    /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share).
+    /// The share congestion control feedback (transport-wide and RFC 8888) is sized to. With
+    /// [`Self::rtcp_congestion_feedback_in_budget`] (the default) it is a share of the session
+    /// bandwidth, the media measured both ways and at least
+    /// [`Self::rtcp_minimum_session_bandwidth`], divided with the peer while both send media:
+    /// 0.0375 by default, the receivers' three quarters of RFC 3550 section 6.2's 5% (a quarter
+    /// is "dedicated to participants that are sending data"), so the feedback is as frequent as
+    /// the RTCP bandwidth allows and the regular reports keep a quarter of it. Without it, a
+    /// share of the media received (libwebrtc's form: 0.05 under the `Chrome` profile). See
+    /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share)
+    /// and [`TwccReceiverBuilder::with_rtcp_budget`](interceptor::TwccReceiverBuilder::with_rtcp_budget).
     pub congestion_feedback_share: f64,
     /// The longest interval between two congestion control feedback packets while media
-    /// arrives. 500 ms by default: below about 60 kbit/s of media the feedback's share of it
-    /// (with its SRTCP and lower layers) asks for more than 250 ms, and a 250 ms ceiling would
-    /// put the connection's RTCP over RFC 3550's 5% of the session bandwidth (RFC 4585
-    /// section 3.2); draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3 accepts
-    /// sending it "less frequently" on low bandwidth. 250 ms is libwebrtc's (the `Chrome`
-    /// profile). See
+    /// arrives, when the feedback is sized to the media received
+    /// ([`Self::rtcp_congestion_feedback_in_budget`] `false`). 250 ms by default, libwebrtc's.
+    /// Inside the RTCP budget (the default) the budget sets the interval and this does not
+    /// apply: RFC 4585 section 3.2 makes feedback "subject to the RTCP bandwidth constraints",
+    /// so no fixed ceiling may hold it more often than they allow. See
     /// [`TwccReceiverBuilder::with_max_adaptive_interval`](interceptor::TwccReceiverBuilder::with_max_adaptive_interval).
     pub congestion_feedback_max_interval: Duration,
     /// Where the RTCP sessions draw their random numbers from (the report interval's
@@ -554,8 +560,8 @@ impl DefaultInterceptorOptions {
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
             rtcp_congestion_feedback_in_budget: true,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
-            congestion_feedback_share: 0.05,
-            congestion_feedback_max_interval: Duration::from_millis(500),
+            congestion_feedback_share: interceptor::RTCP_BUDGET_FEEDBACK_SHARE,
+            congestion_feedback_max_interval: Duration::from_millis(250),
             rtcp_random: None,
             nack_max_nacks_per_packet: 0,
             nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit::default(),
@@ -1061,6 +1067,11 @@ fn with_congestion_feedback_recorders(
     let rereport_received = options.twcc_rereport_received;
     let share = options.congestion_feedback_share;
     let max_interval = options.congestion_feedback_max_interval;
+    // Inside the RTCP budget the feedback is sized to the session bandwidth the RTCP session
+    // computes its budget from.
+    let budget = options
+        .rtcp_congestion_feedback_in_budget
+        .then_some(options.rtcp_minimum_session_bandwidth);
     let wall_clock = options.wall_clock;
     // Each transport's arrivals are reported on that transport (the remote numbers each
     // transport on its own).
@@ -1068,11 +1079,15 @@ fn with_congestion_feedback_recorders(
         registry.with_per_rtp_session(
             Slot::TwccReceiver,
             PerRtpSession::new(move || {
-                TwccReceiverBuilder::new()
+                let builder = TwccReceiverBuilder::new()
                     .with_rereport_received(rereport_received)
                     .with_feedback_share(share)
-                    .with_max_adaptive_interval(max_interval)
-                    .build()
+                    .with_max_adaptive_interval(max_interval);
+                match budget {
+                    Some(floor) => builder.with_rtcp_budget(floor),
+                    None => builder,
+                }
+                .build()
             }),
         )
     } else {
@@ -1085,6 +1100,10 @@ fn with_congestion_feedback_recorders(
                 let builder = Rfc8888Builder::new()
                     .with_feedback_share(share)
                     .with_max_adaptive_interval(max_interval);
+                let builder = match budget {
+                    Some(floor) => builder.with_rtcp_budget(floor),
+                    None => builder,
+                };
                 match wall_clock {
                     Some(anchor) => builder.with_wall_clock(anchor),
                     None => builder,

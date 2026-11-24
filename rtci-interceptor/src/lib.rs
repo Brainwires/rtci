@@ -269,6 +269,7 @@ pub use audio_red::{
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
 pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
 pub use cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
+pub use cc::feedback_cadence::RTCP_BUDGET_FEEDBACK_SHARE;
 pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
     DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
