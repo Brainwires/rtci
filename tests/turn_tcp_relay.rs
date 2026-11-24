@@ -9,6 +9,7 @@
 use anyhow::Result;
 use rtci::ice::attributes::control::AttrControlled;
 use rtci::ice::attributes::priority::PriorityAttr;
+use rtci::ice::{AddressPurpose, IceAddressPolicy};
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
@@ -501,6 +502,130 @@ fn a_peer_connecting_to_the_relayed_address_reaches_ice_over_a_data_connection()
         answers.iter().any(|m| m.typ == BINDING_SUCCESS),
         "the agent answers over the data connection: {answers:?}"
     );
+    Ok(())
+}
+
+/// A remote TCP candidate of `ip`, active (RFC 6544 section 4.5: port 9), trickled.
+fn remote_active_tcp_candidate(ip: &str) -> RTCIceCandidateInit {
+    RTCIceCandidateInit {
+        candidate: format!("candidate:1 1 tcp 1518280447 {ip} 9 typ host tcptype active"),
+        sdp_mid: Some("0".to_owned()),
+        ..Default::default()
+    }
+}
+
+/// The IP addresses the engine asked a permission for, on any connection.
+fn permitted(h: &Harness) -> Vec<std::net::IpAddr> {
+    h.requests_of(rtci::stun::message::METHOD_CREATE_PERMISSION)
+        .into_iter()
+        .filter_map(|(_, m)| {
+            let mut p = no_peer();
+            p.get_from(&m).ok().map(|_| p.ip)
+        })
+        .collect()
+}
+
+/// A ConnectionAttempt indication (RFC 6062 section 4.4) for `peer`'s connection to the
+/// relayed address.
+fn connection_attempt(connection_id: u32, peer: SocketAddr) -> Result<Vec<u8>> {
+    let mut indication = Message::new();
+    indication.build(&[
+        Box::new(MessageType::new(
+            METHOD_CONNECTION_ATTEMPT,
+            CLASS_INDICATION,
+        )),
+        Box::new(TransactionId::new()),
+        Box::new(ConnectionId(connection_id)),
+        Box::new(PeerAddress {
+            ip: peer.ip(),
+            port: peer.port(),
+        }),
+    ])?;
+    Ok(indication.raw)
+}
+
+/// The embedder's address policy (`SettingEngineBuilder::with_ice_address_policy`) and the
+/// permissions of a TCP allocation (RFC 6062 section 5.3: a peer reaches the relayed address
+/// only with one): the engine asks no permission for a remote TCP candidate on an address the
+/// policy refuses as a remote candidate, whether it reads the candidate where it was trickled
+/// or in the remote description; it asks one for a candidate the policy allows.
+#[test]
+fn a_remote_tcp_candidate_the_address_policy_refuses_gets_no_permission() -> Result<()> {
+    let refused: std::net::IpAddr = "198.51.100.66".parse()?;
+    let allowed: std::net::IpAddr = "198.51.100.7".parse()?;
+    let mut h = Harness::with(SettingEngineBuilder::new().with_ice_address_policy(
+        IceAddressPolicy::new(move |addr, _, purpose| {
+            !(purpose == AddressPurpose::RemoteCandidate && addr.ip() == refused)
+        }),
+    ))?;
+    h.pc.add_remote_candidate(remote_active_tcp_candidate("198.51.100.66"))?;
+    h.pc.add_remote_candidate(remote_active_tcp_candidate("198.51.100.7"))?;
+    h.pump()?;
+    assert!(
+        h.pc.remote_description()
+            .expect("the answer")
+            .sdp
+            .contains("198.51.100.66 9 typ host"),
+        "the refused candidate is in the remote description, as if added (W3C 4.4.2)"
+    );
+    let permitted = permitted(&h);
+    assert!(
+        permitted.contains(&allowed),
+        "a permission for the allowed candidate's address: {permitted:?}"
+    );
+    assert!(
+        !permitted.contains(&refused),
+        "no permission for the refused candidate's address: {permitted:?}"
+    );
+    Ok(())
+}
+
+/// The address policy and a peer's connection to the relayed address (RFC 6062 section 4.4):
+/// the ConnectionAttempt of a peer the policy refuses as an inbound source is not bound, so
+/// no data connection is opened for it and nothing of it reaches ICE; the attempt of a peer
+/// it allows is bound.
+#[test]
+fn a_connection_attempt_from_a_peer_the_address_policy_refuses_is_not_bound() -> Result<()> {
+    let refused: std::net::IpAddr = "198.51.100.66".parse()?;
+    let mut h = Harness::with(SettingEngineBuilder::new().with_ice_address_policy(
+        IceAddressPolicy::new(move |addr, _, purpose| {
+            !(purpose == AddressPurpose::InboundDatagramSource && addr.ip() == refused)
+        }),
+    ))?;
+    // Both peers have a permission (the policy refuses neither as a remote candidate), so
+    // the server announces the connections of both.
+    h.pc.add_remote_candidate(remote_active_tcp_candidate("198.51.100.66"))?;
+    h.pc.add_remote_candidate(remote_active_tcp_candidate("198.51.100.7"))?;
+    h.pump()?;
+    let tcp = h.control(true);
+
+    h.pc.handle_stream_read(
+        h.now,
+        tcp,
+        &connection_attempt(41, a("198.51.100.66:45000"))?,
+    )?;
+    h.pump()?;
+    assert!(
+        h.data_connections().is_empty(),
+        "no data connection for a refused peer"
+    );
+    assert!(
+        h.requests_of(METHOD_CONNECTION_BIND).is_empty(),
+        "its connection is not bound"
+    );
+
+    h.pc.handle_stream_read(
+        h.now,
+        tcp,
+        &connection_attempt(42, a("198.51.100.7:45000"))?,
+    )?;
+    h.pump()?;
+    assert_eq!(h.data_connections().len(), 1, "an allowed peer's is");
+    let bind = h.requests_of(METHOD_CONNECTION_BIND);
+    assert_eq!(bind.len(), 1);
+    let mut cid = ConnectionId::default();
+    cid.get_from(&bind[0].1)?;
+    assert_eq!(cid.0, 42, "bound with the allowed attempt's CONNECTION-ID");
     Ok(())
 }
 
