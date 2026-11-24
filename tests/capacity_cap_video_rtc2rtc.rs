@@ -154,7 +154,47 @@ struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     video: [bool; 2],
+    /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
+    /// permanent tests run [`Perturbation::None`].
+    perturbation: Perturbation,
 }
+
+/// What a run may change that no call's quality should depend on: the length of the ICE
+/// agent's SOFTWARE text (in every STUN request and success response: the sizes of the
+/// consent checks, and with them where every later packet falls in the link's queue), or one
+/// more value drawn from each peer's seeded random source before the peer connection is built
+/// (every seeded value after it moves: ICE credentials, DTLS randoms, SRTP keys, the RTCP
+/// report intervals of the default chain). The seeded figures follow from both (train 23's
+/// `o=` session id, drawn from the crypto provider since `conf/jsep-75-session-version`, moved
+/// the paced chain's seed 3 freeze from 1.91 to 2.20 s), so a bound is measured over these as
+/// well as over seeds and wall clocks ([`measure_the_capacity_cap`], `RTC_CAP_PERTURB`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Perturbation {
+    None,
+    /// `SettingEngineBuilder::with_ice_software(None)`: no SOFTWARE attribute.
+    NoSoftware,
+    /// `SettingEngineBuilder::with_ice_software(Some(text))`.
+    Software(&'static str),
+    /// This many 64-bit values drawn from the seeded crypto provider and dropped first.
+    Draws(u32),
+}
+
+/// The perturbations of the measurement, by name. The engine's own SOFTWARE text is
+/// `rtci-ice 0.2.0-dev` (18 bytes); 27 bytes is the fork's text before the crate rename.
+const PERTURBATIONS: [(&str, Perturbation); 6] = [
+    ("none", Perturbation::None),
+    ("nosw", Perturbation::NoSoftware),
+    (
+        "sw27",
+        Perturbation::Software("rtc-ice 0.22.0+brainwires.6"),
+    ),
+    (
+        "sw40",
+        Perturbation::Software("rtci-ice 0.2.0-dev (perturbation: 40 B)."),
+    ),
+    ("draw1", Perturbation::Draws(1)),
+    ("draw2", Perturbation::Draws(2)),
+];
 
 impl Setup {
     fn new(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Self {
@@ -166,7 +206,13 @@ impl Setup {
             cap: Duration::from_secs(20),
             cap_at_target: None,
             video: [true, true],
+            perturbation: Perturbation::None,
         }
+    }
+
+    fn perturbed(mut self, perturbation: Perturbation) -> Self {
+        self.perturbation = perturbation;
+        self
     }
 
     /// A call that starts with audio alone, either way.
@@ -519,9 +565,15 @@ impl Peer {
         let seed = setup.seed ^ salt;
         let rate_limit = setup.rate_limit;
         let wall_clock = setup.anchor.map(|anchor| SystemInstant::at(start, anchor));
+        let mut rng = Rng(seed);
+        if let Perturbation::Draws(draws) = setup.perturbation {
+            for _ in 0..draws {
+                rng.next_u64();
+            }
+        }
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
             inner: default_provider()?,
-            rng: Mutex::new(Rng(seed)),
+            rng: Mutex::new(rng),
         });
         let mut media_engine = MediaEngine::default();
         media_engine.register_codec(
@@ -575,6 +627,7 @@ impl Peer {
                 .set_session_bitrate_limit(Some(f64::from(MAX_BPS)));
             return Self::with_chain(
                 addr,
+                setup.perturbation,
                 provider,
                 media_engine,
                 registry,
@@ -619,6 +672,7 @@ impl Peer {
         );
         Self::with_chain(
             addr,
+            setup.perturbation,
             provider,
             media_engine,
             registry,
@@ -633,6 +687,7 @@ impl Peer {
     #[allow(clippy::too_many_arguments)]
     fn with_chain(
         addr: &str,
+        perturbation: Perturbation,
         provider: Arc<dyn RTCCryptoProvider>,
         media_engine: MediaEngine,
         registry: Registry,
@@ -642,13 +697,15 @@ impl Peer {
         handles: Option<DefaultInterceptorHandles>,
         start: Instant,
     ) -> Result<Self> {
+        let setting_engine = SettingEngineBuilder::new().with_crypto_provider(provider);
+        let setting_engine = match perturbation {
+            Perturbation::NoSoftware => setting_engine.with_ice_software(None),
+            Perturbation::Software(text) => setting_engine.with_ice_software(Some(text.to_owned())),
+            Perturbation::None | Perturbation::Draws(_) => setting_engine,
+        };
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_setting_engine(
-                SettingEngineBuilder::new()
-                    .with_crypto_provider(provider)
-                    .build(),
-            )
+            .with_setting_engine(setting_engine.build())
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build(start)?;
@@ -1397,6 +1454,11 @@ struct Outcome {
     /// it can still report congestion for some hundreds of milliseconds after the cap goes;
     /// from 1 s on, the path is open and nothing should cut the estimate.
     target_at_lift: u32,
+    /// The lowest target the encoder followed from the cap's going to 1 s after it: the
+    /// reference of the recovery measure. The cap can go on the peak of a tooth of the
+    /// estimate's sawtooth, and that tooth's cut (its feedback, out of the capped link's queue)
+    /// then lands within some 0.3 s after the lift: it belongs to the cap, not to the recovery.
+    lift_reference: u32,
     recovery_falls: Vec<(Duration, u32, u32)>,
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
@@ -1508,6 +1570,12 @@ fn run(setup: &Setup) -> Result<Outcome> {
         window.iter().copied().max().unwrap_or(0),
     );
     let target_at_lift = target_at(&world.peers[0].targets, opened_at);
+    let lift_reference = world.peers[0]
+        .targets
+        .iter()
+        .filter(|t| t.0 > opened_at && t.0 <= opened_at + Duration::from_secs(1))
+        .map(|t| t.1)
+        .fold(target_at_lift, u32::min);
     let recovery_falls = world.peers[0]
         .targets
         .windows(2)
@@ -1578,6 +1646,7 @@ fn run(setup: &Setup) -> Result<Outcome> {
         recovery,
         recovery_window,
         target_at_lift,
+        lift_reference,
         recovery_falls,
         freeze,
         freeze_at,
@@ -1871,10 +1940,13 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 
 /// A measurement over what the environment names, one line per run; asserts nothing.
 /// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
-/// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
-/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
-/// `20`), each a comma-separated list; `RTC_CAP_AT_TARGET` (the target in bit/s at which the
-/// cap arrives, instead of after 20 s).
+/// (`default` (the engine's, as the permanent tests), `within`, `upto`, `unlimited`; the last
+/// three by default), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS` (indices into the
+/// three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays; `20`),
+/// `RTC_CAP_PERTURB` (names in [`PERTURBATIONS`]; `none`), each a comma-separated list;
+/// `RTC_CAP_AT_TARGET` (the target in bit/s at which the cap arrives, instead of after 20 s);
+/// `RTC_CAP_THREADS` (runs side by side; the machine's parallelism). Each run is printed as it
+/// ends, so the lines come in no fixed order.
 #[test]
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_the_capacity_cap() -> Result<()> {
@@ -1886,69 +1958,100 @@ fn measure_the_capacity_cap() -> Result<()> {
             .filter(|item| !item.is_empty())
             .collect()
     }
+    let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
+    let mut runs = Vec::new();
     for chain in list("RTC_CAP_CHAINS", "parolnet,default,nopacer") {
         for rule in list("RTC_CAP_RULES", "within,upto,unlimited") {
             for seconds in list("RTC_CAP_SECONDS", "20") {
                 for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
                     for anchor in list("RTC_CAP_ANCHORS", "0,1,2") {
-                        let rate_limit = match rule.as_str() {
-                            "within" => RetransmissionRateLimit::WithinTarget,
-                            "upto" => RetransmissionRateLimit::UpToTarget,
-                            "unlimited" => RetransmissionRateLimit::Unlimited,
-                            other => bail!("unknown rule {other}"),
-                        };
-                        let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
-                        let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
-                            .chain(match chain.as_str() {
-                                "parolnet" => Chain::ParolNet,
-                                "default" => Chain::Default,
-                                "nopacer" => Chain::DefaultWithoutPacer,
-                                other => bail!("unknown chain {other}"),
-                            })
-                            .anchor(ANCHORS[anchor.parse::<usize>()?]);
-                        setup.cap = Duration::from_secs(seconds.parse()?);
-                        if let Some(bps) = &at_target {
-                            setup = setup.capped_at_a_target_of(bps.parse()?);
-                        }
-                        match run(&setup) {
-                            Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} climb {} falls {} | estimate after {}",
-                                o.before / 1000,
-                                o.capped_at.as_secs_f64(),
-                                o.freeze.as_secs_f64(),
-                                o.freeze_at.as_secs_f64(),
-                                o.lag.as_secs_f64(),
-                                o.rtx_sent,
-                                o.rtx_dropped,
-                                o.padding_sent,
-                                o.padding_dropped,
-                                o.queue_drops,
-                                o.audio_dropped,
-                                o.pacer_dropped,
-                                o.pacer_dropped_late,
-                                o.pacer_discards.len(),
-                                o.pauses.len(),
-                                o.keyframe_requests.len(),
-                                o.under / 1000,
-                                o.estimate_at_lift / 1000,
-                                o.target_at_lift / 1000,
-                                o.recovery.map(|bps| bps / 1000),
-                                o.recovery_window.0 / 1000,
-                                o.recovery_window.1 / 1000,
-                                o.recovery_window.2 / 1000,
-                                draft_climb_mean(o.target_at_lift) / 1000,
-                                o.recovery_falls.len(),
-                                o.estimate_after / 1000,
-                            ),
-                            Err(error) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | failed: {error}"
-                            ),
+                        for perturb in list("RTC_CAP_PERTURB", "none") {
+                            let rate_limit = match rule.as_str() {
+                                "default" => None,
+                                "within" => Some(RetransmissionRateLimit::WithinTarget),
+                                "upto" => Some(RetransmissionRateLimit::UpToTarget),
+                                "unlimited" => Some(RetransmissionRateLimit::Unlimited),
+                                other => bail!("unknown rule {other}"),
+                            };
+                            let Some(&(_, perturbation)) =
+                                PERTURBATIONS.iter().find(|(name, _)| *name == perturb)
+                            else {
+                                bail!("unknown perturbation {perturb}");
+                            };
+                            let mut setup = Setup::new(seed.parse()?, rate_limit)
+                                .chain(match chain.as_str() {
+                                    "parolnet" => Chain::ParolNet,
+                                    "default" => Chain::Default,
+                                    "nopacer" => Chain::DefaultWithoutPacer,
+                                    other => bail!("unknown chain {other}"),
+                                })
+                                .anchor(ANCHORS[anchor.parse::<usize>()?])
+                                .perturbed(perturbation);
+                            setup.cap = Duration::from_secs(seconds.parse()?);
+                            if let Some(bps) = &at_target {
+                                setup = setup.capped_at_a_target_of(bps.parse()?);
+                            }
+                            let label = format!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} perturb {perturb}"
+                            );
+                            runs.push((label, setup));
                         }
                     }
                 }
             }
         }
     }
+    let threads = std::env::var("RTC_CAP_THREADS")
+        .ok()
+        .and_then(|threads| threads.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((label, setup)) = runs.get(i) else {
+                        break;
+                    };
+                    match run(setup) {
+                        Ok(o) => println!(
+                            "{label} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} climb {} falls {} | estimate after {} | reference {} climb from reference {}",
+                            o.before / 1000,
+                            o.capped_at.as_secs_f64(),
+                            o.freeze.as_secs_f64(),
+                            o.freeze_at.as_secs_f64(),
+                            o.lag.as_secs_f64(),
+                            o.rtx_sent,
+                            o.rtx_dropped,
+                            o.padding_sent,
+                            o.padding_dropped,
+                            o.queue_drops,
+                            o.audio_dropped,
+                            o.pacer_dropped,
+                            o.pacer_dropped_late,
+                            o.pacer_discards.len(),
+                            o.pauses.len(),
+                            o.keyframe_requests.len(),
+                            o.under / 1000,
+                            o.estimate_at_lift / 1000,
+                            o.target_at_lift / 1000,
+                            o.recovery.map(|bps| bps / 1000),
+                            o.recovery_window.0 / 1000,
+                            o.recovery_window.1 / 1000,
+                            o.recovery_window.2 / 1000,
+                            draft_climb_mean(o.target_at_lift) / 1000,
+                            o.recovery_falls.len(),
+                            o.estimate_after / 1000,
+                            o.lift_reference / 1000,
+                            draft_climb_mean(o.lift_reference) / 1000,
+                        ),
+                        Err(error) => println!("{label} | failed: {error}"),
+                    }
+                }
+            });
+        }
+    });
     Ok(())
 }
 
