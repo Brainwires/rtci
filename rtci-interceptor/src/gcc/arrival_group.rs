@@ -56,6 +56,8 @@ pub struct ArrivalGroupAccumulator {
     burst_interval: Duration,
     current: Option<ArrivalGroup>,
     previous: Option<ArrivalGroup>,
+    /// Whether reports come in arrival order ([`with_arrival_order`](Self::with_arrival_order)).
+    arrival_order: bool,
 }
 
 impl Default for ArrivalGroupAccumulator {
@@ -71,7 +73,20 @@ impl ArrivalGroupAccumulator {
             burst_interval,
             current: None,
             previous: None,
+            arrival_order: false,
         }
+    }
+
+    /// Whether the reports are fed in the order they arrived (`true`) or in the order they
+    /// were sent (`false`). draft-ietf-rmcat-gcc-02 section 5.1: "Any packets received out of
+    /// order are ignored by the arrival-time model". Fed in arrival order, a packet out of
+    /// order is one sent before the first packet of the group being built, as libwebrtc's
+    /// `InterArrivalDelta::ComputeDeltas` reads it after `delay_based_bwe.cc` sorts each
+    /// feedback by receive time (`SortedByReceiveTime`); fed in send order, one that arrived
+    /// before the group's latest arrival.
+    pub fn with_arrival_order(mut self, arrival_order: bool) -> Self {
+        self.arrival_order = arrival_order;
+        self
     }
 
     /// Feed one report. Returns a gradient when this report started a new group.
@@ -95,6 +110,11 @@ impl ArrivalGroupAccumulator {
             return None;
         };
 
+        // In arrival order, a packet sent before the group's first is out of order.
+        if self.arrival_order && report.departure < current.first_departure {
+            return None;
+        }
+
         // Still the same burst: extend it.
         if report
             .departure
@@ -110,7 +130,7 @@ impl ArrivalGroupAccumulator {
 
         // draft-ietf-rmcat-gcc-02 section 5.1: a packet received out of order (before the
         // group it follows) is ignored by the arrival-time model.
-        if arrival < current.arrival {
+        if !self.arrival_order && arrival < current.arrival {
             return None;
         }
 
@@ -191,6 +211,37 @@ mod tests {
             arrival: Some(Duration::from_millis(arrival_ms)),
             ecn: Ecn::default(),
         }
+    }
+
+    /// Fed in arrival order (draft-ietf-rmcat-gcc-02 5.1, libwebrtc's reading), a packet sent
+    /// before the first packet of the group being built arrived out of order and is ignored;
+    /// the packets that overtook it are kept. Groups at 0, 20 and 40 ms sent, the 20 ms
+    /// group's packet held back to arrive after the 40 ms one: the 40 ms group is measured
+    /// against the 0 ms one, the late packet adds nothing.
+    #[test]
+    fn in_arrival_order_a_packet_sent_before_the_group_is_ignored() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut accumulator = ArrivalGroupAccumulator::default().with_arrival_order(true);
+        assert_eq!(None, accumulator.accumulate(&report(at(0), 100, 1000)));
+        assert_eq!(None, accumulator.accumulate(&report(at(40), 140, 1000)));
+        assert_eq!(
+            None,
+            accumulator.accumulate(&report(at(20), 150, 1000)),
+            "out of order"
+        );
+        let reading = accumulator
+            .accumulate(&report(at(60), 160, 1000))
+            .expect("40 closed");
+        assert_eq!(
+            0.0, reading.delta_ms,
+            "40 ms apart sent, 40 ms apart arrived"
+        );
+        assert_eq!(
+            1,
+            accumulator.previous.expect("40").packets,
+            "the late packet not in it"
+        );
     }
 
     /// Packets sent inside the burst interval are one group, whatever their count.

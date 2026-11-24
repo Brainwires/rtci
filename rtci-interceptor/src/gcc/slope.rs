@@ -49,6 +49,13 @@ impl SlopeEstimator {
         }
     }
 
+    /// Whether reports are fed in arrival order
+    /// ([`ArrivalGroupAccumulator::with_arrival_order`]).
+    pub fn with_arrival_order(mut self, arrival_order: bool) -> Self {
+        self.groups = self.groups.with_arrival_order(arrival_order);
+        self
+    }
+
     /// The current filtered trend, in milliseconds.
     pub fn estimate_ms(&self) -> f64 {
         self.kalman.estimate()

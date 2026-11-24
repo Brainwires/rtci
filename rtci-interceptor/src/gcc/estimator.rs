@@ -94,6 +94,9 @@ pub const PAUSE_HALVING: Duration = Duration::from_secs(10);
 ///   reproducible.
 pub struct Gcc {
     slope: SlopeEstimator,
+    /// Whether each feedback's reports reach the grouping in arrival order
+    /// ([`Gcc::with_arrival_sorted_groups`]).
+    arrival_sorted_groups: bool,
     detector: OveruseDetector,
     rate: RateCalculator,
     delay_control: RateController,
@@ -172,7 +175,8 @@ impl Gcc {
     pub fn new(initial: f64, min: f64, max: f64) -> Self {
         let initial = initial.clamp(min, max);
         Self {
-            slope: SlopeEstimator::new(),
+            slope: SlopeEstimator::new().with_arrival_order(true),
+            arrival_sorted_groups: true,
             detector: OveruseDetector::new(),
             rate: RateCalculator::default(),
             delay_control: RateController::new(initial, min, max),
@@ -251,6 +255,20 @@ impl Gcc {
     /// halved (and halved again each time the same period passes).
     pub fn with_feedback_timeout(mut self, feedback_timeout: Duration) -> Self {
         self.feedback_timeout = feedback_timeout;
+        self
+    }
+
+    /// Whether each feedback's reports are grouped in the order they arrived (`true`, the
+    /// default) or in the order they were sent. draft-ietf-rmcat-gcc-02 section 5.1 ignores
+    /// "any packets received out of order"; in arrival order that is a packet sent before the
+    /// first of the group being built (libwebrtc's `delay_based_bwe.cc` sorts each feedback by
+    /// receive time, `InterArrivalDelta` discards such a packet), in send order one that arrived
+    /// before the group's latest arrival. On a path that holds some packets back the send-order
+    /// grouping discards the packets that overtook them and keeps two to five times the noise
+    /// (`docs/gcc-reordering.md`).
+    pub fn with_arrival_sorted_groups(mut self, arrival_sorted: bool) -> Self {
+        self.arrival_sorted_groups = arrival_sorted;
+        self.slope = SlopeEstimator::new().with_arrival_order(arrival_sorted);
         self
     }
 
@@ -372,13 +390,32 @@ impl BandwidthEstimator for Gcc {
                 self.rate.add(at, report.size);
                 self.newest_arrival = Some(self.newest_arrival.map_or(at, |newest| newest.max(at)));
             }
-            if let Some(trend) = self.slope.accumulate(report) {
+            if !self.arrival_sorted_groups
+                && let Some(trend) = self.slope.accumulate(report)
+            {
                 self.deltas = (self.deltas + 1).min(MAX_SCALED_DELTAS);
                 usage = self.detector.update_with_arrival(
                     trend.at,
                     trend.arrival,
                     trend.estimate_ms * f64::from(self.deltas),
                 );
+            }
+        }
+        if self.arrival_sorted_groups {
+            let mut arrived: Vec<&PacketReport> = reports
+                .iter()
+                .filter(|report| report.arrived && report.arrival.is_some())
+                .collect();
+            arrived.sort_by_key(|report| report.arrival);
+            for report in arrived {
+                if let Some(trend) = self.slope.accumulate(report) {
+                    self.deltas = (self.deltas + 1).min(MAX_SCALED_DELTAS);
+                    usage = self.detector.update_with_arrival(
+                        trend.at,
+                        trend.arrival,
+                        trend.estimate_ms * f64::from(self.deltas),
+                    );
+                }
             }
         }
 
@@ -516,7 +553,7 @@ impl BandwidthEstimator for Gcc {
     fn on_path_change(&mut self, _now: Instant) {
         // Delay measurements across two paths mean nothing, and neither does where the old
         // path converged.
-        self.slope = SlopeEstimator::new();
+        self.slope = SlopeEstimator::new().with_arrival_order(self.arrival_sorted_groups);
         self.detector = OveruseDetector::new().with_threshold_time_base(self.threshold_time_base);
         self.rate = RateCalculator::default();
         self.deltas = 0;
