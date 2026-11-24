@@ -4101,6 +4101,54 @@ pub(crate) fn decoding_dependencies(
     out
 }
 
+/// The tokens of an `a=group` line (its semantics first), `None` for another attribute.
+fn group_tokens(a: &sdp::description::common::Attribute) -> Option<Vec<&str>> {
+    (a.key == ATTR_KEY_GROUP).then(|| {
+        a.value
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect()
+    })
+}
+
+/// The `a=group` semantics this endpoint acts on: BUNDLE (RFC 9143), lip synchronization
+/// (RFC 5888 section 7) and decoding dependency (RFC 5583).
+const UNDERSTOOD_GROUP_SEMANTICS: [&str; 3] = ["BUNDLE", "LS", "DDP"];
+
+/// RFC 5888 section 9.3: "If a server receives an offer that contains empty "a=group" lines,
+/// it SHOULD add its capabilities also in the form of empty "a=group" lines to its answer."
+/// An offer with an `a=group` line that names no identification-tag is answered with an empty
+/// `a=group` line for each semantics this endpoint understands and the answer does not use.
+pub(crate) fn answer_group_capabilities(
+    offer: &SessionDescription,
+    answer: &mut SessionDescription,
+) {
+    let offered_empty = offer
+        .attributes
+        .iter()
+        .filter_map(group_tokens)
+        .any(|tokens| tokens.len() == 1);
+    if !offered_empty {
+        return;
+    }
+    for semantics in UNDERSTOOD_GROUP_SEMANTICS {
+        let used = answer
+            .attributes
+            .iter()
+            .filter_map(group_tokens)
+            .any(|tokens| tokens.first() == Some(&semantics));
+        if !used {
+            answer
+                .attributes
+                .push(sdp::description::common::Attribute::new(
+                    ATTR_KEY_GROUP.to_owned(),
+                    Some(semantics.to_owned()),
+                ));
+        }
+    }
+}
+
 /// RFC 5583 section 6.1 (with RFC 5888 section 9.2, which it follows) in an answer to
 /// `offer`: an answerer that understands DDP keeps the offered dependencies ("The answerer
 /// cannot change the dependency relations") for what it accepts. Each offered DDP group is

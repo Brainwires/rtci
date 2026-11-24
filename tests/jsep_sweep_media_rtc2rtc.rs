@@ -459,6 +459,40 @@ fn recvonly_and_inactive_endpoints_still_send_rtcp() -> Result<()> {
     Ok(())
 }
 
+/// RFC 8866 section 6.7.3: an endpoint that is `sendonly` "SHOULD still receive and process
+/// RTCP". The offerer's section is sendonly once the answer is recvonly; the receiver reports
+/// the answerer sends for its video reach the offerer's outbound stream (its remote-inbound
+/// stats, with round trips measured from the reports' LSR / DLSR).
+#[test]
+fn a_sendonly_endpoint_processes_the_rtcp_it_receives() -> Result<()> {
+    use rtci::statistics::StatsSelector;
+    use rtci::statistics::report::RTCStatsReportEntry;
+    let mut world = World::new(
+        Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
+        Peer::new("10.0.0.2:5000", SettingEngineBuilder::new().build())?,
+    );
+    let sender = world.peers[0].pc.add_track(video_track())?;
+    let (offer, answer) = world.connect()?;
+    assert!(answer.contains("\r\na=recvonly\r\n"), "{answer}");
+    let vp8 = payload_type(&offer, "VP8/90000");
+    write(&mut world, sender, vp8, 100, 5)?;
+    world.run_for(Duration::from_secs(8), |_| false);
+    let now = world.now;
+    let report = world.peers[0].pc.get_stats(now, StatsSelector::None);
+    let remote_inbound = report
+        .iter()
+        .find_map(|entry| match entry {
+            RTCStatsReportEntry::RemoteInboundRtp(s) => Some(s),
+            _ => None,
+        })
+        .expect("the sendonly endpoint processed receiver reports (remote-inbound)");
+    assert!(
+        remote_inbound.round_trip_time_measurements > 0,
+        "{remote_inbound:?}"
+    );
+    Ok(())
+}
+
 /// RFC 8830 section 3.1: an RTP stream arriving in a section whose description signals no
 /// msid at all "creates a track" of the section's media type, associated by MID (RFC 9143
 /// section 9.2), in no MediaStream. The offer reaches the answerer without its `a=msid` and

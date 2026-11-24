@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **jsep**: an offer with empty `a=group` lines (RFC 5888 section 9.3 capability indication)
+  is answered with an empty `a=group` line for each semantics the engine understands and the
+  answer does not use (BUNDLE, LS, DDP) (`conf/jsep-77-small-rows`). Offers without such lines,
+  which is every browser's, are answered as before. Test:
+  `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
+  RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
+  lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,
+  `rtci-dtls` `a_client_hello_offering_only_the_null_suite_is_refused`).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
