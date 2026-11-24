@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **pacer, the streams waiting share the rate by priority** (`conf/ccnext2-2a-pacer-priority`):
+  RFC 8835 section 4.1 (SHOULD): "each stream at each level of priority is being given
+  approximately twice the transmission capacity (measured in payload bytes) of the level
+  below". The target was already divided among the encodings by priority (the text's first
+  strategy); what streams wrote above their share left the pacer in the order written, so one
+  stream over its target took the path from the others whatever their priority. The pacer now
+  serves the new media waiting by start-time fair queuing over payload octets, each stream
+  weighted by its encoding's priority (very-low 1, low 2, medium 4, high 8; a stream it is not
+  told of weighs as `low`; a FEC stream is one flow with the stream it protects); each stream
+  still leaves in the order written, retransmissions keep their place ahead of new media and
+  audio is still never queued. The peer connection writes the weights to the pacer
+  (`PacerPriorities`, new, a write-ward carrier) when the target is divided and after
+  `setParameters`. Measured (`tests/bandwidth_allocation_rtc2rtc.rs`, two video streams written
+  at 1.2 Mbit/s each into a 1 Mbit/s path, hosted run 45440788913): high 3.92 times low's
+  octets on the wire (1.01 in the order written, run 45441790794). One video stream (the
+  capacity-cap matrix, six seeds on three wall clocks, both chains, run 45441814325), the
+  reordering sweep, the rate-limited link, the multi-flow tests and the VP8 jitter tests: the
+  same figures as without it. Audit rows RFC8835-4.1-1 and RFC8836-2-6b are `tested`.
+
 - **congestion control (GCC), the over-use detector's threshold adapts over the arrival
   gaps** (`conf/gcc-9-draft-threshold-time-base`): draft-ietf-rmcat-gcc-02 section 5.4,
   `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)|-del_var_th(i-1))`, t(i)
