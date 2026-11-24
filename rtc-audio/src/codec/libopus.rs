@@ -352,3 +352,192 @@ mod tests {
         }
     }
 }
+
+/// opus-rs against the reference libopus, both ways: every packet one implementation encodes
+/// decodes in the other with the same final range-coder state (RFC 6716 section 6's
+/// conformance criterion, as `opus_demo` checks it), at every bitrate the send pipeline can
+/// reach and with libopus in the modes browsers encode in.
+#[cfg(test)]
+mod opus_interop {
+    use super::*;
+    use crate::codec::fmtp::{OpusEncoderConfig, OpusFmtp};
+    use crate::processing::ProcessingConfig;
+    use crate::send::{SendCodec, SendConfig, SendOutput, SendPipeline};
+    use crate::signal::Tone;
+
+    fn rms(x: &[f32]) -> f64 {
+        (x.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
+    }
+
+    fn final_range_of_decoder(d: &LibOpusDecoder) -> u32 {
+        let mut r: u32 = 0;
+        // SAFETY: a live decoder; the request writes one opus_uint32.
+        unsafe {
+            sys::opus_decoder_ctl(d.st, sys::OPUS_GET_FINAL_RANGE_REQUEST, &mut r as *mut u32)
+        };
+        r
+    }
+
+    fn final_range_of_encoder(e: &LibOpusEncoder) -> u32 {
+        let mut r: u32 = 0;
+        // SAFETY: a live encoder; the request writes one opus_uint32.
+        unsafe {
+            sys::opus_encoder_ctl(e.st, sys::OPUS_GET_FINAL_RANGE_REQUEST, &mut r as *mut u32)
+        };
+        r
+    }
+
+    /// 3 s of a 440 Hz tone in 20 ms frames.
+    fn tone_frames(amplitude: f32) -> Vec<Vec<f32>> {
+        let mut tone = Tone::new(48_000, 440.0, amplitude);
+        (0..150)
+            .map(|_| {
+                let mut x = vec![0f32; 960];
+                tone.fill(&mut x);
+                x
+            })
+            .collect()
+    }
+
+    #[test]
+    fn opus_rs_packets_decode_bit_exactly_in_libopus_up_to_510_kbps() {
+        for amplitude in [0.25f32, 1.0] {
+            for fec in [false, true] {
+                for bitrate in [16_000, 32_000, 64_000, 128_000, 343_200, 510_000] {
+                    let mut enc =
+                        opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip).unwrap();
+                    enc.bitrate_bps = bitrate;
+                    enc.use_inband_fec = fec;
+                    enc.packet_loss_perc = if fec { 10 } else { 0 };
+                    let mut dec = LibOpusDecoder::new(2).unwrap();
+                    let (mut out, mut y) = (vec![0u8; MAX_PAYLOAD], Vec::new());
+                    for (i, x) in tone_frames(amplitude).iter().enumerate() {
+                        let n = enc.encode(x, 960, &mut out).unwrap();
+                        dec.decode(&out[..n], &mut y).unwrap();
+                        assert_eq!(
+                            final_range_of_decoder(&dec),
+                            enc.final_range(),
+                            "packet {i} at {bitrate} bit/s, amplitude {amplitude}, FEC {fec}"
+                        );
+                    }
+                    // Stereo output of a mono stream: both channels carry the tone.
+                    let level = rms(&y[y.len() / 2..]);
+                    let want = f64::from(amplitude) / 2f64.sqrt();
+                    assert!(
+                        (level / want - 1.0).abs() < 0.12,
+                        "{bitrate} bit/s, amplitude {amplitude}: RMS {level}, want {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The interop peer's sender in train 13 round 5: the receiver's fmtp as Chromium offers
+    /// it, processing off, and the congestion controller's share for one audio stream (Chromium
+    /// counted 858-byte payloads). libopus, Chromium's decoder, hears the tone.
+    #[test]
+    fn the_send_pipeline_at_a_high_congestion_target_decodes_with_energy_in_libopus() {
+        let mut p = SendPipeline::new(SendConfig {
+            codec: SendCodec::Opus(OpusEncoderConfig::for_remote(
+                &OpusFmtp::parse("minptime=10;useinbandfec=1"),
+                None,
+                None,
+                1,
+            )),
+            processing: ProcessingConfig::OFF,
+            ..Default::default()
+        })
+        .unwrap();
+        p.set_target_bitrate(366_400.0);
+        assert_eq!(p.stats().target_bitrate, Some(343_200));
+        let mut tone = Tone::new(48_000, 440.0, 0.25);
+        let mut dec = LibOpusDecoder::new(2).unwrap();
+        let (mut y, mut packets, mut bytes) = (Vec::new(), 0, 0);
+        for _ in 0..300 {
+            let mut samples = vec![0f32; 480];
+            tone.fill(&mut samples);
+            let frame = crate::AudioFrame {
+                samples,
+                sample_rate: 48_000,
+                channels: 1,
+            };
+            for o in p.push_capture(&frame).unwrap() {
+                if let SendOutput::Packet { payload, .. } = o {
+                    packets += 1;
+                    bytes += payload.len();
+                    dec.decode(&payload, &mut y).unwrap();
+                }
+            }
+        }
+        assert_eq!(packets, 150);
+        assert!(bytes / packets > 800, "{} bytes a packet", bytes / packets);
+        let level = rms(&y[y.len() / 2..]);
+        assert!(level > 0.15, "libopus decoded RMS {level}");
+    }
+
+    #[test]
+    fn libopus_packets_decode_bit_exactly_in_opus_rs() {
+        for amplitude in [0.25f32, 1.0] {
+            for application in [sys::OPUS_APPLICATION_VOIP, sys::OPUS_APPLICATION_AUDIO] {
+                for (fec, loss) in [(false, 0), (true, 10)] {
+                    for bitrate in [24_000u32, 32_000, 64_000, 128_000] {
+                        let mut enc = LibOpusEncoder::new(OpusEncoderConfig {
+                            bitrate,
+                            fec,
+                            packet_loss_percent: loss,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                        enc.ctl(sys::OPUS_SET_APPLICATION_REQUEST, application);
+                        let mut dec = opus_rs::OpusDecoder::new(48_000, 1).unwrap();
+                        let (mut buf, mut y) = (vec![0f32; MAX_PACKET_SAMPLES], Vec::new());
+                        for (i, x) in tone_frames(amplitude).iter().enumerate() {
+                            let mut p = Vec::new();
+                            enc.encode(x, &mut p).unwrap();
+                            let n = dec.decode(&p, MAX_PACKET_SAMPLES, &mut buf).unwrap();
+                            y.extend_from_slice(&buf[..n]);
+                            assert_eq!(
+                                dec.final_range(),
+                                final_range_of_encoder(&enc),
+                                "packet {i}: application {application}, {bitrate} bit/s, FEC {fec}"
+                            );
+                        }
+                        let level = rms(&y[y.len() / 2..]);
+                        let want = f64::from(amplitude) / 2f64.sqrt();
+                        assert!(
+                            (level / want - 1.0).abs() < 0.12,
+                            "{bitrate} bit/s: RMS {level}, want {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// What a browser sends from a silent source: libopus's packets of digital silence decode
+    /// in opus-rs to an RMS of about 2.7e-6 (-111 dBFS), the `decodedRms` the interop peer
+    /// reported for Firefox in train 13 round 5, five orders below the full-scale tone.
+    #[test]
+    fn libopus_digital_silence_decodes_in_opus_rs_far_below_a_tone() {
+        for (amplitude, low, high) in [(0.0f32, 0.0, 1e-5), (1.0, 0.5, 1.0)] {
+            let mut enc = LibOpusEncoder::new(OpusEncoderConfig {
+                bitrate: 32_000,
+                fec: true,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut dec = crate::codec::opus::OpusDecoder::new(1).unwrap();
+            let mut y = Vec::new();
+            for x in tone_frames(amplitude) {
+                let mut p = Vec::new();
+                enc.encode(&x, &mut p).unwrap();
+                dec.decode(&p, &mut y).unwrap();
+            }
+            let level = rms(&y);
+            assert!(
+                (low..=high).contains(&level),
+                "amplitude {amplitude}: RMS {level}"
+            );
+        }
+    }
+}

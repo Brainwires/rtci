@@ -69,7 +69,7 @@ jobs:
       - id: pick
         uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
-          jobs: test_macos=macos-arm64 test_windows=windows-x64 c_header=linux-x64
+          jobs: test_macos=macos-arm64 test_windows=windows-x64 c_header=linux-x64 audio_libopus=linux-x64
           vars: ${{ toJSON(vars) }}
           runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
@@ -486,6 +486,37 @@ jobs:
         run: |
           cbindgen --quiet --config rtc-ffi/cbindgen.toml --crate rtc-ffi --output rtc-ffi/include/rtc.h
           git diff --exit-code -- rtc-ffi/include/rtc.h
+
+  # rtc-audio with the reference libopus (feature `libopus`: bundled C, built with CMake):
+  # opus-rs and libopus decode each other's packets bit-exactly (`codec::libopus` tests).
+  audio_libopus:
+    name: rtc-audio against libopus
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').audio_libopus || 'ubuntu-latest' }}
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      # GitHub's image has CMake; a runner without it gets the PyPI build, for this user only.
+      - name: CMake for the libopus build
+        run: |
+          if ! command -v cmake >/dev/null; then
+            python3 -m pip install --user cmake
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Test rtc-audio with libopus
+        run: cargo test --package rtc-audio --features libopus --verbose
 
   # The workspace builds on its declared `rust-version` (the workspace manifest), every
   # feature. Dependencies resolve to versions that support that toolchain where one exists.
