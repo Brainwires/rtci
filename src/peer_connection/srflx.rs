@@ -527,11 +527,8 @@ impl RTCPeerConnection {
                 else {
                     break;
                 };
-                // A server of the other family cannot be reached from this base; one the
-                // embedder's address policy refuses is never sent anything.
-                if server.is_ipv4() != base_ip.is_ipv4()
-                    || !self.address_allowed(server, ice::AddressPurpose::StunTurnServer)
-                {
+                // A server of the other family cannot be reached from this base.
+                if server.is_ipv4() != base_ip.is_ipv4() {
                     if let Some(r) = self.streams.srflx.probes[index].race.as_mut() {
                         r.failed();
                     }

@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use super::*;
-use crate::agent::remote_policy::{IceAddressPolicy, RemoteAddressFilter};
+use crate::agent::remote_policy::RemoteAddressFilter;
 use crate::external_ip_mapper::ExternalIpMapper;
 use crate::mdns::*;
 use crate::network_type::NetworkType;
@@ -371,13 +371,6 @@ pub struct AgentConfig {
     /// the agent holds it; `false` drops the candidate. Addresses that are never a valid unicast
     /// destination (unspecified, multicast, broadcast, port 0) are dropped before it is asked.
     pub remote_address_filter: Option<RemoteAddressFilter>,
-
-    /// The embedder's address policy, for both directions: remote candidates (an mDNS one's
-    /// resolved address) and peer-reflexive sources it refuses are never held or paired, and a
-    /// datagram from a source it refuses is dropped before the agent reads it (no response, no
-    /// candidate, no consent, no data accepted). The default allows everything. See
-    /// [`IceAddressPolicy`].
-    pub address_policy: IceAddressPolicy,
 
     /// The tiebreaker of RFC 8445 Section 5.2 ("a random number between 0 and 2**64 - 1",
     /// drawn when nil). A fixed one makes the outcome of a role conflict reproducible; the
