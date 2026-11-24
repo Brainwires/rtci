@@ -17,10 +17,15 @@ fn test_is_key_frame() {
 fn written(payloads: &[&[u8]], has_key_frame: bool) -> Result<Vec<u8>> {
     let mut writer = H26xWriter::new(Vec::<u8>::new(), false);
     writer.has_key_frame = has_key_frame;
-    for payload in payloads {
+    // Consecutive sequence numbers, as a sender gives them: the writer drops the fragments of
+    // a NAL unit after a gap (RFC 6184 section 5.8).
+    for (sequence_number, payload) in (0u16..).zip(payloads) {
         writer.write_rtp(&rtp::Packet {
+            header: rtp::header::Header {
+                sequence_number,
+                ..Default::default()
+            },
             payload: Bytes::copy_from_slice(payload),
-            ..Default::default()
         })?;
     }
     writer.close()?;

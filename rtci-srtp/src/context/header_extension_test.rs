@@ -198,6 +198,40 @@ fn encrypted_header_extensions_are_authenticated_as_sent() {
     }
 }
 
+/// RFC 7941 section 6: the SDES items carried in header extensions (MID, RtpStreamId,
+/// RepairedRtpStreamId) identify sources, and "SHOULD" have integrity and source
+/// authentication. Left in the clear (the default, no Cryptex, no RFC 6904), they are still
+/// part of the authenticated portion (RFC 3711 section 3.1): a changed octet anywhere in the
+/// extension block fails the authentication, with the HMAC and with the AEAD profiles.
+#[test]
+fn clear_header_extensions_are_authenticated_as_sent() {
+    for profile in ProtectionProfile::ALL {
+        for two_byte in [false, true] {
+            let (plain, extension) = packet_with_extensions(two_byte, 9);
+            let protected = context(profile).encrypt_rtp(&plain).unwrap();
+            assert_eq!(
+                &protected[extension.clone()],
+                &plain[extension.clone()],
+                "{profile:?}: the extensions stay readable"
+            );
+            // Octets of element data (A1, A2 and B1 in `packet_with_extensions`).
+            let data = if two_byte { [2, 3, 7] } else { [1, 2, 5] };
+            for at in data.map(|offset| extension.start + offset) {
+                let mut forged = protected.to_vec();
+                forged[at] ^= 0x01;
+                let error = context(profile).decrypt_rtp(&forged).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        Error::RtpFailedToVerifyAuthTag | Error::ErrFailedToVerifyAuthTag
+                    ),
+                    "{profile:?} two-byte {two_byte}, octet {at}: {error}"
+                );
+            }
+        }
+    }
+}
+
 /// RFC 6904 section 3.2: the header keystream uses the IV of the packet, so it differs from
 /// packet to packet and from the payload keystream (k_he and k_hs are keys of their own).
 #[test]
