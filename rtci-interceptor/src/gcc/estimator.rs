@@ -389,7 +389,20 @@ impl BandwidthEstimator for Gcc {
         if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
             usage = Usage::Over;
         }
+        let delay_before = self.delay_control.target();
         let delay_target = self.delay_control.update(now, usage, received);
+        if delay_before < 140_000.0 {
+            eprintln!(
+                "GCCSTUCK reports {} arrived {} usage {:?} received {:?} before {:.0} after {:.0} state {:?}",
+                reports.len(),
+                reports.iter().filter(|r| r.arrived).count(),
+                usage,
+                received.map(|r| r as u64),
+                delay_before,
+                delay_target,
+                self.delay_control.state()
+            );
+        }
 
         // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
         // that did not: "a CE mark is a congestion signal" (RFC 8888 section 7 with RFC 6679
