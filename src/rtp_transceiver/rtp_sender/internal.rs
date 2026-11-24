@@ -105,6 +105,11 @@ pub(crate) struct RTCRtpSenderInternal {
     /// Each encoding's share of the congestion controller's target (`allocate_bandwidth`):
     /// what its encoder is to aim for, by SSRC.
     allocated_bitrates: Vec<(SSRC, f64)>,
+    /// The encoder's own ceiling for each encoding that set one, by SSRC, bits per second
+    /// (libwebrtc's "encoder defined bitrate range", `AudioSendStream`): it caps the encoding's
+    /// share of the target beside `maxBitrate`, so what the encoder cannot use goes to the
+    /// other senders.
+    encoder_max_bitrates: Vec<(SSRC, f64)>,
     /// The `maxBitrate` budget of each encoding that has one (`admit_under_max_bitrate`).
     max_bitrate_limiters: Vec<MaxBitrateLimiter>,
     /// The `maxFramerate` state of each video encoding that has one
@@ -188,6 +193,22 @@ impl RTCRtpSenderInternal {
 
     pub(crate) fn set_allocated_bitrates(&mut self, shares: Vec<(SSRC, f64)>) {
         self.allocated_bitrates = shares;
+    }
+
+    /// The encoder's ceiling for the encoding sending on `ssrc`, if it set one.
+    pub(crate) fn encoder_max_bitrate(&self, ssrc: SSRC) -> Option<f64> {
+        self.encoder_max_bitrates
+            .iter()
+            .find(|(s, _)| *s == ssrc)
+            .map(|(_, bps)| *bps)
+    }
+
+    /// Sets (or with `None` clears) the encoder's ceiling for the encoding sending on `ssrc`.
+    pub(crate) fn set_encoder_max_bitrate(&mut self, ssrc: SSRC, bps: Option<f64>) {
+        self.encoder_max_bitrates.retain(|(s, _)| *s != ssrc);
+        if let Some(bps) = bps {
+            self.encoder_max_bitrates.push((ssrc, bps.max(0.0)));
+        }
     }
 
     /// Whether a packet of `bits` on `ssrc` with RTP timestamp `timestamp`, written at `now`,

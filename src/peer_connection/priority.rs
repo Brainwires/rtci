@@ -155,7 +155,8 @@ pub fn allocate_bandwidth(total: f64, flows: &[(f64, Option<f64>)]) -> Vec<f64> 
 /// (W3C webrtc-priority 3.2: "the priority ... influences the bandwidth allocation among
 /// RTCRtpSenders"; webrtc 5.2.5 `maxBitrate` caps an encoding): every active encoding with
 /// an SSRC of a transceiver that is not stopped and has a sending direction takes a share by
-/// its `priority` (`bandwidth_weight`), capped at its `maxBitrate`. Each sender keeps its
+/// its `priority` (`bandwidth_weight`), capped at its `maxBitrate` and at its encoder's own
+/// ceiling (`RTCRtpSender::set_encoder_max_bitrate`). Each sender keeps its
 /// encodings' shares (`RTCRtpSender::target_bitrates`); returns them by SSRC.
 #[cfg(test)]
 pub(crate) fn allocate_target_bitrate(
@@ -192,10 +193,13 @@ pub(crate) fn allocate_target_bitrate_on(
             if !encoding.active {
                 continue;
             }
-            flows.push((
-                bandwidth_weight(encoding.priority),
-                (encoding.max_bitrate > 0).then_some(f64::from(encoding.max_bitrate)),
-            ));
+            // The application's maxBitrate and the encoder's own ceiling, the lower of them.
+            let max_bitrate = (encoding.max_bitrate > 0).then_some(f64::from(encoding.max_bitrate));
+            let cap = match (max_bitrate, sender.encoder_max_bitrate(ssrc)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            flows.push((bandwidth_weight(encoding.priority), cap));
             owners.push((index, ssrc));
         }
     }
@@ -545,5 +549,82 @@ mod tests {
         sender.set_parameters(parameters, None).unwrap();
         assert_eq!(shares(&mut pc, high), vec![300_000.0]);
         assert_eq!(shares(&mut pc, low), vec![100_000.0]);
+    }
+
+    /// The encoder's own ceiling (`set_encoder_max_bitrate`, libwebrtc's encoder-defined range
+    /// of an audio stream) caps an encoding's share beside its maxBitrate, the lower of the two
+    /// applying, and what it leaves goes to the other encodings; cleared, the share is the
+    /// weighted one again. `getParameters()` does not show it.
+    #[test]
+    fn an_encoders_ceiling_caps_its_share_and_leaves_the_rest_to_the_others() {
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        use crate::peer_connection::configuration::media_engine::MediaEngine;
+        use crate::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+        use crate::rtp_transceiver::{
+            RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
+        };
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs().unwrap();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .build(std::time::Instant::now())
+            .unwrap();
+        let mut add = |kind| {
+            RTCRtpSenderId::from(
+                pc.add_transceiver_from_kind(
+                    kind,
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Sendonly,
+                        streams: vec![],
+                        send_encodings: vec![RTCRtpEncodingParameters {
+                            active: true,
+                            ..Default::default()
+                        }],
+                    }),
+                )
+                .unwrap(),
+            )
+        };
+        let audio = add(RtpCodecKind::Audio);
+        let video = add(RtpCodecKind::Video);
+        let share = |pc: &mut crate::peer_connection::RTCPeerConnection, id| {
+            pc.rtp_sender(id).unwrap().target_bitrates()[0]
+        };
+        pc.pipeline_context
+            .interceptor_handler_context
+            .transport_targets
+            .insert(0, 1_000_000.0);
+        pc.reallocate_target_bitrate();
+        let (ssrc, even) = share(&mut pc, audio);
+        assert_eq!(even, 500_000.0, "equal priorities, equal shares");
+
+        pc.rtp_sender(audio)
+            .unwrap()
+            .set_encoder_max_bitrate(ssrc, Some(63_200.0));
+        assert_eq!(share(&mut pc, audio).1, 63_200.0);
+        assert_eq!(share(&mut pc, video).1, 936_800.0);
+        assert_eq!(
+            pc.rtp_sender(audio).unwrap().get_parameters().encodings[0].max_bitrate,
+            0,
+            "not a W3C parameter"
+        );
+
+        // A lower maxBitrate wins over the encoder's ceiling.
+        let mut sender = pc.rtp_sender(audio).unwrap();
+        let mut parameters = sender.get_parameters().clone();
+        parameters.encodings[0].max_bitrate = 32_000;
+        sender.set_parameters(parameters, None).unwrap();
+        assert_eq!(share(&mut pc, audio).1, 32_000.0);
+        assert_eq!(share(&mut pc, video).1, 968_000.0);
+
+        // Cleared (and maxBitrate lifted): the weighted share again.
+        let mut sender = pc.rtp_sender(audio).unwrap();
+        let mut parameters = sender.get_parameters().clone();
+        parameters.encodings[0].max_bitrate = 0;
+        sender.set_parameters(parameters, None).unwrap();
+        pc.rtp_sender(audio)
+            .unwrap()
+            .set_encoder_max_bitrate(ssrc, None);
+        assert_eq!(share(&mut pc, audio).1, 500_000.0);
     }
 }

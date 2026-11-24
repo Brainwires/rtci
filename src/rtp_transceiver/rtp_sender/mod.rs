@@ -439,6 +439,22 @@ impl RTCRtpSender<'_> {
         self.sender().allocated_bitrates().to_vec()
     }
 
+    /// Tells the engine the most the encoder of the encoding sending on `ssrc` can use, in
+    /// bits per second with its packets' overhead (`None` clears it): that encoding's share
+    /// of the congestion controller's target is capped there, beside its `maxBitrate`, and
+    /// what it leaves goes to the other encodings (libwebrtc's encoder-defined bitrate range
+    /// of an audio stream, `AudioSendStream::GetMinMaxBitrateConstraints`). Unlike
+    /// `maxBitrate` it is not one of the W3C parameters: `getParameters()` does not show it.
+    /// The target is divided again at once.
+    pub fn set_encoder_max_bitrate(
+        &mut self,
+        ssrc: crate::rtp_transceiver::SSRC,
+        bps: Option<f64>,
+    ) {
+        self.sender_mut().set_encoder_max_bitrate(ssrc, bps);
+        self.peer_connection.reallocate_target_bitrate();
+    }
+
     /// webrtc-svc 3.2.3: "the user agent MAY configure a different scalability mode" than
     /// the one requested, when the negotiated codec cannot carry it, and `getParameters` after
     /// negotiation returns "the currently configured" mode. The engine does not encode: the
