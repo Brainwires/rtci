@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- SRTP re-keying (RFC 5764 section 4.4) starts at a margin measured in time as well as in
+  packets: the larger of a sixteenth of the key's lifetime and the packets the key protects,
+  at the rate it has been used since its first packet, in the time a re-keying needs as
+  measured on the handshake that gave it (twice the handshake's duration, for the handshake
+  and the ICE checks of the restart, plus one DTLS retransmission timer). On a slow path with
+  a short lifetime the re-keying starts earlier instead of the key running out and the
+  transport failing (0.1.0's known limit); with the default lifetimes, and wherever the
+  sixteenth is the larger, nothing moves. `OnSrtpKeyLifetimeExpiring` still comes at the
+  sixteenth; the DTLS client still asks first (`with_srtp_rekeying_dtls_client_first`: the
+  client measures its handshake from its first flight, the server from the first datagram it
+  reads). Engine behaviour change.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
