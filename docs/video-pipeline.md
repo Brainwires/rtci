@@ -557,18 +557,66 @@ Tests (no camera, no browser):
   and the pipeline on the receiver; and the capacity scenario of
   `tests/capacity_cap_video_rtc2rtc.rs` (300 kbit/s for 20 s) with the sender following GCC.
 
-Acceptance (asserted, seeded, each assertion mutation-checked):
+Acceptance (asserted, seeded, each assertion mutation-checked). The first version of this
+table, written before anything ran, set `freezeCount` = 0 at 2 % loss in the two-peer call,
+"under 500 ms" at 10 % and a jitter buffer "within p95 - 10 .. p95 + 50 ms" of the network
+jitter. Measurement showed the first two depend on how fast the engine repairs a loss, not on
+the pipeline (section 6.1), and the third on libwebrtc's estimator, which this port follows;
+the figures below replace them, each with its reason.
 
 | Scenario | Figure | Source of the threshold |
 |---|---|---|
-| 30 s, 30 fps, 500 kbit/s, 2 % loss, 25 ms one way + 0..40 ms uniform jitter | `freezeCount` = 0 (W3C definition) | W3C webrtc-stats `freezeCount` |
-| same, 10 % loss | longest interval between rendered frames under 500 ms; every PLI justified (`KeyFrameReason`) | the 200 ms key-frame wait (`video_receive_stream2.h:74`) plus one RTT and a key frame's transfer |
-| capacity 300 kbit/s for 20 s, then open | longest interval without a rendered frame after the cap lifts under 1 s (the last release froze 7 s) | regression bound for the engine's known failure |
-| key frame lost at start | first PLI within one frame interval of the first non-key frame; at most one PLI per 200 ms | `rtp_video_stream_receiver2.cc:1067-1072`, `video_receive_stream2.cc:1187-1213` |
-| clean link, 40 ms jitter | mean `jitterBufferDelay / jitterBufferEmittedCount` within [jitter p95 - 10 ms, jitter p95 + 50 ms] | the estimator's 2.33 sigma and 10 ms OS term (`jitter_estimator.cc:62-73`) |
-| golden streams under 5 % loss and reordering with NACK | every released frame byte-identical to the source and decodable (its references released before it) | correctness |
+| golden streams (VP8, VP9, H.264, H.265 fixtures), 5 % loss, 25 ms + 0..40 ms, a retransmission one 60 ms round trip after each loss | every released picture byte-identical to the source; no delta picture before the one it predicts from (the fixtures' own I-P-P order, independent of the reference finder); at least 99 % decoded; `freezeCount` = 0 | correctness; W3C `freezeCount` |
+| two-peer call, 2 % and 10 % loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, the engine's NACK and RTX | no corrupt picture, no decode out of order, no delta picture without its predecessor (the source's frame numbers); longest interval between rendered pictures at most the slowest repair + 100 ms (the pipeline waits for nothing but repairs) | `ReceiveStats::max_repair_delay`, measured on the same run |
+| capacity 300 kbit/s for 20 s, then open, the sender following GCC | longest interval between rendered pictures under 1 s over the whole run (the last release froze 7 s) | regression bound for the engine's known failure |
+| key frame lost at start | first PLI at the first delta frame; at most one request per 200 ms; decoding resumes at the next key frame | `rtp_video_stream_receiver2.cc:1067-1072`, `video_receive_stream2.cc:1187-1213` |
+| pictures stuck behind a gap retransmission never fills | a key frame asked for (`RepairWindow`) between 5 RTT (at least 1 s) and that + 50 ms after the last release; with `ReceiveConfig::chrome()` only the 3 s decode timeout | RFC 4588 6.3 ("would still be useful"); libwebrtc `video_receive_stream2.h:75` |
+| `jitterBufferTarget` 100 ms, steady stream | a picture is not released before render time - decode time - render delay, and its render time is arrival + 100 ms (+-5 ms) | `frame_decode_timing.cc` `MaxWaitingTime`; W3C webrtc-extensions `jitterBufferTarget` |
+| clean link, 0..40 ms jitter | no freeze, no frame dropped, mean `jitterBufferDelay` per picture 10..60 ms (measured 25.9 ms: libwebrtc's estimate for this jitter is about 20 ms, `2.33 sigma - 30 ms + 10 ms` with `sigma = 40 / sqrt(6)` ms) | `jitter_estimator.cc:62-73` |
 
 Browser cells: none yet (no decoder); phase 2 adds them.
+
+#### 6.1 Phase 1: what was measured
+
+GitHub-hosted runs of `cargo test -p rtc-video -- --nocapture` on `conf/vp-2-receive`
+(ubuntu-latest; the `MEASURE` lines), virtual time, fixed seeds:
+
+| Scenario | Decoded | Freezes (W3C) | Longest interval | Mean jitter buffer delay | Repairs: count, mean, max |
+|---|---|---|---|---|---|
+| VP8 fixture, clean / 5 % loss | 300 / 298 of 300 | 0 / 0 | 54 / 131 ms | | |
+| VP9 fixture, clean / 5 % loss | 300 / 299 | 0 / 0 | 54 / 113 ms | | |
+| H.264 fixture, clean / 5 % loss | 300 / 298 | 0 / 0 | 54 / 164 ms | | |
+| H.265 fixture, clean / 5 % loss | 300 / 300 | 0 / 0 | 54 / 164 ms | | |
+| call, clean, 0..40 ms jitter, 20 s | 599 of 599 | 0 | 45 ms | 25.9 ms | 0 |
+| call, 2 % loss, 30 s | 897 of 899 | 13 (2.98 s) | 319 ms | 98.3 ms | 24, 227 ms, 375 ms |
+| call, 10 % loss, 30 s | 887 of 896 | 51 (13.2 s) | 654 ms | 249 ms | 175, 321 ms, 877 ms |
+| call, 300 kbit/s for 20 s then open, 50 s | 1498 of 1500 | 5 (2.23 s) | 620 ms | 86.6 ms | 28, 605 ms, 1089 ms |
+
+No run released a picture that differed from what was sent or that its references did not
+allow, on any codec.
+
+**Engine finding: repair latency.** In the calls a lost packet comes back 227 ms (mean, 2 %
+loss) to 605 ms (capacity drop) after the first packet past its gap, against a round trip of
+about 70 ms on that link. libwebrtc asks as soon as a gap shows (`nack_requester.cc`
+`OnReceivedPacket` sends `GetNackBatch(kSeqNumOnly)` on the packet that reveals it) and again
+every round trip; the engine's generator waits for its learned reordering allowance (up to
+500 ms) and runs on a 100 ms cycle. Shortening the cycle to 20 ms made it worse (2 % loss:
+repairs 554 ms mean, 28 freezes; run 45308589888), so the cause is not the cycle alone; it is
+reported to the congestion / retransmission work and not changed here (outside this crate).
+The W3C freezes in the loss rows are those repairs: the pipeline waits for nothing else (the
+asserted bound), and with repairs one round trip late (the golden streams) there is none.
+
+**Mutation check.** Each mutation on a throwaway branch, `cargo test -p rtc-video` on a hosted
+runner; all killed:
+
+| Mutation | Killed by |
+|---|---|
+| frame buffer ignores references (`decodable` never cleared) | buffer unit tests, golden H.264 / H.265, the 10 % loss and capacity calls, the repair-window test (11 failures) |
+| picture-id finder gives no references | golden VP8 / VP9, all three loss calls, the jitter call, the repair-window test (7) |
+| release ignores render time | `a_picture_is_held_until_its_render_time_less_decode_and_render_delay` (added after the first round, where this mutation survived) |
+| repair window never asks | `frames_stuck_behind_an_unrepaired_gap_ask_for_a_key_frame_after_the_repair_window` |
+| freeze margin 300 ms instead of 150 | `a_long_interval_after_steady_frames_is_a_freeze` |
+| retransmissions never detected | `a_packet_late_against_the_packet_after_its_gap_counts_as_a_retransmission` (added after the first round) |
 
 ### Phase 1b: the engine boundary (`conf/vp-3-boundary`)
 
