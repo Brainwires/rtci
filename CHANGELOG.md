@@ -146,14 +146,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
   `setting`, measured).
 
-- **RFC 7941 section 4.2.3: MID and RtpStreamId are sent until delivered, not on every
-  packet.** A sender stamped the MID and RtpStreamId header extensions on every RTP packet.
-  It now stamps them until a reception report block about the stream shows the receiver got
-  a packet from the first one that carried them (section 4.2.3: "only send header extensions
-  when needed", with "the normal RTCP report blocks" as the indicator of delivery), and again
-  for a new SSRC or a changed value (sections 4.2.4.1, 4.2.4.3). libwebrtc stops the same
-  way, on the first report about the SSRC. Engine behaviour change (RTP header extensions on
-  the wire). Rows: RFC7941-4.2.3-1, 4.2.4-1, 4.2.4-2 (`missing` -> `tested`).
 - **rtp**: `HevcPayloader` puts the parameter sets, AUD and prefix SEI that precede a slice in
   the slice's aggregation packet when the slice does not fit the packet being filled and they
   fit one together, instead of leaving them with the units before them (RFC 7798 section 5).

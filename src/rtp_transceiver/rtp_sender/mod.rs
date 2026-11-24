@@ -1021,7 +1021,6 @@ impl RTCRtpSender<'_> {
             .collect();
         let mixed = sender.extmap_allow_mixed();
         let two_byte_stream = sender.is_two_byte_stream(packet.header.ssrc);
-        let sdes_delivery = sender.sdes_delivery(packet.header.ssrc);
         let parameters = sender.get_parameters(media_engine, &negotiated_header_extensions);
         let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 
@@ -1126,20 +1125,12 @@ impl RTCRtpSender<'_> {
         // RFC 9143 sections 9.1 and 15: the offerer and answerer identify the m= section an
         // RTP stream belongs to with the MID header extension, and RFC 8852 section 3.3 / RFC
         // 8853 section 5.5 the encoding of a simulcast stream with RtpStreamId. Both go into
-        // the packets the sender writes when the extension is negotiated, until a reception
-        // report shows the receiver got them, and again when a value or the SSRC changes (RFC
-        // 7941 sections 4.2.3 and 4.2.4: "only send header extensions when needed", using
-        // "the normal RTCP report blocks" as the indicator of delivery; libwebrtc stops on
-        // the first report about the SSRC the same way). A value the application put there
-        // itself is left alone. The NACK responder turns the RtpStreamId of a packet it
-        // retransmits into RepairedRtpStreamId.
-        let values = format!(
-            "{}\0{}",
-            mid.as_deref().unwrap_or(""),
-            encoding.rtp_coding_parameters.rid
-        );
-        let stamp_sdes = !sdes_delivery.is_some_and(|delivery| delivery.delivered(&values));
-        let mut stamped = false;
+        // every packet the sender writes when the extension is negotiated: a receiver that
+        // was not told the SSRC (the engine's descriptions name none for simulcast, and RFC
+        // 9143 makes `a=ssrc` optional) needs one to associate the stream, at any time it
+        // starts to listen or the SSRC changes. A value the application put there itself is
+        // left alone. The NACK responder turns the RtpStreamId of a packet it retransmits
+        // into RepairedRtpStreamId.
         let stamps = [
             (::sdp::extmap::SDES_MID_URI, mid.as_deref().unwrap_or("")),
             (
@@ -1148,7 +1139,7 @@ impl RTCRtpSender<'_> {
             ),
         ];
         for (uri, value) in stamps {
-            if value.is_empty() || !stamp_sdes {
+            if value.is_empty() {
                 continue;
             }
             let Some(id) = parameters
@@ -1167,7 +1158,6 @@ impl RTCRtpSender<'_> {
                 packet
                     .header
                     .set_extension_upgrading(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
-                stamped = true;
             }
         }
 
@@ -1199,9 +1189,6 @@ impl RTCRtpSender<'_> {
         // the event packets sent before them.
         if from_application && in_dtmf_stream {
             sender.dtmf.on_media_packet(now, &mut packet);
-        }
-        if stamped {
-            sender.sdes_sent(packet.header.ssrc, &values, packet.header.sequence_number);
         }
 
         let track_id = sender.track().track_id().to_string();

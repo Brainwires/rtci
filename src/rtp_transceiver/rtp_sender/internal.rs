@@ -102,9 +102,6 @@ pub(crate) struct RTCRtpSenderInternal {
     /// the two-byte form from then on (RFC 8285 section 4.1.2: "A stream MUST contain only
     /// one-byte headers or only two-byte headers").
     two_byte_ssrcs: Vec<SSRC>,
-    /// The delivery of the MID and RtpStreamId header extensions of each stream (RFC 7941
-    /// section 4.2.3): stamped until a reception report shows the receiver got the packets.
-    sdes_delivery: Vec<(SSRC, SdesDelivery)>,
     /// Each encoding's share of the congestion controller's target (`allocate_bandwidth`):
     /// what its encoder is to aim for, by SSRC.
     allocated_bitrates: Vec<(SSRC, f64)>,
@@ -947,52 +944,6 @@ impl RTCRtpSenderInternal {
     /// Whether a stream may mix one- and two-byte header extensions (RFC 8285 section 6).
     pub(crate) fn extmap_allow_mixed(&self) -> bool {
         self.extmap_allow_mixed
-    }
-
-    /// What is known of the delivery of stream `ssrc`'s MID and RtpStreamId header extensions
-    /// (see [`SdesDelivery::delivered`]).
-    pub(crate) fn sdes_delivery(&self, ssrc: SSRC) -> Option<SdesDelivery> {
-        self.sdes_delivery
-            .iter()
-            .find(|(s, _)| *s == ssrc)
-            .map(|(_, delivery)| delivery.clone())
-    }
-
-    /// Records that a packet of stream `ssrc` with sequence number `sequence_number` carried
-    /// the MID / RtpStreamId header extensions with `values`.
-    pub(crate) fn sdes_sent(&mut self, ssrc: SSRC, values: &str, sequence_number: u16) {
-        match self.sdes_delivery.iter_mut().find(|(s, _)| *s == ssrc) {
-            Some((_, delivery)) => {
-                if delivery.values != values {
-                    *delivery = SdesDelivery::new(values);
-                }
-                delivery.first.get_or_insert(sequence_number);
-            }
-            None => {
-                // Bounded: a sender has a few streams; one that changed SSRC many times keeps
-                // the latest.
-                if self.sdes_delivery.len() >= 64 {
-                    self.sdes_delivery.remove(0);
-                }
-                let mut delivery = SdesDelivery::new(values);
-                delivery.first = Some(sequence_number);
-                self.sdes_delivery.push((ssrc, delivery));
-            }
-        }
-    }
-
-    /// A reception report block about the local stream `ssrc` arrived, with
-    /// `extended_highest` its extended highest sequence number received: once it reaches the
-    /// first packet that carried the header extensions, the receiver has them (RFC 7941
-    /// section 4.2.3: "The normal RTCP report blocks can also provide an indicator of
-    /// successful delivery").
-    pub(crate) fn on_report_block(&mut self, ssrc: SSRC, extended_highest: u32) {
-        if let Some((_, delivery)) = self.sdes_delivery.iter_mut().find(|(s, _)| *s == ssrc)
-            && let Some(first) = delivery.first
-            && (extended_highest as u16).wrapping_sub(first) < 0x8000
-        {
-            delivery.delivered = true;
-        }
     }
 
     /// Whether the stream `ssrc` has sent the two-byte form (see `two_byte_ssrcs`).
@@ -1840,33 +1791,5 @@ mod remote_format_order_test {
             vec![(63, "audio/red".to_owned()), (111, "audio/opus".to_owned())],
             "no remote order: the list as set"
         );
-    }
-}
-
-/// The delivery of a stream's MID / RtpStreamId header extensions (RFC 7941 section 4.2.3).
-#[derive(Default, Debug, Clone)]
-pub(crate) struct SdesDelivery {
-    /// The values the extensions carry (MID and rid), as one key.
-    values: String,
-    /// The sequence number of the first packet that carried them.
-    first: Option<u16>,
-    /// A reception report showed a packet from `first` on received.
-    delivered: bool,
-}
-
-impl SdesDelivery {
-    /// Whether the receiver has the header extensions with `values`, so packets need not
-    /// carry them (RFC 7941 section 4.2.3: "only send header extensions when needed"): a
-    /// reception report showed a packet that carried these values received. A changed value
-    /// (section 4.2.4.3) or a new SSRC (section 4.2.4.1) is not delivered yet.
-    pub(crate) fn delivered(&self, values: &str) -> bool {
-        self.delivered && self.values == values
-    }
-
-    fn new(values: &str) -> Self {
-        Self {
-            values: values.to_owned(),
-            ..Default::default()
-        }
     }
 }
