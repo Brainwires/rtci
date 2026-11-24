@@ -40,7 +40,8 @@ const RECORDED_RTX_SSRC: u32 = 0x1234_5679;
 /// DTLS handshake, whose ephemeral keys no seed reaches, so the datagrams' bytes differ from
 /// run to run whatever the chain wrote; this is what the chain wrote. Retransmissions and
 /// probe padding on the RTX stream are left out: the NACK responder draws the RTX stream's
-/// first sequence number from `rand`.
+/// first sequence number from `rand`. The CNAME of the SDES items is replaced by a fixed one:
+/// the peer connection draws it from `rand` too.
 struct WireTap {
     wire: Wire,
     read_queue: VecDeque<TaggedPacket>,
@@ -69,7 +70,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
                 Some(rtc::shared::marshal::Marshal::marshal(packet)?.to_vec())
             }
             Packet::Rtcp(packets) if !packets.is_empty() => {
-                Some(rtc::rtcp::packet::marshal(packets)?.to_vec())
+                let packets: Vec<Box<dyn rtc::rtcp::Packet>> = packets
+                    .iter()
+                    .map(|packet| without_cname(packet.as_ref()))
+                    .collect();
+                Some(rtc::rtcp::packet::marshal(&packets)?.to_vec())
             }
             _ => None,
         };
@@ -83,6 +88,25 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
     fn poll_write(&mut self) -> Option<TaggedPacket> {
         self.write_queue.pop_front()
     }
+}
+
+/// `packet`, with the text of any SDES CNAME item replaced by a fixed one of the same length.
+fn without_cname(packet: &dyn rtc::rtcp::Packet) -> Box<dyn rtc::rtcp::Packet> {
+    use rtc::rtcp::source_description::{SdesType, SourceDescription};
+    let Some(sdes) = packet.as_any().downcast_ref::<SourceDescription>() else {
+        return packet.cloned();
+    };
+    let mut sdes = sdes.clone();
+    for item in sdes
+        .chunks
+        .iter_mut()
+        .flat_map(|chunk| chunk.items.iter_mut())
+    {
+        if item.sdes_type == SdesType::SdesCname {
+            item.text = Bytes::from(vec![b'c'; item.text.len()]);
+        }
+    }
+    Box::new(sdes)
 }
 
 impl Interceptor for WireTap {
@@ -855,9 +879,20 @@ fn the_same_seed_gives_the_same_bytes_after_a_pause() -> Result<()> {
     // The sender wrote sender reports (RTCP packet type 200 first in a compound packet).
     assert!(first[0].iter().any(|packet| packet.get(1) == Some(&200)));
     for (peer, (first, second)) in first.iter().zip(&second).enumerate() {
-        for (index, (a, b)) in first.iter().zip(second).enumerate() {
-            assert_eq!(a, b, "peer {peer}: packet {index} differs");
-        }
+        let differing: Vec<(usize, &Vec<u8>, &Vec<u8>)> = first
+            .iter()
+            .zip(second)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(index, (a, b))| (index, a, b))
+            .collect();
+        assert!(
+            differing.is_empty(),
+            "peer {peer}: {} of {} packets differ, the first: {:?}",
+            differing.len(),
+            first.len(),
+            &differing[..differing.len().min(3)]
+        );
         assert_eq!(first.len(), second.len(), "peer {peer}: packets written");
     }
     Ok(())
