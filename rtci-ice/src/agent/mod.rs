@@ -1319,8 +1319,13 @@ impl Agent {
         // A signalled TCP active candidate has no listening port (RFC 6544 §4.5: port 9): it
         // initiates connections and is reached as the peer-reflexive candidate its checks
         // create on one of our passive candidates. That peer-reflexive one, which carries the
-        // connection's real source port, is kept.
-        if c.tcp_type() == TcpType::Active && c.candidate_type() != CandidateType::PeerReflexive {
+        // connection's real source port, is kept. Two lite agents send no checks: there the
+        // active candidate is the remote side of a pair the controlling agent may select, and
+        // whose connection it opens itself (RFC 6544 Section 6.1).
+        if c.tcp_type() == TcpType::Active
+            && c.candidate_type() != CandidateType::PeerReflexive
+            && !(self.lite && self.remote_lite)
+        {
             debug!(
                 "Ignoring remote candidate with tcptype active: {}",
                 c.address()

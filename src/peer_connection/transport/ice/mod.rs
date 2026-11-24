@@ -306,9 +306,11 @@ impl IceTransport {
     pub(crate) fn add_remote_candidate(&mut self, c: Candidate) -> Result<bool> {
         // cannot check for network yet because it might not be applied
         // when mDNS hostame is used.
-        if c.tcp_type() == TcpType::Active {
+        if c.tcp_type() == TcpType::Active && !(self.agent.is_lite() && self.agent.is_remote_lite())
+        {
             // TCP Candidates with tcptype active will probe server passive ones, so
-            // no need to do anything with them.
+            // no need to do anything with them. Two lite agents send no checks: the agent
+            // takes the candidate (RFC 6544 section 6.1).
             log::info!("Ignoring remote candidate with tcpType active: {c}");
             return Ok(true);
         }
