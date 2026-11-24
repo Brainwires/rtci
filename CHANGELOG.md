@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **congestion control (GCC), the over-use detector's threshold adapts over the arrival
+  gaps** (`conf/gcc-9-draft-threshold-time-base`): draft-ietf-rmcat-gcc-02 section 5.4,
+  `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)|-del_var_th(i-1))`, t(i)
+  the arrival time of group i, is now the default (`ThresholdTimeBase::Arrival`, for `Gcc`,
+  `DefaultInterceptorOptions::gcc_threshold_time_base` and the `Rfc` profile row
+  `gcc.threshold-time-base`). The earlier default, the gap between the readings on the
+  sender's clock capped at 100 ms, stays as `ThresholdTimeBase::Departure` (a setting, no
+  profile selects it); `Chrome` keeps libwebrtc's capped arrival gap (`ArrivalCapped`). It was
+  kept as the default because it measured better; since the draft's decrease on every update
+  (0.1.0) it no longer does. Measured (`rtci-interceptor/tests/rfc8836_multi_flow.rs`, hosted
+  run 45416144506, against Departure): two flows on one bottleneck share 0.48 / 0.50 with a
+  queueing delay of 2.9 ms mean and 11.0 ms p95 (0.49 / 0.49, 18.5 and 93.2 ms); a late flow
+  0.49 (0.50); beside a TCP-like transfer 0.33 of the path with a 0.05 s buffer (0.25) and
+  **0.14 with a 0.2 s buffer (0.22): the cost**, above the tests' bound of 0.05. The
+  capacity-cap call (`tests/capacity_cap_video_rtc2rtc.rs`, six seeds on three wall clocks,
+  hosted run 45416130268 against 0.1.0's 45407054812): without a pacer freeze, oldest picture
+  and retransmissions unchanged, 249 to 281 kbit/s under the 300 kbit/s cap (246 to 252),
+  1101 to 1501 kbit/s on average 15 to 25 s after it (1060 to 1363); with the pacer freeze
+  0.97 to 1.87 s (0.97 to 1.91), oldest picture 6.01 to 9.83 s (5.56 to 10.23), 94 to 106
+  retransmissions (90 to 104), 154 to 231 kbit/s under the cap (122 to 230), recovery 862 to
+  2500 kbit/s (646 to 2500). The lossy reordering sweep (48 cells) is unchanged but for two
+  cells of 100 ms reordering at 2 Mbit/s, higher (1 %: 331 -> 340 kbit/s, 5 %: 100 -> 218);
+  the rate-limited link 574 / 539 / 535 kbit/s (574 / 538 / 535). Audit row GCC-5.4-4 is
+  `tested`.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,

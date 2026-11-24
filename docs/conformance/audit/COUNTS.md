@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5033 | 25 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
+| MUST | 5034 | 24 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
 | SHOULD | 874 | 0 | 2 | 4 | 48 | 38 | 1 | 327 | 1294 |
 | MAY | 458 | 0 | 0 | 18 | 30 | 100 | 0 | 172 | 778 |
 | PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
-| all | 6434 | 25 | 9 | 24 | 92 | 144 | 1 | 1166 | 7895 |
+| all | 6435 | 24 | 9 | 24 | 92 | 144 | 1 | 1166 | 7895 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5080 | 5065 | 99.7 | 5033 | 99.1 |
+| MUST | 5080 | 5065 | 99.7 | 5034 | 99.1 |
 | SHOULD | 967 | 876 | 90.6 | 874 | 90.4 |
 | MAY | 606 | 458 | 75.6 | 458 | 75.6 |
 | PROC | 76 | 69 | 90.8 | 69 | 90.8 |
@@ -51,7 +51,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 35 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 1 | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 7 |
-| `draft-ietf-rmcat-gcc.md` | MUST | 33 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 35 |
+| `draft-ietf-rmcat-gcc.md` | MUST | 34 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 35 |
 | `draft-ietf-rmcat-gcc.md` | SHOULD | 15 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 17 |
 | `draft-ietf-rmcat-gcc.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc2198.md` | MUST | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 13 |
