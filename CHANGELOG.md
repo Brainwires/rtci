@@ -274,15 +274,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Browser cell: the engine's ULPFEC in RED rebuilt by the browser.** `scenarios.spec.mjs`
-  has Rust send VP8 in RED with ULPFEC (the `Chrome` profile's form), NACK off on both sides,
-  and checks that the browser decodes every frame although Rust's sender discarded every
-  tenth media packet after the FEC protected it (`examples/interop-peer`
-  `?drop_video_every=N`, reported as `videoDropped`). The earlier finding that Chromium does
-  not rebuild from the engine's FEC was wrong: the packets are byte for byte what libwebrtc's
-  `UlpfecReceiver` reads, and Chromium rebuilds from them; the earlier cell's threshold under
-  random netem loss failed on frames whose media and FEC packets were both dropped (VP8
-  without NACK then waits for a key frame). No engine change.
 - **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
   section 6.2): `FlexFec03Encoder` builds no repair packet larger than
   `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
