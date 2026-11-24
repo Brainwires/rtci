@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **sctp** (sctp-22, pass2): an expiry of T1-init or T1-cookie backs off the association's
+  RTO, as RFC 9260 5.1 says ("The T1-init timer and T1-cookie timer SHOULD follow the same
+  rules given in Section 6.3", rule E2: "set RTO = RTO * 2"). Each handshake timer restarts
+  with the backed-off RTO; T1-cookie starts with what T1-init's expiries left, and the first
+  DATA after the handshake starts T3-rtx with it until a round trip is measured. Before, each
+  timer doubled its own interval from RTO.Initial and the RTO was left alone (the test
+  `handshake_timers_back_off_on_their_own_and_leave_the_rto_alone` pinned that on purpose;
+  the commit that added it, 6fedf271, chose it after the 16 s data-channel delay it fixed,
+  which came from T3-rtx backoff, not from the handshake timers). That form is libwebrtc
+  dcSCTP's and stays as `TransportConfig::with_handshake_timers_back_off_rto(false)` and
+  `SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto(false)`, the `Chrome`
+  behaviour profile's value. What a peer sees: after a handshake that lost packets the first
+  DATA is retransmitted later (after three lost INITs and three lost COOKIE ECHOs, 60 s
+  instead of 1 s) unless the round trip is measured first. Engine behaviour change: yes
+  (SCTP timers); alone in a train round.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

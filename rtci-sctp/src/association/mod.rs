@@ -326,6 +326,8 @@ pub struct Association {
     max_receive_message_size: u32,
     /// See [`TransportConfig::with_zero_window_overcommit`].
     zero_window_overcommit: bool,
+    /// See [`TransportConfig::with_handshake_timers_back_off_rto`].
+    handshake_timers_back_off_rto: bool,
     /// The partial delivery point (RFC 6458 8.1.21): see
     /// [`TransportConfig::with_partial_delivery_point`].
     partial_delivery_point: u32,
@@ -624,6 +626,7 @@ impl Default for Association {
             max_message_size: 0,
             max_receive_message_size: 0,
             zero_window_overcommit: false,
+            handshake_timers_back_off_rto: true,
             partial_delivery_point: 1,
             will_send_shutdown: false,
             bytes_received: 0,
@@ -718,7 +721,7 @@ impl Default for Association {
             fwd_tsn_stream_map: FxHashMap::default(),
 
             rto_mgr: RtoManager::default(),
-            timers: TimerTable::default(),
+            timers: TimerTable::default().with_t1_following_rto(true),
 
             // Congestion control parameters
             max_receive_buffer_size: 0,
@@ -818,6 +821,7 @@ impl Association {
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
             zero_window_overcommit: config.zero_window_overcommit(),
+            handshake_timers_back_off_rto: config.handshake_timers_back_off_rto(),
             partial_delivery_point: config.partial_delivery_point(),
             transport_config: Some(config.clone()),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
@@ -841,7 +845,9 @@ impl Association {
             destination_port: config.remote_sctp_port(),
 
             rto_mgr: RtoManager::with_config(config.rto_config()),
-            timers: TimerTable::new(config.timer_config()).with_rto_config(config.rto_config()),
+            timers: TimerTable::new(config.timer_config())
+                .with_rto_config(config.rto_config())
+                .with_t1_following_rto(config.handshake_timers_back_off_rto()),
             pending_queue: {
                 let mut queue = PendingQueue::with_scheduler(config.stream_scheduler());
                 queue.set_packet_budget(mtu.saturating_sub(COMMON_HEADER_SIZE) as usize);
@@ -6336,9 +6342,22 @@ impl Association {
         self.awake_write_loop();
     }
 
+    /// RFC 9260 5.1: "The T1-init timer and T1-cookie timer SHOULD follow the same rules
+    /// given in Section 6.3": an expiry backs off the path's RTO (6.3.3 E2, bounded by
+    /// RTO.Max), which the timer is started again with, as the next handshake timer and the
+    /// first T3-rtx are, until a round trip is measured. Not with
+    /// `TransportConfig::with_handshake_timers_back_off_rto(false)` (dcSCTP's form), where
+    /// the timer doubles its own interval and the RTO is left alone.
+    fn back_off_rto_for_handshake_timer(&mut self) {
+        if self.handshake_timers_back_off_rto {
+            self.rto_mgr.backoff();
+        }
+    }
+
     fn on_retransmission_timeout(&mut self, timer_id: Timer, n_rtos: usize, now: Instant) {
         match timer_id {
             Timer::T1Init => {
+                self.back_off_rto_for_handshake_timer();
                 if let Err(err) = self.send_init() {
                     debug!(
                         "[{}] failed to retransmit init (n_rtos={}): {:?}",
@@ -6348,6 +6367,7 @@ impl Association {
             }
 
             Timer::T1Cookie => {
+                self.back_off_rto_for_handshake_timer();
                 if let Err(err) = self.send_cookie_echo() {
                     debug!(
                         "[{}] failed to retransmit cookie-echo (n_rtos={}): {:?}",

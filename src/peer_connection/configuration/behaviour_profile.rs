@@ -701,6 +701,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| sctp_max_retransmissions_shown(s.sctp_max_retransmissions),
     },
     {
+        id: "sctp.handshake-timers-back-off-rto",
+        setting: "SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto",
+        clause: "RFC 9260 5.1 (SHOULD), 6.3.3 E2",
+        rfc: true => "true",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::DcSctpSocket @ a222406d: t1_init_ and t1_cookie_ are timers of their own (TimerOptions(options.t1_init_timeout / t1_cookie_timeout, TimerBackoffAlgorithm::kExponential, max_init_retransmits)), 1 s each (net/dcsctp/public/dcsctp_options.h); their expiries touch no RTO",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_sctp_handshake_timers_back_off_rto(v),
+        read: |s: &SettingEngine| s.sctp_handshake_timers_back_off_rto,
+    },
+    {
         id: "datachannel.send-before-ack",
         setting: "SettingEngineBuilder::with_data_channel_send_before_ack",
         clause: "RFC 8832 6 (MAY), W3C webrtc-pc 6.2 send()",
