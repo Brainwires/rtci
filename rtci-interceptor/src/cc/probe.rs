@@ -220,7 +220,8 @@ impl ProbeController {
             last_probe: None,
             further: None,
             max_bitrate,
-            after_drop: true,
+            // REVIEW PROTOTYPE (throwaway): `REVIEW_NO_DROP_PROBE` turns the probes after a drop off.
+            after_drop: std::env::var_os("REVIEW_NO_DROP_PROBE").is_none(),
             peak: None,
             drop: None,
             drop_probe: false,
@@ -275,6 +276,7 @@ impl ProbeController {
             if now.saturating_duration_since(asked) < PROBE_RESULT_TIMEOUT {
                 return None;
             }
+            crate::trace(now, format_args!("probe outstanding cluster given up (no result in 1 s)"));
             // Its reports never came: the cluster is given up, and with it the sequence it
             // was part of.
             self.outstanding = None;
@@ -304,7 +306,8 @@ impl ProbeController {
             // gone, the path carries it again.
             self.drop_probe = true;
             Some(PROBE_AFTER_DROP_SHARE * before)
-        } else if sending < APPLICATION_LIMITED_SHARE * target
+        } else if std::env::var_os("REVIEW_NO_ALR_PROBE").is_none()
+            && sending < APPLICATION_LIMITED_SHARE * target
             && self.last_probe.is_none_or(|last| {
                 now.saturating_duration_since(last) >= PROBE_APPLICATION_LIMITED_INTERVAL
             })
@@ -317,6 +320,14 @@ impl ProbeController {
         }?;
 
         let rate = rate.min(self.max_bitrate);
+        crate::trace(
+            now,
+            format_args!(
+                "probe ask rate {rate:.0} target {target:.0} sending {sending:.0} drop_probe {} drop {:?}",
+                self.drop_probe,
+                self.drop.map(|(b, at)| (b as u64, now.saturating_duration_since(at).as_secs_f64()))
+            ),
+        );
         if rate <= target {
             // Nothing above the target is allowed, so there is nothing to ask.
             self.drop_probe = false;

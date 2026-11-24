@@ -256,6 +256,11 @@ impl RateController {
         self.measured_rate = measured;
     }
 
+    /// THROWAWAY trace.
+    pub(crate) fn trace_measured(&self) -> Option<f64> {
+        self.measured_rate
+    }
+
     /// Forget where the path's capacity was thought to be: the next climb is multiplicative.
     pub fn reset_convergence(&mut self) {
         self.convergence.reset();

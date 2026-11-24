@@ -215,6 +215,10 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 probing,
                 probe_packets: HashMap::new(),
                 probe_clusters: HashMap::new(),
+                trace_sent: [0; 16],
+                trace_unnumbered: 0,
+                trace_at: None,
+                trace_fb: 0,
                 sent: VecDeque::new(),
                 last_target: None,
                 estimator: self.estimator,
@@ -411,6 +415,12 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     last_target: Option<f64>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
+    /// THROWAWAY trace: octets sent since the last status line, by SSRC low nibble
+    /// (index 15: not a tracked stream), and when that line was.
+    trace_sent: [usize; 16],
+    trace_unnumbered: usize,
+    trace_at: Option<Instant>,
+    trace_fb: usize,
 }
 
 impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
@@ -582,7 +592,11 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         if let Some(feedback) = payload
             .downcast_ref::<rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc>(
         ) {
-            self.history.on_twcc_feedback_count(feedback.fb_pkt_count);
+            let missed = self.history.on_twcc_feedback_count(feedback.fb_pkt_count);
+            self.trace_fb += 1;
+            if missed > 0 {
+                crate::trace(now, format_args!("cc feedback packets lost {missed}"));
+            }
             let mut round_trip: Option<Duration> = None;
             for acknowledgement in self.timeline.convert_twcc(feedback) {
                 if let Some(rtt) = self.history.on_twcc_feedback(now, acknowledgement)
@@ -907,6 +921,16 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             let Some(state) = self.probe_clusters.remove(&cluster) else {
                 continue;
             };
+            crate::trace(
+                now,
+                format_args!(
+                    "cc cluster {cluster} complete sent {} reports {} arrived {} estimate {:?}",
+                    state.sent,
+                    state.reports.len(),
+                    state.reports.iter().filter(|r| r.arrived).count(),
+                    probe_estimate(&state.reports).map(|e| e as u64)
+                ),
+            );
             if let Some(estimate) = probe_estimate(&state.reports)
                 && let Some(probing) = self.probing.as_mut()
                 && let Some(estimate) = probing.on_result(cluster, estimate)
@@ -915,6 +939,27 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             }
         }
         // A cluster whose packets were never all reported is forgotten with its packets.
+        for (cluster, state) in &self.probe_clusters {
+            if now.saturating_duration_since(state.last_sent) >= PROBE_FORGET {
+                let mut missing: Vec<(u32, u16)> = self
+                    .probe_packets
+                    .iter()
+                    .filter(|(_, c)| *c == cluster)
+                    .map(|((ssrc, seq), _)| (*ssrc & 0xf, *seq))
+                    .collect();
+                missing.sort_unstable();
+                crate::trace(
+                    now,
+                    format_args!(
+                        "cc cluster {cluster} FORGOTTEN sent {} reports {} arrived {} unreported(ssrc nibble, seq) {missing:?} history unreported {}",
+                        state.sent,
+                        state.reports.len(),
+                        state.reports.iter().filter(|r| r.arrived).count(),
+                        self.history.unreported(),
+                    ),
+                );
+            }
+        }
         self.probe_clusters
             .retain(|_, state| now.saturating_duration_since(state.last_sent) < PROBE_FORGET);
         if self.probe_clusters.is_empty() {
@@ -978,6 +1023,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        crate::trace_peer(self.local_ssrcs.first().copied());
         if msg.message.custom::<crate::PathChanged>().is_some() {
             // The peer connection selected another candidate pair. The next inbound packet's
             // addresses are the new path's, whatever they are: the address-based detection
@@ -1044,6 +1090,48 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        crate::trace_peer(self.local_ssrcs.first().copied());
+        if let Packet::Rtp(ref rtp_packet) = msg.message.packet {
+            let tracked = self.streams.contains_key(&rtp_packet.header.ssrc);
+            let slot = if tracked {
+                (rtp_packet.header.ssrc & 0xf).min(14) as usize
+            } else {
+                15
+            };
+            self.trace_sent[slot] += rtp_packet.marshal_size();
+            if tracked && self.twcc_sequence_number(rtp_packet).is_none() {
+                self.trace_unnumbered += rtp_packet.marshal_size();
+            }
+            if self
+                .trace_at
+                .is_none_or(|at| msg.now.saturating_duration_since(at) >= Duration::from_secs(1))
+            {
+                let secs = self
+                    .trace_at
+                    .map_or(1.0, |at| msg.now.saturating_duration_since(at).as_secs_f64());
+                let kbps = |octets: usize| (octets as f64 * 8.0 / secs / 1000.0) as u64;
+                crate::trace(
+                    msg.now,
+                    format_args!(
+                        "cc sent kbit/s audio {} video {} rtx {} other {} untracked {} | without twcc number {} | feedback packets {} | target {:.0} history {} lost_fb {}",
+                        kbps(self.trace_sent[0]),
+                        kbps(self.trace_sent[1]),
+                        kbps(self.trace_sent[2]),
+                        kbps(self.trace_sent[3..15].iter().sum()),
+                        kbps(self.trace_sent[15]),
+                        kbps(self.trace_unnumbered),
+                        self.trace_fb,
+                        self.estimator.target_bitrate(),
+                        self.history.len(),
+                        self.history.lost_feedback(),
+                    ),
+                );
+                self.trace_sent = [0; 16];
+                self.trace_unnumbered = 0;
+                self.trace_fb = 0;
+                self.trace_at = Some(msg.now);
+            }
+        }
         if let Some(control) = msg.message.custom::<TmmbrControl>().copied() {
             let own_ssrc = self.own_ssrc();
             self.tmmbr_requests.on_control(control, own_ssrc);
@@ -1096,6 +1184,18 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                     }
                     // The pacer marked it as part of a cluster: its report is the cluster's.
                     if let Some(probe) = msg.message.custom::<ProbePacket>() {
+                        crate::trace(
+                            msg.now,
+                            format_args!(
+                                "cc probe packet cluster {} ssrc nibble {} seq {} twcc {:?} size {} padding {}",
+                                probe.cluster,
+                                rtp_packet.header.ssrc & 0xf,
+                                rtp_packet.header.sequence_number,
+                                twcc_sequence_number,
+                                size,
+                                rtp_packet.header.padding
+                            ),
+                        );
                         self.probe_packets.insert(
                             (rtp_packet.header.ssrc, rtp_packet.header.sequence_number),
                             probe.cluster,
@@ -1123,6 +1223,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+        crate::trace_peer(self.local_ssrcs.first().copied());
         self.history
             .prune_before(now.checked_sub(self.prune_horizon).unwrap_or(now));
 

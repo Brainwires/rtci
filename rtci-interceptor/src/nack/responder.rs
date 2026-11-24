@@ -1211,6 +1211,38 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             self.forget_discarded(&discard);
         }
 
+        // REVIEW PROTOTYPE (throwaway): the pacer gave up its queue. Nothing sent before is
+        // repaired any more, and the application is asked for a key frame on every stream.
+        if msg.message.custom::<crate::ReviewFlush>().is_some() {
+            let size = self.size;
+            let ssrcs: Vec<u32> = self.streams.keys().copied().collect();
+            for stream in self.streams.values_mut() {
+                if let Some(buffer) = SendBuffer::new(size) {
+                    stream.send_buffer = buffer;
+                }
+                stream.sent_at.iter_mut().for_each(|sent| *sent = None);
+                stream.last_retransmit.clear();
+            }
+            self.pending.clear();
+            self.pending_asked.clear();
+            self.pending_octets = 0;
+            self.in_pacer.clear();
+            self.release_at = None;
+            for media_ssrc in ssrcs {
+                self.read_queue.push_back(TaggedPacket {
+                    now,
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+                        rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                            sender_ssrc: 0,
+                            media_ssrc,
+                        },
+                    )]))
+                    .with(Attribute::DeliverToApplication),
+                });
+            }
+        }
+
         // A probe cluster the congestion controller asks for: fill it.
         if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
             let session = crate::RtpSession::of(&msg.message);

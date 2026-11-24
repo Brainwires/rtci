@@ -257,6 +257,41 @@ pub(crate) mod ulpfec;
 pub(crate) mod wire_image;
 pub(crate) mod xr;
 
+/// THROWAWAY collapse trace (never merged): (epoch, from s, to s).
+#[doc(hidden)]
+pub static TRACE_WINDOW: std::sync::Mutex<Option<(std::time::Instant, f64, f64)>> =
+    std::sync::Mutex::new(None);
+thread_local! {
+    /// THROWAWAY: which peer's chain is running (the high nibble of its first SSRC).
+    #[doc(hidden)]
+    pub static TRACE_PEER: std::cell::Cell<u32> = const { std::cell::Cell::new(9) };
+}
+/// THROWAWAY: whether a line at `now` would print.
+#[doc(hidden)]
+pub fn trace_on(now: std::time::Instant) -> bool {
+    TRACE_WINDOW.lock().unwrap().is_some_and(|(epoch, from, to)| {
+        let at = now.saturating_duration_since(epoch).as_secs_f64();
+        at >= from && at <= to
+    })
+}
+/// THROWAWAY trace line.
+#[doc(hidden)]
+pub fn trace(now: std::time::Instant, what: std::fmt::Arguments<'_>) {
+    if let Some((epoch, from, to)) = *TRACE_WINDOW.lock().unwrap() {
+        let at = now.saturating_duration_since(epoch).as_secs_f64();
+        if at >= from && at <= to {
+            println!("CTR p{} {:8.3} {what}", TRACE_PEER.with(|p| p.get()), at);
+        }
+    }
+}
+/// THROWAWAY: names the peer from one of its SSRCs.
+#[doc(hidden)]
+pub fn trace_peer(ssrc: Option<u32>) {
+    if let Some(ssrc) = ssrc {
+        TRACE_PEER.with(|p| p.set((ssrc >> 28).wrapping_sub(1)));
+    }
+}
+
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
 // shared bitrate handle, and the adaptive (RFC 3550 jitter + playout-delay extension) jitter buffer.
 pub use adaptive_jitter_buffer::{
@@ -388,7 +423,7 @@ pub use pacing::pacer::{
 };
 pub use pacing::sender::{
     DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
-    DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerDiscard,
+    DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerDiscard, ReviewFlush,
     PacerInterceptor, PacerPause, QueueOverflow as PacerQueueOverflow, RetransmissionsLeft,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};

@@ -373,6 +373,7 @@ pub struct PacerInterceptor {
     /// Outbound packets ready for the next interceptor: what passed through, plus
     /// anything this one generated.
     write_queue: VecDeque<TaggedPacket>,
+    trace_at: Option<Instant>,
 }
 
 impl PacerInterceptor {
@@ -404,6 +405,7 @@ impl PacerInterceptor {
             duplicate_retransmissions: 0,
             departed: Vec::new(),
             retransmissions_dropped: Vec::new(),
+            trace_at: None,
         }
     }
 
@@ -611,6 +613,13 @@ impl PacerInterceptor {
         if let Some(probe) = self.probe.as_mut() {
             probe.bucket.refill(now);
             if now.saturating_duration_since(probe.started) > PROBE_CLUSTER_TIMEOUT {
+                crate::trace(
+                    now,
+                    format_args!(
+                        "pacer cluster {} timed out, {:.0} bits unsent",
+                        probe.cluster, probe.remaining_bits
+                    ),
+                );
                 self.probe = None;
             }
         }
@@ -630,6 +639,7 @@ impl PacerInterceptor {
             })));
             probe.remaining_bits -= bits;
             if probe.remaining_bits <= 0.0 {
+                crate::trace(packet.now, format_args!("pacer cluster {} filled", probe.cluster));
                 self.probe = None;
             }
         }
@@ -680,10 +690,25 @@ impl PacerInterceptor {
             None => self.paused,
         };
         if change {
+            crate::trace(
+                now,
+                format_args!(
+                    "pacer pause {} queue {} packets {:.0} bits padding {} target {:.0} expected {:?}",
+                    if self.paused { "ENDS" } else { "BEGINS" },
+                    self.queue.len(),
+                    self.queued_bits,
+                    self.padding.len(),
+                    self.target(),
+                    expected
+                ),
+            );
             self.paused = !self.paused;
             if self.paused {
                 self.pauses += 1;
                 self.pause_began = Some(now);
+                if std::env::var_os("REVIEW_FLUSH").is_some() {
+                    self.review_flush(now);
+                }
             }
         }
         change
@@ -692,6 +717,35 @@ impl PacerInterceptor {
     /// Whether new media written at `written` is what a source that follows the pause left
     /// behind: written before the pause in force (or the last one) began, or within
     /// [`PAUSE_GRACE`] of that. It is never discarded for its age (see "Pausing the source").
+    /// REVIEW PROTOTYPE (throwaway): when a pause begins, everything queued is given up (the
+    /// retransmissions reported dropped, the media discarded with a key-frame request) and the
+    /// NACK responder is told to stop repairing what was sent before.
+    fn review_flush(&mut self, now: Instant) {
+        let mut by_ssrc: Vec<(u32, Vec<TaggedPacket>)> = Vec::new();
+        for packet in std::mem::take(&mut self.queue) {
+            if packet.message.has(&Attribute::Retransmission) {
+                self.retransmission_dropped(&packet);
+                self.dropped += 1;
+            } else if let Packet::Rtp(rtp) = &packet.message.packet {
+                let ssrc = rtp.header.ssrc;
+                match by_ssrc.iter_mut().find(|(s, _)| *s == ssrc) {
+                    Some((_, list)) => list.push(packet),
+                    None => by_ssrc.push((ssrc, vec![packet])),
+                }
+            }
+        }
+        self.queued_bits = 0.0;
+        for (ssrc, packets) in by_ssrc {
+            self.discard(now, ssrc, &packets);
+        }
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(ReviewFlush))),
+        });
+    }
+
     fn written_before_pause(&self, written: Instant) -> bool {
         self.pause_began
             .is_some_and(|began| written <= began + PAUSE_GRACE)
@@ -867,6 +921,10 @@ impl PacerInterceptor {
 /// source is above the target**: what the application writes has to come down to the target
 /// it is given (`Attribute::TargetBitrateChanged`, `RTCRtpSender::target_bitrates`). Read with
 /// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+/// REVIEW PROTOTYPE (throwaway): the pacer gave up its queue at a pause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewFlush;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacerDiscard {
     /// The stream the packets were of.
@@ -944,6 +1002,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        crate::trace_peer(self.audio.iter().min().copied());
         // Follow the congestion controller's estimate.
         //
         // It arrives on the **read** leg because that is the only one it can cross on. The
@@ -977,6 +1036,20 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             let mut bucket = LeakyBucket::new(request.bits_per_second)
                 .with_burst_bits(crate::pacing::pacer::MIN_BURST_BITS);
             bucket.refill(msg.now);
+            crate::trace(
+                msg.now,
+                format_args!(
+                    "pacer cluster {} start rate {:.0} octets {} queue {} ({} rtx) padding {} paused {} target {:.0}",
+                    request.cluster,
+                    request.bits_per_second,
+                    request.octets,
+                    self.queue.len(),
+                    self.queue.iter().filter(|p| p.message.has(&Attribute::Retransmission)).count(),
+                    self.padding.len(),
+                    self.paused,
+                    self.target()
+                ),
+            );
             self.probe = Some(ActiveProbe {
                 cluster: request.cluster,
                 bucket,
@@ -994,6 +1067,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        crate::trace_peer(self.audio.iter().min().copied());
         let now = msg.now;
         let rtp = matches!(msg.message.packet, Packet::Rtp(_));
         self.enqueue(msg)?;
@@ -1012,6 +1086,27 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
+        crate::trace_peer(self.audio.iter().min().copied());
+        if self
+            .trace_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_millis(500))
+        {
+            self.trace_at = Some(now);
+            crate::trace(
+                now,
+                format_args!(
+                    "pacer status queue {} ({} rtx) {:.0} bits padding {} target {:.0} paused {} dropped {} discarded_frames {}",
+                    self.queue.len(),
+                    self.queue.iter().filter(|p| p.message.has(&Attribute::Retransmission)).count(),
+                    self.queued_bits,
+                    self.padding.len(),
+                    self.target(),
+                    self.paused,
+                    self.dropped,
+                    self.discarded_frames
+                ),
+            );
+        }
         self.release_due(now);
         self.tell_application_ward(now);
         Ok(())

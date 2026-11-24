@@ -135,6 +135,10 @@ pub struct Gcc {
     loss_at_queue_limit_is_overuse: bool,
     queue_limit: QueueLimitDetector,
     threshold_time_base: ThresholdTimeBase,
+    /// REVIEW PROTOTYPE (throwaway): when the estimate was last lowered.
+    review_last_cut: Option<Instant>,
+    trace_unreported: usize,
+    trace_qlimit: bool,
 }
 
 impl Default for Gcc {
@@ -197,6 +201,9 @@ impl Gcc {
             loss_at_queue_limit_is_overuse: true,
             queue_limit: QueueLimitDetector::new(),
             threshold_time_base: ThresholdTimeBase::default(),
+            review_last_cut: None,
+            trace_unreported: 0,
+            trace_qlimit: false,
         }
     }
 
@@ -386,31 +393,78 @@ impl BandwidthEstimator for Gcc {
             .newest_arrival
             .and_then(|newest| self.rate.rate_bits_per_second(newest));
         // A loss out of a queue at its limit: the queue would be growing, had it room.
+        self.trace_qlimit = false;
         if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
             usage = Usage::Over;
+            self.trace_qlimit = true;
         }
         let delay_target = self.delay_control.update(now, usage, received);
 
         // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
         // that did not: "a CE mark is a congestion signal" (RFC 8888 section 7 with RFC 6679
         // section 7.3.3: the sender reacts to it as to a lost packet, without retransmitting).
+        // REVIEW PROTOTYPE (throwaway, `REVIEW_LOSS_EPOCH`): one response per congestion event.
+        // Packets that left before the estimate was last lowered were sent at a rate that no
+        // longer applies; their loss is not counted against the lowered estimate.
+        let before_update = self.target;
+        if std::env::var_os("REVIEW_LOSS_EPOCH").is_some() {
+            let since = self.review_last_cut;
+            let counted: Vec<&PacketReport> = reports
+                .iter()
+                .filter(|report| since.is_none_or(|cut| report.departure >= cut))
+                .collect();
+            let lost = counted
+                .iter()
+                .filter(|report| !report.arrived || report.ecn == Ecn::Ce)
+                .count();
+            self.loss_control.update(now, lost, counted.len());
+        } else {
         let lost = reports
             .iter()
             .filter(|report| !report.arrived || report.ecn == Ecn::Ce)
             .count();
         self.loss_control.update(now, lost, reports.len());
+        }
         if self.loss_capped_by_delay {
             self.loss_control.cap(delay_target);
         }
         let loss_target = self.loss_control.target();
         log::debug!(
-            "gcc: feedback of {} packets, {lost} lost; loss average {:?}, delay target {delay_target:.0}, loss target {loss_target:.0}",
+            "gcc: feedback of {} packets; loss average {:?}, delay target {delay_target:.0}, loss target {loss_target:.0}",
             reports.len(),
             self.loss_control.average_loss(),
         );
 
         // Whichever half is more pessimistic wins, clamped once (D3).
         self.target = delay_target.min(loss_target).clamp(self.min, self.max);
+        if crate::trace_on(now) {
+            let unreported = std::mem::take(&mut self.trace_unreported);
+            let lost = reports
+                .iter()
+                .filter(|report| !report.arrived || report.ecn == Ecn::Ce)
+                .count();
+            crate::trace(
+                now,
+                format_args!(
+                    "gcc reports {} lost {lost} usage {usage:?} state {:?} received {:?} measured {:?} band {:?} delay {delay_target:.0} loss {loss_target:.0} avg_loss {:.3} target {:.0} (was {before_update:.0}) unreported_octets {unreported} qlimit {} rtt {:?} fb_interval {:?}",
+                    reports.len(),
+                    self.delay_control.state(),
+                    received.map(|r| r as u64),
+                    self.delay_control.trace_measured().map(|r| r as u64),
+                    self.delay_control.convergence_band().map(|(a, b)| (a as u64, b as u64)),
+                    self.loss_control.average_loss().unwrap_or(-1.0),
+                    self.target,
+                    self.trace_qlimit,
+                    self.round_trip_time.map(|d| d.as_millis()),
+                    self.feedback_interval.map(|d| d.as_millis()),
+                ),
+            );
+        } else {
+            self.trace_unreported = 0;
+        }
+        if self.target < before_update {
+            self.review_last_cut = Some(now);
+        }
 
         // Feedback arrived: the missing-feedback clock starts again when the next packet
         // leaves.
@@ -428,6 +482,7 @@ impl BandwidthEstimator for Gcc {
     /// A packet that no per-packet feedback will report: the flow is not paused, and its
     /// feedback is not awaited.
     fn on_unreported_packet_sent(&mut self, now: Instant, _size: usize) {
+        self.trace_unreported += _size;
         if let Some(last) = self.last_sent {
             self.resume_after(now.saturating_duration_since(last));
         }
@@ -436,6 +491,7 @@ impl BandwidthEstimator for Gcc {
 
     fn on_packet_sent(&mut self, now: Instant, size: usize) {
         self.on_unreported_packet_sent(now, size);
+        self.trace_unreported -= size;
         self.last_reported_sent = Some(now);
         // Only once feedback has a rhythm (two reports) is its absence unexpected: a receiver
         // that never sends any is handled by the receiver-report fallback, and one that has
@@ -471,6 +527,10 @@ impl BandwidthEstimator for Gcc {
     }
 
     fn on_probe_result(&mut self, now: Instant, bits_per_second: f64) {
+        crate::trace(
+            now,
+            format_args!("gcc probe result {bits_per_second:.0} against target {:.0}", self.target),
+        );
         if !bits_per_second.is_finite() || bits_per_second <= 0.0 {
             return;
         }
@@ -541,6 +601,15 @@ impl BandwidthEstimator for Gcc {
         while let Some(deadline) = self.feedback_deadline
             && now >= deadline
         {
+            crate::trace(
+                now,
+                format_args!(
+                    "gcc NO FEEDBACK for {:?}: target {:.0} halved; last feedback {:?} ago",
+                    self.effective_feedback_timeout(),
+                    self.target,
+                    self.last_feedback.map(|at| now.saturating_duration_since(at).as_millis())
+                ),
+            );
             self.target = (self.target * FEEDBACK_TIMEOUT_DECREASE).clamp(self.min, self.max);
             self.delay_control.set_target(self.target);
             self.loss_control.cap(self.target);
