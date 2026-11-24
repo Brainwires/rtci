@@ -53,7 +53,9 @@ turn = { version = "0.22.0", path = "rtc-turn", package = "rtc-turn", default-fe
 # The examples' signalling helper is not published: path only, so `cargo publish` drops the
 # root crate's dev-dependency on it.
 signal = { path = "examples/signal", package = "rtc-signal" }
-stream-driver = { version = "0.22.0", path = "examples/stream-driver", package = "rtc-stream-driver" }
+# The reference driver depends on `rtc` (its `peer` module), so the root crate's dev-dependency
+# on it has no version (`cargo publish` drops it) and leaves that feature off.
+stream-driver = { path = "examples/stream-driver", package = "rtc-stream-driver", default-features = false }
 
 # common dependencies
 sansio = "1"

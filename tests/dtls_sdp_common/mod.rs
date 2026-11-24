@@ -194,6 +194,8 @@ pub struct World {
     pub now: Instant,
     /// Whether datagrams are delivered; `false` cuts the network.
     pub connected: bool,
+    /// The datagrams sent to an address no peer has (a STUN server, say): (from, to, data).
+    pub undelivered: Vec<(SocketAddr, SocketAddr, BytesMut)>,
 }
 
 impl World {
@@ -202,6 +204,7 @@ impl World {
             peers: vec![a, b],
             now: Instant::now(),
             connected: true,
+            undelivered: Vec::new(),
         }
     }
 
@@ -226,6 +229,7 @@ impl World {
                     continue;
                 }
                 let Some(peer) = self.peers.iter_mut().find(|p| p.addr == to) else {
+                    self.undelivered.push((from, to, data));
                     continue;
                 };
                 let _ = peer.pc.handle_read(TaggedBytesMut {

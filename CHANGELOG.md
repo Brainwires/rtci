@@ -745,6 +745,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
+  (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
+  set of local candidates, on transport addresses the previous DTLS association did not use
+  (RFC 8842 section 5.1). It names the transport (ICE and DTLS transport ids, the mids of its
+  sections, the first one's `sdpMLineIndex`), the reason (`NewDtlsAssociation`,
+  `SrtpRekeying` on the side whose key neared its lifetime, `TransportReplaced` for the
+  transport set up after an answer rejected every m= section, `DiscardedBySetting` for an ICE
+  restart with `with_discard_local_candidates_during_ice_restart(true)`) and the refused
+  addresses. It fires when the description that begins the transport's gathering is set
+  locally, right before its `gatheringstatechange` to "gathering"; not with
+  `with_dtls_new_association_on_previous_addresses(true)`. Crate documentation: section
+  "Gathering". Every route of `add_local_candidate` (the default transport, another one by
+  `sdp_mid`) returns `ErrICECandidateAddressOfPreviousDtlsAssociation` unchanged for a refused
+  address (tests below).
+- **rtc-stream-driver**: new `peer` module (feature `peer`, on by default; depends on `rtc`):
+  `PeerDriver` drives a whole peer connection over sockets it owns, its UDP host sockets
+  included (`PeerDriverConfig`: addresses, UDP port range, the TCP driver's settings). It
+  gathers when a transport begins gathering, and on `OnLocalCandidatesNeeded` binds new UDP
+  ports in its range, adds their candidates for the event's section and ends the generation
+  by itself; the previous sockets stay open until a pair on a new one is selected for that
+  transport and then for `retired_socket_linger` (5 s by default: the peer may still send to
+  the previous address until its own selection switches; closing at once lost a packet on
+  macOS), or until the transport closes. With the opt-out it keeps its sockets and gives their
+  candidates to each new generation. Tests (`examples/stream-driver/tests/peer.rs`, no
+  gathering in test code): `stop_all_then_add_carries_media_on_new_sockets`,
+  `automatic_srtp_re_keying_carries_every_packet_onto_new_sockets`,
+  `with_the_opt_out_the_driver_keeps_its_sockets`.
+- **interop-peer**: gathers on a new UDP socket on `OnLocalCandidatesNeeded` and trickles the
+  candidate to the browser; `?previous_addresses=1` builds it with
+  `with_dtls_new_association_on_previous_addresses(true)`. Browser cells "transceiver stop,
+  then a new transceiver reuses or keeps the m-line" (the default: Rust's answer lists none of
+  the previous candidates) and its twin with the opt-out (the answer lists them again).
+
 - **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
   (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
   RFC6544-9.2-1 `tested`.
@@ -835,6 +868,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
 ### Bug Fixes
+
+- **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
+  dropped the local candidates (a new DTLS association on new ports), the side that selected
+  the new pair first dropped the packets the peer still sent on the previous pair before its
+  own selection switched (the controlled side selects at the nomination request, the
+  controlling one at its response): one packet lost at each renewal, seen through
+  `rtc-stream-driver` on macOS and Windows. The previous path's data is now taken for 5 s
+  after the new pair is selected (`Agent::retired_media_path`, `RETIRED_MEDIA_PATH_GRACE`),
+  and routed to its transport (`on_address`)
+  (`data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received`).
+
+- **rtc** (engine-run server-reflexive gathering, RFC 8842 section 5.1): after a new DTLS
+  association, the probe from a refused UDP base went on; a late answer to it would have been
+  announced as a server-reflexive candidate of the new generation whose base is the previous
+  association's socket. The probes of the refused bases now end with the restart (and with the
+  replacement of a closed transport); the new host candidates the application adds start
+  their own (`after_a_new_association_the_engine_gathers_server_reflexive_candidates_from_the_new_port`).
 
 - **rtc** (multi-transport ICE restart, `conf/mt-9-restart-drops-candidates`): with several
   transports (sections outside a BUNDLE group, several BUNDLE groups), a transport other than
@@ -1048,6 +1098,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes for integrators
 
+- **A transport that needs new candidates** (`conf/mt-10-gather-anew`): since the RFC 8842
+  section 5.1 default, a new DTLS association (an ICE restart for one: `renew_dtls_association`,
+  automatic SRTP re-keying, a peer's new `a=tls-id`; or the transport set up after an answer
+  rejected every m= section) drops the transport's local candidates and refuses their UDP
+  addresses. An application that does not gather again loses connectivity on that transport;
+  the browser cell "transceiver stop, then a new transceiver" failed that way with the
+  workspace's own interop peer. Handle `OnLocalCandidatesNeeded`: bind new UDP ports, add a
+  host candidate for each with `sdp_mid` = the event's first mid, signal the candidates, end
+  the generation with an empty candidate for that mid, and keep the previous sockets open
+  until a pair on a new one is selected (`SelectedCandidatePairChange` on that transport) or
+  the transport closes. Engine-run STUN and TURN gathering follow the new host candidates by
+  themselves; the ICE-TCP listener is kept. `rtc_stream_driver::peer::PeerDriver` does all of
+  it. An application with one fixed socket sets
+  `with_dtls_new_association_on_previous_addresses(true)` instead (no event; the candidates
+  and addresses are kept). W3C gathering states: a restarting transport goes to "gathering"
+  when the description is set and to "complete" at the application's end-of-candidates; the
+  transport that replaced a closed one starts "new" (a new `RTCIceTransport`) and does the
+  same. A rolled-back local offer takes its restart back (the previous candidates and
+  addresses are in use again): sockets bound for it may be closed.
+- **Publishing order**: `rtc-stream-driver` now depends on `rtc` (feature `peer`), and the root
+  crate's dev-dependency on it has no version, so `rtc` is published before
+  `rtc-stream-driver` (docs/releasing.md).
+
 - **ICE restart, answerer**: candidates gathered for the restart may be added as soon as the
   restart offer is applied (`set_remote_description`); they need not be added again after
   `set_local_description(answer)`, whether or not
@@ -1057,6 +1130,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation's, otherwise the current one's.
 
 ### Testing
+
+- **rtc** (`conf/mt-10-gather-anew`): rtc-to-rtc tests driven by `OnLocalCandidatesNeeded`:
+  `transport_close_rtc2rtc.rs::the_new_transport_asks_for_candidates_on_new_addresses_and_the_event_drives_the_gathering`
+  (stop all, then a new transceiver; the twin of the browser cell) and
+  `with_the_opt_out_the_new_transport_carries_media_on_the_previous_addresses`;
+  `dtls_association_new_three_tuple.rs::a_new_association_tells_the_application_to_gather_on_new_addresses`,
+  `a_restart_that_discards_the_candidates_asks_for_candidates_on_any_address`, and the opt-out
+  test now asserts no event; `multi_transport_rtc2rtc.rs::automatic_srtp_re_keying_renews_every_transport_on_new_addresses`
+  gathers from the events alone (reasons `SrtpRekeying` / `NewDtlsAssociation`, every
+  transport, the refused address offered through the section's mid).
+- **ci**: `scripts/check-nested-locks.py` in the inventory job: `cargo metadata --locked` on
+  each nested workspace with a committed `Cargo.lock` (`scripts/test-env/peers/layers`,
+  `scripts/test-env/peers/str0m`), so a stale lock fails early.
 
 - **ice-tcp**: `with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed`
   no longer depends on real time (`conf/flake-1-icetcp-vp8`). It failed once on GitHub's

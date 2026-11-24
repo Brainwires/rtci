@@ -192,6 +192,13 @@ pub(crate) struct PreviousGeneration {
 /// Most consent transactions of a replaced generation kept open at a time.
 pub(crate) const MAX_PREVIOUS_GENERATION_TRANSACTIONS: usize = 8;
 
+/// How long data is still taken on the path an ICE restart replaced, once the restart's pair
+/// is selected: each side selects on its own (the controlled agent at the nomination request,
+/// the controlling one at its response), so the peer may send on the previous path until its
+/// own selection switches. A datagram on that path, from that peer address, is the peer's (the
+/// previous generation's checks established it).
+pub(crate) const RETIRED_MEDIA_PATH_GRACE: Duration = Duration::from_secs(5);
+
 /// Most early requests remembered: one per (local, remote) address pair, so this bounds how
 /// many paths a peer can have probed before its description arrives.
 pub(crate) const MAX_EARLY_REQUESTS: usize = 16;
@@ -384,6 +391,9 @@ pub struct Agent {
     /// The selected pair's path at the moment an ICE restart was applied, kept until the
     /// restart selects a pair (or the agent fails or closes). See [`Agent::media_path`].
     pub(crate) previous_media_path: Option<MediaPath>,
+    /// `previous_media_path` once the restart selected a pair, with until when data is still
+    /// taken on it ([`RETIRED_MEDIA_PATH_GRACE`]). Nothing is sent on it.
+    pub(crate) retired_media_path: Option<(MediaPath, Instant)>,
     /// The credentials and consent state that go with `previous_media_path`.
     pub(crate) previous_generation: Option<PreviousGeneration>,
     /// The session an ICE restart replaced, while that restart can be taken back
@@ -627,6 +637,7 @@ impl Agent {
             nomination_started: None,
             selected_pair: None,
             previous_media_path: None,
+            retired_media_path: None,
             previous_generation: None,
             restart_undo: None,
             candidate_pairs: vec![],
@@ -2014,6 +2025,14 @@ impl Agent {
             .or_else(|| self.valid_media_path())
     }
 
+    /// The path an ICE restart replaced, while data on it is still taken after the restart's
+    /// pair was selected (`RETIRED_MEDIA_PATH_GRACE`); nothing is sent on it.
+    pub fn retired_media_path(&self) -> Option<MediaPath> {
+        self.retired_media_path
+            .filter(|(_, until)| self.clock < *until)
+            .map(|(path, _)| path)
+    }
+
     /// The path of the valid pair the controlling agent is nominating, before any pair is
     /// selected, while consent on it is fresh: a Binding success response came from its
     /// remote candidate less than the consent expiry ago, as of the newest instant the agent
@@ -2085,6 +2104,16 @@ impl Agent {
             && transport.local_addr == path.local_addr
             && transport.transport_protocol == path.transport_protocol
         {
+            return Some(DataPath::InUse);
+        }
+        // The path an ICE restart replaced, for a while after the new pair was selected: the
+        // peer's packets sent before its own selection switched.
+        if self.retired_media_path.is_some_and(|(retired, until)| {
+            self.clock < until
+                && transport.peer_addr == retired.peer_addr
+                && transport.local_addr == retired.local_addr
+                && transport.transport_protocol == retired.transport_protocol
+        }) {
             return Some(DataPath::InUse);
         }
         // "On any of the candidates provided": the datagram arrived on one of them.
@@ -2499,6 +2528,7 @@ impl Agent {
             // transactions for a candidate pair MUST be discarded when consent expires").
             if matches!(new_state, ConnectionState::Failed | ConnectionState::Closed) {
                 self.previous_media_path = None;
+                self.retired_media_path = None;
                 self.previous_generation = None;
                 self.pending_binding_requests.clear();
                 self.triggered_queue.clear();
@@ -2548,8 +2578,13 @@ impl Agent {
                 self.consent_unanswered_since = None;
             }
             self.selected_pair = Some(pair_index);
-            // The restart (if any) has its pair: the previous generation's path is retired.
-            self.previous_media_path = None;
+            // The restart (if any) has its pair: the previous generation's path is retired. The
+            // peer may still send on it until its own selection switches: data on it is taken
+            // a little longer (`RETIRED_MEDIA_PATH_GRACE`).
+            if let Some(previous) = self.previous_media_path.take() {
+                let now = now.unwrap_or(self.clock);
+                self.retired_media_path = Some((previous, now + RETIRED_MEDIA_PATH_GRACE));
+            }
             self.previous_generation = None;
 
             if !matches!(

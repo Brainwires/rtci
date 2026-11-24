@@ -18,7 +18,8 @@ use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{
-    RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTransportEventKind,
+    RTCDataChannelEvent, RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason,
+    RTCPeerConnectionEvent, RTCTransportEventKind,
 };
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::{
@@ -34,6 +35,7 @@ use rtc::rtp_transceiver::{
     RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
 use rtc::sansio::Protocol;
+use rtc::shared::error::Error;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -70,17 +72,18 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str, role: RTCDtlsRole, now: Instant) -> Result<Self> {
+    fn with_settings(
+        addr: &str,
+        role: RTCDtlsRole,
+        settings: SettingEngineBuilder,
+        now: Instant,
+    ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
-            .with_setting_engine(
-                SettingEngineBuilder::new()
-                    .with_answering_dtls_role(role)
-                    .build(),
-            )
+            .with_setting_engine(settings.with_answering_dtls_role(role).build())
             .build(now)?;
         Ok(Self {
             pc,
@@ -343,9 +346,18 @@ fn write_audio(
 /// Two peers connected with an audio section and a data channel, on one (BUNDLE) transport.
 /// Returns them with the offerer's audio transceiver and the virtual time.
 fn connected() -> Result<(Peer, Peer, RTCRtpTransceiverId, Instant)> {
+    connected_with(SettingEngineBuilder::new)
+}
+
+/// [`connected`], each peer built with `settings`.
+fn connected_with(
+    settings: impl Fn() -> SettingEngineBuilder,
+) -> Result<(Peer, Peer, RTCRtpTransceiverId, Instant)> {
     let start = Instant::now();
-    let mut offerer = Peer::new("127.0.0.1:52010", RTCDtlsRole::Client, start)?;
-    let mut answerer = Peer::new("127.0.0.1:52011", RTCDtlsRole::Server, start)?;
+    let mut offerer =
+        Peer::with_settings("127.0.0.1:52010", RTCDtlsRole::Client, settings(), start)?;
+    let mut answerer =
+        Peer::with_settings("127.0.0.1:52011", RTCDtlsRole::Server, settings(), start)?;
     let audio = offerer
         .pc
         .add_transceiver_from_kind(RtpCodecKind::Audio, sendrecv())?;
@@ -611,5 +623,275 @@ fn the_next_offer_sets_up_a_new_transport_that_carries_media_and_data() -> Resul
         "the data channel's message"
     );
     assert_eq!(answerer.rtp - rtp_before, 5, "the audio packets");
+    Ok(())
+}
+
+/// The `OnLocalCandidatesNeeded` events among `events`.
+fn candidates_needed(events: &[RTCPeerConnectionEvent]) -> Vec<RTCLocalCandidatesNeededEvent> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => Some(needed.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The non-rejected m= sections of the peer's local description, by mid.
+fn local_mids(peer: &Peer) -> Vec<String> {
+    let sdp = peer
+        .pc
+        .local_description()
+        .expect("a local description")
+        .sdp;
+    let mut mids = vec![];
+    let mut rejected = false;
+    for line in sdp.lines() {
+        if let Some(m) = line.strip_prefix("m=") {
+            rejected = m.split(' ').nth(1) == Some("0");
+        } else if let Some(mid) = line.strip_prefix("a=mid:")
+            && !rejected
+        {
+            mids.push(mid.to_owned());
+        }
+    }
+    mids
+}
+
+/// The transport that replaced the closed one tells the application, when the next
+/// description sets it up, that it needs local candidates on new addresses
+/// (`OnLocalCandidatesNeeded`, reason `TransportReplaced`, RFC 8842 section 5.1), and the
+/// application gathers from the event alone: no test code moves a port before it. The event
+/// names the transport (its ids, the mids of its sections, the first one's index) and the
+/// refused address, and comes right before the transport's `gatheringstatechange` to
+/// "gathering"; a candidate on the refused address is refused through `add_local_candidate`
+/// with the section's mid. Its gatherer goes from "new" (a new `RTCIceTransport`, W3C
+/// webrtc-pc 5.6: "just created, and has not started gathering candidates yet") to
+/// "gathering" when the description is set (W3C 5.6: "began gathering a generation"), then
+/// to "complete" when the application ends the generation; the connection's
+/// `iceGatheringState` follows (W3C 4.3.2). The new candidates, trickled, carry media and the
+/// data channel.
+#[test]
+fn the_new_transport_asks_for_candidates_on_new_addresses_and_the_event_drives_the_gathering()
+-> Result<()> {
+    let (mut offerer, mut answerer, audio, now) = connected()?;
+    let old_addrs = (offerer.addr, answerer.addr);
+    reject_everything(&mut offerer, &mut answerer, audio, now)?;
+    let now = run_for(&mut offerer, &mut answerer, now, Duration::from_secs(1))?;
+    for peer in [&offerer, &answerer] {
+        assert_eq!(peer.pc.ice_gathering_state(), RTCIceGatheringState::New);
+        assert!(candidates_needed(&peer.events).is_empty(), "not yet");
+    }
+    let since = (offerer.events.len(), answerer.events.len());
+    let (rtp_before, messages_before) = (answerer.rtp, answerer.messages.len());
+
+    let audio = offerer
+        .pc
+        .add_transceiver_from_kind(RtpCodecKind::Audio, sendrecv())?;
+    let channel = offerer.pc.create_data_channel("second", None)?.id();
+    exchange(&mut offerer, &mut answerer, now)?;
+    offerer.drain_events();
+    answerer.drain_events();
+
+    // Each side reacts to its event only: a new port, a candidate for the event's section,
+    // the end of the generation; the candidates the engine surfaces go to the other side.
+    let mut trickled: [Vec<RTCIceCandidateInit>; 2] = [vec![], vec![]];
+    for (i, (peer, since, old)) in [
+        (&mut offerer, since.0, old_addrs.0),
+        (&mut answerer, since.1, old_addrs.1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let needed = candidates_needed(&peer.events[since..]);
+        assert_eq!(needed.len(), 1, "peer {i}: one transport: {needed:?}");
+        let needed = &needed[0];
+        assert_eq!(
+            needed.reason,
+            RTCLocalCandidatesNeededReason::TransportReplaced
+        );
+        assert!(needed.reason.needs_new_addresses());
+        assert_eq!(needed.mids, local_mids(peer), "peer {i}: its sections");
+        assert_eq!(needed.sdp_mline_index, Some(0), "peer {i}");
+        assert_eq!(needed.refused_addresses, vec![old], "peer {i}");
+        let ids = peer.transport_ids(0);
+        assert!(
+            !ids.contains(&(needed.ice_transport, needed.dtls_transport)),
+            "peer {i}: the new transport, not the closed one"
+        );
+        // Right before the transport's gathering begins.
+        let at = since
+            + peer.events[since..]
+                .iter()
+                .position(|e| matches!(e, RTCPeerConnectionEvent::OnLocalCandidatesNeeded(_)))
+                .expect("the event");
+        assert!(
+            matches!(
+                &peer.events[at + 1],
+                RTCPeerConnectionEvent::OnIceGathererStateChange(RTCIceGatheringState::Gathering)
+            ),
+            "peer {i}: {:?}",
+            labels(&peer.events[at..])
+        );
+        assert_eq!(
+            peer.pc.ice_gathering_state(),
+            RTCIceGatheringState::Gathering
+        );
+
+        let mut refused = host(old)?;
+        refused.sdp_mid = Some(needed.mids[0].clone());
+        match peer.pc.add_local_candidate(refused) {
+            Err(Error::ErrICECandidateAddressOfPreviousDtlsAssociation(addr)) => {
+                assert_eq!(addr, old, "peer {i}")
+            }
+            other => panic!("peer {i}: the previous address is refused, got {other:?}"),
+        }
+
+        let from = peer.events.len();
+        peer.addr.set_port(old.port() + 100);
+        let mut candidate = host(peer.addr)?;
+        candidate.sdp_mid = Some(needed.mids[0].clone());
+        candidate.sdp_mline_index = needed.sdp_mline_index;
+        peer.pc.add_local_candidate(candidate)?;
+        peer.pc.add_local_candidate(RTCIceCandidateInit {
+            sdp_mid: Some(needed.mids[0].clone()),
+            ..Default::default()
+        })?;
+        peer.drain_events();
+        assert_eq!(
+            peer.pc.ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        for event in &peer.events[from..] {
+            if let RTCPeerConnectionEvent::OnIceCandidateEvent(event) = event
+                && let Some(candidate) = &event.candidate
+                && !candidate.end_of_candidates
+            {
+                trickled[i].push(candidate.to_json()?);
+            }
+        }
+        assert_eq!(
+            trickled[i].len(),
+            1,
+            "peer {i}: its new candidate is surfaced"
+        );
+        assert_eq!(
+            of_kinds(&labels(&peer.events[since..]), &["gatherer", "gathering"]),
+            vec![
+                "gatherer:gathering",
+                "gathering:gathering",
+                "gatherer:complete",
+                "gathering:complete"
+            ],
+            "peer {i}"
+        );
+    }
+    for candidate in std::mem::take(&mut trickled[0]) {
+        answerer.pc.add_remote_candidate(candidate)?;
+    }
+    for candidate in std::mem::take(&mut trickled[1]) {
+        offerer.pc.add_remote_candidate(candidate)?;
+    }
+
+    let opened = |p: &Peer, from: usize| {
+        p.events[from..].iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_))
+            )
+        })
+    };
+    let mut now = run(&mut offerer, &mut answerer, now, |a, b| {
+        a.connected() && b.connected() && opened(a, since.0) && opened(b, since.1)
+    })?;
+    assert!(
+        offerer.connected() && answerer.connected(),
+        "connected again"
+    );
+    offerer
+        .pc
+        .data_channel(channel)
+        .expect("the channel is open")
+        .send_text(now, "on the new addresses")?;
+    for seq in 1..=5u16 {
+        write_audio(&mut offerer, audio, seq, now)?;
+        now = run_for(&mut offerer, &mut answerer, now, Duration::from_millis(20))?;
+    }
+    run_for(&mut offerer, &mut answerer, now, Duration::from_millis(500))?;
+    assert_eq!(
+        answerer.messages[messages_before..],
+        ["on the new addresses".to_owned()]
+    );
+    assert_eq!(answerer.rtp - rtp_before, 5, "the audio packets");
+    Ok(())
+}
+
+/// `with_dtls_new_association_on_previous_addresses(true)`, the opt-out for an application
+/// with one fixed socket: the transport that replaced the closed one keeps its candidates
+/// and their addresses, no `OnLocalCandidatesNeeded` is fired, the next offer lists the
+/// candidates, and the new transport carries media and the data channel on the previous
+/// addresses without any gathering.
+#[test]
+fn with_the_opt_out_the_new_transport_carries_media_on_the_previous_addresses() -> Result<()> {
+    let (mut offerer, mut answerer, audio, now) = connected_with(|| {
+        SettingEngineBuilder::new().with_dtls_new_association_on_previous_addresses(true)
+    })?;
+    let addrs = (offerer.addr, answerer.addr);
+    reject_everything(&mut offerer, &mut answerer, audio, now)?;
+    let now = run_for(&mut offerer, &mut answerer, now, Duration::from_secs(1))?;
+    let since = (offerer.events.len(), answerer.events.len());
+    let (rtp_before, messages_before) = (answerer.rtp, answerer.messages.len());
+
+    let audio = offerer
+        .pc
+        .add_transceiver_from_kind(RtpCodecKind::Audio, sendrecv())?;
+    let channel = offerer.pc.create_data_channel("second", None)?.id();
+    exchange(&mut offerer, &mut answerer, now)?;
+    let offer = offerer.pc.local_description().expect("offer").sdp;
+    assert!(
+        offer.contains(&format!("{} {} typ host", addrs.0.ip(), addrs.0.port())),
+        "the offer lists the kept candidate:\n{offer}"
+    );
+    let opened = |p: &Peer, from: usize| {
+        p.events[from..].iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_))
+            )
+        })
+    };
+    let mut now = run(&mut offerer, &mut answerer, now, |a, b| {
+        a.connected() && b.connected() && opened(a, since.0) && opened(b, since.1)
+    })?;
+    assert!(
+        offerer.connected() && answerer.connected(),
+        "connected again on the previous addresses: {:?} / {:?}",
+        labels(&offerer.events[since.0..]),
+        labels(&answerer.events[since.1..])
+    );
+    for (i, peer) in [&offerer, &answerer].into_iter().enumerate() {
+        assert!(
+            candidates_needed(&peer.events).is_empty(),
+            "peer {i}: no event with the opt-out"
+        );
+    }
+    // The previous address is accepted.
+    offerer.pc.add_local_candidate(host(addrs.0)?)?;
+    offerer
+        .pc
+        .data_channel(channel)
+        .expect("the channel is open")
+        .send_text(now, "on the previous addresses")?;
+    for seq in 1..=5u16 {
+        write_audio(&mut offerer, audio, seq, now)?;
+        now = run_for(&mut offerer, &mut answerer, now, Duration::from_millis(20))?;
+    }
+    run_for(&mut offerer, &mut answerer, now, Duration::from_millis(500))?;
+    assert_eq!(
+        answerer.messages[messages_before..],
+        ["on the previous addresses".to_owned()]
+    );
+    assert_eq!(answerer.rtp - rtp_before, 5, "the audio packets");
+    assert_eq!((offerer.addr, answerer.addr), addrs, "no port moved");
     Ok(())
 }
