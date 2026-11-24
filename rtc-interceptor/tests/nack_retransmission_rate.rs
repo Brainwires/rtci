@@ -410,8 +410,8 @@ fn a_held_back_retransmission_is_due_when_the_window_has_room() {
 /// each was asked for: a receiver that plays in order waits for its oldest gap, and a packet
 /// asked for again because its repair was lost would otherwise wait behind every newer one. At
 /// 80 kbit/s with libwebrtc's rule one retransmission of 1014 octets leaves every 101.4 ms
-/// after the first: a NACK for 0 to 8 at 400 ms, one for 30 at 410 ms and one for 10 at
-/// 420 ms, while 1 to 8 still wait: 10 leaves before 30.
+/// after the first, nine a window: a NACK for 0 to 8 at 400 ms, one for 30 at 410 ms and one
+/// for 10 at 420 ms, while 1 to 8 still wait: when the window slides, 10 leaves before 30.
 #[test]
 fn waiting_requests_are_answered_oldest_packet_first() {
     let base = Instant::now();
@@ -428,14 +428,26 @@ fn waiting_requests_are_answered_oldest_packet_first() {
         0,
         nack(&mut chain, at + Duration::from_millis(20), &[10], None)
     );
-    let order: Vec<u16> = drive(
+    // 1 to 8 fill the window: 10 and 30 wait for it to slide, and the receiver asks for them
+    // again meanwhile (a request lives a second from its last asking).
+    let mut left = drive(
         &mut chain,
         at + Duration::from_millis(20),
+        at + Duration::from_millis(900),
+    );
+    read_nack(
+        &mut chain,
+        at + Duration::from_millis(900),
+        &[10, 30],
+        None,
+        None,
+    );
+    left.extend(drive(
+        &mut chain,
+        at + Duration::from_millis(900),
         at + Duration::from_secs(3),
-    )
-    .into_iter()
-    .map(|(_, seq)| seq)
-    .collect();
+    ));
+    let order: Vec<u16> = left.into_iter().map(|(_, seq)| seq).collect();
     assert_eq!(vec![1, 2, 3, 4, 5, 6, 7, 8, 10, 30], order);
 }
 
