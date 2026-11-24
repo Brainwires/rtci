@@ -46,13 +46,15 @@ pub struct ReceiveConfig {
     /// arrival pattern is all there is). `None`: never.
     pub retransmission_lateness: Option<Duration>,
     /// How long frames that cannot be decoded may wait for retransmissions before a key frame
-    /// is asked for, in round-trip times, at least [`MIN_REPAIR_WINDOW`]. `None`: libwebrtc's
+    /// is asked for, in round-trip times, at least [`MIN_REPAIR_WINDOW`] (long enough for a
+    /// retransmission that is lost again to be asked for and arrive: shorter, random loss
+    /// turns into a stream of key frames, each bigger and lost more often). `None`: libwebrtc's
     /// behaviour, only the decode timeout (3 s, or three times `rtx-time`).
     pub repair_window_rtts: Option<f64>,
 }
 
 /// The shortest repair window.
-pub const MIN_REPAIR_WINDOW: Duration = Duration::from_millis(300);
+pub const MIN_REPAIR_WINDOW: Duration = Duration::from_secs(1);
 
 impl Default for ReceiveConfig {
     fn default() -> Self {
@@ -63,7 +65,7 @@ impl Default for ReceiveConfig {
             max_pending_decodes: 2,
             min_freeze_samples: 1,
             retransmission_lateness: Some(Duration::from_millis(50)),
-            repair_window_rtts: Some(3.0),
+            repair_window_rtts: Some(5.0),
         }
     }
 }

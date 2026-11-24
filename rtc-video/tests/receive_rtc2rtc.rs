@@ -22,8 +22,8 @@ use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor as _, PassThroughInterceptor, Registry,
-    RtcpRandom, RtcpSessionBuilder, Slot,
+    GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder,
+    PassThroughInterceptor, Registry, RtcpRandom, RtcpSessionBuilder, Slot,
 };
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
@@ -213,6 +213,7 @@ struct Receiver {
 fn build_pc(
     seed: u64,
     send: bool,
+    nack_interval: Option<Duration>,
 ) -> Result<(RTCPeerConnection, GccHandle, Option<RTCRtpSenderId>)> {
     let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
         inner: default_provider()?,
@@ -239,7 +240,13 @@ fn build_pc(
         },
         RtpCodecKind::Video,
     )?;
-    let registry = configure_nack(Registry::new(), &mut media_engine);
+    let mut registry = configure_nack(Registry::new(), &mut media_engine);
+    if let Some(interval) = nack_interval {
+        registry = registry.with(
+            Slot::NackGenerator,
+            NackGeneratorBuilder::new().with_interval(interval).build(),
+        );
+    }
     let registry = configure_rtcp_reports_with(
         registry,
         RtcpSessionBuilder::new()
@@ -325,8 +332,19 @@ fn is_rtp(data: &[u8]) -> bool {
 
 impl Call {
     fn new(link: Link, seed: u64, fixed_bitrate: Option<u32>) -> Result<Self> {
-        let (spc, gcc, track) = build_pc(seed, true)?;
-        let (rpc, _, _) = build_pc(seed ^ 0xabcd, false)?;
+        Self::with_nack(link, seed, fixed_bitrate, None)
+    }
+
+    /// `nack_interval`: the receiver's NACK generator cycle (`None`: the engine default,
+    /// 100 ms).
+    fn with_nack(
+        link: Link,
+        seed: u64,
+        fixed_bitrate: Option<u32>,
+        nack_interval: Option<Duration>,
+    ) -> Result<Self> {
+        let (spc, gcc, track) = build_pc(seed, true, None)?;
+        let (rpc, _, _) = build_pc(seed ^ 0xabcd, false, nack_interval)?;
         let now = Instant::now();
         let mut call = Self {
             now,
@@ -636,11 +654,18 @@ fn report(name: &str, call: &mut Call) -> ReceiveStats {
     s
 }
 
+/// The NACK cycle of libwebrtc's receiver: it asks as soon as a gap shows
+/// (`nack_requester.cc` `OnReceivedPacket`) and again every round trip on a 20 ms process timer.
+const FAST_NACK: Option<Duration> = Some(Duration::from_millis(20));
+
 #[test]
 fn two_percent_loss_with_reordering_has_no_freeze() -> Result<()> {
-    let mut call = Call::new(Link::lossy(0.02, 40), 11, Some(500_000))?;
+    let mut call = Call::with_nack(Link::lossy(0.02, 40), 11, Some(500_000), FAST_NACK)?;
     call.run_for(Duration::from_secs(30))?;
-    let s = report("2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s", &mut call);
+    let s = report(
+        "2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, NACK every 20 ms",
+        &mut call,
+    );
     assert_eq!(call.receiver.corrupt, 0, "every picture decoded as sent");
     assert_eq!(
         call.receiver.decoder.errors, 0,
@@ -651,11 +676,35 @@ fn two_percent_loss_with_reordering_has_no_freeze() -> Result<()> {
     Ok(())
 }
 
+/// The same call with the engine's default NACK cycle (100 ms): measured, the freezes it
+/// leaves are the generator's latency, not the pipeline's (docs/video-pipeline.md).
+#[test]
+fn two_percent_loss_with_the_default_nack_cycle_stays_intact() -> Result<()> {
+    let mut call = Call::new(Link::lossy(0.02, 40), 11, Some(500_000))?;
+    call.run_for(Duration::from_secs(30))?;
+    let s = report(
+        "2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, default NACK",
+        &mut call,
+    );
+    assert_eq!(call.receiver.corrupt, 0);
+    assert_eq!(call.receiver.decoder.errors, 0);
+    assert!(s.frames_decoded > 870, "decoded {}", s.frames_decoded);
+    assert!(
+        s.longest_render_interval < 0.5,
+        "longest interval {:.0} ms",
+        s.longest_render_interval * 1000.0
+    );
+    Ok(())
+}
+
 #[test]
 fn ten_percent_loss_recovers_within_half_a_second() -> Result<()> {
-    let mut call = Call::new(Link::lossy(0.10, 40), 12, Some(500_000))?;
+    let mut call = Call::with_nack(Link::lossy(0.10, 40), 12, Some(500_000), FAST_NACK)?;
     call.run_for(Duration::from_secs(30))?;
-    let s = report("10% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s", &mut call);
+    let s = report(
+        "10% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, NACK every 20 ms",
+        &mut call,
+    );
     assert_eq!(call.receiver.corrupt, 0);
     assert_eq!(call.receiver.decoder.errors, 0);
     assert!(
