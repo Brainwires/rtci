@@ -34,6 +34,41 @@ either, while the sender, the repairs and the congestion controller behaved as t
 key-frame request, or the `rtc-video` receive pipeline (on the `conf/vp-*` line), whose NACK
 horizon gives up packets it can no longer use and asks for a key frame.
 
+### Measured: how long the bound should be after a capacity drop and after an outage
+
+`tests/capacity_cap_video_rtc2rtc.rs` measures both cases with the receiver of a port of
+ParolNet's call (`SampleBuilder::new(256)`, a decoder that asks for a key frame while it has no
+reference): `measure_the_capacity_cap` (a call at up to 2.5 Mbit/s whose path drops to
+300 kbit/s for 20 s, six seeds on three wall clocks) and `measure_the_ice_restart` (a 4 s
+outage, then an ICE restart). Environment variables give that receiver a gap bound
+(`RTC_CAP_GAP_WAIT_MS`), a least time between its key-frame requests (`RTC_CAP_PLI_MIN_MS`,
+1 s otherwise), no further request while one is unanswered (`RTC_CAP_PLI_UNTIL_KEY`), and
+make the sender's application produce a key frame when the selected pair changes
+(`RTC_CAP_KEY_ON_SWITCH`). Hosted runs 45417676638, 45417689445, 45417706262, 45422456552,
+45417716278, 45422466844 (with the repairs of `conf/rtx-2r-smooth-limiter`); longest time
+without a usable frame / oldest picture shown, in seconds:
+
+| receiver | capacity drop, chain without pacer | capacity drop, default chain | outage, chain without pacer | outage, default chain |
+|---|---|---|---|---|
+| no time bound | 0.74-1.08 / 2.88-3.12 | 0.81-1.05 / 3.97-5.91 | 0.09-0.14 | 7.95-8.02 (no frame to the end) |
+| bound 2 s, key frames at most every 2 s | 1.00-1.73 / 2.21-2.31 | 2.13-4.13 / 2.35-2.47 | 0.09-0.14 | 1.88-2.11 |
+| bound 3 s | unchanged | 0.81-3.30 / 3.18-3.97 | 0.09-0.14 | 2.49-2.56 |
+| bound 6 s | unchanged | unchanged | 0.09-0.14 | 5.59-5.62 |
+| no bound, key frame on the path change | unchanged | unchanged | 0.09-0.14 | 7.67-7.97 |
+| bound 3 s and key frame on the path change | | | 0.09-0.14 | 2.02-2.03 |
+
+So after a sudden capacity drop the repairs that a bound gives up on are ones still coming:
+the repair of 60 packets lost at 2.5 Mbit/s inside 200 kbit/s takes several seconds, and a
+bound shorter than that trades a younger picture for longer freezes (each give-up asks for a
+key frame, five times a frame's budget, squeezed through the same narrow path). After an outage
+the bound is what recovers the picture at all. A bound above the longest repair the call sees
+(6 s here) costs nothing at the drop and shortens the outage from no picture to 5.6 s; a
+shorter one is a choice between the two. A key frame the sender makes on the path change does
+not help a receiver without a bound (the key frame waits behind the gap), and helps one with a
+bound by about half a second. The engine asks no key frame on a path change (libwebrtc neither:
+`call/rtp_transport_controller_send.cc` `OnNetworkRouteChanged` resets the bandwidth estimate
+only).
+
 libwebrtc's receiver follows the same idea in its own terms: when its NACK list would grow past
 1000 packets it clears the list and requests a key frame
 (`modules/video_coding/nack_requester.cc:213-219` at revision a222406d: "NACK list full,

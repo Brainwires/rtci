@@ -424,6 +424,8 @@ struct Peer {
     unusable: u64,
     last_keyframe_request: Option<Instant>,
     keyframe_requests: Vec<Duration>,
+    /// A key-frame request made and no key frame decoded since (RTC_CAP_PLI_UNTIL_KEY).
+    request_outstanding: bool,
     /// The sending side: every `OnPacerDiscard` (time, frames, packets), and the key-frame
     /// requests (PLI / FIR) it was handed.
     pacer_discards: Vec<(Duration, u32, usize)>,
@@ -678,7 +680,15 @@ impl Peer {
             force_key: true,
             keyframes_sent: Vec::new(),
             video_receiver: None,
-            builder: SampleBuilder::new(256, Vp8Packet::default(), 90_000),
+            builder: match std::env::var("RTC_CAP_GAP_WAIT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+            {
+                Some(ms) => SampleBuilder::new(256, Vp8Packet::default(), 90_000)
+                    .with_max_gap_wait(Duration::from_millis(ms)),
+                None => SampleBuilder::new(256, Vp8Packet::default(), 90_000),
+            },
+            request_outstanding: false,
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
             usable_lag: Vec::new(),
@@ -996,6 +1006,9 @@ impl World {
                 }
                 RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => {
                     let estimate = peer.estimate();
+                    if peer.connected && std::env::var_os("RTC_CAP_KEY_ON_SWITCH").is_some() {
+                        peer.force_key = true;
+                    }
                     peer.pair_changes.push((at, estimate));
                 }
                 RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
@@ -1020,8 +1033,14 @@ impl World {
                 RTCMessage::RtpPacket(_, packet) if packet.header.payload_type == VP8_PT => {
                     peer.builder.push(now, packet);
                     while let Some(sample) = peer.builder.pop(now) {
+                        let key = sample.data.first().is_some_and(|b| b & 1 == 0)
+                            && sample.data.len() >= VideoModel::HEADER
+                            && &sample.data[3..5] == b"PN";
                         match peer.decoder.accept(&sample.data) {
                             Some(true) => {
+                                if key {
+                                    peer.request_outstanding = false;
+                                }
                                 peer.usable_at.push(at);
                                 let data = &sample.data;
                                 let captured = u32::from_be_bytes([
@@ -1039,13 +1058,32 @@ impl World {
                             None => {}
                         }
                     }
+                    // A gap the builder gave up for its time bound: the frame after it may
+                    // refer to what was lost.
+                    if peer.builder.take_key_frame_request() {
+                        peer.decoder.last = None;
+                    }
                     // A decoder without its reference asks for a key frame, at most once a
                     // second (ParolNet's receive path).
-                    if peer.decoder.last.is_none()
+                    let least = Duration::from_millis(
+                        std::env::var("RTC_CAP_PLI_MIN_MS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1000),
+                    );
+                    let until_key = std::env::var_os("RTC_CAP_PLI_UNTIL_KEY").is_some();
+                    let held = until_key
+                        && peer.request_outstanding
                         && peer
                             .last_keyframe_request
-                            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+                            .is_some_and(|t| now.duration_since(t) < least * 2);
+                    if peer.decoder.last.is_none()
+                        && !held
+                        && peer
+                            .last_keyframe_request
+                            .is_none_or(|t| now.duration_since(t) >= least)
                     {
+                        peer.request_outstanding = true;
                         peer.last_keyframe_request = Some(now);
                         peer.keyframe_requests.push(at);
                         peer.request_keyframe(now)?;
@@ -2156,6 +2194,12 @@ struct PathChangeOutcome {
     freeze_after_at: Duration,
     /// Retransmissions the caller sent from the switch on.
     rtx_after: u64,
+    /// The oldest picture the callee showed from the switch on (capture to decoder), the
+    /// key-frame requests the callee made from the switch on, and the caller's target ten
+    /// seconds after the switch.
+    lag_after: Duration,
+    keyframes_after: usize,
+    target_after: u32,
 }
 
 /// The call of ParolNet's `an_ice_restart_follows_a_machine_to_another_network`: ten seconds
@@ -2209,10 +2253,27 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
         switched_at + Duration::from_secs(1),
         world.elapsed(),
     );
+    let lag_after = world.peers[1]
+        .usable_at
+        .iter()
+        .zip(&world.peers[1].usable_lag)
+        .filter(|(at, _)| **at >= switched_at)
+        .map(|(_, lag)| *lag)
+        .max()
+        .unwrap_or_default();
+    let keyframes_after = world.peers[1]
+        .keyframe_requests
+        .iter()
+        .filter(|at| **at >= switched_at)
+        .count();
+    let target_after = target_at(&world.peers[0].targets, world.elapsed());
     Ok(PathChangeOutcome {
         freeze_after,
         freeze_after_at,
         rtx_after: world.uplinks[0].rtx_sent - rtx_at_switch,
+        lag_after,
+        keyframes_after,
+        target_after,
         before,
         lowest_before: world.peers[0]
             .targets
@@ -2251,24 +2312,31 @@ fn measure_the_ice_restart() -> Result<()> {
     };
     for chain in list("RTC_CAP_CHAINS", "parolnet,default") {
         for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
-            let setup = Setup::new(seed.parse()?, None)
-                .chain(match chain.as_str() {
-                    "parolnet" => Chain::ParolNet,
-                    "default" => Chain::Default,
-                    other => bail!("unknown chain {other}"),
-                })
-                .anchor(ANCHORS[0]);
-            match path_change_run(&setup) {
-                Ok(o) => println!(
-                    "RESTART chain {chain} seed {seed} | switched at {:.2} | freeze after switch+1 s {:.3} at {:.2} | rtx after {} | lowest after {} | estimate after {:?}",
-                    o.switched_at.as_secs_f64(),
-                    o.freeze_after.as_secs_f64(),
-                    o.freeze_after_at.as_secs_f64(),
-                    o.rtx_after,
-                    o.lowest_after / 1000,
-                    o.estimate_after.map(|bps| bps / 1000),
-                ),
-                Err(error) => println!("RESTART chain {chain} seed {seed} | failed: {error}"),
+            for anchor in list("RTC_CAP_ANCHORS", "0") {
+                let setup = Setup::new(seed.parse()?, None)
+                    .chain(match chain.as_str() {
+                        "parolnet" => Chain::ParolNet,
+                        "default" => Chain::Default,
+                        other => bail!("unknown chain {other}"),
+                    })
+                    .anchor(ANCHORS[anchor.parse::<usize>()?]);
+                match path_change_run(&setup) {
+                    Ok(o) => println!(
+                        "RESTART chain {chain} seed {seed} anchor {anchor} | switched at {:.2} | freeze after switch+1 s {:.3} at {:.2} | lag after {:.2} | rtx after {} | pli after {} | lowest after {} | estimate after {:?} | target +10 s {}",
+                        o.switched_at.as_secs_f64(),
+                        o.freeze_after.as_secs_f64(),
+                        o.freeze_after_at.as_secs_f64(),
+                        o.lag_after.as_secs_f64(),
+                        o.rtx_after,
+                        o.keyframes_after,
+                        o.lowest_after / 1000,
+                        o.estimate_after.map(|bps| bps / 1000),
+                        o.target_after / 1000,
+                    ),
+                    Err(error) => println!(
+                        "RESTART chain {chain} seed {seed} anchor {anchor} | failed: {error}"
+                    ),
+                }
             }
         }
     }

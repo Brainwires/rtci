@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Test environment and documentation
+
+- **capacity-cap test, receiver gap policy**: `measure_the_ice_restart` runs over the wall
+  clocks (`RTC_CAP_ANCHORS`) and prints the oldest picture, key-frame requests and target after
+  the switch; `RTC_CAP_GAP_WAIT_MS`, `RTC_CAP_PLI_MIN_MS`, `RTC_CAP_PLI_UNTIL_KEY` and
+  `RTC_CAP_KEY_ON_SWITCH` give the measured receiver a gap bound and key-frame policies.
+  `docs/receiver-gap-policy.md` records what each costs after a capacity drop and after an
+  outage (a bound above the longest repair, 6 s here, costs nothing at the drop and gives a
+  picture back 5.6 s after a 4 s outage instead of none).
+
 ### Behaviour changes
 
 - **interceptors (NACK responder), retransmissions leave at the limit's rate**
