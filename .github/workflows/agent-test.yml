@@ -5,6 +5,9 @@ name: agent-test
 # on our own machines: it never runs on the self-hosted pools, and it starts no other workflow.
 # Dispatch it through the ci tools with an owner, for example:
 #   ref: conf/some-branch   command: cargo test -p rtci-ice --no-fail-fast
+# A mutation run (the code deliberately broken, to show that a test notices) passes `expect: fail`:
+# the run is then green when a test fails and red when the mutation survives, so a red run in the
+# list always means something is wrong.
 on:
   workflow_dispatch:
     inputs:
@@ -27,8 +30,14 @@ on:
         required: false
         default: ''
         type: string
+      expect:
+        description: "pass: the command must succeed. fail: a mutation run, green only when a test fails"
+        required: false
+        default: pass
+        type: choice
+        options: [ pass, fail ]
 
-run-name: "agent-test ${{ inputs.ref }} ${{ inputs.purpose }}"
+run-name: "agent-test ${{ inputs.ref }} ${{ inputs.purpose }}${{ inputs.expect == 'fail' && ' [mutation: expected to fail]' || '' }}"
 
 # No concurrency group: a group built from the command made a long or multi-line command an
 # invalid workflow, and the dispatch tooling already answers an identical dispatch that is still
@@ -60,10 +69,27 @@ jobs:
         shell: bash
         env:
           AGENT_COMMAND: ${{ inputs.command }}
+          AGENT_EXPECT: ${{ inputs.expect }}
         run: |
           set -o pipefail
           echo "ref: $(git rev-parse HEAD)"
-          bash -c "$AGENT_COMMAND" 2>&1 | tee agent-test.log
+          if [ "$AGENT_EXPECT" != fail ]; then
+            bash -c "$AGENT_COMMAND" 2>&1 | tee agent-test.log
+            exit
+          fi
+          # A mutation run: the change under test was deliberately broken, so the run is green
+          # only when a test fails. A command that passes means the mutation survived (a missing
+          # test); a failure with no failed test (it did not compile, say) proves nothing.
+          if bash -c "$AGENT_COMMAND" 2>&1 | tee agent-test.log; then
+            echo "::error::the mutation survived: the command passed"
+            exit 1
+          fi
+          if grep -qE '^test .* \.\.\. FAILED|^test result: FAILED' agent-test.log; then
+            echo "the mutation was caught: a test failed, as expected" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error::the command failed without a failed test (build error?): this proves nothing"
+          exit 1
       - name: Test totals
         if: always()
         shell: bash

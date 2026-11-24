@@ -1210,3 +1210,44 @@ fn moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched() -
     );
     Ok(())
 }
+
+/// RFC 6544 section 5: "implementors SHOULD take particular care to include both IPv4 and IPv6
+/// candidates as part of the process of gathering candidates". The engine gathers its TCP
+/// candidates (passive, active, simultaneous-open) for the address of each UDP host candidate
+/// the application adds, whatever its family: two peers on IPv6 alone, UDP blocked, gather
+/// IPv6 TCP candidates, pair them and connect over TCP.
+#[test]
+fn tcp_candidates_are_gathered_and_paired_over_ipv6() -> Result<()> {
+    let mut net = Net::new();
+    let mut peers = peers(&net, SettingEngine::default);
+    for (i, p) in peers.iter_mut().enumerate() {
+        p.ip = format!("fd00::{}", i + 1).parse()?;
+        p.udp = std::net::SocketAddr::new(p.ip, 4000);
+    }
+    let channel = negotiate(&mut peers, &net)?;
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(30),
+        |_, _| {},
+    )?;
+    assert_eq!(peers[1].received, expected, "every message, in order");
+    let now = net.now;
+    for (i, p) in peers.iter_mut().enumerate() {
+        let address = format!(" fd00::{} ", i + 1);
+        let announced = p.announced();
+        for tcptype in ["passive", "active", "so"] {
+            assert!(
+                announced.iter().any(|c| c.contains(" tcp ")
+                    && c.contains(&address)
+                    && c.contains(&format!("tcptype {tcptype}"))),
+                "peer {i} announced an IPv6 {tcptype} TCP candidate: {announced:?}"
+            );
+        }
+        assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("tcp"));
+    }
+    Ok(())
+}
