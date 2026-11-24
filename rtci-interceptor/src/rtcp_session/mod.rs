@@ -118,6 +118,13 @@ const HIGH_LOSS_FRACTION: u8 = 26;
 /// seconds: RFC 4585 section 5 (interworking with AVP) has `T_rr_interval` "SHOULD NOT be larger
 /// than five seconds" where RTP/AVP entities may take part.
 const MAX_BUDGET_T_RR_INTERVAL: f64 = 5.0;
+/// The part of what the congestion control feedback leaves of the RTCP bandwidth that the
+/// in-budget regular interval is computed in. Measured (`tests/rtcp_rate_trace_rtc2rtc.rs`,
+/// 24 kbit/s of audio at the 64 kbit/s floor), the regular reports of both ends ran 6 to 12%
+/// over the rate the full remainder gives (the per-SSRC average of RFC 8108 5.3.1 against the
+/// packets actually sent), which put all RTCP at 101 to 103% of RFC 3550's 5%; computed in
+/// 85% of it they keep the whole inside the budget with room for that.
+const IN_BUDGET_REGULAR_SHARE: f64 = 0.85;
 
 /// The least interval the session computes, in seconds. RTP/AVPF has no minimum for a
 /// point-to-point session (RFC 4585 3.5.1), so with enough bandwidth the calculated interval
@@ -1368,7 +1375,7 @@ impl RtcpSessionInterceptor {
             let input = IntervalInput {
                 members: self.member_count().max(1),
                 senders: self.sender_count(now),
-                rtcp_bw: left,
+                rtcp_bw: left * IN_BUDGET_REGULAR_SHARE,
                 sender_fraction,
                 we_sent: self.we_sent(index, now),
                 avg_rtcp_size: size,
