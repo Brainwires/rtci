@@ -30,7 +30,13 @@
 //! per clock rate), and `?profile=chrome` (or `rfc`, `strict-rfc`, `performance`) under that
 //! behaviour profile (`docs/behaviour-profiles.md`): `SettingEngineBuilder::with_behaviour_profile`
 //! and `MediaEngine::for_profile`, the settings below applied after it. Without them the peer
-//! takes the build's default profile and its value. `?previous_addresses=1` builds it with
+//! takes the build's default profile and its value. `?video_red_ulpfec=1` (or `=0`) sets
+//! `DefaultInterceptorOptions::video_red_ulpfec` whatever the profile: video `red` + `ulpfec`
+//! offered and answered, ULPFEC in RED sent and recovered (the report's `fec` has the engine's
+//! FEC counts, `RTCPeerConnection::fec_stats`). `?drop_video_every=N` discards every N-th video
+//! media packet this peer sends in RED, at the wire, after the FEC encoder protected it: a loss
+//! only FEC can bring back, the same packets every run (the report's `videoDropped` counts
+//! them). `?previous_addresses=1` builds it with
 //! `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)`: a new DTLS
 //! association keeps the transport's candidates and addresses. Without it (the RFC 8842
 //! section 5.1 default), when the engine says a transport needs new local candidates
@@ -73,7 +79,8 @@ use rtci::media::io::ogg_reader::OggReader;
 use rtci::media_stream::{MediaStreamTrack, MediaStreamTrackId};
 use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::interceptor_registry::{
-    configure_simulcast_extension_headers, register_default_interceptors,
+    DefaultInterceptorOptions, configure_simulcast_extension_headers,
+    register_default_interceptors_with_options,
 };
 use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_HEVC, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,
@@ -106,6 +113,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -142,6 +151,8 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut ssrc_per_clock_rate = None;
             let mut previous_addresses = false;
+            let mut video_red_ulpfec = None;
+            let mut drop_video_every = None;
             let mut profile = BehaviourProfile::default();
             let mut unknown_profile = None;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
@@ -152,6 +163,10 @@ async fn main() -> Result<()> {
                         ssrc_per_clock_rate = Some(true);
                     } else if pair == "previous_addresses=1" {
                         previous_addresses = true;
+                    } else if let Some(value) = pair.strip_prefix("video_red_ulpfec=") {
+                        video_red_ulpfec = Some(value == "1");
+                    } else if let Some(value) = pair.strip_prefix("drop_video_every=") {
+                        drop_video_every = value.parse().ok().filter(|n: &u64| *n > 0);
                     } else if let Some(name) = pair.strip_prefix("profile=") {
                         match BehaviourProfile::from_name(name) {
                             Some(named) => profile = named,
@@ -170,6 +185,8 @@ async fn main() -> Result<()> {
                     let options = SessionOptions {
                         ssrc_per_clock_rate,
                         previous_addresses,
+                        video_red_ulpfec,
+                        drop_video_every,
                         profile,
                     };
                     if let Err(e) = Session::run(ws, ip, dir, options).await {
@@ -405,6 +422,12 @@ struct SessionOptions {
     ssrc_per_clock_rate: Option<bool>,
     /// `previous_addresses=1`: `with_dtls_new_association_on_previous_addresses(true)`.
     previous_addresses: bool,
+    /// `video_red_ulpfec=1` / `=0`: `DefaultInterceptorOptions::video_red_ulpfec` (video `red`
+    /// + `ulpfec` offered and ULPFEC in RED in the chain) whatever the profile says.
+    video_red_ulpfec: Option<bool>,
+    /// `drop_video_every=N`: every N-th video media packet in RED is discarded at the wire
+    /// ([`DropEveryNthRedMedia`]).
+    drop_video_every: Option<u64>,
     profile: BehaviourProfile,
 }
 
@@ -454,6 +477,8 @@ struct Session {
     wire_rtp_received: BTreeMap<u8, (u64, u64)>,
     /// The same for what the engine put on the wire.
     wire_rtp_sent: BTreeMap<u8, (u64, u64)>,
+    /// Video media packets `?drop_video_every=N` discarded.
+    video_dropped: Arc<AtomicU64>,
     /// RTCP packets received, by type (`sr`, `rr`, `nack`, `pli`, `fir`, `twcc`, ...).
     rtcp_by_type: BTreeMap<String, u64>,
     /// The SSRCs whose RTP the engine discarded as unassociated (RFC 8830 3.1).
@@ -491,6 +516,8 @@ impl Session {
         let SessionOptions {
             ssrc_per_clock_rate,
             previous_addresses,
+            video_red_ulpfec,
+            drop_video_every,
             profile,
         } = options;
         let (mut ws_tx, mut ws_rx) = ws.split();
@@ -499,7 +526,25 @@ impl Session {
         let mut me = MediaEngine::for_profile(profile);
         me.register_default_codecs()?;
         configure_simulcast_extension_headers(&mut me)?;
-        let registry = register_default_interceptors(Registry::new(), &mut me)?;
+        let mut interceptor_options = DefaultInterceptorOptions::for_profile(profile);
+        if let Some(on) = video_red_ulpfec {
+            interceptor_options.video_red_ulpfec = on;
+        }
+        let (registry, _) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut me,
+            &interceptor_options,
+        )?;
+        // Below the FEC encoder's wire tap (`Slot::FecWireImage`, 1 500) and the transport-wide
+        // numbering: the packet was protected and numbered, then lost on its way.
+        let video_dropped = Arc::new(AtomicU64::new(0));
+        let registry = match drop_video_every {
+            Some(every) => registry.with(
+                rtci::interceptor::Slot::from(1_400),
+                DropEveryNthRedMedia::new(every, video_dropped.clone()),
+            ),
+            None => registry,
+        };
         // 256 KiB messages (what Chromium and WebKit state; RFC 8841 6.1), `.local` remote
         // candidates resolved over mDNS (a browser hides its host address by default).
         // Browsers do not announce SCTP message interleaving, and the engine's default then
@@ -571,6 +616,7 @@ impl Session {
             rtp_by_key: BTreeMap::new(),
             wire_rtp_received: BTreeMap::new(),
             wire_rtp_sent: BTreeMap::new(),
+            video_dropped,
             rtcp_by_type: BTreeMap::new(),
             discarded_ssrcs: vec![],
             coverage: HashMap::new(),
@@ -1089,12 +1135,40 @@ impl Session {
                     "rtcp": self.rtcp_by_type,
                     "discardedSsrcs": self.discarded_ssrcs,
                     "sctp": sctp,
+                    "fec": self.fec_stats(),
+                    "videoDropped": self.video_dropped.load(Ordering::Relaxed),
                     "errors": self.errors,
                 }));
             }
             other => return Err(anyhow!("unknown message type {other:?}")),
         }
         Ok(())
+    }
+
+    /// The engine's FEC counts that webrtc-stats has no member for
+    /// (`RTCPeerConnection::fec_stats`): per outbound stream the FEC sent, per inbound stream
+    /// the FEC received (all carriages, in RED among them), the packets FEC rebuilt and the
+    /// discards by reason.
+    fn fec_stats(&self) -> Value {
+        let stats = self.pc.fec_stats();
+        json!({
+            "sent": stats.sent.iter().map(|s| json!({
+                "ssrc": s.ssrc,
+                "fecPacketsSent": s.fec_packets_sent,
+                "fecBytesSent": s.fec_bytes_sent,
+            })).collect::<Vec<_>>(),
+            "received": stats.received.iter().map(|r| json!({
+                "ssrc": r.ssrc,
+                "fecPacketsReceived": r.fec_packets_received,
+                "fecBytesReceived": r.fec_bytes_received,
+                "fecPacketsInRed": r.fec_packets_in_red,
+                "packetsRecovered": r.packets_recovered,
+                "fecPacketsDiscarded": r.fec_packets_discarded,
+                "discardedUnneeded": r.discarded_unneeded,
+                "discardedExpired": r.discarded_expired,
+                "discardedRejected": r.discarded_rejected,
+            })).collect::<Vec<_>>(),
+        })
     }
 
     /// The W3C stats a test compares with the browser's: RTP counters per SSRC, the remote
@@ -1853,4 +1927,106 @@ fn codec_kind(c: &RTCRtpCodec) -> RtpCodecKind {
     } else {
         RtpCodecKind::Video
     }
+}
+
+/// `?drop_video_every=N`: discards every N-th media packet of a local video stream sent in RED
+/// (`video/red` with `video/ulpfec` negotiated), counting from the N-th. FEC packets (a RED
+/// packet whose block has the `ulpfec` payload type) and everything else pass. Placed nearer
+/// the wire than the ULPFEC encoder's tap, so the FEC sent covers what this drops.
+struct DropEveryNthRedMedia {
+    every: u64,
+    seen: u64,
+    dropped: Arc<AtomicU64>,
+    /// Media SSRC -> (RED payload type, ULPFEC payload type) of its section.
+    streams: HashMap<u32, (u8, u8)>,
+    reads: std::collections::VecDeque<rtci::interceptor::TaggedPacket>,
+    writes: std::collections::VecDeque<rtci::interceptor::TaggedPacket>,
+}
+
+impl DropEveryNthRedMedia {
+    fn new(every: u64, dropped: Arc<AtomicU64>) -> Self {
+        Self {
+            every,
+            seen: 0,
+            dropped,
+            streams: HashMap::new(),
+            reads: Default::default(),
+            writes: Default::default(),
+        }
+    }
+}
+
+impl rtci::sansio::Protocol<rtci::interceptor::TaggedPacket, rtci::interceptor::TaggedPacket, ()>
+    for DropEveryNthRedMedia
+{
+    type Rout = rtci::interceptor::TaggedPacket;
+    type Wout = rtci::interceptor::TaggedPacket;
+    type Eout = ();
+    type Error = rtci::shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: Self::Rout) -> std::result::Result<(), Self::Error> {
+        self.reads.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        self.reads.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: Self::Wout) -> std::result::Result<(), Self::Error> {
+        if let rtci::interceptor::Packet::Rtp(p) = &msg.message.packet
+            && let Some((red, fec)) = self.streams.get(&p.header.ssrc).copied()
+            && p.header.payload_type == red
+            && p.payload.first().is_some_and(|block| block & 0x7F != fec)
+        {
+            self.seen += 1;
+            if self.seen % self.every == 0 {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+        self.writes.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<Self::Wout> {
+        self.writes.pop_front()
+    }
+
+    fn handle_timeout(&mut self, _now: Instant) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn poll_timeout(&mut self) -> Option<Self::Time> {
+        None
+    }
+}
+
+impl rtci::interceptor::Interceptor for DropEveryNthRedMedia {
+    fn bind_local_stream(&mut self, info: &rtci::interceptor::StreamInfo) {
+        if !info.mime_type.to_ascii_lowercase().starts_with("video/") {
+            return;
+        }
+        let format = |subtype: &str| {
+            info.section_mime_types
+                .iter()
+                .find(|(_, mime)| {
+                    mime.rsplit_once('/')
+                        .is_some_and(|(_, s)| s.eq_ignore_ascii_case(subtype))
+                })
+                .map(|(pt, _)| *pt)
+        };
+        if let (Some(red), Some(fec)) = (format("red"), format("ulpfec")) {
+            self.streams.insert(info.ssrc, (red, fec));
+        }
+    }
+
+    fn unbind_local_stream(&mut self, info: &rtci::interceptor::StreamInfo) {
+        self.streams.remove(&info.ssrc);
+    }
+
+    fn bind_remote_stream(&mut self, _info: &rtci::interceptor::StreamInfo) {}
+
+    fn unbind_remote_stream(&mut self, _info: &rtci::interceptor::StreamInfo) {}
 }

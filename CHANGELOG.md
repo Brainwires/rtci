@@ -208,6 +208,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Browser cell: the engine's ULPFEC in RED rebuilt by the browser.** `scenarios.spec.mjs`
+  has Rust send VP8 in RED with ULPFEC (the `Chrome` profile's form), NACK off on both sides,
+  and checks that the browser decodes every frame although Rust's sender discarded every
+  tenth media packet after the FEC protected it (`examples/interop-peer`
+  `?drop_video_every=N`, reported as `videoDropped`). The earlier finding that Chromium does
+  not rebuild from the engine's FEC was wrong: the packets are byte for byte what libwebrtc's
+  `UlpfecReceiver` reads, and Chromium rebuilds from them; the earlier cell's threshold under
+  random netem loss failed on frames whose media and FEC packets were both dropped (VP8
+  without NACK then waits for a key frame). No engine change.
+- **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
+  section 6.2): `FlexFec03Encoder` builds no repair packet larger than
+  `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
+  16-octet SRTP tag; `with_max_packet_size` sets another); the block goes without it and the
+  repair stream's sequence numbers skip nothing. Engine behaviour change only for media
+  packets above about 1400 octets.
+- **RFC 8854 audit** (`docs/conformance/audit/rfc8854.md`): 23 rows (MUST 3 tested, 1 n/a;
+  SHOULD 6 tested, 6 partial, 2 missing, 3 n/a; MAY 1 tested, 1 missing), and a test that no
+  behaviour profile offers a FEC-only m= section (section 5.2).
+- **Browser cell: video RED + ULPFEC from the browser.** `examples/interop-peer` takes
+  `?video_red_ulpfec=1` (`DefaultInterceptorOptions::video_red_ulpfec`) and reports the
+  engine's FEC counts (`fec`); `scenarios.spec.mjs` has the browser send VP8 in RED with
+  ULPFEC, NACK off, through netem loss, and checks that the engine rebuilt packets from it.
+  `scripts/test-env/hosted-cell.sh` runs a browser cell on a disposable Linux machine (a
+  GitHub-hosted runner through `agent-test.yml`) outside the test image.
+- **Video `red` + `ulpfec` in the `Chrome` behaviour profile.**
+  `DefaultInterceptorOptions::video_red_ulpfec` (profile row `fec.video-red-ulpfec`: `Rfc`
+  `false`, `Chrome` `true`): `register_default_interceptors` then registers `video/red` (116),
+  RTX for it (117, `apt=116`) and `video/ulpfec` (43) after the video codecs, as Chromium
+  offers them (libwebrtc `GetDefaultSupportedFormats`), and `configure_video_red_ulpfec`
+  installs ULPFEC in RED in both directions (FEC in RED packets of its own, read from the wire
+  tap, loss-driven amount). The default stays RFC 8854 section 7's: neither is offered for
+  video. `UlpfecReceiveInterceptor` now reads RED and FEC under the payload types the stream's
+  section negotiated (as the sender already did), not only the builder's: an answer keeps
+  the offerer's numbers. Engine behaviour change for the `Chrome` profile (its video offers
+  and chain).
+- **FEC statistics.** The receiver's webrtc-stats now count all the FEC received for a
+  stream (8.5): `fecPacketsReceived` and `fecBytesReceived` include the FEC blocks of the
+  stream's RED packets (RFC 5109 section 14.2) and the packets of a FEC session of its own
+  (section 14.1; those also count in `packetsReceived` / `bytesReceived`, webrtc-stats 7.1),
+  besides a FEC SSRC's; `fecPacketsDiscarded` is measured for ULPFEC (FEC whose packets all
+  arrived or were rebuilt, FEC the recovery window left behind or that arrived outside it,
+  malformed FEC). `RTCPeerConnection::fec_stats()` (`FecStats`, `FecSentStats`,
+  `FecReceivedStats`) has what webrtc-stats has no member for: the FEC each outbound stream
+  sent (packets and payload octets, any carriage, ULPFEC and FlexFEC), the media packets FEC
+  rebuilt, and the discards by reason. In the interceptor crate: `UlpfecDecoderStats` gains
+  `discarded_unneeded`, `discarded_expired` and `discarded()`; `UlpfecReceiveInterceptor`
+  passes `UlpfecReceiveStats` application-ward on an empty RTCP carrier when its counts change
+  (and `receive_stats(ssrc)`); every packet a ULPFEC or FlexFEC encoder puts FEC into carries
+  a `FecSent` mark. An application that drives a chain itself sees the carriers (empty RTCP
+  packets with that attribute) on the read leg.
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
   the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
@@ -221,6 +271,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
   rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
   has a new public field (`..Default::default()` in a struct literal covers it).
+- **ULPFEC as a separate stream: a FEC session of its own (RFC 5109 sections 7.2, 14.1,
+  14.3).** `RTCPeerConnection::add_fec_session(transceiver, semantics)` offers, for the media
+  of one transceiver, a second m= section that lists only `ulpfec` (one dynamic payload type,
+  the media's rate), outside the BUNDLE group and so on a transport of its own (its own
+  candidates, DTLS association and SRTP keys), grouped with the media section by
+  `a=group:FEC-FR <media> <fec>` (RFC 5956 section 4.1, the default) or `a=group:FEC ...`
+  (RFC 4756, the semantics RFC 5109 names; `RTCFecGroupSemantics`). The returned transceiver is
+  the session: it has a mid, a direction, can be stopped, and never has a track
+  (`fec_session_of`, `fec_session_protects`). Once the answer keeps the section and repeats
+  the grouping, the ULPFEC of the protected sender's streams travels there, each FEC stream
+  with the SSRC of the media stream it protects, marker 0, sequence numbers of its own and
+  RTCP of its own; what arrives there repairs the protected receiver's streams and is never
+  delivered as media. `SettingEngineBuilder::with_separate_fec_sessions(true)` accepts an
+  offered FEC session (same grouping and payload type in the answer, the direction of the
+  transceiver it protects). `configure_ulpfec_sessions` adds the interceptors (encoder with
+  its wire tap, decoder); the amount of FEC follows the reported loss and comes out of the
+  target the application encodes at. In the interceptor crate: `FecSessionPacket` marks what
+  was read in a FEC session for the decoder, and `UlpfecReceiveBuilder::sessions()` keeps a
+  decoder for each bound stream.
+  **Defaults are unchanged**: nothing offers a FEC session by itself, and an offered one is
+  refused (port 0, the group left out), as RFC 8854 section 5.2 asks of a WebRTC endpoint
+  ("SHOULD NOT be offered"; "Answerers SHOULD reject any FEC-only "m=" lines, unless they
+  specifically know how to handle such a thing"). No browser accepts one.
+  **Known limits**: the FEC section negotiates no header extension, so the FEC session's
+  congestion controller has no per-packet feedback and stays at its start estimate; FEC for a
+  stream whose SSRC the description does not declare is used from that stream's first media
+  packet on.
+
+### Changed
+
+- **A video RED format is not negotiated without ULPFEC (RFC 5109 section 14.3).** "In
+  cases in which the redundancy payload format is used with FEC as the only secondary codec,
+  when the FEC stream is rejected the redundant encoding payload type SHOULD also be
+  removed": a `video/red` format without an fmtp line (it names no encodings, so ULPFEC is
+  the only thing it can carry) is left out of the negotiated formats when no `ulpfec` format
+  of its rate is negotiated, and the RTX format that names it goes too. This changes the
+  answer of an application that registered `video/red` and not `ulpfec`; the default codecs
+  register neither, and audio RED is untouched.
+- A new m= section that an offer keeps outside every BUNDLE group although the offer has
+  groups (`RTCRtpTransceiver::set_bundle_request(Some(false))` on a transceiver the last
+  answer did not have) gets a transport of its own, as the method's documentation says; it
+  was put on the BUNDLE transport. A section a description leaves outside every group is
+  never written `a=bundle-only`.
 
 - **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
   (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast

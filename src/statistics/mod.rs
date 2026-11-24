@@ -66,6 +66,7 @@ mod report_integrity_test;
 mod statistics_test;
 
 pub(crate) mod accumulator;
+mod fec;
 mod feed;
 pub mod report;
 pub mod stats;
@@ -76,6 +77,8 @@ pub use accumulator::{
     AudioPlayoutStatsUpdate, AudioReceiverStatsUpdate, AudioSourceStatsUpdate, DecoderStatsUpdate,
     EncoderStatsUpdate, PsnrSum, QualityLimitationDurations, VideoSourceStatsUpdate,
 };
+
+pub use fec::{FecReceivedStats, FecSentStats, FecStats};
 
 /// Selector for filtering statistics in `get_stats()`.
 ///

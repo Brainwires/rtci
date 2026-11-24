@@ -18,7 +18,7 @@ congestion-control PR.
 Totals:
 
 - MUST: tested 35 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 4 (total 39)
-- SHOULD: tested 5 / untested 0 / partial 0 / missing 2 / violated 0 / n-a 3 (total 10)
+- SHOULD: tested 6 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 3 (total 10)
 - MAY: tested 1 / untested 0 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
 
 Paths are relative to the repo root; `fec/` abbreviates `rtci-interceptor/src/flexfec/`, `it/` abbreviates
@@ -64,7 +64,7 @@ Paths are relative to the repo root; `fec/` abbreviates `rtci-interceptor/src/fl
 | FLEXFEC03-6.2-4 | 6.2 (4.2) | MUST | SN base MUST be the lowest sequence number of the source packets this repair packet protects | tested | `fec/draft03/encoder.rs` (`encode_one`: base and mask relative to the first packet the repair packet covers) | `it/flexfec03_conformance.rs::each_repair_packet_carries_its_own_lowest_sequence_number_as_sn_base`, `encoder.rs::sn_base_is_the_lowest_sequence_number_each_repair_packet_protects`, `encoder.rs::the_declared_mask_matches_the_interleaved_coverage` | Bug 3, fixed |
 | FLEXFEC03-6.2-5 | 6.2 | MUST | Repair payload is the XOR of everything after the 12-byte header; shorter packets padded with zero octets at the end | tested | `fec/draft03/encoder.rs:181-220` | `encoder.rs::the_repair_payload_is_the_xor_of_the_protected_payloads`, `the_repair_payload_is_as_long_as_the_largest_protected_packet` | |
 | FLEXFEC03-6.2-6 | 6.2 | MUST | CSRC list, header extension and RTP padding of source packets are part of the protected data | tested | `fec/draft03/encoder.rs:193-196` (marshals the whole packet) | `it/flexfec03_conformance.rs::a_lost_packet_with_csrcs_an_extension_and_padding_is_recovered_byte_identically` |  |
-| FLEXFEC03-6.2-7 | 6.2 | SHOULD | Repair packet (largest source + 20 to 32 bytes) should not exceed the path MTU | missing | `fec/draft03/encoder.rs:181-186` | none | Advisory text ("may cause problems"). A repair packet for a full-MTU source packet is always over the MTU |
+| FLEXFEC03-6.2-7 | 6.2 | SHOULD | Repair packet (largest source + 20 to 32 bytes) should not exceed the path MTU | tested | `rtci-interceptor/src/flexfec/draft03/encoder.rs` (`DRAFT03_MAX_REPAIR_PACKET_SIZE`, `FlexFec03Encoder::with_max_packet_size`) | `rtci-interceptor/src/flexfec/draft03/encoder.rs::a_repair_packet_larger_than_the_path_allows_is_not_built` | fec2: a repair packet larger than 1436 octets (a 1500-octet path under IPv6, UDP and a 16-octet SRTP tag) is not built and takes no sequence number; the block goes without it |
 | FLEXFEC03-6.3-1 | 6.3 | MUST | Whatever algorithm is used, the result is identical to the specified one | tested | `fec/draft03/decoder.rs:259-318` | `it/flexfec_round_trip.rs::a_single_loss_is_recovered_byte_identically`, `one_repair_packet_covering_the_whole_block_recovers_any_single_loss` | |
 | FLEXFEC03-6.3.1-1 | 6.3.1 | MUST | A repair packet with more than one missing source packet recovers nothing | tested | `fec/draft03/decoder.rs:241-246` | `it/flexfec_round_trip.rs::two_losses_under_one_repair_packet_recover_neither` | |
 | FLEXFEC03-6.3.1.1-1 | 6.3.1.1 | MAY | Association signalled entirely in SDP (L, D, ToP) | missing | none | none | |

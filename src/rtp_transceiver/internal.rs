@@ -13,7 +13,8 @@ use crate::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpHeaderExtensionToNegotiate, RtpCodecKind,
 };
 use crate::rtp_transceiver::{
-    PayloadType, RTCRemoteBandwidth, RTCRtpTransceiverDirection, RTCRtpTransceiverInit, fmtp,
+    PayloadType, RTCFecGroupSemantics, RTCRemoteBandwidth, RTCRtpTransceiverDirection,
+    RTCRtpTransceiverInit, fmtp,
 };
 use interceptor::Interceptor;
 use log::trace;
@@ -118,6 +119,39 @@ pub(crate) struct RTCRtpTransceiverInternal {
     remote_rtcp_xr: Option<Vec<String>>,
     /// The `a=ptime` / `a=maxptime` of this transceiver's section of the remote description.
     remote_packet_time: RTCPacketTime,
+    /// This transceiver's m= section is a FEC session (RFC 5109 section 14.1): it carries the
+    /// `ulpfec` stream of another transceiver's media, in an RTP session of its own.
+    fec_session: Option<FecSessionState>,
+    /// The token of the FEC session ([`FecSessionState::token`]) that protects this
+    /// transceiver's media.
+    protected_by: Option<u64>,
+}
+
+/// The `ulpfec` format of a FEC session's m= section (RFC 5109 sections 13 and 14.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FecSessionFormat {
+    /// The dynamic payload type (section 14.1).
+    pub(crate) payload_type: PayloadType,
+    /// The `rate` parameter (section 13: "larger than 1000 Hz" in a separate stream).
+    pub(crate) clock_rate: u32,
+    /// `onelevelonly=1` (section 13).
+    pub(crate) one_level_only: bool,
+}
+
+/// What a transceiver that is a FEC session knows about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FecSessionState {
+    /// Pairs the session with the transceiver it protects
+    /// ([`RTCRtpTransceiverInternal::protected_by`]): transceiver ids move when one is removed
+    /// and a mid is not there before the first offer.
+    pub(crate) token: u64,
+    /// The semantics of the `a=group` line that groups the two sections.
+    pub(crate) semantics: RTCFecGroupSemantics,
+    /// The format this side's descriptions state: the payload type it receives FEC with.
+    pub(crate) local: FecSessionFormat,
+    /// The format of the remote description's section: the payload type to send FEC with.
+    /// `None` until a remote description accepted the session with its group.
+    pub(crate) remote: Option<FecSessionFormat>,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -183,7 +217,31 @@ impl RTCRtpTransceiverInternal {
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
             remote_packet_time: RTCPacketTime::default(),
+            fec_session: None,
+            protected_by: None,
         }
+    }
+
+    /// The FEC session this transceiver's m= section is (RFC 5109 section 14.1), if it is one.
+    pub(crate) fn fec_session(&self) -> Option<&FecSessionState> {
+        self.fec_session.as_ref()
+    }
+
+    pub(crate) fn fec_session_mut(&mut self) -> Option<&mut FecSessionState> {
+        self.fec_session.as_mut()
+    }
+
+    pub(crate) fn set_fec_session(&mut self, session: Option<FecSessionState>) {
+        self.fec_session = session;
+    }
+
+    /// The token of the FEC session that protects this transceiver's media.
+    pub(crate) fn protected_by(&self) -> Option<u64> {
+        self.protected_by
+    }
+
+    pub(crate) fn set_protected_by(&mut self, token: Option<u64>) {
+        self.protected_by = token;
     }
 
     /// Whether the sender is described in this transceiver's m= section (its `a=msid` and
