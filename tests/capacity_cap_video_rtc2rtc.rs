@@ -50,8 +50,8 @@ use rtc::rtp_transceiver::rtp_sender::{
 };
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 use rtc::sansio::Protocol;
+use rtc::shared::time::SystemInstant;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -109,12 +109,64 @@ impl RtcpRandom for SeededRtcpRandom {
     }
 }
 
-thread_local! {
-    /// Whether the next `World`'s peers use the engine's default interceptors (the pacer, GCC
-    /// on transport-wide feedback, the NACK pair) with the video following the target the
-    /// senders are given (`RTCRtpSender::target_bitrates`), instead of ParolNet's chain.
-    static DEFAULT_CHAIN: Cell<bool> = const { Cell::new(false) };
+/// Which interceptor chain the peers of a run use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chain {
+    /// ParolNet's: NACK, the RTCP reports, key-frame requests, TWCC with the TWCC-driven GCC
+    /// (`GccInterceptorBuilder`), no pacer; the video follows `GccHandle::target_bitrate_bps`.
+    ParolNet,
+    /// The engine's default interceptors (the pacer, GCC on transport-wide feedback, the NACK
+    /// pair); the video follows the target the senders are given
+    /// (`RTCRtpSender::target_bitrates`).
+    Default,
+    /// The default interceptors with the pacer's slot passed through.
+    DefaultWithoutPacer,
 }
+
+/// How a run is set up.
+#[derive(Clone, Copy, Debug)]
+struct Setup {
+    seed: u64,
+    /// The NACK responder's rule; the engine's default when `None`.
+    rate_limit: Option<RetransmissionRateLimit>,
+    chain: Chain,
+    /// The wall clock at the instant the peers are built (since the Unix epoch): every NTP
+    /// time on the wire follows from it, so a run with one is reproducible to the byte, and
+    /// runs with different ones differ in the phase of everything derived from NTP times
+    /// (round-trip times to 1/65536 s). The process's wall clock when `None`.
+    anchor: Option<Duration>,
+    /// How long the cap stays after the estimate went under 400 kbit/s.
+    cap: Duration,
+}
+
+impl Setup {
+    fn new(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Self {
+        Self {
+            seed,
+            rate_limit,
+            chain: Chain::ParolNet,
+            anchor: None,
+            cap: Duration::from_secs(20),
+        }
+    }
+
+    fn chain(mut self, chain: Chain) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    fn anchor(mut self, anchor: Duration) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+}
+
+/// Three wall clocks a run is repeated on: the same second, a different phase within it.
+const ANCHORS: [Duration; 3] = [
+    Duration::new(1_800_000_000, 0),
+    Duration::new(1_800_000_000, 333_333_333),
+    Duration::new(1_800_000_000, 777_777_777),
+];
 
 const VP8_PT: u8 = 96;
 const RTX_PT: u8 = 97;
@@ -382,12 +434,10 @@ fn track(kind: RtpCodecKind, codec: RTCRtpCodec, ssrc: u32, rtx: Option<u32>) ->
 impl Peer {
     /// A peer with ParolNet's media engine and interceptor chain, sending Opus and VP8; its
     /// NACK responder holds retransmissions to `rate_limit`, the engine's default when `None`.
-    fn new(
-        addr: &str,
-        seed: u64,
-        ssrc_base: u32,
-        rate_limit: Option<RetransmissionRateLimit>,
-    ) -> Result<Self> {
+    fn new(addr: &str, setup: &Setup, salt: u64, ssrc_base: u32, start: Instant) -> Result<Self> {
+        let seed = setup.seed ^ salt;
+        let rate_limit = setup.rate_limit;
+        let wall_clock = setup.anchor.map(|anchor| SystemInstant::at(start, anchor));
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
             inner: default_provider()?,
             rng: Mutex::new(Rng(seed)),
@@ -420,14 +470,21 @@ impl Peer {
             },
             RtpCodecKind::Audio,
         )?;
-        if DEFAULT_CHAIN.with(|d| d.get()) {
+        if setup.chain != Chain::ParolNet {
             let mut options = DefaultInterceptorOptions::default();
             options.rtcp_random = Some(provider.clone());
-            let (registry, handles) = register_default_interceptors_with_options(
+            options.wall_clock = wall_clock;
+            if let Some(rate_limit) = rate_limit {
+                options.nack_retransmission_rate_limit = rate_limit;
+            }
+            let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),
                 &mut media_engine,
                 &options,
             )?;
+            if setup.chain == Chain::DefaultWithoutPacer {
+                registry = registry.with(Slot::Pacer, PassThroughInterceptor::new());
+            }
             // The application's bounds, as ParolNet gives its GCC.
             handles
                 .congestion_control
@@ -443,6 +500,7 @@ impl Peer {
                 ssrc_base,
                 None,
                 Some(handles),
+                start,
             );
         }
         let registry = match rate_limit {
@@ -458,12 +516,14 @@ impl Peer {
                 )
                 .with(Slot::NackGenerator, NackGeneratorBuilder::new().build()),
         };
-        let registry = configure_rtcp_reports_with(
-            registry,
-            RtcpSessionBuilder::new()
-                .with_t_rr_interval(Duration::ZERO)
-                .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed))),
-        );
+        let session = RtcpSessionBuilder::new()
+            .with_t_rr_interval(Duration::ZERO)
+            .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match wall_clock {
+            Some(anchor) => session.with_wall_clock(anchor),
+            None => session,
+        };
+        let registry = configure_rtcp_reports_with(registry, session);
         configure_receiver_reference_time(&mut media_engine);
         let registry = configure_key_frame_requests(registry);
         let (gcc, handle) = GccInterceptorBuilder::new();
@@ -483,9 +543,11 @@ impl Peer {
             ssrc_base,
             Some(handle),
             None,
+            start,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_chain(
         addr: &str,
         provider: Arc<dyn RTCCryptoProvider>,
@@ -494,6 +556,7 @@ impl Peer {
         ssrc_base: u32,
         gcc: Option<GccHandle>,
         handles: Option<DefaultInterceptorHandles>,
+        start: Instant,
     ) -> Result<Self> {
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
@@ -504,7 +567,7 @@ impl Peer {
             )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+            .build(start)?;
         let audio = pc.add_track(track(RtpCodecKind::Audio, opus_codec(), ssrc_base, None))?;
         let video = pc.add_track(track(
             RtpCodecKind::Video,
@@ -968,12 +1031,12 @@ impl World {
     }
 
     /// Two peers over host candidates, audio and video each way, connected.
-    fn connected(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Self> {
+    fn connected(setup: &Setup) -> Result<Self> {
         let start = Instant::now();
         let mut world = World {
             peers: [
-                Peer::new("10.0.0.1:5000", seed ^ 0x1111, 0x1000_0000, rate_limit)?,
-                Peer::new("10.0.0.2:5000", seed ^ 0x2222, 0x2000_0000, rate_limit)?,
+                Peer::new("10.0.0.1:5000", setup, 0x1111, 0x1000_0000, start)?,
+                Peer::new("10.0.0.2:5000", setup, 0x2222, 0x2000_0000, start)?,
             ],
             uplinks: [Uplink::new(), Uplink::new()],
             start,
@@ -1057,6 +1120,10 @@ struct Outcome {
     /// (the target less the retransmission reserve, the same with nothing to repair).
     after: u32,
     estimate_after: u32,
+    /// The estimate when the cap went, and the target the encoder followed 5, 10, 15 and 20 s
+    /// later.
+    estimate_at_lift: u32,
+    recovery: [u32; 4],
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
     freeze_at: Duration,
@@ -1075,8 +1142,9 @@ struct Outcome {
 
 /// The call: 20 s open, the caller's uplink capped at 300 kbit/s until 20 s after its
 /// estimate went under 400 kbit/s, then open again for 20 s.
-fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome> {
-    let mut world = World::connected(seed, rate_limit)?;
+fn run(setup: &Setup) -> Result<Outcome> {
+    let seed = setup.seed;
+    let mut world = World::connected(setup)?;
     let t = world.now + Duration::from_secs(20);
     world.advance(t)?;
     let before = target_at(&world.peers[0].targets, world.elapsed());
@@ -1094,10 +1162,10 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
     let Some(reacted) = reacted else {
         bail!("the estimate did not come down within 5 s");
     };
-    let t = world.now + Duration::from_secs(20);
+    let t = world.now + setup.cap;
     world.advance(t)?;
     let mut samples = Vec::new();
-    let mut at = capped_at + Duration::from_secs(8);
+    let mut at = capped_at + Duration::from_secs(8).min(setup.cap / 2);
     while at <= world.elapsed() {
         samples.push(target_at(&world.peers[0].targets, at));
         at += Duration::from_millis(100);
@@ -1106,8 +1174,13 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
     let under = samples[samples.len() / 2];
     world.uplinks[0].set_profile(LinkProfile::open());
     let opened_at = world.elapsed();
-    let t = world.now + Duration::from_secs(20);
-    world.advance(t)?;
+    let estimate_at_lift = world.peers[0].estimate().unwrap_or(0);
+    let mut recovery = [0; 4];
+    for after in recovery.iter_mut() {
+        let t = world.now + Duration::from_secs(5);
+        world.advance(t)?;
+        *after = target_at(&world.peers[0].targets, world.elapsed());
+    }
     let end = world.elapsed();
     let after = target_at(&world.peers[0].targets, end);
     let estimate_after = world.peers[0].estimate().unwrap_or(0);
@@ -1115,7 +1188,7 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
     let pacer_dropped = caller.video_written.difference(&caller.video_left).count();
     if std::env::var("RTC_CAP_TRACE").is_ok() {
         for line in &world.trace {
-            println!("TRACE seed {seed} {line}");
+            println!("TRACE {:?} seed {seed} {line}", setup.chain);
         }
     }
     let callee = &world.peers[1];
@@ -1126,6 +1199,8 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
         under,
         after,
         estimate_after,
+        estimate_at_lift,
+        recovery,
         freeze,
         freeze_at,
         capped_at,
@@ -1144,7 +1219,7 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
 fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, Outcome)>> {
     let mut outcomes = Vec::new();
     for seed in 1..=6 {
-        let outcome = run(seed, rate_limit)?;
+        let outcome = run(&Setup::new(seed, rate_limit))?;
         println!("{rate_limit:?} seed {seed}: {outcome:?}");
         outcomes.push((seed, outcome));
     }
@@ -1218,6 +1293,70 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
     Ok(())
 }
 
+/// A measurement over what the environment names, one line per run; asserts nothing.
+/// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
+/// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
+/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
+/// `20`), each a comma-separated list.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_the_capacity_cap() -> Result<()> {
+    fn list(name: &str, default: &str) -> Vec<String> {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .map(|item| item.trim().to_owned())
+            .filter(|item| !item.is_empty())
+            .collect()
+    }
+    for chain in list("RTC_CAP_CHAINS", "parolnet,default,nopacer") {
+        for rule in list("RTC_CAP_RULES", "within,upto,unlimited") {
+            for seconds in list("RTC_CAP_SECONDS", "20") {
+                for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
+                    for anchor in list("RTC_CAP_ANCHORS", "0,1,2") {
+                        let rate_limit = match rule.as_str() {
+                            "within" => RetransmissionRateLimit::WithinTarget,
+                            "upto" => RetransmissionRateLimit::UpToTarget,
+                            "unlimited" => RetransmissionRateLimit::Unlimited,
+                            other => bail!("unknown rule {other}"),
+                        };
+                        let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
+                            .chain(match chain.as_str() {
+                                "parolnet" => Chain::ParolNet,
+                                "default" => Chain::Default,
+                                "nopacer" => Chain::DefaultWithoutPacer,
+                                other => bail!("unknown chain {other}"),
+                            })
+                            .anchor(ANCHORS[anchor.parse::<usize>()?]);
+                        setup.cap = Duration::from_secs(seconds.parse()?);
+                        match run(&setup) {
+                            Ok(o) => println!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | freeze {:.2} at {:.1} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                o.freeze.as_secs_f64(),
+                                o.freeze_at.as_secs_f64(),
+                                o.rtx_sent,
+                                o.rtx_dropped,
+                                o.queue_drops,
+                                o.audio_dropped,
+                                o.pacer_dropped,
+                                o.keyframe_requests.len(),
+                                o.under / 1000,
+                                o.estimate_at_lift / 1000,
+                                o.recovery.map(|bps| bps / 1000),
+                                o.estimate_after / 1000,
+                            ),
+                            Err(error) => println!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | failed: {error}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The same call through the engine's default interceptors (the pacer with its default
 /// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
 /// section 7 default), the video following the target the senders are given
@@ -1226,15 +1365,13 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 /// seeds, and the video does not freeze for more than 2 s.
 #[test]
 fn a_sender_following_the_lowered_target_loses_nothing_at_the_pacer() -> Result<()> {
-    DEFAULT_CHAIN.with(|d| d.set(true));
     let outcomes: Result<Vec<_>> = (1..=3)
         .map(|seed| {
-            let outcome = run(seed, None)?;
+            let outcome = run(&Setup::new(seed, None).chain(Chain::Default))?;
             println!("default chain seed {seed}: {outcome:?}");
             Ok((seed, outcome))
         })
         .collect();
-    DEFAULT_CHAIN.with(|d| d.set(false));
     let outcomes = outcomes?;
     for (seed, outcome) in &outcomes {
         assert_eq!(0, outcome.pacer_dropped, "seed {seed}: {outcome:?}");
@@ -1269,8 +1406,8 @@ struct PathChangeOutcome {
 /// has selected the new pair. Every datagram keeps the same addresses throughout, as in an
 /// application that hands them over with a placeholder pair: only the peer connection's word
 /// tells the congestion controllers that the path changed.
-fn path_change_run(seed: u64) -> Result<PathChangeOutcome> {
-    let mut world = World::connected(seed, None)?;
+fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
+    let mut world = World::connected(setup)?;
     let t = world.now + Duration::from_secs(10);
     world.advance(t)?;
     let before = world.peers[0].estimate();
@@ -1329,7 +1466,7 @@ fn path_change_run(seed: u64) -> Result<PathChangeOutcome> {
 #[test]
 fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<()> {
     for seed in 1..=3 {
-        let outcome = path_change_run(seed)?;
+        let outcome = path_change_run(&Setup::new(seed, None))?;
         println!("ParolNet chain seed {seed}: {outcome:?}");
         assert!(
             outcome.before.is_some_and(|before| before > 300_000),
@@ -1356,15 +1493,13 @@ fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<(
 /// at it.
 #[test]
 fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chain() -> Result<()> {
-    DEFAULT_CHAIN.with(|d| d.set(true));
     let outcomes: Result<Vec<_>> = (1..=3)
         .map(|seed| {
-            let outcome = path_change_run(seed)?;
+            let outcome = path_change_run(&Setup::new(seed, None).chain(Chain::Default))?;
             println!("default chain seed {seed}: {outcome:?}");
             Ok((seed, outcome))
         })
         .collect();
-    DEFAULT_CHAIN.with(|d| d.set(false));
     for (seed, outcome) in &outcomes? {
         assert!(
             outcome.most_loss_after < 0.1,
