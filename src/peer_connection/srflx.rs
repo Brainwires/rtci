@@ -788,19 +788,22 @@ impl RTCPeerConnection {
             .ufrag
             .clone();
         let key = (transport, mapped, kind, ufrag);
-        // RFC 8445 section 5.1.3: one equal to its base (no NAT) is redundant. With
-        // `with_multicast_dns_expose_known_public_addresses` in `QueryAndGather` it goes to
-        // the agent all the same: it is what shows the base public
-        // (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2, which also says it "MUST NOT
-        // be considered redundant" with the base's mDNS candidate); the agent drops it as
-        // redundant when the base's host candidate carries the address.
-        let shows_public = self.setting_engine.multicast_dns.mode
-            == ice::mdns::MulticastDnsMode::QueryAndGather
-            && self
-                .setting_engine
-                .multicast_dns
-                .expose_known_public_addresses;
-        if (mapped == base && !shows_public) || self.streams.srflx.announced.contains(&key) {
+        // RFC 8445 section 5.1.3: one equal to its base (no NAT) is redundant, with the base's
+        // host candidate written with its address. In `QueryAndGather` that host candidate
+        // carries an mDNS name instead, and draft-ietf-mmusic-mdns-ice-candidates section
+        // 3.1.2.2 says: "Regardless of whether the address turns out to be public or private,
+        // a server-reflexive candidate will be generated; [...] and as such MUST NOT be
+        // considered redundant per the guidance in [RFC8445], Section 5.1.3". So it goes to
+        // the agent, which applies 5.1.3 with what it holds: kept (raddr 0.0.0.0 / ::, rport
+        // 9) beside a `.local` host candidate, dropped beside one that carries the address
+        // (the fixed-IP mode's other addresses, or one unwrapped by
+        // `with_multicast_dns_expose_known_public_addresses`, which takes its evidence from
+        // it). libwebrtc keeps it the same way (p2p/base/stun_port.cc,
+        // UDPPort::OnStunBindingRequestSucceeded: the reflected address equal to the local
+        // one is discarded only when "mDNS obfuscation is not enabled").
+        let hidden_base =
+            self.setting_engine.multicast_dns.mode == ice::mdns::MulticastDnsMode::QueryAndGather;
+        if (mapped == base && !hidden_base) || self.streams.srflx.announced.contains(&key) {
             return;
         }
         self.streams.srflx.announced.push(key);

@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **jsep** (mdns-5): **in mDNS `QueryAndGather`, a STUN answer equal to its base is a
+  server-reflexive candidate** (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2,
+  MDNSICE-3.1.2.2-1: "a server-reflexive candidate will be generated; [...] and as such MUST
+  NOT be considered redundant per the guidance in [RFC8445], Section 5.1.3"). The engine's STUN
+  gathering dropped it as redundant with the host candidate, which in this mode carries only
+  its `.local` name: a host with a public address offered no usable candidate to a peer that
+  cannot resolve the name. It is now provided with raddr `0.0.0.0` / `::` and rport 9
+  (MDNSICE-3.1.2.2-2), as libwebrtc keeps it under mDNS obfuscation
+  (p2p/base/stun_port.cc, `UDPPort::OnStunBindingRequestSucceeded`). Other modes unchanged
+  (redundant, dropped). Test: `tests/ice_mdns_exposure.rs::in_hiding_mode_a_stun_answer_equal_to_its_base_is_a_candidate_with_the_base_hidden`.
 - **stream-driver** (mdns-4): with mDNS `QueryAndGather` the driver binds the host's mDNS sockets when its connection begins gathering, before the first host candidates (before: at the first mDNS datagram), and tells the connection for which address families it has none (`RTCPeerConnection::set_multicast_dns_publishing`). The names of host addresses of such a family are not registered: their candidates go out under a `.local` name that is not published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1), or not at all with `with_multicast_dns_fail_closed(true)`. Before, the name was registered and announced into a socket that did not exist.
 - **ice** (mdns-4): a host candidate whose mDNS name cannot be registered keeps one unpublished name per address (its UDP and TCP candidates share it, section 3.1.1 steps 2 and 5); before, each candidate past the cap of 64 names got a name of its own. No `QueryAndGather` path writes the literal address any more except the fixed-IP mode's other addresses (the agent without an mDNS connection used to, a path that `Agent::new` never takes).
 - **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
@@ -297,9 +307,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     future ICE gathering phases"), kept candidates included, as long as each restart's
     gathering shows it again. Per agent; `Agent::set_ice_servers` (called by
     `RTCPeerConnection::set_configuration`) discards it when the set of STUN / TURN servers
-    changes (the section's SHOULD). With the setting, the engine's STUN gathering hands the
-    agent a server-reflexive answer equal to its base instead of dropping it (the agent
-    drops it as redundant when the host candidate carries the address).
+    changes (the section's SHOULD). The evidence is the server-reflexive candidate equal to
+    its base, which `QueryAndGather` now always provides (see "Behaviour changes").
   - `SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses(true)`
     (`AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`), draft section 3.1.2.3:
     the addresses the application marks as RFC 4941 temporary

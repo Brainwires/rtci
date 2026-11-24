@@ -211,16 +211,86 @@ fn an_address_the_stun_server_shows_public_is_unwrapped_after_the_ice_restart() 
     Ok(())
 }
 
-/// The setting off (the default): a server-reflexive answer equal to the base is redundant
-/// as before, and the restart's host candidates are hidden too.
+/// The setting off (the default): the host candidate stays hidden in every gathering, the
+/// restart's included.
 #[test]
 fn without_the_setting_the_public_address_stays_hidden() -> Result<()> {
     let mut pc = connection(false, false)?;
     let first = first_gathering(&mut pc)?;
     assert!(hosts(&first).iter().all(|c| c.contains(".local ")));
-    assert!(first.iter().all(|c| !c.contains("typ srflx")), "{first:?}");
     let second = restart(&mut pc, &[PUBLIC, PRIVATE])?;
-    assert!(second.iter().all(|c| !c.contains(PUBLIC_IP)), "{second:?}");
+    assert!(
+        second
+            .iter()
+            .all(|c| !(c.contains(PUBLIC_IP) && c.contains("typ host"))),
+        "{second:?}"
+    );
+    Ok(())
+}
+
+/// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2 at the peer connection, in the
+/// default hiding mode (no exposure setting): "Regardless of whether the address turns out to
+/// be public or private, a server-reflexive candidate will be generated; [...] and as such
+/// MUST NOT be considered redundant" (MDNSICE-3.1.2.2-1), and "this server-reflexive candidate
+/// MUST have its raddr field set to \"0.0.0.0\"/\"::\" and its rport field set to \"9\""
+/// (MDNSICE-3.1.2.2-2). The engine's own STUN gathering provides it when the answer equals the
+/// base; without mDNS hiding (`QueryOnly`) the same answer stays redundant (RFC 8445 section
+/// 5.1.3), the host candidate carrying the address already.
+#[test]
+fn in_hiding_mode_a_stun_answer_equal_to_its_base_is_a_candidate_with_the_base_hidden() -> Result<()>
+{
+    let mut pc = connection(false, false)?;
+    let first = first_gathering(&mut pc)?;
+    assert!(
+        hosts(&first).iter().all(|c| c.contains(".local ")),
+        "{first:?}"
+    );
+    let srflx: Vec<&String> = first.iter().filter(|c| c.contains("typ srflx")).collect();
+    assert_eq!(
+        srflx.len(),
+        1,
+        "not redundant with the mDNS candidate: {first:?}"
+    );
+    assert!(
+        srflx[0].contains(&format!(
+            "{PUBLIC_IP} 50000 typ srflx raddr 0.0.0.0 rport 9"
+        )),
+        "{}",
+        srflx[0]
+    );
+
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut plain = RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_ice_servers(vec![RTCIceServer {
+                    urls: vec![format!("stun:{STUN_SERVER}")],
+                    ..Default::default()
+                }])
+                .build(),
+        )
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_multicast_dns_mode(MulticastDnsMode::QueryOnly)
+                .build(),
+        )
+        .build(Instant::now())?;
+    plain.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let offer = plain.create_offer(None)?;
+    plain.set_local_description(Instant::now(), offer)?;
+    let first = first_gathering(&mut plain)?;
+    assert!(
+        first
+            .iter()
+            .any(|c| c.contains(&format!("{PUBLIC_IP} 50000 typ host"))),
+        "{first:?}"
+    );
+    assert!(
+        first.iter().all(|c| !c.contains("typ srflx")),
+        "redundant with the host candidate: {first:?}"
+    );
     Ok(())
 }
 
