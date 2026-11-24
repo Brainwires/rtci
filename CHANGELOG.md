@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **workspace**: the version on `master` is `0.2.0-dev` (every crate, and every requirement on
+  a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
+  cannot take without a change of their own. Each such change is listed here. Git dependents
+  that need the 0.1 API pin the tag `v0.1.0` or use the crates.io release.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
