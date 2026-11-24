@@ -436,8 +436,9 @@ impl RtcpSessionBuilder {
     /// and 250 ms (`TwccReceiverBuilder::with_adaptive_interval`): congestion control feedback
     /// is the sender's congestion signal and is not held to the RTCP bandwidth the regular
     /// reports share, as libwebrtc and the browsers send it. It goes as a reduced-size packet
-    /// where `a=rtcp-rsize` was negotiated, else in a minimal compound packet, and does not
-    /// move the regular reports' timing. `false` is RFC 4585 as written: at low media rates
+    /// where `a=rtcp-rsize` was negotiated, else in a minimal compound packet, and counts in
+    /// the average RTCP packet size (RFC 4585 3.5.4: "avg_rtcp_size ... MUST be updated
+    /// accordingly", Early or Regular), sent as received. `false` is RFC 4585 as written: at low media rates
     /// the session then sends feedback a few times a second, with gaps a sender's estimator
     /// does not climb through.
     pub fn with_immediate_congestion_feedback(mut self, immediate: bool) -> Self {
@@ -878,7 +879,8 @@ pub struct RtcpSessionInterceptor {
     /// Set while a regular packet is sent.
     sending_regular: bool,
     /// Set while a packet is sent outside the RTCP bandwidth's timing (immediate congestion
-    /// feedback): it does not move the average packet size the regular interval rests on.
+    /// feedback): it is measured as congestion control feedback, and counts in
+    /// `avg_rtcp_size` as every packet does (RFC 4585 3.5.4).
     outside_budget: bool,
     /// Feedback and other packets waiting for a compound packet.
     pending: Vec<Box<dyn rtcp::Packet>>,
@@ -1082,11 +1084,11 @@ impl RtcpSessionInterceptor {
             };
         }
         // RFC 3550 6.3.6 with RFC 8108 5.3.1: the average takes the size per reporting SSRC.
-        if !self.outside_budget {
-            let size = (wire_size(&packets) + self.srtcp_overhead) as f64
-                / reporting_ssrcs(&packets) as f64;
-            self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
-        }
+        // RFC 4585 3.5.4: of every packet sent, Early or Regular, congestion control feedback
+        // that leaves at once included, as the peer's is counted when it arrives.
+        let size =
+            (wire_size(&packets) + self.srtcp_overhead) as f64 / reporting_ssrcs(&packets) as f64;
+        self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
         self.write_queue.push_back(TaggedPacket {
             now,
             transport: TransportContext::default(),
@@ -3142,6 +3144,61 @@ mod tests {
         protected.avg_rtcp_size = 100.0;
         protected.observe_rtcp(now, &[rr(2)]);
         assert!((protected.avg_rtcp_size - (93.75 + 50.0 / 16.0)).abs() < 1e-9);
+    }
+
+    /// RFC 4585 3.5.4: "the avg_rtcp_size ... MUST be updated accordingly" for every
+    /// compound RTCP packet sent, Early or Regular. Congestion control feedback that leaves
+    /// at once (the default, `with_immediate_congestion_feedback`) moves the average a
+    /// sixteenth towards its size, as the same packet does when it arrives from the peer.
+    #[test]
+    fn congestion_feedback_sent_at_once_counts_in_the_average_packet_size() {
+        let now = Instant::now();
+        let mut session = RtcpSessionBuilder::new().build();
+        session.bind_remote_stream(&StreamInfo {
+            ssrc: 200,
+            clock_rate: 90_000,
+            mime_type: "video/VP8".to_owned(),
+            ..Default::default()
+        });
+        session.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+        session.control(now, &RtcpSessionControl::Start);
+        while session.poll_write().is_some() {}
+        let feedback = || {
+            boxed(TransportLayerCc {
+                sender_ssrc: 0,
+                media_ssrc: 200,
+                fb_pkt_count: 1,
+                ..Default::default()
+            })
+        };
+        session.avg_rtcp_size = 1000.0;
+        session
+            .handle_write(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![feedback()])),
+            })
+            .unwrap();
+        let mut sent = vec![];
+        while let Some(packet) = session.poll_write() {
+            if let Packet::Rtcp(packets) = packet.message.packet {
+                sent.push(packets);
+            }
+        }
+        assert_eq!(1, sent.len(), "the feedback leaves at once");
+        let size = wire_size(&sent[0]) as f64 / reporting_ssrcs(&sent[0]) as f64;
+        let expected = 1000.0 * 15.0 / 16.0 + size / 16.0;
+        assert!(
+            (session.avg_rtcp_size - expected).abs() < 1e-9,
+            "{} against {expected}",
+            session.avg_rtcp_size
+        );
+
+        // The same packet received moves the average the same way.
+        let mut peer = RtcpSessionBuilder::new().build();
+        peer.avg_rtcp_size = 1000.0;
+        peer.observe_rtcp(now, &sent[0]);
+        assert!((peer.avg_rtcp_size - expected).abs() < 1e-9);
     }
 
     /// RFC 4585 6.1: the packet sender of a feedback message is rewritten, whatever its type.
