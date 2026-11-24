@@ -178,7 +178,7 @@ impl RateController {
             measured_rate: None,
             convergence: Convergence::new(),
             last_change: None,
-            one_decrease_per_round_trip: true,
+            one_decrease_per_round_trip: false,
             last_decrease: None,
             received_rate_bound: ReceivedRateBound::default(),
         }
@@ -191,18 +191,23 @@ impl RateController {
         self
     }
 
-    /// Whether over-use lowers the target at most once per round trip (the default), or on
-    /// every update while it lasts.
+    /// Whether over-use lowers the target at most once per round trip, or on every update
+    /// while it lasts (the default).
     ///
     /// draft-ietf-rmcat-gcc-02 section 5.5 stays in Decrease while over-use lasts and sets
-    /// `A_hat = beta * R_hat` on each update. The received rate lags a cut by its measurement
-    /// window, and the detector by its filter (more so for a flow that sends few packets), so
-    /// over-use that the last cut has already answered goes on being read for some updates,
-    /// and each one cuts again: a newcomer to a shared bottleneck, which sends little and
-    /// filters slowly, cuts itself several times for one episode that the established flow
-    /// answers once. As libwebrtc's `AimdRateControl::TimeToReduceFurther` does, a further
-    /// cut waits one round trip (held within 10 to 200 ms) unless the received rate has
-    /// fallen below half the target. `false` is the draft as written.
+    /// `A_hat = beta * R_hat` on each update: `false`, the default. The estimate then follows
+    /// the received rate down as its measurement window empties of what arrived before the
+    /// path changed, which is what matters when a path loses most of its capacity at once
+    /// (`tests/capacity_cap_video_rtc2rtc.rs`: a 300 kbit/s cap under a sender at 1 Mbit/s
+    /// freezes the video 0.56 to 1.26 s and leaves the oldest picture 1.68 to 2.48 s old;
+    /// with one decrease per round trip 0.85 to 1.36 s and 2.33 to 2.61 s).
+    ///
+    /// `true` is libwebrtc's form (`AimdRateControl::TimeToReduceFurther`): a further cut
+    /// waits one round trip (held within 10 to 200 ms) unless the received rate has fallen
+    /// below half the target. Two flows sharing a bottleneck then keep a shorter queue
+    /// (`rtc-interceptor/tests/rfc8836_multi_flow.rs`: mean 2.8 ms and 95th percentile 10.8 ms
+    /// of queueing delay, against 18.5 ms and 93 ms with the draft's form; the shares are
+    /// 0.48 / 0.50 and 0.49 / 0.49).
     pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
         self.one_decrease_per_round_trip = enabled;
         self

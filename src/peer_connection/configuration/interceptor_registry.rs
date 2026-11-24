@@ -390,8 +390,9 @@ pub struct DefaultInterceptorOptions {
     /// (draft-ietf-rmcat-gcc-02 section 5.4). See
     /// [`Gcc::with_threshold_time_base`](interceptor::Gcc::with_threshold_time_base).
     pub gcc_threshold_time_base: interceptor::ThresholdTimeBase,
-    /// Whether over-use lowers the estimate at most once per round trip (`true`, the default)
-    /// or on every update (draft-ietf-rmcat-gcc-02 section 5.5). See
+    /// Whether over-use lowers the estimate at most once per round trip (`true`, libwebrtc's
+    /// form) or on every update (`false`, the default: draft-ietf-rmcat-gcc-02 section 5.5).
+    /// See
     /// [`Gcc::with_one_decrease_per_round_trip`](interceptor::Gcc::with_one_decrease_per_round_trip).
     pub gcc_one_decrease_per_round_trip: bool,
     /// What the bound of the congestion controller's estimate by the received rate
@@ -537,7 +538,7 @@ impl DefaultInterceptorOptions {
             rtcp_report_from_every_ssrc: false,
             twcc_rereport_received: false,
             gcc_threshold_time_base: interceptor::ThresholdTimeBase::Departure,
-            gcc_one_decrease_per_round_trip: true,
+            gcc_one_decrease_per_round_trip: false,
             gcc_received_rate_bound: interceptor::ReceivedRateBound::LimitsIncrease,
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,

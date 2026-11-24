@@ -957,7 +957,7 @@ governed_behaviours! {
         id: "gcc.one-decrease-per-round-trip",
         setting: "DefaultInterceptorOptions::gcc_one_decrease_per_round_trip",
         clause: "draft-ietf-rmcat-gcc-02 5.5",
-        rfc: true => "true",
+        rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
         chrome_source: "libwebrtc modules/remote_bitrate_estimator/aimd_rate_control.cc::AimdRateControl::TimeToReduceFurther @ a222406d: a decrease waits the round trip time held between 10 and 200 ms since the last change, or for the acknowledged rate to fall under half the estimate (delay_based_bwe.cc calls it on overuse)",

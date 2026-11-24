@@ -222,8 +222,9 @@ impl Gcc {
         self
     }
 
-    /// Whether over-use lowers the estimate at most once per round trip (the default) or on
-    /// every update while it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it. See
+    /// Whether over-use lowers the estimate at most once per round trip (libwebrtc's form) or
+    /// on every update while it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it (the
+    /// default). See
     /// [`RateController::with_one_decrease_per_round_trip`].
     pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
         self.delay_control = self.delay_control.with_one_decrease_per_round_trip(enabled);
