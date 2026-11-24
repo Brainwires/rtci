@@ -906,10 +906,12 @@ fn rtcp_and_budget(m: &Measured) -> (f64, f64) {
 /// feedback at 95% of the budget).
 #[test]
 fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth() -> Result<()> {
-    // 45 s, 40 s measured: the regular reports are few (one every one to five seconds from
-    // each side), and their intervals are drawn from [0.5, 1.5] of the computed one.
+    // 90 s, 85 s measured: the regular reports are few (one every two seconds or so from
+    // each side), their intervals are drawn from [0.5, 1.5] of the computed one, and one report
+    // more or less in a 40 s window moved the total by 1.3% (3253 against 3296 bit/s on two
+    // trees with the same RTCP code).
     let call = Scenario {
-        seconds: 45,
+        seconds: 90,
         ..AUDIO_24K
     };
     let default = measure(call, BehaviourProfile::Rfc, None)?;
