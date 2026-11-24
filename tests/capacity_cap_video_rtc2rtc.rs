@@ -2033,9 +2033,18 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // repairs to the estimate; without one they leave in a burst while the estimate is
         // still falling), and 35 to 41 of the repairs repeat a packet whose first repair was
         // still in flight when the receiver asked again (hosted traces 45341865225,
-        // 45342290711). The bound here guards it from growing.
+        // 45342290711). It is a documented known limit (CHANGELOG, "Known limits"), and the
+        // bound here guards it against gross regression only: on six seeds and three wall
+        // clocks the oldest picture was 5.56 to 9.84 s with the ICE agent's 27-byte SOFTWARE
+        // text and 5.56 to 10.23 s with its 14-byte one (hosted runs 45370399055 and
+        // 45370404660: the seeded figures follow the wire's packet sizes, so one text length
+        // moves a seed by some hundreds of milliseconds). The bound is that maximum, 10.23 s,
+        // and some 15 % (11.75 s). The freeze, the retransmissions and the recovery are held
+        // more tightly by the other assertions here. Not repeating a repair whose first copy
+        // is still in flight (`conf/rtx-1-duplicate-repairs`) brings it to 4.14 to 6.58 s,
+        // and the bound down with it.
         assert!(
-            outcome.lag <= Duration::from_secs(10),
+            outcome.lag <= Duration::from_millis(11_750),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );

@@ -746,7 +746,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retransmission rule: the pacer holds repairs to the estimate, where a chain without one
   lets them leave in a burst while the estimate is still falling. (With over-use lowering
   the estimate on every update, the default since: 0.97 to 1.91 s and 5.59 to 9.84 s on six
-  seeds.) Traced repair by repair (hosted runs 45341865225, 45342290711): 90 to 103
+  seeds; 5.56 to 10.23 s on six seeds and three wall clocks, the seeded runs moving with the
+  length of the ICE agent's SOFTWARE text.) Traced repair by repair (hosted runs 45341865225, 45342290711): 90 to 103
   retransmissions, none dropped at the path, of which 35 to 41 repeat a packet whose first
   repair had already arrived (answered 0.01 to 1.1 s after it; the request was made while
   that repair was still in flight), and these share the estimate with the first repairs of
@@ -1591,6 +1592,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **rtc**: the paced chain's oldest-picture bound in the capacity-cap port is 11.75 s
+  (`conf/gcc-8-paced-picture-guard`). It was 10 s, 1.6 % above the most one tree measured: with
+  the ICE agent's SOFTWARE text 14 bytes long instead of 27 (the crate rename), seed 3 of the
+  full matrix (`RTC_CAP_FULL`) showed a picture 10.23 s old. Measured on six seeds and three
+  wall clocks with either text: 5.56 to 10.23 s; the bound is that maximum and some 15 %. It
+  guards the documented known limit (a sudden drop under the pacer, see Known limits)
+  against gross regression; the freeze, retransmission and recovery assertions hold the call
+  more tightly.
 - **rtc**: the capacity-cap port's recovery is measured over a window and, for the paced
   chain, against the estimate the cap left (`conf/gcc-7-recovery-mean`). A single reading 20 s
   after the cap fell on the estimate's sawtooth: renaming the crates shortened the ICE
