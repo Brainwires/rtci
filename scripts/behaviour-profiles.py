@@ -300,7 +300,7 @@ def render(rows, not_governed, not_expressible):
     w("  (`rtcp.congestion-feedback-in-budget`) is the default, and its cadence is derived from")
     w("  that budget (`cc.feedback-share` 3.75% of the session bandwidth, the receivers' three")
     w("  quarters of the 5%, no fixed ceiling): at 24 kbit/s of audio the connection's RTCP is")
-    w("  101.7% of a 3.2 kbit/s budget with the lower layers (the 64 kbit/s session floor;")
+    w("  99 to 103% of a 3.2 kbit/s budget with the lower layers (the 64 kbit/s session floor;")
     w("  within RFC 3550 6.3.1's compensation), against 197% before; 64% at 100 kbit/s and 77%")
     w("  at 300 kbit/s of video (135% and 140% before). `Performance` takes 69% of its own")
     w("  budget (16 kbit/s floor).")
