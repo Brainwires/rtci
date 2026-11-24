@@ -8,7 +8,6 @@ use std::io::Write;
 use bytes::Bytes;
 use rtp::codec::h264::H264Packet;
 use rtp::codec::h265::H265Packet;
-use rtp::packetizer::Depacketizer;
 
 use crate::io::Writer;
 use shared::error::Result;
@@ -39,10 +38,18 @@ enum H26xPacket {
 }
 
 impl H26xPacket {
-    fn depacketize(&mut self, payload: &Bytes) -> Result<Bytes> {
+    /// Depacketizes one packet given with its RTP sequence number: after a gap the fragments
+    /// of the NAL unit the lost packet belonged to are dropped rather than spliced into a NAL
+    /// unit with a hole in it (RFC 6184 section 5.8, RFC 7798 section 4.4.3: the receiver
+    /// discards the following fragmentation units of a NAL unit after a lost one).
+    fn depacketize_with_sequence_number(
+        &mut self,
+        sequence_number: u16,
+        payload: &Bytes,
+    ) -> Result<Bytes> {
         match self {
-            H26xPacket::H264(p) => p.depacketize(payload),
-            H26xPacket::H265(p) => p.depacketize(payload),
+            H26xPacket::H264(p) => p.depacketize_with_sequence_number(sequence_number, payload),
+            H26xPacket::H265(p) => p.depacketize_with_sequence_number(sequence_number, payload),
         }
     }
 }
@@ -108,9 +115,10 @@ impl<W: Write> H26xWriter<W> {
             }
         }
 
-        let payload = self
-            .packet
-            .depacketize(&Bytes::copy_from_slice(&packet.payload))?;
+        let payload = self.packet.depacketize_with_sequence_number(
+            packet.header.sequence_number,
+            &Bytes::copy_from_slice(&packet.payload),
+        )?;
         self.writer.write_all(&payload)?;
 
         Ok(())
@@ -124,13 +132,10 @@ impl<W: Write> H26xWriter<W> {
         // after a gap the fragments of the NAL unit the lost packet belonged to are dropped
         // rather than spliced into a NAL unit with a hole in it (section 4.4.3: an incomplete
         // NAL unit is never passed on with forbidden_zero_bit 0).
-        let data = match &mut self.packet {
-            H26xPacket::H265(p) => p.depacketize_with_sequence_number(
-                packet.header.sequence_number,
-                &Bytes::copy_from_slice(&packet.payload),
-            )?,
-            H26xPacket::H264(p) => p.depacketize(&Bytes::copy_from_slice(&packet.payload))?,
-        };
+        let data = self.packet.depacketize_with_sequence_number(
+            packet.header.sequence_number,
+            &Bytes::copy_from_slice(&packet.payload),
+        )?;
         self.writer.write_all(&data)?;
 
         Ok(())

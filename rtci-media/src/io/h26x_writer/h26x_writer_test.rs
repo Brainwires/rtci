@@ -4,13 +4,38 @@ use rtp::Packet;
 use rtp::codec::h265::HevcPayloader;
 use rtp::packetizer::Payloader;
 
+/// RFC 6184 section 5.8: "the receiver SHOULD discard the following fragmentation units
+/// ... corresponding to the same fragmented NAL unit" after a lost one. The writer gives the
+/// depacketizer each packet's sequence number: with the middle FU-A of a NAL unit lost,
+/// nothing of that NAL unit is written; the next whole one is.
 #[test]
-fn test_h26x_writer_h264() {
-    // TODO: Add tests for H26xWriter with H264
-    // This would require:
-    // 1. Sample H264 RTP packets
-    // 2. Expected Annex B output
-    // 3. Verification of correct depacketization
+fn test_h26x_writer_h264_drops_a_nal_unit_whose_middle_fragment_was_lost() {
+    let mut writer = H26xWriter::new(Vec::<u8>::new(), false);
+    let packet = |sequence_number: u16, payload: &[u8]| Packet {
+        header: rtp::header::Header {
+            sequence_number,
+            ..Default::default()
+        },
+        payload: Bytes::copy_from_slice(payload),
+    };
+    // A sequence parameter set (type 7) first: the writer starts at a key frame.
+    writer
+        .write_rtp(&packet(9, &[0x67, 0x42, 0x00, 0x1F]))
+        .unwrap();
+    // An IDR (type 5) in FU-As: start (10), middle (11, lost), end (12).
+    writer.write_rtp(&packet(10, &[0x7C, 0x85, 0xAA])).unwrap();
+    writer.write_rtp(&packet(12, &[0x7C, 0x45, 0xCC])).unwrap();
+    assert_eq!(
+        vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1F],
+        writer.writer,
+        "a NAL unit with a hole is not written"
+    );
+
+    writer.write_rtp(&packet(13, &[0x41, 0xDD])).unwrap();
+    assert_eq!(
+        vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1F, 0, 0, 0, 1, 0x41, 0xDD],
+        writer.writer
+    );
 }
 
 #[test]

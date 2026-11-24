@@ -1957,15 +1957,18 @@ fn test_handle_data_across_the_tsn_wrap() -> Result<()> {
 /// would arrive after the id is free and reset the next channel that takes it.
 #[test]
 fn test_reset_request_is_echoed_only_for_an_open_outgoing_stream() -> Result<()> {
-    for (state, echoed) in [
-        (RecvSendState::ReadWritable, true),
-        (RecvSendState::Closed, false),
-        (RecvSendState::Writable, false),
+    for (state, started, echoed) in [
+        (RecvSendState::ReadWritable, false, true),
+        (RecvSendState::Readable, false, true),
+        (RecvSendState::Closed, true, false),
+        (RecvSendState::Writable, true, false),
+        (RecvSendState::ReadWritable, true, false),
     ] {
         let mut a = create_association(TransportConfig::default());
         a.set_state(AssociationState::Established);
         a.create_stream(3, true, PayloadProtocolIdentifier::Binary);
         a.streams.get_mut(&3).unwrap().state = state;
+        a.streams.get_mut(&3).unwrap().outgoing_reset_started = started;
         let reply = a.handle_reconfig(&reset_request_chunk(7, a.peer_last_tsn, vec![3]))?;
         // The response always; a reset request of this side's own, in the same chunk (RFC
         // 6525 5.2.1), only when echoed.
@@ -2286,3 +2289,6 @@ mod reset_reuse_test;
 
 #[path = "partial_delivery_test.rs"]
 mod partial_delivery_test;
+
+#[path = "reset_answer_test.rs"]
+mod reset_answer_test;
