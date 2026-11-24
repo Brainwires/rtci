@@ -28,9 +28,17 @@
 //! host addresses behind `.local` names and resolves the peer's: its ICE agents write their
 //! mDNS datagrams from local port 5353. At the first one the driver binds the host's mDNS
 //! sockets, port 5353 joined to 224.0.0.251 and, where the host has IPv6, to ff02::fb (shared
-//! with other mDNS responders of the host through address reuse); it sends the connection's
-//! queries, probes and answers there and hands what arrives back to the connection. A
-//! connection without mDNS writes none, and the driver binds nothing.
+//! with other mDNS responders of the host through address reuse), on the interface of every
+//! address of [`PeerDriverConfig::addresses`]; it sends the connection's queries, probes and
+//! answers there and hands what arrives back to the connection. A connection without mDNS
+//! writes none, and the driver binds nothing.
+//!
+//! RFC 6762 section 14: a host on several links takes part in mDNS on each, and an answer
+//! carries only addresses valid on the interface it leaves by. The engine names, for each
+//! message, the address it is about (its record's); the driver sends it by that address's
+//! interface (`Transmit::source`: `IP_MULTICAST_IF` / `IPV6_MULTICAST_IF`), an IPv6 record's
+//! on the IPv6 group (and on the IPv4 group of the same interface where the driver has an IPv4
+//! address there), and a query once on each interface.
 //!
 //! With `QueryAndGather` the driver binds the mDNS sockets before it adds the first host
 //! candidates and tells the connection for which address families it has one
@@ -68,7 +76,7 @@ use crate::sockets::{self, PortRange};
 use crate::{DriverConfig, DriverInput, StreamDriver};
 use bytes::BytesMut;
 use rtci::ice::mdns::{MulticastDnsMode, MulticastDnsPublishing};
-use rtci::mdns::{MDNS_PORT, MdnsRateLimit};
+use rtci::mdns::{MDNS_MULTICAST_IPV4, MDNS_PORT, MdnsRateLimit};
 use rtci::peer_connection::RTCPeerConnection;
 use rtci::peer_connection::event::{
     RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason, RTCPeerConnectionEvent,
@@ -148,6 +156,64 @@ struct MdnsSockets {
     v4: Option<(Arc<dyn AsyncUdpSocket>, SocketAddr)>,
     v6: Option<(Arc<dyn AsyncUdpSocket>, SocketAddr)>,
     readers: Vec<Box<dyn JoinHandle>>,
+    /// One configured address per interface, by family: what a message that names no address
+    /// of its own (a query) leaves from, once on each interface (RFC 6762 section 14).
+    links_v4: Vec<IpAddr>,
+    links_v6: Vec<IpAddr>,
+    /// For an IPv6 address, the configured IPv4 address of the same interface: an IPv6
+    /// record's messages also leave on the IPv4 group of its own interface.
+    companions: Vec<(IpAddr, IpAddr)>,
+}
+
+impl MdnsSockets {
+    /// Where one mDNS datagram of the engine goes: (destination, address it leaves from).
+    /// The engine names the address of the record a message is about (its own interface's,
+    /// RFC 6762 section 14), or the unspecified address for a query; it addresses every
+    /// multicast message to the IPv4 group. An IPv4 record's message leaves from its address
+    /// on the IPv4 group; an IPv6 record's from its address on the IPv6 group, and from the
+    /// IPv4 address of its interface on the IPv4 group where the driver has one (resolvers
+    /// that listen on one family); a query once from each interface, on each family's group.
+    fn routes(&self, from: IpAddr, to: SocketAddr) -> Vec<(SocketAddr, Option<IpAddr>)> {
+        let group_v4 = SocketAddr::new(MDNS_MULTICAST_IPV4.into(), MDNS_PORT);
+        let group_v6 = SocketAddr::new(MDNS_MULTICAST_IPV6.into(), MDNS_PORT);
+        if !to.ip().is_multicast() {
+            // A unicast reply to an asker (RFC 6762 sections 5.5, 6.7).
+            let source = (!from.is_unspecified() && from.is_ipv4() == to.is_ipv4()).then_some(from);
+            return vec![(to, source)];
+        }
+        if from.is_unspecified() {
+            let routes: Vec<_> = (self.links_v4.iter().map(|ip| (group_v4, Some(*ip))))
+                .chain(self.links_v6.iter().map(|ip| (group_v6, Some(*ip))))
+                .collect();
+            if routes.is_empty() {
+                return vec![(to, None)];
+            }
+            return routes;
+        }
+        match from {
+            IpAddr::V4(_) => vec![(group_v4, Some(from))],
+            IpAddr::V6(_) => std::iter::once((group_v6, Some(from)))
+                .chain(
+                    self.companions
+                        .iter()
+                        .filter(|(v6, _)| *v6 == from)
+                        .map(|(_, v4)| (group_v4, Some(*v4))),
+                )
+                .collect(),
+        }
+    }
+}
+
+/// `addresses` with one per interface (the first of each), of one family. An address on no
+/// interface the host lists (a mock network's) counts as an interface of its own.
+fn one_per_interface(addresses: &[IpAddr], ipv4: bool) -> Vec<IpAddr> {
+    let mut seen = HashSet::new();
+    addresses
+        .iter()
+        .copied()
+        .filter(|ip| ip.is_ipv4() == ipv4 && !ip.is_unspecified())
+        .filter(|ip| seen.insert(runtime::interface_name(*ip).unwrap_or_else(|| ip.to_string())))
+        .collect()
 }
 
 impl Drop for MdnsSockets {
@@ -495,25 +561,31 @@ impl PeerDriver {
     }
 
     /// Sends the held mDNS datagrams the budget lets go at `now`, binding the mDNS sockets at
-    /// the first. A datagram for a family the host has no mDNS socket for is unsent.
+    /// the first, each on the interface of the address the engine names for it
+    /// ([`MdnsSockets::routes`]). A datagram no socket could send is unsent.
     fn send_mdns(&mut self, now: Instant) {
         while let Some(datagram) = self.mdns_egress.pop_ready(now) {
             let sockets = self.mdns_sockets();
-            let socket = match datagram.transport.peer_addr {
-                SocketAddr::V4(_) => &sockets.v4,
-                SocketAddr::V6(_) => &sockets.v6,
-            };
-            // The engine names the address each mDNS datagram leaves from (its record's).
-            let from = datagram.transport.local_addr.ip();
-            let sent = socket.as_ref().is_some_and(|(socket, _)| {
-                socket.try_send(&Transmit {
-                    destination: datagram.transport.peer_addr,
-                    contents: &datagram.message,
-                    traffic_class: 0,
-                    segment_size: None,
-                    source: (!from.is_unspecified()).then_some(from),
-                })
-            });
+            let routes = sockets.routes(
+                datagram.transport.local_addr.ip(),
+                datagram.transport.peer_addr,
+            );
+            let mut sent = false;
+            for (destination, source) in routes {
+                let socket = match destination {
+                    SocketAddr::V4(_) => &sockets.v4,
+                    SocketAddr::V6(_) => &sockets.v6,
+                };
+                if let Some((socket, _)) = socket {
+                    sent |= socket.try_send(&Transmit {
+                        destination,
+                        contents: &datagram.message,
+                        traffic_class: 0,
+                        segment_size: None,
+                        source,
+                    });
+                }
+            }
             if sent {
                 self.mdns_sent += 1;
             } else {
@@ -523,11 +595,14 @@ impl PeerDriver {
     }
 
     /// The host's mDNS sockets, bound at the first call (none with
-    /// [`PeerDriverConfig::mdns_sockets`] off, or where the host refuses them).
+    /// [`PeerDriverConfig::mdns_sockets`] off, or where the host refuses them), each joined to
+    /// its group on the interface of every configured address of its family (RFC 6762
+    /// section 14: a name is answered, and a peer's asked for, on the link of its address).
     fn mdns_sockets(&mut self) -> &MdnsSockets {
         let bind = self.config.mdns_sockets;
         let runtime = &self.runtime;
         let datagrams_tx = &self.datagrams_tx;
+        let addresses = &self.config.addresses;
         self.mdns_sockets.get_or_insert_with(|| {
             let mut readers = Vec::new();
             let mut open = |config: runtime::MulticastConfig| {
@@ -544,9 +619,36 @@ impl PeerDriver {
                 ))));
                 Some((socket, local))
             };
-            let v4 = open(mdns_v4());
-            let v6 = open(mdns_v6());
-            MdnsSockets { v4, v6, readers }
+            let v4 = open(mdns_v4(addresses.clone()));
+            let v6 = open(mdns_v6(addresses.clone()));
+            let links_v4 = if v4.is_some() {
+                one_per_interface(addresses, true)
+            } else {
+                Vec::new()
+            };
+            let links_v6 = if v6.is_some() {
+                one_per_interface(addresses, false)
+            } else {
+                Vec::new()
+            };
+            let companions = links_v6
+                .iter()
+                .filter_map(|v6| {
+                    let name = runtime::interface_name(*v6)?;
+                    let v4 = links_v4
+                        .iter()
+                        .find(|v4| runtime::interface_name(**v4).as_deref() == Some(&name))?;
+                    Some((*v6, *v4))
+                })
+                .collect();
+            MdnsSockets {
+                v4,
+                v6,
+                readers,
+                links_v4,
+                links_v6,
+                companions,
+            }
         })
     }
 
@@ -561,9 +663,11 @@ impl PeerDriver {
         }
         self.mdns_publishing_told = true;
         let sockets = self.mdns_sockets();
+        // What is actually sent: an IPv4 record's messages need the IPv4 socket; an IPv6
+        // record's leave on the IPv6 group, or on the IPv4 group of its interface.
         let publishing = MulticastDnsPublishing {
             ipv4: sockets.v4.is_some(),
-            ipv6: sockets.v6.is_some(),
+            ipv6: sockets.v6.is_some() || !sockets.companions.is_empty(),
         };
         self.pc.set_multicast_dns_publishing(publishing);
     }
@@ -734,12 +838,7 @@ impl PeerDriver {
     fn gather_section(&mut self, mid: &str, index: Option<u16>) -> Result<()> {
         self.prepare_mdns_publishing();
         for ip in self.config.addresses.clone() {
-            let socket = match self.config.udp_port_range {
-                Some(range) => sockets::bind_runtime_udp_in_range(self.runtime.as_ref(), ip, range),
-                None => self.runtime.bind_udp(SocketAddr::new(ip, 0)),
-            }
-            .map_err(io_error)?;
-            let local = socket.local_addr().map_err(io_error)?;
+            let (socket, local) = self.bind_unique_port(ip).map_err(io_error)?;
             let reader = self.runtime.spawn(Box::pin(read_loop(
                 socket.clone(),
                 local,
@@ -759,6 +858,39 @@ impl PeerDriver {
                 .add_local_candidate(host_candidate(local, mid, index)?)?;
         }
         self.end_of_candidates(mid, index)
+    }
+
+    /// A UDP socket on `ip`; with `QueryAndGather`, one whose port no other socket of the
+    /// driver has: a `.local` candidate names its socket by port alone ([`names_socket`]), so
+    /// ports are kept unique across the driver's addresses (the system gives each address its
+    /// own ports, and a port-range cursor comes round again). Where the range has no such port
+    /// left after [`MAX_PORT_ATTEMPTS`] binds, the last one is taken: two sockets then share a
+    /// port, and a retired one may stay open until its transport closes.
+    fn bind_unique_port(&self, ip: IpAddr) -> io::Result<(Arc<dyn AsyncUdpSocket>, SocketAddr)> {
+        let unique = self.pc.multicast_dns_mode() == MulticastDnsMode::QueryAndGather;
+        // Sockets refused for their port stay bound until the end, so that the next bind
+        // cannot be given the same port again.
+        let mut refused = Vec::new();
+        for _ in 0..MAX_PORT_ATTEMPTS {
+            let socket = match self.config.udp_port_range {
+                Some(range) => sockets::bind_runtime_udp_in_range(self.runtime.as_ref(), ip, range),
+                None => self.runtime.bind_udp(SocketAddr::new(ip, 0)),
+            };
+            let socket = match socket {
+                Ok(socket) => socket,
+                // The range is full now that the refused sockets hold their ports.
+                Err(e) if !refused.is_empty() && e.kind() == io::ErrorKind::AddrInUse => break,
+                Err(e) => return Err(e),
+            };
+            let local = socket.local_addr()?;
+            if !unique || !self.sockets.iter().any(|s| s.local.port() == local.port()) {
+                return Ok((socket, local));
+            }
+            refused.push((socket, local));
+        }
+        refused
+            .pop()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::AddrInUse))
     }
 
     fn end_of_candidates(&mut self, mid: &str, index: Option<u16>) -> Result<()> {
@@ -788,10 +920,14 @@ impl PeerDriver {
     }
 }
 
+/// How many binds [`PeerDriver::bind_unique_port`] tries for a port no other socket has.
+const MAX_PORT_ATTEMPTS: usize = 16;
+
 /// Whether a local candidate of `address` and `port` is the one of the socket at `local`. With
 /// mDNS (`QueryAndGather`) the engine has replaced the candidate's address with a `.local` name
-/// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1): the port tells the socket then (two
-/// sockets of the driver on different addresses with one port number would both match).
+/// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1): the port tells the socket then, and
+/// it tells exactly one, because no two sockets of a driver share a port
+/// ([`PeerDriver::bind_unique_port`]).
 fn names_socket(address: &str, port: u16, local: SocketAddr) -> bool {
     port == local.port()
         && (address == local.ip().to_string() || address.to_ascii_lowercase().ends_with(".local"))

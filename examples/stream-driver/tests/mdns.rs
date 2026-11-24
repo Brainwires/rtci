@@ -227,3 +227,32 @@ async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Re
     assert!(up, "connected, the held mDNS sent as the budget allowed");
     Ok(())
 }
+
+/// RFC 6762 section 14: the driver sends each mDNS message on the interface of the address it
+/// is about and joins the group there, not only on the system's default multicast interface.
+/// Two drivers whose only address is loopback publish names of 127.0.0.1, announce and answer
+/// them on the loopback interface, resolve each other's, and connect. (Sent on the default
+/// interface, as 0.2.0-dev did before, the answers came from another address and were
+/// refused: the names never resolved.)
+#[tokio::test]
+async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> Result<()> {
+    let _group = MDNS_GROUP_IN_USE.lock().await;
+    let ip = IpAddr::from([127, 0, 0, 1]);
+    let limit = MdnsRateLimit::default();
+    let mut a = Side::new(ip, Some(limit.clone()))?;
+    let mut b = Side::new(ip, Some(limit))?;
+    let up = connect(&mut a, &mut b, Duration::from_secs(30)).await?;
+    assert_only_local_names("a", &a, ip);
+    assert_only_local_names("b", &b, ip);
+    assert!(
+        up,
+        "connected over the resolved .local candidates on loopback: a {:?} (mDNS sent {}, received {}) / b {:?} (sent {}, received {})",
+        a.driver.pc().connection_state(),
+        a.driver.mdns_datagrams_sent(),
+        a.driver.mdns_datagrams_received(),
+        b.driver.pc().connection_state(),
+        b.driver.mdns_datagrams_sent(),
+        b.driver.mdns_datagrams_received()
+    );
+    Ok(())
+}

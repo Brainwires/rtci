@@ -608,8 +608,9 @@ fn test_address_answer_carries_nsec_for_the_other_family() {
     // Window 0, four bitmap bytes, the bit of type 28 in the last.
     let raw = &out[0].raw;
     assert_eq!(&raw[raw.len() - 8..], &[0xC0, 12, 0, 4, 0, 0, 0, 0x08]);
-    // An IPv6 record goes to the IPv4 group, from the unspecified address.
-    assert_eq!(out[0].from, "0.0.0.0:5353".parse().unwrap());
+    // An IPv6 record's message leaves from the record's own address (RFC 6762 section 14:
+    // the application sends it on that address's interface), addressed to the group.
+    assert_eq!(out[0].from, "[fe80::20]:5353".parse().unwrap());
 }
 
 // RFC 6762 sections 6, 6.5: type ANY and class ANY match; another class does not.
