@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(value) = std::str::from_utf8(rest) else {
         return;
     };
-    match selector % 35 {
+    match selector % 39 {
         0 => fixed_point::<Group>(value),
         1 => fixed_point::<Mid>(value),
         2 => fixed_point::<Msid>(value),
@@ -60,6 +60,15 @@ fuzz_target!(|data: &[u8]| {
         29 => fixed_point::<SctpPort>(value),
         30 => fixed_point::<MaxMessageSize>(value),
         31 => fixed_point::<SctpMap>(value),
+        35 => fixed_point::<Tool>(value),
+        36 => fixed_point::<ConferenceType>(value),
+        37 => fixed_point::<Orient>(value),
+        38 => {
+            fixed_point::<Quality>(value);
+            if let Ok(quality) = Quality::parse(value) {
+                let _ = quality.value();
+            }
+        }
         32 => {
             if let Ok(connection) = ConnectionInformation::parse(value) {
                 let printed = connection.to_string();

@@ -280,3 +280,58 @@ fn an_h264_offer_without_profile_level_id_is_answered_at_level_1() -> TestResult
     );
     Ok(())
 }
+
+/// RFC 6184 section 8.2.2: "To enable the offerer and answerer to inform each other about
+/// their capabilities for de-interleaving buffering in receiving streams, both parties are
+/// RECOMMENDED to include deint-buf-cap." An interleaved format (`packetization-mode=2`) the
+/// application registers is offered and answered with this endpoint's buffer in bytes
+/// (`MAX_DEINTERLEAVING_BYTES`, 32 MiB); a value the application gives is kept; formats of
+/// the other modes get none.
+#[test]
+fn an_interleaved_h264_format_states_the_deinterleaving_buffer_capability() -> TestResult {
+    let cap = format!(
+        "deint-buf-cap={}",
+        rtci::rtp::codec::h264::MAX_DEINTERLEAVING_BYTES
+    );
+    let mut pc = h264_peer("packetization-mode=2;profile-level-id=42e01f")?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        fmtp(&offer.sdp, "102"),
+        vec![
+            cap.clone(),
+            "packetization-mode=2".to_owned(),
+            "profile-level-id=42e01f".to_owned()
+        ],
+        "{}",
+        offer.sdp
+    );
+
+    let mut pc = h264_peer("packetization-mode=2;profile-level-id=42e01f")?;
+    let sdp = answer(
+        &mut pc,
+        offer_with_h264(
+            "packetization-mode=2;profile-level-id=42e01f;sprop-deint-buf-req=64000;\
+             sprop-interleaving-depth=45;deint-buf-cap=128000",
+        ),
+    )?;
+    let parameters = fmtp(&sdp, "100");
+    assert!(parameters.contains(&cap), "{sdp}");
+    assert!(
+        parameters.contains(&"packetization-mode=2".to_owned()),
+        "{sdp}"
+    );
+
+    let mut pc = h264_peer("packetization-mode=2;profile-level-id=42e01f;deint-buf-cap=1000")?;
+    let offer = pc.create_offer(None)?;
+    assert!(
+        fmtp(&offer.sdp, "102").contains(&"deint-buf-cap=1000".to_owned()),
+        "{}",
+        offer.sdp
+    );
+    assert!(!offer.sdp.contains(&cap), "{}", offer.sdp);
+
+    let mut pc = h264_peer("packetization-mode=1;profile-level-id=42e01f")?;
+    let offer = pc.create_offer(None)?;
+    assert!(!offer.sdp.contains("deint-buf-cap"), "{}", offer.sdp);
+    Ok(())
+}

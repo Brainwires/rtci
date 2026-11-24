@@ -144,13 +144,13 @@ fn must_bundle_gives_only_the_first_section_a_transport() -> TestResult {
     Ok(())
 }
 
-/// W3C webrtc-pc section 4.2.5 defines `max-bundle`, and RFC 9429 section 4.1.1 `must-bundle`
-/// as "identically defined": by default both select the one policy. RFC 9429 section 4.1.1:
-/// "'max-bundle' is considered deprecated, and implementations compliant with this
-/// specification SHOULD ignore attempts by the application to select this bundle policy":
-/// with the setting, the default policy, balanced, stays in effect.
+/// W3C webrtc-pc section 4.2.5 defines `max-bundle` ("Gather ICE candidates for only one
+/// track. If the remote endpoint is not bundle-aware, negotiate only one media track") and has
+/// no `must-bundle`; RFC 9429 section 4.1.1 calls `must-bundle` "identically defined". By
+/// default `max-bundle` selects that policy: every section of the initial offer but the first
+/// is bundle-only, which is what the peer sees.
 #[test]
-fn max_bundle_is_must_bundle_unless_it_is_set_to_be_ignored() -> TestResult {
+fn max_bundle_selects_must_bundle_by_default() -> TestResult {
     // No setting engine at all: the default.
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
@@ -176,7 +176,15 @@ fn max_bundle_is_must_bundle_unless_it_is_set_to_be_ignored() -> TestResult {
         "must-bundle:\n{}",
         offer.sdp
     );
+    Ok(())
+}
 
+/// RFC 9429 section 4.1.1: "'max-bundle' is considered deprecated, and implementations
+/// compliant with this specification SHOULD ignore attempts by the application to select this
+/// bundle policy". With `with_max_bundle_as_must_bundle(false)` the default policy, balanced,
+/// stays in effect: the peer gets the offer it would get with no policy chosen.
+#[test]
+fn max_bundle_is_ignored_when_set_to_be_ignored() -> TestResult {
     let mut pc = offerer_with(Some(RTCBundlePolicy::MaxBundle), false)?;
     let offer = pc.create_offer(None)?;
     assert_eq!(
@@ -188,6 +196,8 @@ fn max_bundle_is_must_bundle_unless_it_is_set_to_be_ignored() -> TestResult {
         "balanced:\n{}",
         offer.sdp
     );
+    let mut balanced = offerer_with(None, false)?;
+    assert_eq!(shape(&balanced.create_offer(None)?.sdp), shape(&offer.sdp));
     Ok(())
 }
 

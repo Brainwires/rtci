@@ -586,6 +586,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| !s.max_bundle_ignored,
     },
     {
+        id: "jsep.rtcp-mux-only-in-subsequent-offers",
+        setting: "SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers",
+        clause: "RFC 8858 4.5 (RFC 9429 5.2.2 MUST NOT add it)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "Chromium's subsequent offers carry a=rtcp-mux and no a=rtcp-mux-only (fixture chromium--direction-changes-are-answered-with-the-complementary-direction--3-offer.sdp)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_rtcp_mux_only_in_subsequent_offers(v),
+        read: |s: &SettingEngine| s.rtcp_mux_only_in_subsequent_offers,
+    },
+    {
         id: "jsep.stopping-transceiver-rejected-in-answer",
         setting: "SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer",
         clause: "RFC 9429 5.3.1",
@@ -1530,6 +1542,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::wall_clock",
         class: NotGovernedClass::Input,
         note: "an injected wall-clock anchor for the NTP times the interceptors write (sender reports, XR receiver reference times, RFC 8888 report timestamps, the RFC 6051 header extension), for virtual-time runs that repeat within one process; `None` (the process-wide SystemInstant::shared) in every profile",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_wall_clock",
+        class: NotGovernedClass::Input,
+        note: "an injected wall-clock time for the instant the peer connection is built at, for the wall-clock values it writes itself (the o= session version, RFC 8866 5.2; the receivers' source timestamps; the NTP times of the RTCP session it installs), for virtual-time runs that repeat; `None` (the system clock, read once) in every profile",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_audio_redundancy",
