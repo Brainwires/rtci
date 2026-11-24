@@ -558,10 +558,15 @@ fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
         .iter()
         .filter_map(|e| match e {
             RTCPeerConnectionEvent::OnIceCandidateEvent(e) => Some(match &e.candidate {
+                // RFC 9429 section 4.1.20: the end event's section fields "MAY be specified
+                // to indicate that the event applies to a specific "m=" section": this
+                // engine names the section of the transport whose gathering ended.
                 Some(c) if c.end_of_candidates => format!(
-                    "end:{}:{}",
+                    "end:{}:{}:{:?}:{:?}",
                     c.to_json().expect("json").candidate.is_empty(),
-                    c.username_fragment.as_deref() == Some(ufrag.as_str())
+                    c.username_fragment.as_deref() == Some(ufrag.as_str()),
+                    c.sdp_mid.as_deref(),
+                    c.sdp_mline_index
                 ),
                 Some(_) => "candidate".to_owned(),
                 None => "null".to_owned(),
@@ -572,7 +577,7 @@ fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
     assert_eq!(
         sequence,
         [
-            "end:true:true",
+            "end:true:true:Some(\"0\"):Some(0)",
             "gatherer:complete",
             "gathering:complete",
             "null"

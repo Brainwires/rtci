@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6)
   (`conf/jsep-77-small-rows`). Test:
   `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
+- **tests** (`conf/jsep-77-small-rows`): a late identification-tag does not end the session
+  (RFC 9143 section 15,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_late_identification_tag_does_not_end_the_session`); the
+  end-of-gathering event names its section (RFC 9429 section 4.1.20). RFC9143-15-3, RFC5888-6-5,
+  RFC8839-4.4.1.2.1-2, RFC9429-4.1.20-4, RFC3264-6.1-15 and 7-3 are `tested`, RFC3264-6.1-20 `n/a`.
   RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
   lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
   `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,
