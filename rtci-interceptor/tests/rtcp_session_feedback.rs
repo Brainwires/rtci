@@ -4,7 +4,7 @@
 
 mod rtcp_session_common;
 
-use rtci_interceptor::{Interceptor, RtcpBandwidth, RtcpSessionControl};
+use rtci_interceptor::{Interceptor, NackControl, Packet, RtcpBandwidth, RtcpSessionControl};
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
 use rtcp::receiver_report::ReceiverReport;
@@ -88,6 +88,101 @@ fn feedback_leaves_at_once_in_a_minimal_compound_packet_from_the_endpoints_ssrc(
         .expect("then the feedback");
     assert_eq!(REPORTER, pli.sender_ssrc);
     assert_eq!(200, pli.media_ssrc);
+}
+
+/// Writes the application's NACK horizon for `media_ssrc` into the chain, as the peer
+/// connection does on its way to the NACK generator; only its carrier comes out.
+fn nack_horizon(chain: &mut impl Interceptor, now: Instant, media_ssrc: u32, oldest_useful: u16) {
+    chain
+        .handle_write(
+            NackControl::Horizon {
+                media_ssrc,
+                oldest_useful: Some(oldest_useful),
+            }
+            .into_packet(now),
+        )
+        .unwrap();
+    while let Some(tagged) = chain.poll_write() {
+        match tagged.message.packet {
+            Packet::Rtcp(packets) => assert!(packets.is_empty(), "only the carrier: {packets:?}"),
+            _ => panic!("only the carrier is written"),
+        }
+    }
+}
+
+/// The sequence numbers the NACKs for `media_ssrc` in `sent` ask for.
+fn nacked(sent: &[Sent], media_ssrc: u32) -> Vec<u16> {
+    let mut requested: Vec<u16> = sent
+        .iter()
+        .flat_map(|datagram| datagram.get::<TransportLayerNack>())
+        .filter(|nack| nack.media_ssrc == media_ssrc)
+        .flat_map(|nack| nack.nacks.iter().flat_map(|pair| pair.packet_list()))
+        .collect();
+    requested.sort_unstable();
+    requested
+}
+
+/// RFC 4585 3.5.2, step 4a: feedback that may not leave in an Early packet is stored for the
+/// next regular one, to go with it if it "is still useful" then. A NACK held that way when
+/// the receiving application's NACK horizon (RFC 4588 6.3, `NackControl::Horizon`) passes
+/// what it asks for is not: the sequence numbers behind the horizon leave it, those of
+/// another stream and the ones at or past the horizon stay, and a NACK left asking for
+/// nothing is not sent at all. No NACK that leaves after the horizon names a packet behind it.
+#[test]
+fn a_nack_held_for_the_regular_packet_drops_what_the_nack_horizon_passed() {
+    let mut chain = chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(64_000),
+        ..Default::default()
+    }));
+    let base = Instant::now();
+    chain.bind_remote_stream(&video(200));
+    chain.bind_remote_stream(&video(300));
+    control(&mut chain, base, RtcpSessionControl::Start);
+
+    chain
+        .handle_write(rtcp(base + secs(0.01), nack(200, 10)))
+        .unwrap();
+    assert_eq!(1, written(&mut chain).len());
+
+    // No early packet is allowed now: these wait for the regular one.
+    for (media_ssrc, sequence_number) in [(200, 12), (200, 13), (200, 20), (300, 12)] {
+        chain
+            .handle_write(rtcp(base + secs(0.02), nack(media_ssrc, sequence_number)))
+            .unwrap();
+    }
+    assert!(written(&mut chain).is_empty());
+
+    // The application has given up everything of 200 before 13.
+    nack_horizon(&mut chain, base + secs(0.03), 200, 13);
+    let sent = run(&mut chain, base + secs(0.9));
+    assert_eq!(1, sent.len(), "one packet carries what was stored");
+    assert_eq!(vec![13, 20], nacked(&sent, 200), "12 is behind the horizon");
+    assert_eq!(
+        vec![12],
+        nacked(&sent, 300),
+        "another stream's is untouched"
+    );
+
+    // Early feedback is allowed again, is used, and the next NACK waits once more.
+    let now = base + secs(0.91);
+    chain.handle_write(rtcp(now, pli(200))).unwrap();
+    assert_eq!(1, written(&mut chain).len());
+    chain
+        .handle_write(rtcp(base + secs(0.92), nack(200, 21)))
+        .unwrap();
+    chain
+        .handle_write(rtcp(base + secs(0.92), nack(200, 22)))
+        .unwrap();
+    assert!(written(&mut chain).is_empty());
+
+    // The horizon passes all it asks for.
+    nack_horizon(&mut chain, base + secs(0.93), 200, 23);
+    let sent = run(&mut chain, base + secs(4.0));
+    assert!(
+        sent.iter()
+            .all(|datagram| !datagram.has::<TransportLayerNack>()),
+        "a NACK that asks for nothing useful is not sent"
+    );
 }
 
 /// RFC 4585 3.5.2: after an Early packet no other is allowed until the next regular one is

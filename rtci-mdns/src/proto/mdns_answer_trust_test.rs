@@ -250,3 +250,47 @@ fn test_a_unicast_response_to_a_multicast_question_is_ignored() {
         Some(ip(sender))
     );
 }
+
+/// RFC 6762 section 11 through `handle_read`: with the destination reported in `local_addr`
+/// (`MdnsConfig::with_destination_reported`, or `Mdns::set_destination_reported`), an answer
+/// from a public source that arrived at 224.0.0.251 is on the link and resolves (a LAN of
+/// public addresses); at an unspecified local address (destination unknown) the scope of the
+/// source still decides, and without the declaration a group address in `local_addr` is not
+/// believed.
+#[test]
+fn test_a_reported_multicast_destination_in_local_addr_makes_a_public_source_on_link() {
+    let public = "198.51.100.7";
+    let read = |reported: bool, local: &str| {
+        let now = Instant::now();
+        let mut conn = Mdns::new(now, MdnsConfig::default());
+        conn.set_destination_reported(reported);
+        let id = conn.query_now(now, NAME);
+        while conn.poll_write().is_some() {}
+        conn.handle_read(TaggedBytesMut {
+            now,
+            transport: TransportContext {
+                local_addr: SocketAddr::new(local.parse().unwrap(), MDNS_PORT),
+                peer_addr: SocketAddr::new(public.parse().unwrap(), MDNS_PORT),
+                transport_protocol: TransportProtocol::UDP,
+                ecn: None,
+            },
+            message: answer_packet(ip(public), true, 120),
+        })
+        .unwrap();
+        std::iter::from_fn(|| conn.poll_event()).find_map(|event| match event {
+            MdnsEvent::QueryAnswered(qid, ip) if qid == id => Some(ip),
+            _ => None,
+        })
+    };
+    assert_eq!(read(true, "224.0.0.251"), Some(ip(public)));
+    assert_eq!(
+        read(true, "0.0.0.0"),
+        None,
+        "destination unknown: off-link source"
+    );
+    assert_eq!(
+        read(false, "224.0.0.251"),
+        None,
+        "a local address not declared a destination"
+    );
+}

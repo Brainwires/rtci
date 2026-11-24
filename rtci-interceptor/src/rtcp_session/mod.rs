@@ -6,6 +6,7 @@ mod ecn;
 pub(crate) mod identity;
 pub(crate) mod scheduler;
 
+use crate::nack::{NackControl, older_than};
 use crate::report::receiver_stream::ReceiverStream;
 use crate::report::sender_stream::SenderStream;
 use crate::stream_info::StreamInfo;
@@ -457,7 +458,7 @@ impl RtcpSessionBuilder {
     /// first local media SSRC, and none about the co-located SSRCs, as libwebrtc does and as
     /// RFC 8861 reporting groups allow where they are signalled; the larger compound packets
     /// of the RFC form were measured to cost the video through a capacity cap
-    /// (`report_blocks_from_every_ssrc_measured_against_once` in the root crate's tests).
+    /// (`measure_report_blocks_from_every_ssrc_against_once` in the root crate's tests).
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self
@@ -1957,6 +1958,45 @@ impl RtcpSessionInterceptor {
         self.pending.push(packet);
     }
 
+    /// RFC 4585 3.5.2, step 4a: feedback that could not leave in an Early packet is stored
+    /// for the next regular one and sent with it "if it is still useful then". The receiving
+    /// application's NACK horizon ([`NackControl::Horizon`], RFC 4588 6.3) says which packets
+    /// of `media_ssrc` no longer are: the ones before `oldest_useful` leave a NACK that is
+    /// still held, and a NACK left with none is not sent.
+    fn forget_nacks_behind(&mut self, media_ssrc: u32, oldest_useful: u16) {
+        self.pending.retain_mut(|held| {
+            let Some(nack) = held.as_any().downcast_ref::<TransportLayerNack>() else {
+                return true;
+            };
+            if nack.media_ssrc != media_ssrc {
+                return true;
+            }
+            let requested: Vec<u16> = nack
+                .nacks
+                .iter()
+                .flat_map(|pair| pair.packet_list())
+                .collect();
+            let useful: Vec<u16> = requested
+                .iter()
+                .copied()
+                .filter(|&sequence_number| !older_than(sequence_number, oldest_useful))
+                .collect();
+            if useful.len() == requested.len() {
+                return true;
+            }
+            if useful.is_empty() {
+                return false;
+            }
+            let sender_ssrc = nack.sender_ssrc;
+            *held = boxed(TransportLayerNack {
+                sender_ssrc,
+                media_ssrc,
+                nacks: nack_pairs_from_sequence_numbers(&useful),
+            });
+            true
+        });
+    }
+
     fn has_feedback(&self) -> bool {
         self.pending.iter().any(|packet| {
             let any = packet.as_any();
@@ -3008,6 +3048,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         let now = msg.now;
+
+        // The NACK horizon on its way down from the generator: what it passed is of no use
+        // any more, in a NACK held here as well. (The carrier goes on as any other.)
+        if let Some(NackControl::Horizon {
+            media_ssrc,
+            oldest_useful: Some(oldest_useful),
+        }) = msg.message.custom::<NackControl>().copied()
+        {
+            self.forget_nacks_behind(media_ssrc, oldest_useful);
+        }
 
         if let Some(control) = msg.message.custom::<RtcpSessionControl>().cloned() {
             self.control(now, &control);

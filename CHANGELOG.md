@@ -52,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[non_exhaustive]` and its variants carry data, so no code could cast it with `as`; a `match`
   already needed a wildcard arm. Nothing to change in practice.
 
+- **statistics** (vp-8r, `conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
+  fields (`jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay`,
+  `jitter_buffer_emitted_count`). A struct literal adds `..Default::default()`.
 - **stream-driver**: `PeerDriverConfig` has a new public field `mdns_rate_limit` (`None`: the process's budget). Migration: a configuration written as a struct literal adds `mdns_rate_limit: None`, or builds on `..PeerDriverConfig::on(addresses)`.
 - **stream-driver** (runtime-1): **the driver runs on an injected async runtime** (`runtime::Runtime`,
   an object-safe trait used as `Arc<dyn Runtime>`: spawn, the clock and timers, UDP sockets
@@ -100,6 +103,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
   flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
 - **ice / jsep / stream-driver** (mdns-4): new public fields `AgentConfig::multicast_dns_fail_closed` and `AgentConfig::multicast_dns_publishing`, `MulticastDNS::fail_closed` (the setting engine's mDNS settings) and `PeerDriverConfig::mdns_sockets` (see "Added"). Migration: a struct literal of `AgentConfig` or `MulticastDNS` adds `..Default::default()` (or `multicast_dns_fail_closed: false, multicast_dns_publishing: Default::default()` / `fail_closed: false`); one of `PeerDriverConfig` adds `mdns_sockets: true`, or builds on `..PeerDriverConfig::on(addresses)`.
+- **stream-driver** (`conf/mdns-6-regression-test`): `runtime::Transmit` has a new public
+  field, `source: Option<IpAddr>`, the address a datagram is to leave from (the engine names
+  one for each mDNS datagram, RFC 6762 section 14). Migration: a struct literal of `Transmit`
+  adds `source: None`; a third-party `AsyncUdpSocket` may ignore it where it sends from a bound
+  address.
+- **stream-driver** (`conf/mdns-7-per-interface`): `runtime::MulticastConfig` replaces
+  `interface_v4: Ipv4Addr` and `interface_v6: u32` with `interfaces: Vec<IpAddr>` (one group
+  membership per interface holding one of the addresses; empty: the default interface), and
+  `MulticastConfig::mdns` takes them as a second argument. A runtime's `AsyncUdpSocket` is
+  expected to honour `Transmit::source` for a multicast destination
+  (`runtime::MulticastInterfaceSelector` does it for a socket with a descriptor).
+  Migration: `MulticastConfig::mdns(group)` becomes `MulticastConfig::mdns(group, vec![])`;
+  a literal sets `interfaces: vec![interface.into()]` for `interface_v4`, or the address of
+  the interface for `interface_v6`; a third-party socket adds a `MulticastInterfaceSelector`
+  and calls `apply` before each send.
+- **stream-driver** (`conf/mdns-8-send-failures`): `<dyn AsyncUdpSocket>::try_send` returns
+  `io::Result<usize>` (the system's error, `WouldBlock` when the socket cannot take the
+  datagram now) instead of `bool`, and `runtime::mock::Fate` has a new variant, `SendError`.
+  Migration: `socket.try_send(&t)` used as a `bool` becomes `socket.try_send(&t).is_ok()`; a
+  `match` on `Fate` adds an arm for `Fate::SendError`.
 
 ### Behaviour changes
 
@@ -141,6 +164,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **stream-driver** (mdns-4): with mDNS `QueryAndGather` the driver binds the host's mDNS sockets when its connection begins gathering, before the first host candidates (before: at the first mDNS datagram), and tells the connection for which address families it has none (`RTCPeerConnection::set_multicast_dns_publishing`). The names of host addresses of such a family are not registered: their candidates go out under a `.local` name that is not published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1), or not at all with `with_multicast_dns_fail_closed(true)`. Before, the name was registered and announced into a socket that did not exist.
 - **ice** (mdns-4): a host candidate whose mDNS name cannot be registered keeps one unpublished name per address (its UDP and TCP candidates share it, section 3.1.1 steps 2 and 5); before, each candidate past the cap of 64 names got a name of its own. No `QueryAndGather` path writes the literal address any more except the fixed-IP mode's other addresses (the agent without an mDNS connection used to, a path that `Agent::new` never takes).
 - **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
+
+- **video** (`conf/vp-9-no-keyframe-on-resume`): the send pipeline no longer forces a key
+  frame when sending resumes after a pause (a target of 0 from the pacer). Nothing encoded is
+  lost in a pause (the pacer keeps and sends what was written before it), so the receiver's
+  references are intact; no RFC asks for a key frame there, libwebrtc encodes the next picture
+  as it comes (`video/video_stream_encoder.cc` `OnBitrateUpdated`), and the engine's note on
+  `RTCRtpSender::target_bitrates` says none is needed. A receiver that did lose something asks
+  with a PLI or FIR, and the pacer's discards ask too; a request made during the pause is
+  served by the first picture after it. `SendConfig::key_frame_on_resume` (default now
+  `false`) keeps the forced key frame as an option; `SendConfig::chrome()` no longer sets it,
+  since libwebrtc's form is the default. Tests:
+  `a_pause_stops_the_encoder_and_the_resume_continues_with_delta_frames`,
+  `with_key_frame_on_resume_the_first_picture_after_a_pause_is_a_key_frame`,
+  `a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it` (a forced key frame by
+  default fails the first and `the_chrome_profile_resumes_as_the_default_does`; hosted run
+  45410448247), and in the capacity call
+  `a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second` (there the receiver's
+  requests during the long pause make a key frame due at the resume either way).
 
 - **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
   candidate it is (RFC 6544 section 5.4): type preference 75 (section 4.2,
@@ -259,6 +300,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at MTU boundaries as before. `Vp8Payloader::ignore_partitions` (new public field) selects
   the old cut, which is libwebrtc's. Conformance rows RFC7741-4-1, 4.2-7, 4.2-11, 4.4-4 and
   4.4-6 are `tested`.
+- **`vp8.ignore-partitions`, a governed behaviour: the `Chrome` profile packetizes VP8 as
+  libwebrtc does** (`conf/vp-9r-vp8-partitions`). New `MediaEngine::set_vp8_ignore_partitions`
+  (`false` by default, RFC 7741 section 3's partition packets; `true` under `Chrome`:
+  libwebrtc's `RtpPacketizerVp8` cuts the whole frame, `S` on the first packet only, `PID` 0),
+  `MediaEngine::payloader` and `RTCRtpSender::payloader(&codec)`, which build a payloader with
+  the connection's packetization settings (`RTCRtpCodec::payloader` keeps the default form).
+  `rtci-video`'s `VideoSender` takes its payloader from the sender, so its VP8 follows the
+  profile. Tests: `tests/vp8_packetization_profile.rs`.
 
 - **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
   application; no default format is one) is offered and answered with
@@ -319,7 +368,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
   highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
   libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
-  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
+  longer through a capacity cap (`measure_report_blocks_from_every_ssrc_against_once`: mean
   1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
   `setting`, measured).
 
@@ -333,6 +382,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+- **stream-driver, mdns** (`conf/mdns-7-per-interface`, review F1, F7, F8): `PeerDriver`
+  took part in mDNS on the system's default multicast interface only, with one socket, and
+  ignored the address the engine names for each mDNS datagram: names of addresses on any other
+  interface (loopback included) never resolved, and every name was announced on the default
+  link (RFC 6762 section 14: "addresses ... MUST be valid for use on the interface on which the
+  response is being sent"). Now its mDNS sockets join the groups on the interface of every
+  configured address, and each message leaves by the interface of its source
+  (`IP_MULTICAST_IF` / `IPV6_MULTICAST_IF`, set per send by the tokio, smol and custom-runtime
+  sockets, honoured by the mock); a query leaves once from each interface, on both families'
+  groups. `rtci-mdns` names an IPv6 record's own address as the source of its messages (it named
+  0.0.0.0), and the driver sends them on ff02::fb (and on 224.0.0.251 from the IPv4 address of
+  the same interface, where it has one): an IPv6-only link gets mDNS, and the per-family
+  publishing report (`set_multicast_dns_publishing`) says what is actually sent. Under
+  `QueryAndGather` no two UDP sockets of a driver share a port (a `.local` candidate names its
+  socket by port only); a range with no such port left falls back to a shared one. Tests:
+  `mdns_virtual_time.rs::drivers_whose_link_is_not_the_default_multicast_interface_resolve_each_other`,
+  `a_multi_homed_driver_answers_for_each_name_on_the_interface_of_its_address`,
+  `a_publishing_driver_gives_each_of_its_sockets_a_port_of_its_own`,
+  `mdns.rs::drivers_on_loopback_resolve_each_other_on_the_loopback_interface`. The mock
+  network gives each address its own ephemeral ports and has a default multicast interface
+  (`MockNet::set_default_multicast_interface`). Engine behaviour change (rtci-mdns: the source
+  address of an IPv6 record's messages; IPv6 records of different addresses are no longer
+  aggregated into one message, as IPv4 records already were not).
 - **ice** (`conf/ice-25-mdns-tcp-candidate`, also in 0.1.0): a TCP host candidate whose
   address is an mDNS name was built as a UDP candidate (`CandidateHostConfig::new_candidate_host`
   gave every `.local` candidate `NetworkType::Udp4`), so the agent's own ICE-TCP candidates
@@ -342,6 +414,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 3.1.1 step 6 replaces only the address), and resolves to `Tcp4` / `Tcp6`. Tests
   `candidate_test.rs::test_tcp_host_candidate_under_an_mdns_name_is_signalled_as_tcp`,
   `to_json_of_a_tcp_candidate_under_an_mdns_name_says_tcp`. Engine behaviour change (SDP).
+- **stream-driver** (`conf/mdns-8-send-failures`, review F2, F10, F11): where mDNS cannot be
+  sent (the socket binds but every send to the group fails, as on GitHub's macOS image or in a
+  Mac application without the Local Network permission), two publishing `PeerDriver`s sat in
+  Connecting for ever and the application was told nothing; a bind failure was kept for the
+  life of the connection. Now a refused send (at once for "no route" / "no permission", else
+  after three in a row) or a failed bind is reported as `PeerDriverEvent::MdnsUnavailable`
+  (`PeerDriver::poll_driver_event`, with the OS error), counted (`mdns_send_failures`,
+  `mdns_bind_failures`, `mdns_available`), and fed to the connection as a family it cannot
+  publish for (`set_multicast_dns_publishing`, so `with_multicast_dns_fail_closed` applies to
+  the candidates gathered next); the socket is bound again at the next gathering and after a
+  back-off (1 s doubling to 60 s), and the first send that works is reported as
+  `PeerDriverEvent::MdnsAvailable`. What the mDNS sockets receive waits in a bounded queue
+  (256, oldest dropped, `mdns_datagrams_dropped`). Tests `tests/mdns_failures.rs` (virtual
+  time, every platform; the mock network refuses sends with `MockNet::set_send_error`) and
+  `tests/mdns_unavailable.rs` (real network, `--ignored`, run on hosted runners). Not an engine
+  change.
+- **stream-driver** (`conf/mdns-9-shutdown`, review F3): mDNS goodbyes (RFC 6762 section
+  10.1, TTL 0) left only when the application closed the connection and kept stepping the
+  driver; dropping the driver sent none, and the link's caches held the names for 120 s. New
+  `PeerDriver::shutdown(linger)`: closes the connection, sends every goodbye within the mDNS
+  budget (waiting up to `linger`), then closes the driver's sockets, leaving the groups.
+  Dropping a driver that was not shut down now closes its connection and sends at once what
+  the budget lets go (an async driver on a pluggable runtime cannot wait in `drop`). Tests
+  `tests/mdns_shutdown.rs`. Not an engine change.
+- **mdns, ice, peer connection, stream-driver** (`conf/mdns-10-on-link`, review F6, F9, F12
+  and its observation on peer-reflexive candidates):
+  - RFC 6762 section 11's first test ("All responses received with a destination address in
+    the IP header that is ... 224.0.0.251 or ... FF02::FB are necessarily deemed to have
+    originated on the local link, regardless of source IP address") now applies through
+    `handle_read` too: with the destination declared as reported
+    (`with_multicast_dns_destination_reported`, new at run time
+    `RTCPeerConnection::set_multicast_dns_destination_reported`, `Agent::...`, `Mdns::
+    set_destination_reported`), a group address in `local_addr` is an arrival at the group.
+    Before, only `Mdns::handle_datagram` applied it, so through a peer connection a LAN of
+    public addresses resolved no `.local` name. `PeerDriver` declares it and reports each mDNS
+    datagram's destination where it knows it (Linux IPv4, bound to the group; a runtime that
+    fills `RecvMeta::dst_ip`); unknown elsewhere (tokio, smol: no `IP_PKTINFO` read), where the
+    scope of the source still decides.
+  - Under `QueryAndGather` a local peer-reflexive candidate (RFC 8445 7.2.5.3.1) no longer shows
+    its base in the related address, and one whose mapped address is a hidden host address
+    shows the host's name (draft-ietf-mmusic-mdns-ice-candidates 3.3.1, first MUST).
+  - `RTCIceCandidate`'s string form ran the related address into the port
+    (`udp prflx 10.1.0.135:55410172.17.0.1`); it now reads `... related 172.17.0.1:40000`.
+  - The process's mDNS budget can be set once before first use
+    (`peer::set_process_mdns_rate_limit`); a driver on a runtime with a virtual clock
+    (`Runtime::virtual_clock`, new, `true` for `MockRuntime`) takes from a budget of its own
+    instead of the process's wall-clock one, so a mock clock can neither empty it for real
+    drivers nor wait on it.
+  - F9 decided: QU stays off with the driver (its IPv4 socket on Linux is bound to the group
+    and receives no unicast; RFC 6762 section 15.1).
+  Tests: `mdns_answer_trust_test.rs::test_a_reported_multicast_destination_in_local_addr_makes_a_public_source_on_link`,
+  `mdns_virtual_time.rs::drivers_on_a_lan_of_public_addresses_resolve_each_other`,
+  `agent_checklist_test.rs::test_a_local_peer_reflexive_candidate_does_not_show_a_hidden_host_address`,
+  `candidate.rs::the_string_form_separates_the_related_address_from_the_port`,
+  `tests/mdns_budget.rs`. Engine behaviour change (rtci-mdns trust with a reported
+  destination; rtci-ice local peer-reflexive candidates; the candidate string form).
 
 ### Changed
 
@@ -451,6 +579,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the new `Error::ErrRtcpCnameLength`. Audit: RFC8834-4.9-5 `tested`; with new tests
   RFC8835-4.2-8 (bundling by media type), RFC8837-5-6 (AF3x for non-interactive video) and
   the stale RFC8834-8-2 (RTCP XR generation) `tested`.
+
+- **statistics** (`conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
+  fields, `jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay` and
+  `jitter_buffer_emitted_count`: a struct literal without `..Default::default()` needs them.
+
+- **video pipeline, phase 3: the send pipeline** (`conf/vp-7-send`, `docs/video-pipeline.md`
+  6.5; built on `conf/gcc-5-app-limited`, merged in, for the pacer's pause and discards):
+  - `rtci_video::send::SendPipeline`: pictures in, RTP packets out (the negotiated codec's
+    payloader, timestamps from the capture time). The target (`RTCRtpSender::target_bitrates`,
+    the estimate less the retransmission reserve) sets the encoder's rate, never below the
+    encoder's minimum (pictures dropped in the ratio target / minimum instead); a target of 0
+    (the pacer's pause) stops the encoder, and the first picture after it is coded as it
+    comes (`conf/vp-9-no-keyframe-on-resume`, below);
+    PLI, FIR and the pacer's discards ask for a key frame, not served within two round trips
+    of the last one (RFC 5104 3.5.1; 500 ms until a round trip is known, RFC 7728 8.1);
+    resolution and frame-rate steps when the target falls under what the format needs, in the
+    order of the W3C `degradationPreference` (default `balanced`), with a 5 s hold before a
+    step back up. `SendConfig::chrome()`: libwebrtc's choices (one request served per 300 ms,
+    `maintain-framerate`).
+  - `rtci_video::engine::VideoSender`: the glue to an `RTCRtpSender` (target, events, round
+    trip, `update_encoder_stats` with `qualityLimitation*`).
+  - `VideoEncoder::set_rates` and `min_bitrate_bps` (both with defaults), `EncoderFactory`,
+    `picture::scale_into`.
+  - Breaking for an exhaustive `match` (`rtci-video` is not published): `engine::Error` has a
+    new variant `Encode`.
+  - Measured with the VP8 backend in a two-peer call on the default interceptors (640x360,
+    30 fps): open link, encoded rate within 0.1 % of the target over 10 s windows; the capacity
+    test's 300 kbit/s cap on six seeds, longest freeze 1.19 to 1.71 s, 0 frames discarded by
+    the pacer, 0 pictures encoded in a pause, a key frame after each, 1186 to 1385 kbit/s 20 s
+    after the cap; known cost: the oldest picture shown is 10.2 to 11.7 s old after the cap
+    (the pacer's backlog of the 2.5 Mbit/s before the estimate fell); 2 % loss repaired by
+    NACK with no wait beyond the slowest repair. Each reaction mutation-checked.
+  - Not built yet: simulcast, temporal layers and SVC, the rate allocators, the encoder bitrate
+    adjuster, the zero-hertz cadence adapter.
+
+- **video pipeline: codec safety** (`conf/vp-6-codec-safety`, `docs/video-pipeline.md` 4.7,
+  4.8, 6.4):
+  - Breaking: `rtci-video`'s `vp8` feature is opt-in again (default features: `engine`). The
+    default build decodes no video until the application enables a codec. Supply-chain review
+    of `vp8-decoder` / `vp8-encoder` 0.1.3 (publisher, contents against the tagged commit,
+    `unsafe`, build-time code, licences, prior art) with a recommendation for the owner;
+    `scripts/check-video-codec-pins.py` fails on any other version or checksum.
+  - `codec::av1`: the 96-byte leak found by fuzzing is rav1d 1.1.0's (memorysafety/rav1d#1522:
+    every `dav1d_picture_unref` and every empty `dav1d_get_picture` leaves a 48-byte `Arc`;
+    about 50 to 100 bytes a frame), documented on the feature. Separately, a temporal unit's
+    `Dav1dData` is now released when taking out a waiting picture fails (found by reading).
+    The abort on hostile input is rav1d 1.1.0's (memorysafety/rav1d#1497, fixed on its
+    main branch, unreleased), documented on the feature in plain words; reproducer in
+    `rtci-video/tests/data/rav1d-abort.ivf`.
+  - Feature `isolation`: `codec::isolated::IsolatedDecoder` runs any decoder in a child process
+    (`serve` on the child's side); a child that aborts, crashes or hangs costs that frame.
+  - `codec::vp8` catches a panic of the decoder and replaces it (`DecodeError::Corrupt`).
+  - Features `libvpx` (VP8 / VP9 decode and encode), `dav1d` (AV1 decode) and `openh264`
+    (H.264 decode and encode with Cisco's binary only, accepted by its published SHA-256): each
+    loads its library at run time, so building them needs no system library (`cargo check
+    --all-features` stays pure Rust). libvpx's decode of the VP8 fixture equals libvpx's
+    reference output; libdav1d survives every single-bit flip of a key frame (19,352) and 1500
+    seeded mutations that abort rav1d. The AV1 wrappers no longer refuse a key frame after an
+    accepted hostile delta frame (an error met while taking out a waiting picture is the
+    earlier unit's). A CI job installing the libraries is proposed, not added.
+  - The root crate no longer dev-depends on `rtci-video`: the interop peer's `pipeline`
+    scenario is built by the new `rtci-video-interop` package (feature `pipeline`, binary
+    `interop-peer-video`, which the browser stage now starts), so workspace builds compile no
+    codec.
+
+- **video pipeline, phase 2: codecs** (`conf/vp-5-codecs`, `docs/video-pipeline.md` 4.6):
+  - `rtci-video` feature `vp8` (default): VP8 decode and encode in pure Rust with
+    `vp8-decoder` / `vp8-encoder` pinned to `=0.1.3`. Checked on hosted runners: the WebM
+    project's 59 VP8 test vectors bit-exact, libvpx's decode of the same streams identical
+    (58 of 60; the two others change resolution, which the comparison tool rescales), every
+    encoded stream decoded identically by libvpx, 720p decode at 257 fps or more and encode at
+    53 fps or more on one core, 15 min of libFuzzer with no finding.
+  - Feature `av1` (opt-in): AV1 decode with `rav1d` and encode with `rav1e`, both without
+    assembly. rav1d matches dav1d on libaom's vectors (10 of 10) and decodes 720p at about
+    40 fps, but aborts the process on a hostile frame (a panic across its C API); rav1e makes
+    5 to 8 pictures a second at 360p (not real time) and holds 4 pictures back.
+  - `picture` (I420 view and buffer, PSNR, a synthetic source), the `encoder::VideoEncoder`
+    trait, `VideoDecoder::picture`, `codec::decoder_for`.
+  - Tests: PSNR at 640x360 and 600 kbit/s (VP8 39.5 dB), hostile VP8 frames (no panic), the
+    libvpx fixture's MD5, the VP8 fixture and a rav1e stream through loss decoded bit-exactly,
+    a two-peer call with the real VP8 codecs. `scripts/video-codec-check.sh` and
+    `rtci-video/examples/codec_check.rs` reproduce the evidence.
+  - interop-peer scenario `{"media":"pipeline","video":"VP8"|"AV1"}` and the browser cells
+    `pipeline receive VP8` / `AV1`; the root crate dev-depends on `rtci-video` (path only).
+  - `deny.toml`: libfuzzer-sys (NCSA, a permissive licence) allowed; it is a `cfg(fuzzing)`-only
+    dependency of rav1e. The dev profile optimises the codec crates (their tests code video).
+
+- **video pipeline, phase 1b: the engine boundary** (`conf/vp-4-engine-boundary`,
+  `docs/video-pipeline.md` 2.6, 2.9):
+  - `RTCRtpReceiver::set_nack_horizon(now, ssrc, oldest_useful)` and
+    `interceptor::NackControl::Horizon`: the receiving application tells the NACK generator the
+    oldest sequence number it can still use (RFC 4588 6.3: a retransmission is asked for only
+    while it "would still be useful"); the generator asks for no older missing packet and
+    forgets its requests for them (wrap-aware; `None` removes the horizon)
+    (`packets_older_than_the_horizon_are_not_asked_for`,
+    `a_receiver_stops_asking_for_packets_behind_its_nack_horizon`). The RTCP session drops
+    them from a NACK it still holds for its next packet as well (RFC 4585 3.5.2, step 4a:
+    stored feedback is sent only if it is still useful), and sends no NACK that is left
+    asking for nothing: before, a request made just ahead of the horizon left with the next
+    regular RTCP packet, up to about two seconds after the application had given the packet
+    up (`conf/vp-9r2-vp8-partitions`;
+    `a_nack_held_for_the_regular_packet_drops_what_the_nack_horizon_passed`). `rtci_video::engine::
+    VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
+    nack_horizon`, on by default, as libwebrtc's `NackRequester::ClearUpTo`).
+  - The jitter buffer members (`jitterBufferDelay`, `jitterBufferTargetDelay`,
+    `jitterBufferMinimumDelay`, `jitterBufferEmittedCount`) in `DecoderStatsUpdate`, winning over
+    the audio update's (`the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`);
+    `rtci-video` no longer goes through `update_audio_receiver_stats`.
+  - `rtci-video`'s two-peer tests trace every lost packet (gap seen, first NACK, RTX sent and
+    arrived) and count NACKs for packets behind the horizon (none, asserted in the capacity
+    scenario); `docs/video-repair-latency.md` holds the trace.
+
+- **video pipeline, phase one: the receive side** (`conf/vp-2-receive`, design on
+  `conf/vp-1-design`, `docs/video-pipeline.md`; on master by `conf/vp-3-on-master`). A new
+  crate, `rtci-video`, sans-I/O, pure Rust, no codec dependency, not published with 0.1.0
+  (`publish = false`):
+  - `assembly::PacketBuffer`: frames from RTP packets per payload format (VP8 S / PID, VP9
+    B / E, AV1 and the Dependency Descriptor's start / end of frame, H.264 / H.265 by RTP
+    timestamp and marker), key frames and key-frame sizes, duplicates, late packets, overflow
+    and backward jumps as libwebrtc's `packet_buffer.cc`.
+  - `reference::ReferenceFinder`: frame ids and references with libwebrtc's dispatch: VP8
+    temporal layers (TL0PICIDX, TID, Y), picture-id-only and sequence-number-only streams
+    (padding closes gaps), VP9 flexible mode with inter-layer dependency and non-flexible
+    picture groups, the Dependency Descriptor's fdiffs.
+  - `buffer::FrameBuffer`: decodable temporal units, dropping of frames passed over
+    (`framesDropped`, `packetsDiscarded`), libwebrtc's limits (800 frames, 8192 decoded ids).
+  - `timing`: ports of libwebrtc's jitter estimator (Kalman filter on frame delay variation
+    and size, noise threshold, retransmission term, frame-rate scaling), timestamp
+    extrapolator, decode-time percentile and render-time model, the playout-delay extension,
+    `jitterBufferTarget` and an A/V sync delay input; release at render time minus decode and
+    render time, late pictures skipped (`kMaxAllowedFrameDelay`), the low-latency path.
+  - `keyframe::KeyFramePolicy`: PLI on a first frame that is not a key frame, packet buffer
+    overflow, a missing Dependency Descriptor structure, the decode timeouts (200 ms / 3 s, or
+    from `rtx-time`), decoder errors, repeated every 200 ms until a key frame decodes, and a
+    repair window (5 RTT, at least 1 s) after which pictures stuck behind a gap ask for a key
+    frame (`ReceiveConfig::chrome()` keeps libwebrtc's decode timeout only).
+  - `render::RenderStats`: W3C `freezeCount`, `totalFreezesDuration`, `pauseCount`,
+    `totalPausesDuration`, `totalInterFrameDelay`, `totalSquaredInterFrameDelay`,
+    `framesRendered` (W3C definition; libwebrtc's 5-interval warm-up in `chrome()`).
+  - `decoder::VideoDecoder` trait and `ReferenceCheckingDecoder`; `engine::VideoReceiver`
+    (feature `engine`): one pipeline per SSRC of an `RTCRtpReceiver`, PLI through
+    `write_rtcp` when `nack pli` was negotiated, `report_received_frame`, the statistics
+    through `update_decoder_stats` (the jitter buffer members through
+    `update_audio_receiver_stats` for now).
+  - Tests: libvpx VP8 / VP9 IVF and H.264 / H.265 Annex B fixtures through 5 % loss with
+    0..40 ms reordering and retransmission (every picture byte-identical, in an order the
+    stream allows, no freeze); calls between two peer connections at 2 % and 10 % loss and a
+    300 kbit/s capacity drop (no wait beyond the slowest repair, no corrupt picture, no
+    decode out of order).
 
 ### Added
 
@@ -737,6 +1014,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RID, SSRC, the breaker that tripped, how long until a restart is accepted).
   `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`.
 
+- **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
+  `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
+  one run in fifty (28 of 1500 runs on master, alike under every crypto feature set; in CI it
+  happened to show in the ring-only jobs). The engine was right. The test took the first
+  packet of each SRTCP datagram, all that is readable on the wire, for the reporting SSRC's
+  report. Once the stream sends, its RTX SSRC is a participant too (the congestion
+  controller's padding goes out on it, RFC 4588 section 6.1), a compound packet carries the
+  reports of both SSRCs (RFC 8108 section 5.3.2) and is led by the one whose timer expired:
+  in the runs that failed the RTX SSRC led every compound packet sent while the stream had
+  sender status, the stream's sender report second in each. The test now reads the compound
+  packets whole, below the session, and states the requirement: from the stream's first
+  packet on and while it sends, every report of that SSRC is a sender report (RFC 3550
+  section 6.4); nothing says BYE; no SSRC reports but that one and the stream's RTX SSRC. It
+  sends until the SSRC has reported twice instead of for a fixed number of packets. No engine
+  change.
+- **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): RFC 8108 section 5.1 is checked in
+  the RTCP between two peer connections
+  (`every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without`: with
+  `rtcp_report_from_every_ssrc` each of a stream's SSRC and its RTX SSRC reports on the remote
+  SSRC and on the other; without it the report blocks are carried once and none names a
+  co-located SSRC). `report_blocks_from_every_ssrc_measured_against_once`, which asserted
+  that the RFC form froze the video longer through a capacity cap on two seeds, is now the
+  ignored measurement `measure_report_blocks_from_every_ssrc_against_once`: it prints the
+  figures and asserts nothing, because that order is chance on so few runs (it failed with
+  the order reversed under an unrelated change). Row RFC8108-5.1-1 cites the new test. No
+  engine change.
 - **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
   checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length
   4 followed by other bytes read a New Cumulative TSN it does not hold and panicked. Not
@@ -792,6 +1095,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
   unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
   delivered from such a packet).
+
+### Test environment and documentation
+
+- **video** (`conf/vp-9r-vp8-partitions`): the golden-stream tests of `rtci-video`
+  (`*_ivf_survives_loss_and_reordering_intact`, `*_annexb_*`,
+  `vp8_ivf_through_loss_decodes_bit_exactly_with_the_vp8_decoder`) no longer require 99 % of
+  the frames decoded at 5 % loss, a figure calibrated to one packetization and one seeded loss
+  pattern: RFC 7741's partition packets (every VP8 frame at least two packets) took 296 of
+  300. They now state the requirement: every released frame decodes, and a frame is left out
+  only when a repair held it up (its own, or that of a frame it predicts from, completed after
+  the frame's packets were all due without loss) and a key frame after it was released: the
+  frame buffer then released the key frame while it waited, or dropped it as too late
+  (libwebrtc's late-frame drop). The VP8 frames skipped were 208 (repaired), 209 (predicts
+  from 208), 239 and 269 (repaired), each just before a key frame. No pipeline change: no frame
+  split at a partition boundary was mishandled. A mutation where a key frame drops every older
+  frame, complete or not, fails them (VP8 260, VP9 154 released).
+
+- **audit**: the library's advisory check (`.github/deny-library.toml`, no ignores) covers the
+  published crates (`exclude-unpublished`); the whole-workspace check (`deny.toml`) now resolves
+  every feature, so the unpublished crates' optional backends are still checked there. It
+  ignores RUSTSEC-2024-0436 (`paste` 1.0.15 unmaintained, no vulnerability, no safe upgrade):
+  an unmaintained build-time proc-macro reached only through `rav1d` / `rav1e` in the
+  unpublished `rtci-video` crate's opt-in AV1 features; remove when those drop it. Recorded in
+  `FORK.md` "Dependency audit".
+
+- **docs**: `docs/video-pipeline.md`, the design of the video half of the media pipeline
+  (`conf/vp-1-design`): what the engine already gives video, what a complete receiver and
+  sender need beyond it, each element against libwebrtc (`a222406d`) and the RFCs / W3C
+  specifications, the codecs available under the licence and pure-Rust constraints (with the
+  H.264 / H.265 patent situation and Cisco's OpenH264 binary conditions,
+  `specs/openh264-BINARY_LICENSE.txt` quoted), the crate layout, threading and A/V sync, the
+  phases with their acceptance figures, and the decisions left to the owner.
+
+- **stream-driver** (`conf/mdns-6-regression-test`): a return of 0.1.0's `PeerDriver`
+  defect (the UDP sockets of `.local` candidates closed when the signalling state returns to
+  stable) was caught on Linux only. `tests/mdns_virtual_time.rs` connects two publishing
+  drivers on the mock runtime (whose multicast sockets now send from the address a transmit
+  names, as the engine asks for mDNS) and runs on Linux, macOS and Windows in CI;
+  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux (on a Windows host with no
+  interface that carries multicast to the group, as some hosted images, its two tests on the
+  default interface print why and skip).
+
 
 ## [0.1.0] - 2026-11-24
 

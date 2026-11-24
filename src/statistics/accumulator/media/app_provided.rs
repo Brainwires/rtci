@@ -77,6 +77,16 @@ pub struct DecoderStatsUpdate {
     pub total_squared_corruption_probability: Option<f64>,
     /// Number of corruption probability measurements (`corruptionMeasurements`).
     pub corruption_measurements: Option<u64>,
+    /// Cumulative jitter buffer delay, in seconds (`jitterBufferDelay`): for each frame, from
+    /// its first packet's arrival to its exit from the jitter buffer. Takes precedence over
+    /// the same member of [`AudioReceiverStatsUpdate`] for the stream.
+    pub jitter_buffer_delay: Option<f64>,
+    /// Cumulative jitter buffer target delay, in seconds (`jitterBufferTargetDelay`).
+    pub jitter_buffer_target_delay: Option<f64>,
+    /// Cumulative jitter buffer minimum delay, in seconds (`jitterBufferMinimumDelay`).
+    pub jitter_buffer_minimum_delay: Option<f64>,
+    /// Frames emitted from the jitter buffer (`jitterBufferEmittedCount`).
+    pub jitter_buffer_emitted_count: Option<u64>,
 }
 
 impl DecoderStatsUpdate {
@@ -106,6 +116,10 @@ impl DecoderStatsUpdate {
             total_corruption_probability,
             total_squared_corruption_probability,
             corruption_measurements,
+            jitter_buffer_delay,
+            jitter_buffer_target_delay,
+            jitter_buffer_minimum_delay,
+            jitter_buffer_emitted_count,
         );
         if update.decoder_implementation.is_some() {
             self.decoder_implementation = update.decoder_implementation;

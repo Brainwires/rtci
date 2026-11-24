@@ -395,15 +395,17 @@ carry no credential until the server asks for one with a 401.
 ### Dependency audit (fork only)
 
 `.github/workflows/audit.yml` resolves dependencies afresh and runs `cargo deny check advisories`
-on every PR: first on the library's own graph with `.github/deny-library.toml` (normal and build
-dependencies, all features, no ignores), then on the whole workspace with `deny.toml`. Ignores are
-allowed only in `deny.toml`, only for advisories that cannot reach the library, each with its
-reason. Today there are two:
+on every PR: first on the library's own graph with `.github/deny-library.toml` (the published
+crates' normal and build dependencies, all features, no ignores), then on the whole workspace with
+`deny.toml` (every member, `publish = false` ones included, all features). Ignores are allowed
+only in `deny.toml`, only for advisories that cannot reach a published crate, each with its
+reason. Today there are three:
 
 | Advisory | Crate | Why it is ignored |
 | --- | --- | --- |
 | RUSTSEC-2026-0441 (unmaintained, no vulnerability) | `pin-utils` 0.1.1 | Dev-dependency only, interop tests: `webrtc` 0.17.3 -> `webrtc-util` -> `nix` 0.26. `webrtc` 0.17.3 is the last release of the independent implementation the interop tests exercise; 0.20+ is built on the upstream `rtc` crates. |
 | RUSTSEC-2026-0543 (unmaintained, no vulnerability) | `chrono` 0.4 | Dev-dependency only: the examples' and tests' log timestamps (`chrono::Local::now()`). No release fixes it; replacing it in 48 example and test files is not worth a dev-only timestamp. |
+| RUSTSEC-2024-0436 (unmaintained, no vulnerability) | `paste` 1.0.15 | Unmaintained build-time proc-macro, no known vulnerability and no safe upgrade; via `rav1d` 1.1.0 and `rav1e` 0.8.1 in the unpublished `rtci-video` crate's opt-in AV1 features (`av1`; not in the default resolution). Remove when those drop it. The library check leaves `publish = false` crates out and ignores nothing, so it fails if `paste` ever reaches a published crate. |
 
 The same job then runs `cargo deny --all-features check licenses bans sources` against
 `deny.toml`'s `[licenses]` allow-list: permissive licences only (MIT, Apache-2.0, BSD, ISC,
