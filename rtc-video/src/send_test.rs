@@ -423,7 +423,13 @@ fn degraded_pictures_are_scaled_and_encoded_at_the_lower_resolution_and_recover_
         Some((384, 216)),
         "the encoder is given the scaled picture"
     );
-    // 160 kbit/s meets 640x360's 150 but not with the quarter's margin: no step up.
+    // 190 kbit/s meets 640x360's 150 with the quarter's margin, but not within 5 s of the
+    // step down.
+    b.advance(Duration::from_secs(4));
+    b.target(190_000.0);
+    assert_eq!((b.sent().width, b.sent().height), (384, 216), "held");
+    // After the hold, 160 kbit/s meets 640x360's 150 but not with the margin: no step up.
+    b.advance(Duration::from_secs(1));
     b.target(160_000.0);
     assert_eq!((b.sent().width, b.sent().height), (384, 216));
     b.target(190_000.0);

@@ -179,6 +179,11 @@ pub struct SendConfig {
     /// level needs (1.25: a quarter more), so that an estimate that moves a little does not
     /// switch the resolution back and forth.
     pub upgrade_margin: f64,
+    /// And at least this long after the last change of step (5 s: libwebrtc's quality scaler
+    /// samples every `kMeasureMs` 2 s times `kSamplePeriodScaleFactor` 2.5 once it has scaled
+    /// down, `modules/video_coding/utility/quality_scaler.cc` lines 34-35 @ a222406d). A
+    /// change of resolution costs a key frame (a new encoder); stepping down is never held.
+    pub upgrade_hold: Duration,
 }
 
 impl Default for SendConfig {
@@ -190,6 +195,7 @@ impl Default for SendConfig {
             max_framerate: 30.0,
             initial_bitrate_bps: 300_000,
             upgrade_margin: 1.25,
+            upgrade_hold: Duration::from_secs(5),
         }
     }
 }
@@ -349,6 +355,7 @@ pub struct SendPipeline {
     framerates: Vec<f64>,
     path: Vec<Step>,
     level: usize,
+    level_changed: Option<Instant>,
     budget: f64,
     last_capture: Option<Instant>,
     scaled: I420Buffer,
@@ -385,6 +392,7 @@ impl SendPipeline {
             framerates: Vec::new(),
             path: Vec::new(),
             level: 0,
+            level_changed: None,
             budget: 1.0,
             last_capture: None,
             scaled: I420Buffer::default(),
@@ -446,7 +454,7 @@ impl SendPipeline {
         }
         self.target = Some(bps);
         self.stats.target_bitrate = Some(bps);
-        self.choose_level();
+        self.choose_level(now);
         self.apply_rates();
     }
 
@@ -499,7 +507,7 @@ impl SendPipeline {
         self.account(now);
         self.stats.frames_captured += 1;
         if self.source != Some((picture.width, picture.height)) {
-            self.set_source(picture.width, picture.height);
+            self.set_source(now, picture.width, picture.height);
         }
         if self.paused {
             self.stats.frames_dropped_paused += 1;
@@ -674,7 +682,7 @@ impl SendPipeline {
 
     /// A source of `width` x `height`: the resolution and frame-rate steps, and the order in
     /// which the preference takes them.
-    fn set_source(&mut self, width: u32, height: u32) {
+    fn set_source(&mut self, now: Instant, width: u32, height: u32) {
         self.source = Some((width, height));
         self.resolutions = vec![(width, height)];
         let source_pixels = u64::from(width) * u64::from(height);
@@ -739,7 +747,8 @@ impl SendPipeline {
             }
         };
         self.level = 0;
-        self.choose_level();
+        self.level_changed = None;
+        self.choose_level(now);
         self.apply_rates();
     }
 
@@ -752,8 +761,9 @@ impl SendPipeline {
     }
 
     /// The step for the current target: down at once to the first step the target meets, up
-    /// only to a step the target meets with the upgrade margin.
-    fn choose_level(&mut self) {
+    /// only to a step the target meets with the upgrade margin, and only once the upgrade hold
+    /// has passed since the last change.
+    fn choose_level(&mut self, now: Instant) {
         let Some(target) = self.target else { return };
         if self.path.is_empty() {
             return;
@@ -765,11 +775,19 @@ impl SendPipeline {
                 .unwrap_or(last)
         };
         let down = meets(self, 1.0);
+        let held = self
+            .level_changed
+            .is_some_and(|t| now.saturating_duration_since(t) < self.config.upgrade_hold);
         let level = if down > self.level {
             down
+        } else if held {
+            self.level
         } else {
             meets(self, self.config.upgrade_margin).min(self.level)
         };
+        if level != self.level {
+            self.level_changed = Some(now);
+        }
         self.level = level;
         let quality_limited = level > 0;
         self.stats.quality_limited = quality_limited;
