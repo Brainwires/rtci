@@ -398,6 +398,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CircuitBreakerNotice` (see "Fixed"). An application that sends media should handle the
   event: a flow the circuit breaker ceased stays silent until the application restarts it
   (`DefaultInterceptorHandles::circuit_breaker`, `CircuitBreakerHandle::restart`).
+- **interceptor** (collapse-2): `ProbeFill`, an attribute the pacer adds to a `ProbeRequest`'s
+  carrier on its way application-ward: the padding the cluster needs beyond the media and
+  retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
+  that much; a chain without a pacer has no such attribute and the whole cluster is padding,
+  as before.
 
 - **mDNS may leave two kinds of host address unwrapped, each an opt-in setting, off by default
   (mdns-5; MDNSICE-3.1.2.2-4, -3.1.2.2-5, -3.1.2.3-1).** Only in `QueryAndGather`; in every
@@ -619,6 +624,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as before); a sender received at the measurement or above it is cut to 0.85 times the
   received rate, and over-use never raises an estimate that rests on a probe.
   `rate_control::tests::lasting_over_use_with_a_probe_measurement_follows_the_received_rate`.
+- **interceptor / bandwidth probing** (collapse-2): a probe cluster's padding belongs to the
+  cluster. The NACK responder made a whole cluster of padding-only RTX packets for every
+  `ProbeRequest`, and the pacer kept what did not leave in the cluster "until budget was
+  spare". With a backlog in the pacer (after a capacity drop, during its pause) every cluster
+  was filled by the backlog and its 22 padding packets stayed queued, for seconds: 191 of them
+  after ten clusters in `tests/capacity_cap_video_rtc2rtc.rs`. They left inside later
+  clusters with the RTX sequence numbers they were given when made, far behind the stream's
+  newest, where the receiver's replay protection and feedback window no longer take them; no
+  report ever named them, so those clusters were never reported in full and gave no result
+  (every cluster after the cap; an estimate at its floor with an application-limited sender
+  then stayed there, 35 s on an open path in the cap matrix's seed 5 and 3 of 1000 seeds of
+  the capacity review). Now the pacer says how much padding a cluster needs beyond the media
+  it holds (`ProbeFill`, on the request's carrier), the responder makes that much (none while
+  a backlog waits), and padding that could not leave in its cluster is discarded when the
+  cluster ends (`PacerInterceptor::padding_discarded` counts it). The congestion controller
+  counts in a cluster only the packets per-packet feedback will report (audio without
+  feedback that left during a cluster was waited for and never came), and a cluster one of
+  whose reports is still missing 500 ms after it left is measured on the others instead of
+  being given up. `rtci-interceptor/tests/probe_cluster_padding.rs`.
 
 - **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
   checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length
