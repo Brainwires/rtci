@@ -410,7 +410,7 @@ pub use rtcp_session::{
     RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpSessionBuilder, RtcpSessionControl,
     RtcpSessionEvent, RtcpSessionInterceptor,
 };
-pub use rtp_session::{PerRtpSession, RtpSession, RtpSessionAssignment};
+pub use rtp_session::{PathChanged, PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;

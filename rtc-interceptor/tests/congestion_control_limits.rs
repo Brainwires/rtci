@@ -564,6 +564,134 @@ fn a_path_change_is_passed_to_the_estimator() {
     assert_eq!(1, *told.path_changes.lock().unwrap());
 }
 
+/// The peer connection's word that it selected another candidate pair (`PathChanged`, on the
+/// read leg) is a path change also when every packet keeps its addresses (a TURN relay that
+/// keeps them, an application that hands datagrams over with one placeholder pair): the
+/// estimator is told once. Packets that then arrive between other addresses are the new
+/// path's, not a second change.
+#[test]
+fn the_peer_connections_path_change_reaches_the_estimator_with_the_same_addresses() {
+    let told = Told::default();
+    let mut harness = Harness::new(told.clone());
+    for index in 0..5u64 {
+        harness.receive(ms(100 + index * 20), remb(1e6, vec![LOCAL]));
+    }
+    assert_eq!(0, *told.path_changes.lock().unwrap());
+
+    let carrier = rtc_interceptor::PathChanged.into_packet(harness.epoch + ms(300), None);
+    harness.chain.handle_read(carrier).expect("read");
+    harness.drain();
+    assert_eq!(1, *told.path_changes.lock().unwrap(), "told");
+
+    for index in 0..5u64 {
+        harness.receive(ms(320 + index * 20), remb(1e6, vec![LOCAL]));
+    }
+    for index in 0..5u64 {
+        let mut message = harness.tagged(
+            ms(420 + index * 20),
+            Packet::Rtcp(vec![remb(1e6, vec![LOCAL])]),
+        );
+        message.transport.peer_addr = std::net::SocketAddr::from(([192, 0, 2, 7], 6000));
+        harness.chain.handle_read(message).expect("read");
+        harness.drain();
+    }
+    assert_eq!(1, *told.path_changes.lock().unwrap(), "told once");
+}
+
+/// What the estimator was handed: each report's transport-wide sequence number and whether it
+/// arrived.
+#[derive(Clone, Default)]
+struct Reported(Arc<Mutex<Vec<(u16, bool)>>>);
+
+impl BandwidthEstimator for Reported {
+    fn on_reports(&mut self, _now: Instant, reports: &[PacketReport]) {
+        self.0.lock().unwrap().extend(
+            reports
+                .iter()
+                .map(|report| (report.twcc_sequence_number, report.arrived)),
+        );
+    }
+    fn target_bitrate(&self) -> f64 {
+        1_000_000.0
+    }
+}
+
+/// The packets sent before a path change went into the path that was left: the feedback that
+/// reports them missing after the change is no loss of the new path's, and the estimator is
+/// not handed them (libwebrtc's feedback adapter "only reports packets sent on the new route",
+/// `RtpTransportControllerSend::OnNetworkRouteChanged`). Ten packets into a dead path, the
+/// peer connection's path change, five on the new one: the feedback on the new path names the
+/// ten lost and the five received, and only the five reach the estimator.
+#[test]
+fn packets_sent_before_a_path_change_are_no_loss_of_the_new_path() {
+    let reported = Reported::default();
+    let mut harness = Harness::new(reported.clone());
+    for index in 0..10u64 {
+        harness.send(ms(index * 10), 1200);
+    }
+    let carrier = rtc_interceptor::PathChanged.into_packet(harness.epoch + ms(2_000), None);
+    harness.chain.handle_read(carrier).expect("read");
+    harness.drain();
+    for index in 0..10u64 {
+        harness.send(ms(2_010 + index * 10), 1200);
+    }
+    // 0..9 lost, 10..14 received; then 15..19 received, which releases the losses the first
+    // feedback held back for one more.
+    let run = |symbol, run_length| {
+        PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+            type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+            packet_status_symbol: symbol,
+            run_length,
+        })
+    };
+    let received = |count: u16| -> Vec<RecvDelta> {
+        (0..count)
+            .map(|_| RecvDelta {
+                type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                delta: 10_000,
+            })
+            .collect()
+    };
+    harness.receive(
+        ms(2_100),
+        Box::new(TransportLayerCc {
+            sender_ssrc: REMOTE,
+            media_ssrc: LOCAL,
+            base_sequence_number: 0,
+            packet_status_count: 15,
+            reference_time: (2_060 / 64) as u32,
+            fb_pkt_count: 0,
+            packet_chunks: vec![
+                run(SymbolTypeTcc::PacketNotReceived, 10),
+                run(SymbolTypeTcc::PacketReceivedSmallDelta, 5),
+            ],
+            recv_deltas: received(5),
+        }),
+    );
+    harness.receive(
+        ms(2_160),
+        Box::new(TransportLayerCc {
+            sender_ssrc: REMOTE,
+            media_ssrc: LOCAL,
+            base_sequence_number: 15,
+            packet_status_count: 5,
+            reference_time: (2_120 / 64) as u32,
+            fb_pkt_count: 1,
+            packet_chunks: vec![run(SymbolTypeTcc::PacketReceivedSmallDelta, 5)],
+            recv_deltas: received(5),
+        }),
+    );
+    let reports = reported.0.lock().unwrap().clone();
+    assert!(
+        reports.iter().all(|(_, arrived)| *arrived),
+        "the old path's packets counted as lost: {reports:?}"
+    );
+    assert_eq!(
+        (10..20).collect::<Vec<u16>>(),
+        reports.iter().map(|(seq, _)| *seq).collect::<Vec<u16>>()
+    );
+}
+
 /// The round trip time the feedback implies reaches the estimator: the additive increase of
 /// RFC 8836 section 2, requirement 1: the controller reacts to a change of the path. The
 /// engine does not have to be asked: packets that keep arriving between other addresses than

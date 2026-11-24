@@ -507,6 +507,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **congestion control, peer connection**: a new selected candidate pair is a new path for the
+  congestion controllers also when the datagrams keep their addresses
+  (`conf/gcc-2-path-change`). The peer connection reads `PathChanged` (rtc-interceptor, an
+  empty-RTCP carrier on the read leg, tagged with the transport's `RtpSession` when there are
+  several) into the chain each time a transport's ICE agent selects another pair after its
+  first; the TWCC-driven GCC (`GccInterceptor`) starts over from its start rate and forgets the
+  send times of the packets sent before, and the congestion control interceptor calls
+  `BandwidthEstimator::on_path_change` and forgets its send history
+  (`History::forget_sent`), so the packets sent into the old path are not counted as the new
+  path's loss. Both controllers followed only the addresses inbound packets arrive between,
+  and the congestion control interceptor counted the old path's packets as lost when it did
+  see a change; that detection stays, and now forgets the history too. Why: ParolNet's
+  `an_ice_restart_follows_a_machine_to_another_network` hands every datagram over with one
+  placeholder pair, so neither detection fired: after a 4 s outage one transport-wide feedback
+  reported a loss of 0.985 (the packets sent into the dead path), GCC cut its estimate from
+  437 to 242 kbit/s and the call froze 7 s. A TURN relay can keep the addresses too. libwebrtc
+  restarts its estimate on a route change and has its feedback adapter report only the packets
+  sent on the new route (`RtpTransportControllerSend::OnNetworkRouteChanged`,
+  `TransportFeedbackAdapter::SetNetworkRoute`), and leaves the first connection alone, as here.
+  Tests: `tests/capacity_cap_video_rtc2rtc.rs`
+  `an_ice_restart_with_the_same_addresses_starts_the_estimate_over` (ParolNet's chain) and
+  `..._counts_no_old_loss_in_the_default_chain`, an ICE restart after a 4 s outage with the
+  addresses unchanged; unit tests in `gcc/twcc_gcc` and `tests/congestion_control_limits.rs`.
+
 - **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
   (`conf/red-1-send-policy`). jsep17 sent every Opus packet as RED, with a copy of the one
   before, whenever RED was negotiated: a 24 kbit/s audio-only call went from 38.5 to 64.5
