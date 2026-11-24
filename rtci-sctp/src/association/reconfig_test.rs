@@ -13,7 +13,7 @@ use crate::param::param_ssn_tsn_reset_request::ParamSsnTsnResetRequest;
 
 const PPI: PayloadProtocolIdentifier = PayloadProtocolIdentifier::Binary;
 
-fn chunk_of(param: impl Param + 'static) -> ChunkReconfig {
+pub(super) fn chunk_of(param: impl Param + 'static) -> ChunkReconfig {
     ChunkReconfig {
         param_a: Some(Box::new(param)),
         param_b: None,
@@ -33,7 +33,7 @@ fn u32_at(value: &[u8], offset: usize) -> u32 {
 }
 
 /// The (response sequence number, result) of each Re-configuration Response in `packets`.
-fn responses(packets: &[Packet]) -> Vec<(u32, u32)> {
+pub(super) fn responses(packets: &[Packet]) -> Vec<(u32, u32)> {
     let raw: Vec<Bytes> = packets.iter().map(|p| p.marshal().unwrap()).collect();
     reconfig_params(&raw)
         .into_iter()
@@ -50,7 +50,7 @@ fn requests_sent(a: &mut Association, now: Instant) -> Vec<(u16, Vec<u8>)> {
         .collect()
 }
 
-fn ack_everything(a: &mut Association, now: Instant) {
+pub(super) fn ack_everything(a: &mut Association, now: Instant) {
     let last = a.my_next_tsn.wrapping_sub(1);
     if sna32gt(last, a.cumulative_tsn_ack_point) {
         a.handle_sack(
@@ -66,7 +66,7 @@ fn ack_everything(a: &mut Association, now: Instant) {
     }
 }
 
-fn ordered(tsn: u32, stream: u16, ssn: u16, payload: &'static [u8]) -> ChunkPayloadData {
+pub(super) fn ordered(tsn: u32, stream: u16, ssn: u16, payload: &'static [u8]) -> ChunkPayloadData {
     ChunkPayloadData {
         tsn,
         stream_identifier: stream,
