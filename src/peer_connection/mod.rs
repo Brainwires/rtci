@@ -260,6 +260,7 @@ mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 /// Server-reflexive candidates the engine gathers (RFC 8445 section 5.1.1.2).
+pub(crate) mod servers_in_force;
 pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
@@ -4243,6 +4244,14 @@ impl RTCPeerConnection {
                 .agent
                 .set_ice_servers(urls.clone());
         }
+        // W3C "set the configuration": "Set the ICE Agent's ICE servers list to iceServers.
+        // As defined in [RFC9429], if a new list of servers replaces the ICE Agent's existing
+        // ICE servers list, no action will be taken until the next gathering phase." The
+        // engine's own STUN and TURN gathering take the new list for the generations that
+        // begin from now on (an ICE restart, a new transport); one already gathering keeps
+        // its list.
+        self.streams.srflx.set_servers(&urls);
+        self.streams.turn.set_servers(&urls);
         self.configuration.ice_servers = configuration.ice_servers;
 
         Ok(())

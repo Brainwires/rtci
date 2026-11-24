@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **jsep** (mdns-5): **servers given by `set_configuration` reach the engine's own STUN and TURN
+  gathering** (W3C webrtc-pc "set the configuration": "Set the ICE Agent's ICE servers list to
+  iceServers. As defined in [RFC9429], if a new list of servers replaces the ICE Agent's
+  existing ICE servers list, no action will be taken until the next gathering phase"; RFC 9429
+  section 4.1.18). They kept the servers the connection was built with. Now each ICE
+  generation of each transport gathers from the list in force when it began: a generation
+  already gathering keeps its list, the next one (an ICE restart, a new transport) asks the
+  new STUN servers and allocates on the new TURN servers, and the allocations on servers that
+  left the list are deleted then. Tests: `tests/srflx_gathering.rs::servers_set_by_set_configuration_are_asked_from_the_next_gathering_phase`,
+  `tests/turn_udp.rs::turn_servers_set_by_set_configuration_are_allocated_on_from_the_next_gathering_phase`.
 - **jsep** (mdns-5): **in mDNS `QueryAndGather`, a STUN answer equal to its base is a
   server-reflexive candidate** (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2,
   MDNSICE-3.1.2.2-1: "a server-reflexive candidate will be generated; [...] and as such MUST
