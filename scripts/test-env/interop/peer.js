@@ -33,6 +33,11 @@
     return c.captureStream(30);
   }
 
+  // Each tone's AudioContext and oscillator, by its stream's id, for the page's life: a page
+  // that keeps only the track must not leave the graph that feeds it to the garbage collector.
+  const audioSources = new Map();
+
+  // A full-scale 440 Hz tone (WebAudio oscillator) as a MediaStream.
   function audioStream() {
     const ctx = new AudioContext();
     const osc = ctx.createOscillator();
@@ -40,8 +45,54 @@
     const dst = ctx.createMediaStreamDestination();
     osc.connect(dst);
     osc.start();
-    ctx.resume();
+    ctx.resume().catch(() => {});
+    audioSources.set(dst.stream.id, { ctx, osc });
     return dst.stream;
+  }
+
+  // Waits (at most 2 s) for an audioStream()'s context to run; its state then ("running", or
+  // "suspended" where the browser holds it). A suspended context's track carries silence.
+  async function audioReady(stream) {
+    const src = audioSources.get(stream.id);
+    if (!src) return "unknown";
+    await Promise.race([src.ctx.resume().catch(() => {}), sleep(2000)]);
+    return src.ctx.state;
+  }
+
+  // The loudest RMS of 100 ms windows of `track` over `ms`, measured by a WebAudio analyser
+  // (what the browser itself plays or sends, independent of getStats).
+  async function trackRms(track, ms = 2000) {
+    const ctx = new AudioContext();
+    try {
+      const an = ctx.createAnalyser();
+      an.fftSize = 2048;
+      ctx.createMediaStreamSource(new MediaStream([track])).connect(an);
+      await Promise.race([ctx.resume().catch(() => {}), sleep(1000)]);
+      const buf = new Float32Array(an.fftSize);
+      let peak = 0;
+      for (let t = 0; t < ms; t += 100) {
+        await sleep(100);
+        an.getFloatTimeDomainData(buf);
+        peak = Math.max(peak, Math.sqrt(buf.reduce((a, v) => a + v * v, 0) / buf.length));
+      }
+      return { rms: peak, state: ctx.state };
+    } finally {
+      ctx.close().catch(() => {});
+    }
+  }
+
+  // The audio outbound-rtp and media-source statistics (what the browser says it sends).
+  async function outboundAudio(pc) {
+    const out = {};
+    (await pc.getStats()).forEach((r) => {
+      if (r.kind !== "audio") return;
+      if (r.type === "outbound-rtp") {
+        out.outbound = { packetsSent: r.packetsSent, bytesSent: r.bytesSent, targetBitrate: r.targetBitrate };
+      } else if (r.type === "media-source") {
+        out.mediaSource = { audioLevel: r.audioLevel, totalAudioEnergy: r.totalAudioEnergy, totalSamplesDuration: r.totalSamplesDuration };
+      }
+    });
+    return out;
   }
 
   function hasCodec(kind, mime, dir = "sender") {
@@ -328,9 +379,14 @@
     return t;
   }
 
-  function sink(stream) {
+  // Plays a received stream (a remote track is decoded only while something plays it).
+  // Muted by default. Chromium hands a muted element's volume (0) to libwebrtc as the remote
+  // source's volume, which scales the decoded audio before inbound-rtp's audioLevel and
+  // totalAudioEnergy are measured (WebRtcAudioRenderer::UpdateSourceVolume,
+  // ChannelReceive::GetAudioFrameWithInfo): a cell that checks those passes `muted: false`.
+  function sink(stream, { muted = true } = {}) {
     const v = document.createElement(stream.getVideoTracks().length ? "video" : "audio");
-    v.muted = true;
+    v.muted = muted;
     v.autoplay = true;
     v.playsInline = true;
     v.srcObject = stream;
@@ -369,7 +425,7 @@
   }
 
   window.Interop = {
-    open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
+    open, echo, until, sleep, canvasStream, audioStream, audioReady, trackRms, outboundAudio, hasCodec, prefer, inbound, transport, sink, attachTransform,
     selectedPair, wrongFingerprint, mlines, transportLines,
   };
 })();

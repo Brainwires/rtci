@@ -357,6 +357,85 @@ struct Pipeline {
     next: Instant,
     decoded_energy: f64,
     decoded_samples: u64,
+    /// What arrived from the browser, before the jitter buffer.
+    received: ReceivedAudio,
+}
+
+/// Scenario `pipeline`: the browser's audio as it arrived (the report's `pipeline.received`),
+/// so a cell that finds silence can tell a silent source (the browser's own RFC 6464 levels,
+/// small payloads) from a decoding fault.
+#[derive(Default)]
+struct ReceivedAudio {
+    /// The `ssrc-audio-level` extension's id in the remote description, once looked up.
+    level_id: Option<Option<u8>>,
+    packets: u64,
+    payload_bytes: u64,
+    payload_min: Option<usize>,
+    payload_max: usize,
+    payload_types: BTreeMap<u8, u64>,
+    /// RFC 6464 levels (-dBov, 127 is silence) the browser put on its packets.
+    levels: u64,
+    level_sum: u64,
+    level_min: Option<u8>,
+    /// The first payloads, hex, at most 48 bytes each.
+    first: Vec<String>,
+}
+
+impl ReceivedAudio {
+    const FIRST: usize = 8;
+
+    fn record(&mut self, pc: &RTCPeerConnection, pkt: &rtc::rtp::Packet) {
+        let id = *self.level_id.get_or_insert_with(|| {
+            pc.remote_description().and_then(|d| {
+                d.sdp.lines().find_map(|l| {
+                    let rest = l.strip_prefix("a=extmap:")?;
+                    rest.contains("urn:ietf:params:rtp-hdrext:ssrc-audio-level")
+                        .then(|| rest.split(['/', ' ']).next()?.parse().ok())
+                        .flatten()
+                })
+            })
+        });
+        let n = pkt.payload.len();
+        self.packets += 1;
+        self.payload_bytes += n as u64;
+        self.payload_min = Some(self.payload_min.map_or(n, |m| m.min(n)));
+        self.payload_max = self.payload_max.max(n);
+        *self
+            .payload_types
+            .entry(pkt.header.payload_type)
+            .or_default() += 1;
+        if let Some(level) = id
+            .and_then(|id| pkt.header.get_extension(id))
+            .and_then(|e| e.first().map(|b| b & 0x7f))
+        {
+            self.levels += 1;
+            self.level_sum += u64::from(level);
+            self.level_min = Some(self.level_min.map_or(level, |m| m.min(level)));
+        }
+        if self.first.len() < Self::FIRST {
+            self.first.push(
+                pkt.payload
+                    .iter()
+                    .take(48)
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            );
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "packets": self.packets,
+            "payloadBytesMean": self.payload_bytes as f64 / self.packets.max(1) as f64,
+            "payloadBytesMin": self.payload_min,
+            "payloadBytesMax": self.payload_max,
+            "payloadTypes": self.payload_types,
+            "levelExtensionId": self.level_id.flatten(),
+            "levelMeanDbov": (self.levels > 0).then(|| self.level_sum as f64 / self.levels as f64),
+            "levelMinDbov": self.level_min,
+            "firstPayloads": self.first,
+        })
+    }
 }
 
 struct Outgoing {
@@ -982,6 +1061,8 @@ impl Session {
                     json!({
                         "packetsSent": p.sender.as_ref().map_or(0, |s| s.packets_sent()),
                         "encoder": p.sender.as_ref().map(|s| s.pipeline().encoder_name()),
+                        "encoderBitrate": p.sender.as_ref().and_then(|s| s.pipeline().stats().target_bitrate),
+                        "received": p.received.json(),
                         "decodedSeconds": p.decoded_samples as f64 / 48_000.0,
                         "decodedRms": (p.decoded_energy / p.decoded_samples.max(1) as f64).sqrt(),
                         "totalSamplesReceived": s.total_samples_received,
@@ -1197,6 +1278,7 @@ impl Session {
                 next: Instant::now(),
                 decoded_energy: 0.0,
                 decoded_samples: 0,
+                received: ReceivedAudio::default(),
             });
             return Ok(());
         }
@@ -1520,6 +1602,7 @@ impl Session {
                 )
                 .ok();
             }
+            p.received.record(&self.pc, &pkt);
             if let Some(r) = p.receiver.as_mut() {
                 r.handle_rtp(Instant::now(), &pkt);
             }

@@ -231,19 +231,30 @@ test("reflect audio Opus", async ({ page }) => {
 });
 
 // The audio pipeline both ways (rtc-audio): Rust synthesises a 440 Hz tone at -15 dBFS peak,
-// processes it and encodes it with its own Opus encoder (opus-rs); the browser must decode it
+// encodes it with its own Opus encoder (opus-rs; processing off) and the browser must decode it
 // to audio with energy, by its own statistics (webrtc-stats totalAudioEnergy over
 // totalSamplesDuration is the mean square) or, where it reports neither, by a WebAudio
-// analyser on the received track. The browser sends its oscillator; Rust's jitter buffer must
-// decode it with energy and little concealment (the report's `pipeline`).
+// analyser on the received track. The browser sends its oscillator (full scale); Rust's jitter
+// buffer must decode it with energy and little concealment (the report's `pipeline`).
+// - The received track plays through an UNMUTED element: Chromium applies a muted element's
+//   volume to the decoded audio before it measures audioLevel and totalAudioEnergy (peer.js
+//   `sink`), which read 0 in train 13 round 5 while NetEq decoded the stream normally.
+// - The browser's own source is measured too (`sourceRms`, the oscillator's track through an
+//   analyser): Rust decoding silence is a pipeline failure only when the browser sent sound.
+//   In round 5 Firefox sent Opus that decodes to an RMS of 2.66e-6, the value libopus's
+//   digital silence decodes to (rtc-audio's opus_interop test), from a context whose
+//   resume() the page did not await.
+// Everything measured is the `pipeline-diagnostics` annotation, pass or fail.
 test("audio pipeline: the browser decodes Rust's Opus and Rust decodes the browser's", async ({ page }) => {
   const r = await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "pipeline" });
-    s.pc.addTransceiver(Interop.audioStream().getAudioTracks()[0], { direction: "sendrecv" });
+    const local = Interop.audioStream();
+    const sourceState = await Interop.audioReady(local);
+    s.pc.addTransceiver(local.getAudioTracks()[0], { direction: "sendrecv" });
     let track = null;
     s.pc.ontrack = (e) => {
       track = e.track;
-      Interop.sink(new MediaStream([e.track]));
+      Interop.sink(new MediaStream([e.track]), { muted: false });
     };
     await s.negotiate();
     await s.connected();
@@ -251,37 +262,43 @@ test("audio pipeline: the browser decodes Rust's Opus and Rust decodes the brows
       const r = await Interop.inbound(s.pc, "audio");
       return r && r.packetsReceived > 250 && r;
     }, 25000, "5 s of audio from Rust").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
-    let analyser = null;
-    if (rtp && rtp.totalAudioEnergy === undefined && rtp.audioLevel === undefined && track) {
-      const ctx = new AudioContext();
-      const an = ctx.createAnalyser();
-      an.fftSize = 2048;
-      ctx.createMediaStreamSource(new MediaStream([track])).connect(an);
-      await ctx.resume();
-      const buf = new Float32Array(an.fftSize);
-      let peak = 0;
-      for (let i = 0; i < 20; i++) {
-        await Interop.sleep(100);
-        an.getFloatTimeDomainData(buf);
-        peak = Math.max(peak, Math.sqrt(buf.reduce((a, v) => a + v * v, 0) / buf.length));
-      }
-      analyser = peak;
-      ctx.close();
-    }
+    const source = await Interop.trackRms(local.getAudioTracks()[0], 1000);
+    const received = track ? await Interop.trackRms(track, 2000) : null;
+    const sent = await Interop.outboundAudio(s.pc);
     const report = await s.report();
     s.close();
-    return { rtp, analyser, report };
+    return { rtp, sourceState, source, received, sent, report };
   }, WS);
+  test.info().annotations.push({
+    type: "pipeline-diagnostics",
+    description: JSON.stringify({
+      browser: {
+        sourceState: r.sourceState,
+        sourceRms: r.source?.rms,
+        receivedRms: r.received?.rms,
+        sent: r.sent,
+        inbound: r.rtp && {
+          packetsReceived: r.rtp.packetsReceived,
+          bytesReceived: r.rtp.bytesReceived,
+          audioLevel: r.rtp.audioLevel,
+          totalAudioEnergy: r.rtp.totalAudioEnergy,
+          totalSamplesDuration: r.rtp.totalSamplesDuration,
+          concealedSamples: r.rtp.concealedSamples,
+        },
+      },
+      rust: r.report.pipeline,
+    }),
+  });
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
   expect(r.rtp.mimeType.toLowerCase()).toBe("audio/opus");
   const a = r.rtp;
   if (a.totalAudioEnergy !== undefined && a.totalSamplesDuration > 0) {
     // A tone of peak 0.25 has a mean square of 0.031; at least -30 dB of that arrived.
-    expect(a.totalAudioEnergy / a.totalSamplesDuration, JSON.stringify(a)).toBeGreaterThan(3e-5);
+    expect(a.totalAudioEnergy / a.totalSamplesDuration, JSON.stringify(r)).toBeGreaterThan(3e-5);
   } else if (a.audioLevel !== undefined) {
-    expect(a.audioLevel, JSON.stringify(a)).toBeGreaterThan(0.02);
+    expect(a.audioLevel, JSON.stringify(r)).toBeGreaterThan(0.02);
   } else {
-    expect(r.analyser, JSON.stringify(r)).toBeGreaterThan(0.01);
+    expect(r.received?.rms, JSON.stringify(r)).toBeGreaterThan(0.01);
   }
   if (a.concealedSamples !== undefined && a.totalSamplesReceived > 0) {
     expect(a.concealedSamples / a.totalSamplesReceived, JSON.stringify(a)).toBeLessThan(0.1);
@@ -289,7 +306,10 @@ test("audio pipeline: the browser decodes Rust's Opus and Rust decodes the brows
   const p = r.report.pipeline;
   expect(p, JSON.stringify(r.report)).toBeTruthy();
   expect(p.packetsSent, JSON.stringify(p)).toBeGreaterThan(250);
-  // The browser's oscillator is full scale: decoded, its RMS is far above 0.05.
+  // The browser's oscillator is full scale (RMS 0.71): first that the browser sent it, then
+  // that Rust decoded it (far above 0.05).
+  expect(r.source?.rms, `the browser's own source is silent, so this says nothing of Rust's decoding: ${JSON.stringify(r)}`)
+    .toBeGreaterThan(0.05);
   expect(p.decodedRms, JSON.stringify(p)).toBeGreaterThan(0.05);
   expect(p.concealedRatio, JSON.stringify(p)).toBeLessThan(0.1);
 });
