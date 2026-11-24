@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
+  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
+  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
+  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
+  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
+  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
+  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
