@@ -636,6 +636,21 @@ mod tests {
             (target - 114_000.0).abs() < 1.0,
             "1.5 x 76 kbit/s, got {target}"
         );
+
+        // In every state: under-use holds the estimate (section 5.5), and the clamp still
+        // brings it to the bound.
+        let mut controller = RateController::new(1_000_000.0, MIN, MAX)
+            .with_received_rate_bound(ReceivedRateBound::Clamps);
+        let target = controller.update(
+            epoch + Duration::from_millis(100),
+            Usage::Under,
+            Some(76_000.0),
+        );
+        assert_eq!(RateControlState::Hold, controller.state());
+        assert!(
+            (target - 114_000.0).abs() < 1.0,
+            "1.5 x 76 kbit/s held, got {target}"
+        );
     }
 
     /// Section 5.5: close to convergence the increase is additive,

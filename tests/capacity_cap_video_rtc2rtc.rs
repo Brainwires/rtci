@@ -1104,13 +1104,16 @@ impl World {
             ));
             for peer in self.peers.iter_mut() {
                 // Only a peer connection whose chain tells it the estimate has one to report.
-                if peer.handles.is_some()
-                    && let Some(outgoing) = peer.available_outgoing(now)
-                {
-                    peer.lowest_outgoing = Some(
-                        peer.lowest_outgoing
-                            .map_or(outgoing, |low| low.min(outgoing)),
-                    );
+                // The statistic leaves the member out when the estimate is zero: once it
+                // has been there, a report without it is a zero.
+                if peer.handles.is_some() {
+                    let outgoing = peer.available_outgoing(now);
+                    if let Some(outgoing) = outgoing.or(peer.lowest_outgoing.map(|_| 0.0)) {
+                        peer.lowest_outgoing = Some(
+                            peer.lowest_outgoing
+                                .map_or(outgoing, |low| low.min(outgoing)),
+                        );
+                    }
                 }
                 if let Some(estimate) = peer.estimate() {
                     peer.lowest_estimate = Some(
@@ -1661,12 +1664,14 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
 /// goes.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()> {
-    // Measured (hosted run 45330969396, six seeds): freeze 0.85 to 1.36 s, the oldest
-    // picture 2.33 to 2.61 s, 42 to 49 retransmissions (13 to 15 dropped), 236 to 251 kbit/s
-    // under the cap, 1050 to 1214 kbit/s twenty seconds after it. (With the cap arriving
-    // after 20 s at the 0.99 Mbit/s the earlier estimator had reached by then, runs
-    // 45315535896 and 45312738975: 0.83 to 1.24 s, 2.26 to 3.21 s, 43 to 66, 238 to 266,
-    // 988 to 1352.)
+    // Measured (hosted run 45334499296, six seeds, and three at each other length): freeze
+    // 0.56 to 1.26 s, the oldest picture 1.68 to 2.48 s, 39 to 47 retransmissions (10 to 14
+    // dropped), 239 to 257 kbit/s under the cap, 1027 to 1320 kbit/s twenty seconds after
+    // it. With one decrease per round trip (libwebrtc's form, the default until this
+    // estimate was measured; run 45332800112): 0.85 to 1.36 s, 2.33 to 2.61 s, 42 to 49,
+    // 234 to 251, 977 to 1344. With the cap arriving after 20 s at the 0.99 Mbit/s the
+    // earlier estimator had reached by then (runs 45315535896, 45312738975): 0.83 to
+    // 1.24 s, 2.26 to 3.21 s, 43 to 66, 238 to 266, 988 to 1352.
     assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(3_500));
     Ok(())
 }
@@ -1684,9 +1689,10 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_target() -> Result<()>
 {
-    // Measured under this setting (hosted run 45330969396, six seeds): freeze 1.28 to
-    // 1.36 s, the oldest picture 2.49 to 3.35 s, 49 to 54 retransmissions (15 to 17 dropped
-    // at the link's queue, against 13 to 15 under the default).
+    // Measured under this setting (hosted run 45334499296, six seeds, and three at each
+    // other length): freeze 0.80 to 1.29 s, the oldest picture 2.30 to 2.57 s, 46 to 57
+    // retransmissions (12 to 16 dropped at the link's queue, against 10 to 14 under the
+    // default).
     assert_the_call_holds(
         &seeds(
             Some(RetransmissionRateLimit::UpToTarget),
@@ -1719,20 +1725,23 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
 /// and the retransmissions, held here to what was measured so that they do not grow.
 ///
-/// Measured (hosted run 45330363761, six seeds): freeze 1.28 to 1.38 s, the oldest picture
-/// 4.46 to 5.32 s, 106 to 138 retransmissions (25 to 37 dropped at the link's queue), 241 to
-/// 254 kbit/s under the cap, 986 to 1364 kbit/s twenty seconds after it. Some 75 video
-/// packets are lost before the first feedback about the capped link can arrive (about forty
+/// Measured (hosted run 45334499296, six seeds): freeze 1.28 to 1.32 s, the oldest picture
+/// 4.40 to 4.51 s, 92 to 101 retransmissions (23 to 32 dropped at the link's queue), 246 to
+/// 254 kbit/s under the cap, 1086 to 1361 kbit/s twenty seconds after it. Some sixty video
+/// packets are lost before the first feedback about the capped link can arrive and while
+/// the received rate's 500 ms window still holds what arrived before the cap (about forty
 /// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
-/// that much longer. The release before (v0.22.0+brainwires.6, whose estimator met the cap
-/// at 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest
-/// picture 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s
-/// under the cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is
-/// 0.15 to 0.3 s longer than it was, the picture up to 0.9 s older and the retransmissions
-/// about twice as many, while the capped link carries 40 to 50 kbit/s more and the recovery
-/// has no slow seed. What shortens it is not in the estimator: giving up a repair backlog
-/// that has gone stale and sending a key frame instead, and a delay-based detector that
-/// reads a queue filling within a feedback interval (both planned).
+/// that much longer; a third of the repairs are sent into a queue that is still full and
+/// are dropped. The release before (v0.22.0+brainwires.6, whose estimator met the cap at
+/// 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest picture
+/// 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s under the
+/// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.1 to
+/// 0.3 s longer than it was, the picture up to 0.3 s older and the retransmissions half
+/// again as many, while the capped link carries 45 to 50 kbit/s more and the recovery has
+/// no slow seed (473 and 737 kbit/s on two of six before). What shortens it is not in the
+/// estimator: giving up a repair backlog that has gone stale and sending a key frame
+/// instead, and a delay-based detector that reads a queue filling within a feedback
+/// interval (both planned).
 #[test]
 fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Result<()> {
     for seed in seed_range(1, 6) {
@@ -1749,12 +1758,12 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             outcome.freeze
         );
         assert!(
-            outcome.lag <= Duration::from_secs(6),
+            outcome.lag <= Duration::from_millis(5_500),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 160,
+            outcome.rtx_sent <= 130,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -1913,9 +1922,11 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
         );
-        // Measured (hosted run 45315529565, six seeds on three wall clocks): freeze 1.38 to
-        // 1.90 s, 902 to 1484 kbit/s twenty seconds after the cap, and the oldest picture
-        // shown 5.95 to 8.56 s old. That last figure is the known cost of this chain at a
+        // Measured (hosted run 45334499296, six seeds): freeze 0.97 to 1.91 s, 1043 to
+        // 2500 kbit/s twenty seconds after the cap, and the oldest picture shown 5.59 to
+        // 9.84 s old (with one decrease per round trip, run 45332800112: 1.38 to 1.86 s, 946
+        // to 2500 kbit/s, 6.46 to 8.87 s; run 45315529565, six seeds on three wall clocks:
+        // 1.38 to 1.90 s, 902 to 1484 kbit/s, 5.95 to 8.56 s). That last figure is the known cost of this chain at a
         // sudden drop: some hundred full-sized packets the path lost while the source was at
         // 2.5 Mbit/s are repaired inside an estimate of 100 to 250 kbit/s, of which the
         // audio takes 76, at about 17 packets a second, under every retransmission rule (the
@@ -2262,9 +2273,12 @@ fn the_estimate_climbs_on_an_open_link_in_the_default_chain() -> Result<()> {
     Ok(())
 }
 
-/// When the estimate of an open link has to be at 1 Mbit/s: from 300 kbit/s at 8% a second
-/// (draft-ietf-rmcat-gcc-02 section 5.5) that is 15.7 s.
-const OPEN_LINK_1M_BY: Duration = Duration::from_millis(16_500);
+/// When the estimate of an open link has to be at 1 Mbit/s: no later than the estimator of
+/// v0.22.0+brainwires.6 was on this call, 15.82 s (hosted run 45331844223; from 300 kbit/s at
+/// 8% a second, draft-ietf-rmcat-gcc-02 section 5.5, it is 15.6 s). Measured: 15.47 to
+/// 15.52 s without a pacer, 0.37 s in the default chain, whose start-up probes find the
+/// open link (run 45334499296).
+const OPEN_LINK_1M_BY: Duration = Duration::from_millis(15_820);
 
 #[derive(Debug)]
 #[allow(dead_code)] // Read through `Debug`.
