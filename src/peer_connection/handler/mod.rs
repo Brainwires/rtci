@@ -1138,9 +1138,36 @@ impl RTCPeerConnection {
 }
 
 impl RTCPeerConnection {
+    /// Whether the embedder's address policy lets `addr` be used for `purpose`
+    /// (`SettingEngineBuilder::with_ice_address_policy`; the default allows everything).
+    pub(crate) fn address_allowed(
+        &self,
+        addr: std::net::SocketAddr,
+        purpose: ::ice::AddressPurpose,
+    ) -> bool {
+        self.setting_engine
+            .candidates
+            .address_policy
+            .allows(addr, purpose)
+    }
+
     /// Reads a datagram on the transport `id`, which the caller has already chosen (a stream
     /// the engine knows the transport of, a relayed candidate's link).
     pub(crate) fn read_on_transport(&mut self, id: TransportId, msg: TaggedBytesMut) {
+        // Every datagram of the peer (direct, relayed by one of the engine's TURN allocations,
+        // or read on an ICE-TCP connection) comes through here: one from a source the
+        // embedder's address policy refuses reaches neither the ICE agent nor DTLS nor the
+        // media (`SettingEngineBuilder::with_ice_address_policy`).
+        if !self.address_allowed(
+            msg.transport.peer_addr,
+            ::ice::AddressPurpose::InboundDatagramSource,
+        ) {
+            log::debug!(
+                "dropped a datagram from {}: the address policy refuses the source",
+                msg.transport.peer_addr
+            );
+            return;
+        }
         let msg = TaggedRTCMessageInternal {
             now: msg.now,
             transport: msg.transport,
