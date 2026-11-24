@@ -111,8 +111,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   median target under the cap without a pacer is 231 to 237 kbit/s (242 to 250), some
   10 kbit/s lower; the default chain after the outage still shows no usable frame to the end
   of the run (7.95 to 8.02 s against 7.76 to 7.79 s of the measured window: a known limit of
-  0.1.0). The tests' bounds are tightened to these figures (3.6 s and 55 retransmissions
-  without a pacer, 6.8 s and 72 with it).
+  0.1.0). The tests' bounds are the tripwires of this tree's perturbed ensemble
+  (`conf/capmatrix-2-rtx2r-guards`).
+  (`conf/rtx-2r2-smooth-limiter`) A retransmission larger than the bucket ever holds (over
+  1500 octets under a limit of 120 kbit/s) never left, and the deadline named an instant at
+  which it still did not fit: it now leaves when the bucket is full, the bucket owes the
+  rest and the next one waits that much longer
+  (`nack_repeat_repairs::a_retransmission_larger_than_the_bucket_leaves_when_the_bucket_is_full`).
+  **Known cost, measured:** in a chain without a pacer on a path whose queue holds a
+  second (1000 ms at 300 kbit/s), requests reach the sender at the bottleneck's own pace and
+  answering each at once is already smooth; the bucket lets one repair go per 80 ms where the
+  window let twelve go in 0.3 s, and the picture comes back later: longest freeze median
+  1.99 s, 90th percentile 2.28 s, most 2.91 s over 59 seeds, against 1.93 / 1.95 / 1.97 s
+  without the bucket (hosted runs 45493097024, 45493087484; the review's run 45477725919).
+  With a 100 ms or 300 ms queue the bucket is the better form (without a pacer, 100 ms
+  queue: 0.56 s against 1.00 s, oldest picture 2.6 s against 5.3 s).
 
 - **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
   (`conf/rtx-1r-duplicate-repairs`): a request for a packet whose retransmission per-packet
@@ -141,8 +154,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outage and an ICE restart (six seeds) the chain without a pacer is frozen 0.33 to 0.92 s
   from one second after the switch (0.70 to 0.99), the default chain still shows no usable
   frame to the end of the run (a known limit of 0.1.0). The tests' bounds on the picture's
-  age and the retransmissions are tightened to these figures (3.6 s and 74 without a pacer,
-  8.2 s and 92 with it). Not offered: libwebrtc's
+  age and the retransmissions on this branch are the tripwires of the perturbed ensemble
+  (`conf/capmatrix-1-perturbed-ensemble`, measured on the tree before this change; this
+  change sits well inside them). Not offered: libwebrtc's
   form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
   (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
   every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
@@ -151,6 +165,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for first). This narrows two known limits of 0.1.0 (the 1.4 Mbit/s cliff's cause (2),
   and the picture's age after a sudden drop with the pacer). Tests:
   `rtci-interceptor/tests/nack_repeat_repairs.rs`.
+  **What is remembered of a repair is one packet's and ends by the clock**
+  (`conf/rtx-1r2-duplicate-repairs`, after an independent review proved two defects in the
+  first form, hosted run 45477234586: a "received" memory pruned only when another report
+  came, so a request could be declined for ever and the packet that reused a 16-bit sequence
+  number a cycle later was never retransmitted; and a transport-wide number kept for a
+  retransmission by count only, so feedback on the packet that had the number a cycle later
+  was taken for the old retransmission arriving). The responder keeps one record per packet
+  for its latest retransmission (waiting in the pacer, left with no report yet, report
+  overdue, reported received), named by the packet's place in the order the stream was
+  written, which no later packet has again; a waiting request is for its packet too. Every
+  state ends by the engine's clock at the request, write, notice or timeout at hand, whether
+  or not another report or pacer notice ever comes: in the pacer 4 s, the wait for a report
+  two round trips and 100 ms, a late report 4 s (`RETRANSMISSION_REPORT_HORIZON`), reported
+  received 4 s (`DELIVERED_MEMORY`). A report counts once, for a retransmission of the packet
+  held now: a report repeated (RFC 8888 reports a span of packets every time) does not extend
+  the memory, one on nothing remembered begins none, the loss of an earlier copy does not end
+  the wait for a later one. So a receiver whose feedback reports repairs it did not get stops
+  the repairs of its own packet for 4 s per retransmission and no longer, and what is
+  remembered is at most one record per place of the send buffer. The TWCC sender's number
+  is a retransmission's until it is handed out again, until the numbering is half a cycle
+  past it, and for 4 s. `RetransmissionsReported` names each retransmission with the instant
+  it was made (`ReportedRetransmission`, new). Tests (the reviewer's three among them):
+  sequence numbers and transport-wide numbers coming round at 100 000 packets a second,
+  feedback and pacer notices that never come, a receiver that reports every repair received,
+  feedback naming every number, requests and lost reports without end against the rate
+  limit, and the sizes of what is remembered (`nack_repeat_repairs.rs`,
+  `nack::responder::tests`, `twcc::sender::tests`); each rule has a mutation a test catches.
 - **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
   section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
   the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
