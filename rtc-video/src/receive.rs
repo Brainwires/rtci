@@ -564,3 +564,135 @@ fn combine(mut frames: Vec<EncodedFrame>) -> EncodedFrame {
     first.frame.end_of_picture = true;
     first
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::vp8_packet;
+
+    const FRAME: Duration = Duration::from_millis(33);
+
+    /// One-packet VP8 frames: frame `n` at `t0 + n * 33 ms`, sequence number `n`.
+    fn frame(t0: Instant, n: u16, key: bool) -> VideoPacket {
+        vp8_packet(
+            t0 + FRAME * u32::from(n),
+            n,
+            u32::from(n) * 3000,
+            true,
+            !key,
+            true,
+            n,
+        )
+    }
+
+    fn drain(p: &mut ReceivePipeline, now: Instant) -> (usize, Vec<KeyFrameReason>) {
+        p.handle_timeout(now);
+        let mut released = 0;
+        while let Some(r) = p.poll_frame(now) {
+            released += 1;
+            p.on_decoded(
+                now,
+                r.token,
+                DecodeOutcome::Decoded {
+                    width: 320,
+                    height: 240,
+                    qp: None,
+                    decode_time: Duration::from_millis(1),
+                    request_key_frame: false,
+                },
+            );
+        }
+        let mut reasons = Vec::new();
+        while let Some(r) = p.poll_key_frame_request() {
+            reasons.push(r);
+        }
+        (released, reasons)
+    }
+
+    #[test]
+    fn a_lost_first_key_frame_is_asked_for_at_the_first_delta_frame_and_at_most_every_200_ms() {
+        let t0 = Instant::now();
+        let mut p = ReceivePipeline::new(Codec::Vp8, t0, ReceiveConfig::default());
+        let mut requests = Vec::new();
+        // Frame 0 (the key frame) is lost; delta frames follow for a second.
+        for n in 1..31u16 {
+            let now = t0 + FRAME * u32::from(n);
+            p.insert_packet(frame(t0, n, false));
+            for ms in 0..33 {
+                let t = now + Duration::from_millis(ms);
+                let (released, reasons) = drain(&mut p, t);
+                assert_eq!(released, 0, "nothing decodable without a key frame");
+                requests.extend(reasons.into_iter().map(|r| (t, r)));
+            }
+        }
+        assert_eq!(requests[0], (t0 + FRAME, KeyFrameReason::FirstFrameNotKey));
+        for w in requests.windows(2) {
+            assert!(
+                w[1].0 - w[0].0 >= Duration::from_millis(200),
+                "{requests:?}"
+            );
+        }
+        assert!(requests.len() >= 3, "{requests:?}");
+        // The key frame arrives: it and the frames after it decode.
+        p.insert_packet(frame(t0, 31, true));
+        p.insert_packet(frame(t0, 32, false));
+        let (released, _) = drain(&mut p, t0 + FRAME * 40);
+        assert!(released >= 1);
+        assert!(!p.keyframe_required());
+    }
+
+    #[test]
+    fn frames_stuck_behind_an_unrepaired_gap_ask_for_a_key_frame_after_the_repair_window() {
+        let t0 = Instant::now();
+        let mut p = ReceivePipeline::new(Codec::Vp8, t0, ReceiveConfig::default());
+        p.set_rtt(Duration::from_millis(100));
+        let window = p.repair_window().unwrap();
+        assert_eq!(
+            window,
+            Duration::from_millis(1000).max(Duration::from_millis(500))
+        );
+        p.insert_packet(frame(t0, 0, true));
+        drain(&mut p, t0 + Duration::from_millis(100));
+        // Frame 1 never arrives; 2.. keep coming.
+        let mut first_request = None;
+        for n in 2..90u16 {
+            p.insert_packet(frame(t0, n, false));
+            for ms in 0..33 {
+                let t = t0 + FRAME * u32::from(n) + Duration::from_millis(ms);
+                let (released, reasons) = drain(&mut p, t);
+                assert_eq!(released, 0);
+                if first_request.is_none() && reasons.contains(&KeyFrameReason::RepairWindow) {
+                    first_request = Some(t);
+                }
+            }
+        }
+        let at = first_request.expect("a key frame asked for");
+        // The wait starts at the last release (about 100 ms in).
+        let waited = at - (t0 + Duration::from_millis(100));
+        assert!(
+            waited >= window && waited < window + Duration::from_millis(50),
+            "{waited:?}"
+        );
+    }
+
+    #[test]
+    fn libwebrtc_behaviour_waits_for_the_decode_timeout_instead() {
+        let t0 = Instant::now();
+        let mut p = ReceivePipeline::new(Codec::Vp8, t0, ReceiveConfig::chrome());
+        assert_eq!(p.repair_window(), None);
+        p.insert_packet(frame(t0, 0, true));
+        drain(&mut p, t0 + Duration::from_millis(100));
+        let mut first = None;
+        for n in 2..150u16 {
+            p.insert_packet(frame(t0, n, false));
+            let t = t0 + FRAME * u32::from(n);
+            let (_, reasons) = drain(&mut p, t);
+            if first.is_none() && !reasons.is_empty() {
+                first = Some((t, reasons[0]));
+            }
+        }
+        let (t, reason) = first.expect("the decode timeout asks");
+        assert_eq!(reason, KeyFrameReason::Timeout);
+        assert!(t - (t0 + Duration::from_millis(100)) >= Duration::from_secs(3));
+    }
+}

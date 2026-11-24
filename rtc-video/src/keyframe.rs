@@ -199,7 +199,11 @@ impl KeyFramePolicy {
             return;
         }
         self.waiting_since = now;
-        if self.active(now) && !self.receiving_keyframe(now) {
+        // At most one request per key-frame wait, whatever asked last.
+        let due = self
+            .last_request
+            .is_none_or(|t| now >= t + self.wait_for_key_frame);
+        if due && self.active(now) && !self.receiving_keyframe(now) {
             self.request(now, KeyFrameReason::Timeout);
         }
     }

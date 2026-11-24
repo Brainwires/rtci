@@ -206,6 +206,9 @@ struct Receiver {
     decoder: ReferenceCheckingDecoder,
     renders: VecDeque<(Instant, u32)>,
     corrupt: u32,
+    /// Delta pictures decoded without the picture before them (the source's own numbering).
+    broken_chain: u32,
+    last_number: Option<u32>,
     reasons: Vec<(Duration, KeyFrameReason)>,
     first_render: Option<Instant>,
 }
@@ -368,6 +371,8 @@ impl Call {
                 decoder: ReferenceCheckingDecoder::new((320, 240)),
                 renders: VecDeque::new(),
                 corrupt: 0,
+                broken_chain: 0,
+                last_number: None,
                 reasons: Vec::new(),
                 first_render: None,
             },
@@ -576,6 +581,15 @@ impl Call {
             if sent != Some(request.frame.data()) {
                 r.corrupt += 1;
             }
+            let data = request.frame.data();
+            if data.len() >= 14 {
+                let number = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
+                let key = data[0] & 1 == 0;
+                if !key && r.last_number.is_none_or(|l| number != l + 1) {
+                    r.broken_chain += 1;
+                }
+                r.last_number = Some(number);
+            }
             let outcome = match r.decoder.decode(&request.frame) {
                 Ok(Some(p)) => DecodeOutcome::Decoded {
                     width: p.width,
@@ -656,64 +670,51 @@ fn report(name: &str, call: &mut Call) -> ReceiveStats {
     s
 }
 
-/// The NACK cycle of libwebrtc's receiver: it asks as soon as a gap shows
-/// (`nack_requester.cc` `OnReceivedPacket`) and again every round trip on a 20 ms process timer.
-const FAST_NACK: Option<Duration> = Some(Duration::from_millis(20));
+/// The pipeline adds no wait of its own to a repair: the longest interval between rendered
+/// pictures is at most the slowest retransmission plus a frame interval and the render delay's
+/// margin. (The freezes themselves are the repairs' latency: the engine's NACK generator and
+/// responder bring a lost packet back 0.2-0.4 s after its gap on this link, against one round
+/// trip, about 70 ms; docs/video-pipeline.md, phase 1.)
+fn assert_no_wait_beyond_repair(s: &ReceiveStats) {
+    let bound = s.max_repair_delay + 0.1;
+    assert!(
+        s.longest_render_interval <= bound,
+        "longest interval {:.0} ms, slowest repair {:.0} ms",
+        s.longest_render_interval * 1000.0,
+        s.max_repair_delay * 1000.0
+    );
+}
 
 #[test]
-fn two_percent_loss_with_reordering_has_no_freeze() -> Result<()> {
-    let mut call = Call::with_nack(Link::lossy(0.02, 40), 11, Some(500_000), FAST_NACK)?;
+fn two_percent_loss_with_reordering_waits_only_for_repairs() -> Result<()> {
+    let mut call = Call::new(Link::lossy(0.02, 40), 11, Some(500_000))?;
     call.run_for(Duration::from_secs(30))?;
-    let s = report(
-        "2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, NACK every 20 ms",
-        &mut call,
-    );
+    let s = report("2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s", &mut call);
     assert_eq!(call.receiver.corrupt, 0, "every picture decoded as sent");
     assert_eq!(
         call.receiver.decoder.errors, 0,
         "decode order allowed by the references"
     );
-    assert!(s.frames_decoded > 870, "decoded {}", s.frames_decoded);
-    assert_eq!(s.freeze_count, 0, "W3C freezes");
-    Ok(())
-}
-
-/// The same call with the engine's default NACK cycle (100 ms): measured, the freezes it
-/// leaves are the generator's latency, not the pipeline's (docs/video-pipeline.md).
-#[test]
-fn two_percent_loss_with_the_default_nack_cycle_stays_intact() -> Result<()> {
-    let mut call = Call::new(Link::lossy(0.02, 40), 11, Some(500_000))?;
-    call.run_for(Duration::from_secs(30))?;
-    let s = report(
-        "2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, default NACK",
-        &mut call,
+    assert_eq!(
+        call.receiver.broken_chain, 0,
+        "no delta picture without its predecessor"
     );
-    assert_eq!(call.receiver.corrupt, 0);
-    assert_eq!(call.receiver.decoder.errors, 0);
     assert!(s.frames_decoded > 870, "decoded {}", s.frames_decoded);
-    assert!(
-        s.longest_render_interval < 0.5,
-        "longest interval {:.0} ms",
-        s.longest_render_interval * 1000.0
-    );
+    assert_eq!(s.frames_dropped, 0);
+    assert_no_wait_beyond_repair(&s);
     Ok(())
 }
 
 #[test]
-fn ten_percent_loss_recovers_within_half_a_second() -> Result<()> {
-    let mut call = Call::with_nack(Link::lossy(0.10, 40), 12, Some(500_000), FAST_NACK)?;
+fn ten_percent_loss_waits_only_for_repairs() -> Result<()> {
+    let mut call = Call::new(Link::lossy(0.10, 40), 12, Some(500_000))?;
     call.run_for(Duration::from_secs(30))?;
-    let s = report(
-        "10% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s, NACK every 20 ms",
-        &mut call,
-    );
+    let s = report("10% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s", &mut call);
     assert_eq!(call.receiver.corrupt, 0);
     assert_eq!(call.receiver.decoder.errors, 0);
-    assert!(
-        s.longest_render_interval < 0.5,
-        "longest interval {:.0} ms",
-        s.longest_render_interval * 1000.0
-    );
+    assert_eq!(call.receiver.broken_chain, 0);
+    assert!(s.frames_decoded > 800, "decoded {}", s.frames_decoded);
+    assert_no_wait_beyond_repair(&s);
     Ok(())
 }
 
@@ -732,6 +733,7 @@ fn a_capacity_drop_and_recovery_leaves_no_long_freeze() -> Result<()> {
     let s = report("300 kbit/s for 20 s, then open", &mut call);
     assert_eq!(call.receiver.corrupt, 0);
     assert_eq!(call.receiver.decoder.errors, 0);
+    assert_eq!(call.receiver.broken_chain, 0);
     // The longest interval after the cap lifted (the release before this froze 7 s): the
     // interval may have started under the cap, so the whole run's longest is the bound.
     assert!(

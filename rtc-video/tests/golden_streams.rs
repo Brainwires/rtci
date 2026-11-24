@@ -140,6 +140,9 @@ struct Outcome {
     decoder_errors: u64,
     key_frame_requests: u32,
     lost_for_good: usize,
+    freezes: u32,
+    longest_ms: f64,
+    broken_chain: usize,
 }
 
 fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: Network) -> Outcome {
@@ -150,10 +153,12 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
     let mut seq: u16 = 65_000;
     let mut lost_for_good = 0;
     let mut sent: HashMap<u32, Bytes> = HashMap::new();
+    let mut index_of: HashMap<u32, usize> = HashMap::new();
     for (i, frame) in frames.iter().enumerate() {
         let send = t0 + interval * i as u32;
         let ts = (i as u32).wrapping_mul(3003).wrapping_add(0xffff_0000);
         sent.insert(ts, frame.clone());
+        index_of.insert(ts, i);
         let payloads = payloader.payload(1200, frame).expect("payloads");
         let n = payloads.len();
         for (k, payload) in payloads.into_iter().enumerate() {
@@ -201,9 +206,13 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
         decoder_errors: 0,
         key_frame_requests: 0,
         lost_for_good,
+        freezes: 0,
+        longest_ms: 0.0,
+        broken_chain: 0,
     };
     let end = t0 + interval * frames.len() as u32 + Duration::from_secs(3);
     let mut next = 0;
+    let mut last_released: Option<usize> = None;
     let mut now = t0;
     while now < end {
         while next < arrivals.len() && arrivals[next].0 <= now {
@@ -216,7 +225,15 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
         }
         while let Some(request) = pipeline.poll_frame(now) {
             out.released += 1;
-            let expected = &sent[&request.frame.frame.rtp_timestamp];
+            let ts = request.frame.frame.rtp_timestamp;
+            // The fixtures are I-P-P-...: a delta picture needs the picture before it, which
+            // the stream itself says, whatever the pipeline's reference finder concluded.
+            let index = index_of[&ts];
+            if !request.frame.is_keyframe() && last_released != Some(index.wrapping_sub(1)) {
+                out.broken_chain += 1;
+            }
+            last_released = Some(index);
+            let expected = &sent[&ts];
             let same = match codec {
                 Codec::H264 | Codec::H265 => nal_units(expected) == nal_units(request.frame.data()),
                 _ => expected == request.frame.data(),
@@ -244,6 +261,8 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
     }
     out.decoder_errors = decoder.errors;
     let s = pipeline.stats(now);
+    out.freezes = s.freeze_count;
+    out.longest_ms = s.longest_render_interval * 1000.0;
     println!(
         "MEASURE {codec:?} loss {:.0}%: frames {} released {} decoded {} mismatched {} errors {} \
          lost for good {} key frame requests {} dropped {} freezes {} longest {:.0} ms",
@@ -288,14 +307,27 @@ fn check(codec: Codec, frames: &[Bytes], payloader: impl Fn() -> Box<dyn Payload
         frames.len(),
         "every frame released on a clean link"
     );
-    assert_eq!((clean.mismatched, clean.decoder_errors), (0, 0));
+    assert_eq!(
+        (clean.mismatched, clean.decoder_errors, clean.broken_chain),
+        (0, 0, 0)
+    );
     let o = run(codec, frames, payloader(), lossy(2));
     assert_eq!(o.mismatched, 0, "every released picture is what was sent");
+    assert_eq!(
+        o.broken_chain, 0,
+        "no delta picture before the one it predicts from"
+    );
     assert_eq!(
         o.decoder_errors, 0,
         "released in an order its references allow"
     );
     assert_eq!(o.lost_for_good, 0, "the seed loses nothing for good");
+    // Repairs a round trip after each loss (60 ms) and 0..40 ms of jitter: no W3C freeze.
+    assert_eq!(
+        o.freezes, 0,
+        "freezes (longest interval {:.0} ms)",
+        o.longest_ms
+    );
     assert!(
         o.decoded * 100 >= frames.len() * 99,
         "decoded {} of {}",
