@@ -264,6 +264,16 @@ impl PacerBuilder {
 /// `tests/capacity_cap_video_rtc2rtc.rs`). The queue time bound and the discard below are for
 /// media written into a pause: a source that does not follow it.
 ///
+/// **Known limit.** After a sudden drop the picture a receiver shows can be seconds old while
+/// those retransmissions leave: in that test (2.5 Mbit/s into a path that drops to
+/// 300 kbit/s) the receiver never went 2 s without a usable frame (1.38 to 1.90 s), but the
+/// oldest picture it showed was 5.95 to 8.56 s old, against 2.26 to 3.21 s in a chain without
+/// a pacer. About a hundred full-sized packets the path dropped are repaired inside an
+/// estimate of 100 to 250 kbit/s of which the audio takes 76, some 17 packets a second, under
+/// every retransmission rule. Not repairing video that old (dropping the backlog and asking
+/// for a key frame) is planned; it needs a receiver that gives up a gap in time
+/// (`rtc-media`'s `SampleBuilder::with_max_gap_wait`).
+///
 /// **A target of zero means: produce nothing until the next target.** An encoder skips (does
 /// not encode) the frames captured meanwhile; it does not need a key frame to resume, because
 /// nothing it encoded was lost: the next frame it encodes refers to the last one it sent, which

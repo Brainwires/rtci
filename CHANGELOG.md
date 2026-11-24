@@ -640,6 +640,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
 
+### Known limits
+
+- **interceptors (pacer), a sudden drop of the path's capacity**: with the default
+  interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
+  after a sudden drop, though it never stops for more than 2 s. Measured in
+  `tests/capacity_cap_video_rtc2rtc.rs` (a call at 2.5 Mbit/s whose path drops to 300 kbit/s;
+  six seeds on three wall clocks): longest time without a usable frame 1.38 to 1.90 s, oldest
+  picture shown 5.95 to 8.56 s (without a pacer: 0.83 to 1.24 s and 2.26 to 3.21 s). Cause:
+  the path drops about a hundred full-sized packets before the estimate has followed it; they
+  are retransmitted inside the estimate (100 to 250 kbit/s, of which the audio takes 76), about
+  17 packets a second, ahead of the media the paused source left in the pacer, and a receiver
+  that plays in order shows each repaired frame as it completes. It is the same under every
+  retransmission rule: the pacer holds repairs to the estimate, where a chain without one
+  lets them leave in a burst while the estimate is still falling. Planned after this
+  release: when a stream's repair backlog cannot leave within about 2 s at the target, the
+  sender drops it and asks the application for a key frame; a receiver must then skip the
+  gap in time (`SampleBuilder::with_max_gap_wait`), because one that waits by packet count
+  freezes for its whole packet window on a gap that is never filled.
+
 ### Behaviour changes
 
 - **congestion control, peer connection**: a new selected candidate pair is a new path for the
