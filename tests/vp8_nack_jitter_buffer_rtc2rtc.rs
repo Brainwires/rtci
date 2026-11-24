@@ -440,8 +440,9 @@ impl Run {
     }
 
     /// For each loss the receiver could detect: milliseconds from when it could see the gap
-    /// (the first packet after it read) to its first transport-layer feedback (RTCP payload
-    /// type 205) sent at or after that, and to the first retransmission that arrived.
+    /// (the first packet after it read) to the first transport-layer feedback packet (RTCP
+    /// payload type 205: a NACK, or transport-wide feedback, which the wire does not tell
+    /// apart) sent at or after that, and to the first retransmission that arrived.
     fn repair_latency(&self) -> (Vec<f64>, Vec<f64>) {
         let (mut first_feedback, mut repaired) = (vec![], vec![]);
         for seq in self.lost() {
@@ -859,14 +860,15 @@ fn vp8_seeds() -> Result<()> {
                 "-".to_owned()
             } else {
                 format!(
-                    "{:.0}/{:.0}",
+                    "{:.0}/{:.0}/{}",
                     v.iter().sum::<f64>() / v.len() as f64,
-                    v.iter().copied().fold(0.0, f64::max)
+                    v.iter().copied().fold(0.0, f64::max),
+                    v.len()
                 )
             }
         };
         println!(
-            "VP8 {} | ms from the gap seen (mean/max): first NACK {}, repaired {}{}{}",
+            "VP8 {} | ms from the gap seen (mean/max/n): first RTPFB (NACK or transport-wide feedback) {}, repaired {}{}{}",
             summary(seed, &r),
             stat(&feedback),
             stat(&repaired),
