@@ -166,12 +166,6 @@ impl RTCPeerConnection {
         connection_id: ConnectionId,
         attempt: bool,
     ) {
-        // A peer the embedder's address policy refuses gets no data connection: its
-        // connection to the relayed address is never bound (RFC 6062 section 4.4).
-        if attempt && !self.address_allowed(peer, ice::AddressPurpose::InboundDatagramSource) {
-            debug!("TURN TCP connection from {peer}: the address policy refuses it, not bound");
-            return;
-        }
         let link = &self.streams.turn.links[index];
         let Some(server) = link.server else {
             return;
@@ -413,10 +407,6 @@ impl RTCPeerConnection {
                 .filter_map(|l| l.strip_prefix("a=candidate:"))
                 .filter_map(|v| ice::candidate::unmarshal_candidate(v).ok())
                 .filter(|c| c.network_type().is_tcp())
-                .filter(|c| {
-                    c.address().parse::<IpAddr>().is_ok()
-                        && self.address_allowed(c.addr(), ice::AddressPurpose::RemoteCandidate)
-                })
                 .filter_map(|c| c.address().parse::<IpAddr>().ok())
                 .collect();
             let ips: Vec<IpAddr> = self
@@ -466,9 +456,6 @@ impl RTCPeerConnection {
         let Ok(ip) = c.address().parse::<IpAddr>() else {
             return;
         };
-        if !self.address_allowed(c.addr(), ice::AddressPurpose::RemoteCandidate) {
-            return;
-        }
         let on = self.pipeline_context.transports.active_id();
         if !self.streams.turn.remote_tcp_ips.contains(&(on, ip)) {
             self.streams.turn.remote_tcp_ips.push((on, ip));

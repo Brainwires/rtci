@@ -822,18 +822,6 @@ governed_behaviours! {
         apply_media: |m: &mut MediaEngine, v| m.set_vp9_receiver_limits(v),
         read: |m: &MediaEngine| m.vp9_receiver_limits,
     },
-    {
-        id: "vp8.ignore-partitions",
-        setting: "MediaEngine::set_vp8_ignore_partitions",
-        clause: "RFC 7741 3, 4.4",
-        rfc: false => "false",
-        chrome: true => "true",
-        strict_rfc: false => "false",
-        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtp_format_vp8.cc @ a222406d: RtpPacketizerVp8 splits the whole frame with SplitAboutEqually(payload.size(), limits) (partition boundaries are not looked at), BuildHeader sets kSBit \"as first packet in the frame\" and NextPacket clears it after the first packet (\"Clear 'Start of partition' bit\"); PartitionID is never written (0). The engine cuts at MTU boundaries rather than in equal parts",
-        evidence: Source,
-        apply_media: |m: &mut MediaEngine, v| m.set_vp8_ignore_partitions(v),
-        read: |m: &MediaEngine| m.vp8_ignore_partitions,
-    },
     // ---- interceptors ----
     {
         id: "rtcp.t-rr-interval",
@@ -1216,6 +1204,16 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "off: the draft form already (draft-ietf-mmusic-mdns-ice-candidates 3.1.1: a host candidate whose name cannot be registered still goes out under a .local name, unpublished). On (no host candidate at all) departs from that SHOULD and is an embedder's choice in every profile; only with QueryAndGather, which no profile turns on",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_expose_known_public_addresses",
+        class: NotGovernedClass::Same,
+        note: "off: every host address hidden in QueryAndGather, the draft's form without its MAY (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.2: an address a STUN answer shows public \"MAY\" go unwrapped in later gatherings). On is an embedder's choice in every profile; only with QueryAndGather, which no profile turns on. Chrome writes host addresses for a page with media permission, a browser consent policy, not this rule: the Chrome profile does not follow it",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses",
+        class: NotGovernedClass::Same,
+        note: "off: RFC 4941 temporary IPv6 addresses hidden like any other in QueryAndGather (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.3: they \"MAY\" go unconcealed). On is an embedder's choice in every profile, acting only on addresses the application marks temporary; only with QueryAndGather, which no profile turns on. Chrome's own exposure is a browser consent policy: the Chrome profile does not follow it",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_sdp_media_level_fingerprints",
         class: NotGovernedClass::Same,
         note: "media level, as Chromium writes them (fixtures)",
@@ -1430,11 +1428,6 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_remote_address_filter",
         class: NotGovernedClass::Input,
         note: "the host's network policy",
-    },
-    NotGoverned {
-        setting: "SettingEngineBuilder::with_ice_address_policy",
-        class: NotGovernedClass::Input,
-        note: "the embedder's network policy, both directions",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_replay_protection_window",

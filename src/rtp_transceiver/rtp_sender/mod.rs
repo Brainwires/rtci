@@ -352,25 +352,6 @@ impl RTCRtpSender<'_> {
         internal::RTCRtpSenderInternal::get_capabilities(kind, &self.peer_connection.media_engine)
     }
 
-    /// An RTP payloader for `codec` (one of this sender's negotiated codecs) built with the
-    /// connection's packetization settings ([`MediaEngine::payloader`]): under the `Chrome`
-    /// behaviour profile a VP8 frame is cut without regard to its partitions, as libwebrtc
-    /// does; by default each partition starts a packet (RFC 7741 section 3).
-    /// [`RTCRtpCodec::payloader`] alone always gives the default form.
-    ///
-    /// [`MediaEngine::payloader`]: crate::peer_connection::configuration::media_engine::MediaEngine::payloader
-    /// [`RTCRtpCodec::payloader`]: crate::rtp_transceiver::rtp_sender::RTCRtpCodec::payloader
-    ///
-    /// # Errors
-    ///
-    /// `Error::ErrNoPayloaderForCodec` for a codec without a payloader.
-    pub fn payloader(
-        &self,
-        codec: &crate::rtp_transceiver::rtp_sender::RTCRtpCodec,
-    ) -> Result<Box<dyn rtp::packetizer::Payloader>> {
-        self.peer_connection.media_engine.payloader(codec)
-    }
-
     /// Updates the RTP send parameters for this sender.
     ///
     /// `parameters` is what [`get_parameters`](Self::get_parameters) last returned, with the

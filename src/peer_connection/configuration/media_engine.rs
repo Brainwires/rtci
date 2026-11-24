@@ -554,8 +554,6 @@ pub struct MediaEngine {
     pub(crate) flexfec_with_retransmission: bool,
     /// See [`MediaEngine::set_vp9_receiver_limits`].
     pub(crate) vp9_receiver_limits: bool,
-    /// See [`MediaEngine::set_vp8_ignore_partitions`].
-    pub(crate) vp8_ignore_partitions: bool,
 
     /// The RTCP CNAME of the connection this media engine belongs to (RFC 7022), set when the
     /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
@@ -609,7 +607,6 @@ impl MediaEngine {
             negotiated_header_extensions: Default::default(),
             flexfec_with_retransmission: Default::default(),
             vp9_receiver_limits: Default::default(),
-            vp8_ignore_partitions: Default::default(),
             rtcp_cname: Default::default(),
             audio_packet_time: Default::default(),
             offered_header_extensions: Default::default(),
@@ -1347,7 +1344,6 @@ impl MediaEngine {
             header_extensions: self.header_extensions.clone(),
             flexfec_with_retransmission: self.flexfec_with_retransmission,
             vp9_receiver_limits: self.vp9_receiver_limits,
-            vp8_ignore_partitions: self.vp8_ignore_partitions,
             ..Default::default()
         }
     }
@@ -1368,36 +1364,6 @@ impl MediaEngine {
     /// treatment.
     pub fn set_flexfec_with_retransmission(&mut self, allowed: bool) {
         self.flexfec_with_retransmission = allowed;
-    }
-
-    /// Whether the VP8 payloaders this media engine builds ([`Self::payloader`],
-    /// [`RTCRtpSender::payloader`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::payloader))
-    /// cut each frame at MTU boundaries without regard to its partitions
-    /// ([`Vp8Payloader::ignore_partitions`](rtp::codec::vp8::Vp8Payloader::ignore_partitions)).
-    /// `false` by default.
-    ///
-    /// RFC 7741 section 3: "it is RECOMMENDED that the packetizer start each partition in a
-    /// new packet"; with `false` each partition starts a packet of its own, labelled with its
-    /// `PID` and `S` (section 4.4 allows either). libwebrtc's packetizer ignores partitions
-    /// (`S` on the frame's first packet only, `PID` 0): the `Chrome` profile's value is `true`.
-    pub fn set_vp8_ignore_partitions(&mut self, ignore: bool) {
-        self.vp8_ignore_partitions = ignore;
-    }
-
-    /// An RTP payloader for `codec` ([`RTCRtpCodec::payloader`]) with this media engine's
-    /// packetization settings: the VP8 one follows [`Self::set_vp8_ignore_partitions`].
-    ///
-    /// # Errors
-    ///
-    /// As [`RTCRtpCodec::payloader`].
-    pub fn payloader(&self, codec: &RTCRtpCodec) -> Result<Box<dyn rtp::packetizer::Payloader>> {
-        if codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP8) {
-            let mut vp8 = rtp::codec::vp8::Vp8Payloader::default();
-            vp8.enable_picture_id = true;
-            vp8.ignore_partitions = self.vp8_ignore_partitions;
-            return Ok(Box::new(vp8));
-        }
-        codec.payloader()
     }
 
     /// Whether the default VP9 formats state this endpoint's receiver limits,

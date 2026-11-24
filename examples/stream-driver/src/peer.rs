@@ -568,6 +568,26 @@ impl PeerDriver {
         self.pc.set_multicast_dns_publishing(publishing);
     }
 
+    /// With `QueryAndGather`, tells the connection which of the addresses it gathers on the
+    /// operating system flags as RFC 4941 temporary IPv6 addresses
+    /// (`RTCPeerConnection::set_temporary_ipv6_addresses`), so that
+    /// `with_multicast_dns_expose_temporary_ipv6_addresses` can leave those unwrapped
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3). Read from the interface list
+    /// at each gathering (`shared::ifaces::temporary_ipv6_addresses`: Linux, Android, macOS
+    /// and iOS report the flag; Windows and other systems mark nothing); where it cannot be
+    /// read, nothing is marked and every address stays hidden.
+    fn mark_temporary_addresses(&mut self) {
+        if self.pc.multicast_dns_mode() != MulticastDnsMode::QueryAndGather {
+            return;
+        }
+        let temporary: Vec<std::net::Ipv6Addr> = shared::ifaces::temporary_ipv6_addresses()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| self.config.addresses.contains(&IpAddr::V6(*t)))
+            .collect();
+        self.pc.set_temporary_ipv6_addresses(temporary);
+    }
+
     fn on_event(&mut self, event: &RTCPeerConnectionEvent) -> Result<()> {
         match event {
             RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => {
@@ -609,6 +629,7 @@ impl PeerDriver {
         };
         let index = needed.sdp_mline_index;
         self.gathered.insert(needed.ice_transport);
+        self.mark_temporary_addresses();
         if !needed.reason.needs_new_addresses() {
             let on: Vec<SocketAddr> = self
                 .sockets
@@ -733,6 +754,7 @@ impl PeerDriver {
     /// host candidates, then the end of the generation.
     fn gather_section(&mut self, mid: &str, index: Option<u16>) -> Result<()> {
         self.prepare_mdns_publishing();
+        self.mark_temporary_addresses();
         for ip in self.config.addresses.clone() {
             let socket = match self.config.udp_port_range {
                 Some(range) => sockets::bind_runtime_udp_in_range(self.runtime.as_ref(), ip, range),
