@@ -1154,13 +1154,13 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
     let estimate_after = world.peers[0].estimate().unwrap_or(0);
     let caller = &world.peers[0];
     let pacer_dropped = caller.video_written.difference(&caller.video_left).count();
-    // Written from 1 s on and at least 1 s before the end (the last frames may still wait in
-    // a pacer when the run stops).
+    // Written from 1 s on and at least 2.5 s before the end (the last frames may still wait in
+    // a pacer, up to its 2 s bound, when the run stops).
     let pacer_dropped_late = caller
         .video_written_late
         .iter()
         .filter(|(seq, at)| {
-            **at + Duration::from_secs(1) <= end && !caller.video_left.contains(seq)
+            **at + Duration::from_millis(2_500) <= end && !caller.video_left.contains(seq)
         })
         .count();
     if std::env::var("RTC_CAP_TRACE").is_ok() {

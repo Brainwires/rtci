@@ -799,15 +799,7 @@ impl NackResponderInterceptor {
             self.read_queue.push_back(TaggedPacket {
                 now,
                 transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
-                    Attribute::TargetBitrateChanged {
-                        bits_per_second: if self.paused {
-                            0.0
-                        } else {
-                            media_target(target_bps, reserve, self.minimum_bps.unwrap_or(0.0))
-                        },
-                    },
-                ),
+                message: self.target_carrier(target_bps, reserve),
             });
         }
         if self.at_floor() {
@@ -921,6 +913,25 @@ impl NackResponderInterceptor {
         if self.pending.len() != before {
             self.release_at = None;
         }
+    }
+
+    /// An empty RTCP carrier with the target for the original media: the controller's
+    /// `target_bps` less `reserve`, or zero while the pacer pauses the source, with the
+    /// controller's target riding along ([`PacerPause`](crate::PacerPause)) as the pacer hands
+    /// it.
+    fn target_carrier(&self, target_bps: f64, reserve: f64) -> AttributedPacket {
+        if self.paused {
+            return AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::TargetBitrateChanged {
+                    bits_per_second: 0.0,
+                })
+                .with(Attribute::Custom(std::sync::Arc::new(crate::PacerPause {
+                    target_bits_per_second: target_bps,
+                })));
+        }
+        AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
+            bits_per_second: media_target(target_bps, reserve, self.minimum_bps.unwrap_or(0.0)),
+        })
     }
 
     /// The pacer's report of retransmissions that left it or were dropped
@@ -1209,19 +1220,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             self.read_queue.push_back(TaggedPacket {
                 now,
                 transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
-                    Attribute::TargetBitrateChanged {
-                        bits_per_second: if self.paused {
-                            0.0
-                        } else {
-                            media_target(
-                                target_bps,
-                                self.announced_reserve,
-                                self.minimum_bps.unwrap_or(0.0),
-                            )
-                        },
-                    },
-                ),
+                message: self.target_carrier(target_bps, self.announced_reserve),
             });
         }
         self.announce_reserve(now, !carries_target);

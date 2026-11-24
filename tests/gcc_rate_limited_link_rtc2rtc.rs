@@ -335,11 +335,13 @@ fn targets(seed: u64) -> Result<Vec<f64>> {
             )?;
         world.pump()?;
         if n % 250 == 249 {
+            // GCC's target is the pair's `availableOutgoingBitrate`; the stream's
+            // `targetBitrate` is the encoder's, zero while the pacer pauses a source above it.
             let report = world.pcs[0].get_stats(now, StatsSelector::None);
             let target = report
-                .outbound_rtp_streams()
-                .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == SSRC)
-                .and_then(|o| o.target_bitrate)
+                .candidate_pairs()
+                .find(|pair| pair.nominated)
+                .and_then(|pair| pair.available_outgoing_bitrate)
                 .unwrap_or(0.0);
             samples.push(target);
         }

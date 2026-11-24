@@ -1476,6 +1476,13 @@ impl RTCStatsAccumulator {
         // webrtc-stats: `availableOutgoingBitrate` is what the congestion control estimates
         // for the outgoing streams on the pair: the transport's own estimate on its selected
         // pair, not another transport's.
+        self.on_outgoing_estimate(transport, bits_per_second);
+    }
+
+    /// The congestion controller's estimate for transport `transport`
+    /// (`availableOutgoingBitrate` of its selected pair). Set apart from the encoders' target
+    /// while the pacer pauses the source (`PacerPause`): the path's rate has not gone to zero.
+    pub(crate) fn on_outgoing_estimate(&mut self, transport: usize, bits_per_second: f64) {
         self.outgoing_estimates.insert(transport, bits_per_second);
         let pair_id = self
             .transport_mut(transport)

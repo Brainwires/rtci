@@ -691,12 +691,12 @@ fn gcc_follows_a_rate_limited_link() {
             }
             if last_sample.elapsed() >= Duration::from_secs(1) {
                 last_sample = Instant::now();
+                // GCC's target is the pair's `availableOutgoingBitrate`; the stream's
+                // `targetBitrate` is the encoder's, zero while the pacer pauses a source above
+                // it.
                 let report = p[0].pc.get_stats(Instant::now(), StatsSelector::None);
-                if let Some(o) = report
-                    .outbound_rtp_streams()
-                    .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
-                {
-                    samples.push(o.target_bitrate.unwrap_or(0.0));
+                if let Some(pair) = report.candidate_pairs().find(|pair| pair.nominated) {
+                    samples.push(pair.available_outgoing_bitrate.unwrap_or(0.0));
                 }
             }
         }

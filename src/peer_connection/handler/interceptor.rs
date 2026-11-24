@@ -2298,6 +2298,13 @@ impl<'a>
                                     on_transport,
                                 );
                             self.stats.on_target_bitrate(key, *bits_per_second, &shares);
+                            // Paused (a target of zero for the encoders): the path's estimate
+                            // rides along and stays `availableOutgoingBitrate`.
+                            if let Some(pause) = packet.message.custom::<interceptor::PacerPause>()
+                            {
+                                self.stats
+                                    .on_outgoing_estimate(key, pause.target_bits_per_second);
+                            }
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {
