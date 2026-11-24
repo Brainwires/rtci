@@ -233,9 +233,9 @@ mod tests {
         let reading = accumulator
             .accumulate(&report(at(60), 160, 1000))
             .expect("40 closed");
-        assert_eq!(
-            0.0, reading.delta_ms,
-            "40 ms apart sent, 40 ms apart arrived"
+        assert!(
+            reading.delta_ms.abs() < 1e-6,
+            "40 ms apart sent, 40 ms apart arrived: {reading:?}"
         );
         assert_eq!(
             1,
