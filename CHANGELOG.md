@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **RFC 8854 audit** (`docs/conformance/audit/rfc8854.md`): 23 rows (MUST 3 tested, 1 n/a;
+  SHOULD 6 tested, 6 partial, 2 missing, 3 n/a; MAY 1 tested, 1 missing), and a test that no
+  behaviour profile offers a FEC-only m= section (section 5.2).
 - **Browser cell: video RED + ULPFEC from the browser.** `examples/interop-peer` takes
   `?video_red_ulpfec=1` (`DefaultInterceptorOptions::video_red_ulpfec`) and reports the
   engine's FEC counts (`fec`); `scenarios.spec.mjs` has the browser send VP8 in RED with

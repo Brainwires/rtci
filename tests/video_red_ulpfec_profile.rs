@@ -100,3 +100,31 @@ fn the_chrome_profile_offers_red_with_its_rtx_and_ulpfec_and_runs_ulpfec_in_red(
         );
     }
 }
+
+/// RFC 8854 section 5.2: "Use of FEC-only "m=" lines, and grouping using the SDP group
+/// mechanism as described in [RFC5956], Section 4.1, is not currently defined for WebRTC, and
+/// SHOULD NOT be offered." No profile offers one unless the application asks
+/// (`RTCPeerConnection::add_fec_session`).
+#[test]
+fn no_profile_offers_a_fec_only_section() {
+    for profile in [
+        BehaviourProfile::Rfc,
+        BehaviourProfile::Chrome,
+        BehaviourProfile::StrictRfc,
+    ] {
+        let mut media_engine = MediaEngine::for_profile(profile);
+        media_engine.register_default_codecs().unwrap();
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine).unwrap();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build(Instant::now())
+            .unwrap();
+        pc.add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .unwrap();
+        let offer = pc.create_offer(None).unwrap().sdp;
+        assert_eq!(offer.matches("\r\nm=").count(), 1, "{profile}: {offer}");
+        assert!(!offer.contains("a=group:FEC"), "{profile}: {offer}");
+    }
+}
