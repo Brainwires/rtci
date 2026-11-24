@@ -650,6 +650,11 @@ impl CircuitBreakerInterceptor {
                 // Stopping a stream cancels its media timeout breaker (section 4.2).
                 flow.stalled_reports = 0;
                 log::warn!("RTP circuit breaker: SSRC {ssrc:#x} ceased transmission ({reason:?})");
+                crate::trace_peer(Some(ssrc));
+                crate::trace(
+                    now,
+                    format_args!("BREAKER ssrc nibble {} CEASED ({reason:?}) hold {hold:?}", ssrc & 0xf),
+                );
                 self.publish(ssrc);
             }
         }
@@ -862,6 +867,20 @@ impl CircuitBreakerInterceptor {
                 report.ssrc,
                 tcp_throughput(packet_size, tr, loss, config.full_tcp_equation),
             );
+            if loss > 0.0 {
+                crate::trace_peer(Some(report.ssrc));
+                crate::trace(
+                    now,
+                    format_args!(
+                        "breaker ssrc nibble {} CB_INTERVAL {interval} reports, loss {loss:.4} (average {average:.4}) over {window:?}, sending {:.0} bit/s, s {packet_size:.0} B, Tr {tr:?}, 10 x TCP {:.0} bit/s, Tdr {tdr:?} Tf {tf:?} state {:?} samples {:?}",
+                        report.ssrc & 0xf,
+                        sending_rate * 8.0,
+                        80.0 * tcp_throughput(packet_size, tr, loss, config.full_tcp_equation),
+                        flow.state,
+                        flow.losses.iter().map(|l| (l.duration.as_millis(), (l.fraction_lost * 100.0) as u32, l.packets_sent, l.net_lost, l.net_expected)).collect::<Vec<_>>(),
+                    ),
+                );
+            }
             if loss > 0.0
                 && sending_rate
                     > 10.0 * tcp_throughput(packet_size, tr, loss, config.full_tcp_equation)

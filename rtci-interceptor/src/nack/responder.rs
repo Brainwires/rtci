@@ -676,6 +676,7 @@ impl NackResponderInterceptor {
         if self.pacer_reports {
             self.in_pacer.insert((ssrc, seq), now);
         }
+        crate::trace(now, format_args!("nack retransmit seq {seq} size {size}"));
         stream.retransmit_budget -= 1;
         self.retransmissions_queued += 1;
 
@@ -1010,6 +1011,39 @@ impl NackResponderInterceptor {
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
+        if crate::trace_on(now) {
+            crate::trace_peer(Some(ssrc));
+            let mut all = seqs_to_retransmit.clone();
+            all.sort_unstable();
+            all.dedup();
+            let recent: Vec<u16> = all
+                .iter()
+                .copied()
+                .filter(|seq| stream.last_retransmit.get(seq).is_some_and(|at| now.saturating_duration_since(*at) < resend_interval))
+                .collect();
+            let in_pacer: Vec<u16> = all.iter().copied().filter(|seq| self.in_pacer.contains_key(&(ssrc, *seq))).collect();
+            let gone: Vec<u16> = all.iter().copied().filter(|seq| stream.send_buffer.get(*seq).is_none()).collect();
+            let waiting: Vec<u16> = all.iter().copied().filter(|seq| self.pending_asked.contains_key(&(ssrc, *seq))).collect();
+            crate::trace(
+                now,
+                format_args!(
+                    "nack asked {} {:?}..{:?} | sent within {resend_interval:?}: {} {:?} | in pacer: {} | not held: {} {:?} | already waiting: {} | pending {} budget {} queued {} target {:?}",
+                    all.len(),
+                    all.first(),
+                    all.last(),
+                    recent.len(),
+                    recent.iter().take(6).collect::<Vec<_>>(),
+                    in_pacer.len(),
+                    gone.len(),
+                    gone.iter().take(12).collect::<Vec<_>>(),
+                    waiting.len(),
+                    self.pending.len(),
+                    stream.retransmit_budget,
+                    self.retransmissions_queued,
+                    self.target_bps.map(|t| t as u64),
+                ),
+            );
+        }
 
         // A NACK may name the same packet in several pairs; resend each once.
         seqs_to_retransmit.sort_unstable();

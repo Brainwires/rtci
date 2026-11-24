@@ -1095,7 +1095,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             crate::trace(
                 now,
                 format_args!(
-                    "pacer status queue {} ({} rtx) {:.0} bits padding {} target {:.0} paused {} dropped {} discarded_frames {}",
+                    "pacer status queue {} ({} rtx) {:.0} bits padding {} target {:.0} paused {} dropped {} discarded_frames {} duplicate_rtx {} oldest rtx seq {:?}",
                     self.queue.len(),
                     self.queue.iter().filter(|p| p.message.has(&Attribute::Retransmission)).count(),
                     self.queued_bits,
@@ -1103,7 +1103,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                     self.target(),
                     self.paused,
                     self.dropped,
-                    self.discarded_frames
+                    self.discarded_frames,
+                    self.duplicate_retransmissions,
+                    self.queue.front().filter(|p| p.message.has(&Attribute::Retransmission)).and_then(|p| self.retransmission_key(p)).map(|k| k.1)
                 ),
             );
         }
