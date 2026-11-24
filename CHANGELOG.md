@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
+  candidate it is (RFC 6544 section 5.4): type preference 75 (section 4.2,
+  `candidate::UDP_TUNNELLED_TYPE_PREFERENCE`) instead of the TCP host preference 125, so it
+  comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
+  rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
