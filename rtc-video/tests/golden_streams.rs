@@ -17,6 +17,7 @@ use rtc::rtp::codec::vp9::Vp9Payloader;
 use rtc::rtp::packetizer::Payloader;
 use rtc_video::decoder::{ReferenceCheckingDecoder, VideoDecoder};
 use rtc_video::frame::VideoPacket;
+use rtc_video::picture::I420Buffer;
 use rtc_video::{Codec, DecodeOutcome, ReceiveConfig, ReceivePipeline};
 
 struct Rng(u64);
@@ -143,9 +144,31 @@ struct Outcome {
     freezes: u32,
     longest_ms: f64,
     broken_chain: usize,
+    /// Decoded pictures that differ from decoding the source stream directly, in order.
+    pictures_differ: usize,
 }
 
-fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: Network) -> Outcome {
+fn run(codec: Codec, frames: &[Bytes], payloader: Box<dyn Payloader>, net: Network) -> Outcome {
+    run_with(
+        codec,
+        frames,
+        payloader,
+        net,
+        &mut ReferenceCheckingDecoder::new((0, 0)),
+        None,
+    )
+}
+
+/// `reference`: the picture of each frame of the source decoded in order, when `decoder` is a
+/// real decoder; every picture it decodes from the pipeline's output must be that one.
+fn run_with(
+    codec: Codec,
+    frames: &[Bytes],
+    mut payloader: Box<dyn Payloader>,
+    net: Network,
+    decoder: &mut dyn VideoDecoder,
+    reference: Option<&[I420Buffer]>,
+) -> Outcome {
     let t0 = Instant::now();
     let mut rng = Rng(net.seed);
     let interval = Duration::from_micros(33_367);
@@ -198,7 +221,7 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
     arrivals.sort_by_key(|a| a.0);
     let mut pipeline = ReceivePipeline::new(codec, t0, ReceiveConfig::default());
     pipeline.set_rtt(net.rtt);
-    let mut decoder = ReferenceCheckingDecoder::new((0, 0));
+    let mut decoder_errors = 0;
     let mut out = Outcome {
         released: 0,
         decoded: 0,
@@ -209,6 +232,7 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
         freezes: 0,
         longest_ms: 0.0,
         broken_chain: 0,
+        pictures_differ: 0,
     };
     let end = t0 + interval * frames.len() as u32 + Duration::from_secs(3);
     let mut next = 0;
@@ -244,6 +268,14 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
             let outcome = match decoder.decode(&request.frame) {
                 Ok(_) => {
                     out.decoded += 1;
+                    if let Some(reference) = reference {
+                        let same = decoder
+                            .picture()
+                            .is_some_and(|p| p.to_buffer() == reference[index]);
+                        if !same {
+                            out.pictures_differ += 1;
+                        }
+                    }
                     DecodeOutcome::Decoded {
                         width: 176,
                         height: 144,
@@ -252,20 +284,24 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
                         request_key_frame: false,
                     }
                 }
-                Err(_) => DecodeOutcome::Failed,
+                Err(_) => {
+                    decoder_errors += 1;
+                    DecodeOutcome::Failed
+                }
             };
             pipeline.on_decoded(now, request.token, outcome);
             pipeline.on_rendered(request.render_time.unwrap_or(now).max(now));
         }
         now += Duration::from_millis(1);
     }
-    out.decoder_errors = decoder.errors;
+    out.decoder_errors = decoder_errors;
     let s = pipeline.stats(now);
     out.freezes = s.freeze_count;
     out.longest_ms = s.longest_render_interval * 1000.0;
     println!(
         "MEASURE {codec:?} loss {:.0}%: frames {} released {} decoded {} mismatched {} errors {} \
-         lost for good {} key frame requests {} dropped {} freezes {} longest {:.0} ms",
+         lost for good {} key frame requests {} dropped {} freezes {} longest {:.0} ms \
+         decoder {} pictures differing {}",
         net.loss * 100.0,
         frames.len(),
         out.released,
@@ -276,7 +312,9 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
         out.key_frame_requests,
         s.frames_dropped,
         s.freeze_count,
-        s.longest_render_interval * 1000.0
+        s.longest_render_interval * 1000.0,
+        decoder.implementation_name(),
+        out.pictures_differ,
     );
     out
 }
@@ -372,4 +410,53 @@ fn h265_annexb_survives_loss_and_reordering_intact() {
     let frames: Vec<Bytes> = units.iter().map(|u| annexb(u)).collect();
     assert!(frames.len() > 100, "{} access units", frames.len());
     check(Codec::H265, &frames, || Box::<HevcPayloader>::default());
+}
+
+/// The VP8 fixture through the lossy, reordering network into the real VP8 decoder (feature
+/// `vp8`): every picture the pipeline lets it decode is bit for bit the picture of that frame
+/// when the source file is decoded in order, and none fails.
+#[cfg(feature = "vp8")]
+#[test]
+fn vp8_ivf_through_loss_decodes_bit_exactly_with_the_vp8_decoder() {
+    use rtc_video::codec::vp8::Vp8Decoder;
+    let frames = ivf_frames(&test_data("output_vp8.ivf"));
+    let mut direct = Vp8Decoder::new();
+    let reference: Vec<I420Buffer> = frames
+        .iter()
+        .map(|f| {
+            direct.decode_bytes(f).expect("the fixture decodes");
+            direct.picture().expect("shown").to_buffer()
+        })
+        .collect();
+    let payloader = || {
+        let mut p = Vp8Payloader::default();
+        p.enable_picture_id = true;
+        Box::new(p) as Box<dyn Payloader>
+    };
+    for net in [
+        Network {
+            loss: 0.0,
+            jitter: Duration::ZERO,
+            ..lossy(1)
+        },
+        lossy(2),
+    ] {
+        let loss = net.loss;
+        let o = run_with(
+            Codec::Vp8,
+            &frames,
+            payloader(),
+            net,
+            &mut Vp8Decoder::new(),
+            Some(&reference),
+        );
+        assert_eq!(o.decoder_errors, 0, "loss {loss}: decode errors");
+        assert_eq!(o.pictures_differ, 0, "loss {loss}: pictures differ");
+        assert!(
+            o.decoded * 100 >= frames.len() * 99,
+            "loss {loss}: decoded {}",
+            o.decoded
+        );
+        assert_eq!(o.freezes, 0, "loss {loss}: freezes");
+    }
 }

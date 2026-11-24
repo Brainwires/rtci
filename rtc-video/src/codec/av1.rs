@@ -69,6 +69,9 @@ impl Av1Decoder {
         settings.n_threads = 1;
         settings.max_frame_delay = 1;
         settings.frame_size_limit = max_pixels;
+        // Output the highest spatial layer of the operating point only (dav1d's default is
+        // every layer): one picture per temporal unit, as a WebRTC receiver renders.
+        settings.all_layers = 0;
         let mut ctx: Option<Dav1dContext> = None;
         // SAFETY: `ctx` is valid to write to and `settings` to read from.
         let r = unsafe {
@@ -275,7 +278,8 @@ impl Av1Encoder {
         enc.low_latency = true;
         // Key frames on request only (PLI, FIR), as the VP8 encoder.
         enc.min_key_frame_interval = 0;
-        enc.max_key_frame_interval = u64::from(u32::MAX);
+        // rav1e's largest (`MAX_MAX_KEY_FRAME_INTERVAL`): in effect, never on its own.
+        enc.max_key_frame_interval = i32::MAX as u64 / 3;
         // One picture in, one out: no look-ahead.
         enc.speed_settings.rdo_lookahead_frames = 1;
         enc.reservoir_frame_delay = Some(12);

@@ -59,6 +59,11 @@ path = "examples/codec_check.rs"
 required-features = ["vp8", "av1"]
 
 [[test]]
+name = "codecs"
+path = "tests/codecs.rs"
+required-features = ["vp8", "av1"]
+
+[[test]]
 name = "receive_rtc2rtc"
 path = "tests/receive_rtc2rtc.rs"
 required-features = ["engine"]

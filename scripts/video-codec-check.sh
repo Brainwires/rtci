@@ -12,7 +12,8 @@
 #     niklas_1280_720_30.y4m) at 720p and 360p and on the synthetic source: speed, bitrate,
 #     PSNR; each stream also decoded by libvpx / libdav1d and compared with our decoder's output.
 #
-# ffmpeg is an outside reference tool here, never a dependency. Usage (repository root):
+# ffmpeg is an outside reference tool here, never a dependency (`-fps_mode passthrough`: one
+# output picture per decoded picture, no duplicates for the vectors' timestamps). Usage:
 #   scripts/video-codec-check.sh [WORKDIR]
 # Exit status: non-zero when any comparison fails.
 set -u
@@ -53,7 +54,7 @@ same=0; total=0
 for ivf in "$work"/vp8/*.ivf examples/test-data/output_vp8.ivf; do
     n=$(basename "$ivf" .ivf)
     total=$((total + 1))
-    ffmpeg -hide_banner -loglevel error -y -c:v libvpx -i "$ivf" -f rawvideo -pix_fmt yuv420p "$work/out/$n.libvpx.yuv"
+    ffmpeg -hide_banner -loglevel error -y -c:v libvpx -i "$ivf" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$work/out/$n.libvpx.yuv"
     $check decode vp8 "$ivf" "$work/out/$n.ours.yuv" >/dev/null
     if cmp -s "$work/out/$n.libvpx.yuv" "$work/out/$n.ours.yuv"; then
         same=$((same + 1))
@@ -73,7 +74,7 @@ for n in av1-1-b8-01-size-16x16 av1-1-b8-01-size-66x66 av1-1-b8-01-size-226x226 
          av1-1-b8-22-svc-L1T2 av1-1-b8-22-svc-L2T1 av1-1-b8-22-svc-L2T2; do
     fetch "$aom/$n.ivf" "$work/av1/$n.ivf" || { note "$n: not available"; continue; }
     total=$((total + 1))
-    ffmpeg -hide_banner -loglevel error -y -c:v libdav1d -i "$work/av1/$n.ivf" -f rawvideo -pix_fmt yuv420p "$work/out/$n.dav1d.yuv"
+    ffmpeg -hide_banner -loglevel error -y -c:v libdav1d -i "$work/av1/$n.ivf" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$work/out/$n.dav1d.yuv"
     $check decode av1 "$work/av1/$n.ivf" "$work/out/$n.ours.yuv"
     if cmp -s "$work/out/$n.dav1d.yuv" "$work/out/$n.ours.yuv"; then
         same=$((same + 1))
@@ -89,7 +90,7 @@ clip=$work/niklas_1280_720_30.y4m
 fetch "$base/niklas_1280_720_30.y4m" "$clip" || { note "clip: fetch failed"; fail=1; }
 cross() { # CODEC IVF
     local lib=libvpx; [ "$1" = av1 ] && lib=libdav1d
-    ffmpeg -hide_banner -loglevel error -y -c:v "$lib" -i "$2" -f rawvideo -pix_fmt yuv420p "$2.ref.yuv"
+    ffmpeg -hide_banner -loglevel error -y -c:v "$lib" -i "$2" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$2.ref.yuv"
     $check decode "$1" "$2" "$2.ours.yuv" >/dev/null
     if cmp -s "$2.ref.yuv" "$2.ours.yuv"; then
         echo "MEASURE cross-decode $1 $(basename "$2"): $lib and ours identical"
