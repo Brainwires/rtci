@@ -241,6 +241,9 @@ shared.workspace = true
 ice.workspace = true
 signal.workspace = true
 stream-driver.workspace = true
+# The interop peer's `pipeline` scenario (examples/interop-peer): the video receive pipeline and
+# its pure-Rust decoders. Path only, so `cargo publish` drops it (rtc-video is not published).
+rtc-video = { path = "rtc-video", features = ["vp8", "av1"] }
 
 tokio.workspace = true
 env_logger.workspace = true
