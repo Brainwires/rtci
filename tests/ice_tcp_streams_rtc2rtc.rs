@@ -1210,3 +1210,52 @@ fn moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched() -
     );
     Ok(())
 }
+
+/// RFC 8837 section 5: "if multiple flows are multiplexed using a reliable transport (e.g.,
+/// TCP), then all of the packets for all flows multiplexed over that transport-layer flow
+/// MUST be marked using the same DSCP value", the highest-priority flow's (SHOULD). Every
+/// stream transmit of a connection whose data channels include one at `high` carries AF21
+/// (18), the codepoint the driver sets on the TCP socket; with
+/// `RTCDscpMarking::Off` every transmit carries DSCP 0.
+#[test]
+fn every_stream_transmit_carries_the_highest_flows_codepoint() -> Result<()> {
+    use rtci::data_channel::RTCDataChannelInit;
+    use rtci::peer_connection::priority::{RTCDscpMarking, RTCPriorityType};
+    for (marking, expected) in [(RTCDscpMarking::Rfc8837, 18), (RTCDscpMarking::Off, 0)] {
+        let mut net = Net::new();
+        let mut peers = peers(&net, || {
+            SettingEngineBuilder::new()
+                .with_dscp_marking(marking)
+                .build()
+        });
+        peers[0].pc.create_data_channel(
+            "urgent",
+            Some(RTCDataChannelInit {
+                priority: RTCPriorityType::High.dcep_priority(),
+                ..Default::default()
+            }),
+        )?;
+        let channel = negotiate(&mut peers, &net)?;
+        let expected_messages = messages();
+        exchange(
+            &mut peers,
+            &mut net,
+            channel,
+            &expected_messages,
+            Duration::from_secs(30),
+            |_, _| {},
+        )?;
+        let marks: Vec<u8> = net
+            .transmit_dscps
+            .iter()
+            .filter(|(peer, _)| *peer == 0)
+            .map(|(_, dscp)| *dscp)
+            .collect();
+        assert!(!marks.is_empty());
+        assert!(
+            marks.iter().all(|d| *d == expected),
+            "{marking:?}: {marks:?}"
+        );
+    }
+    Ok(())
+}

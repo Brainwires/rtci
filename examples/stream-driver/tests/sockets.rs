@@ -4,7 +4,7 @@
 use rtci_stream_driver::sockets::{
     AddressFilter, PortRange, accept_by_ufrag, bind_tcp_listener_in_range, bind_udp_in_range,
 };
-use rtci_stream_driver::{DriverConfig, DriverInput, StreamDriver};
+use rtci_stream_driver::{DriverConfig, DriverInput, StreamDriver, sockets};
 use shared::stream::{Framing, StreamCommand, StreamEvent, StreamTable};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -231,5 +231,28 @@ fn on_windows_a_range_reaching_into_an_excluded_range_uses_its_other_ports() {
         assert_eq!(socket.local_addr().unwrap().port(), start - 1);
         let full = bind_udp_in_range(lo, range).unwrap_err();
         assert_eq!(full.kind(), std::io::ErrorKind::AddrInUse, "{full:?}");
+    }
+}
+
+/// `sockets::set_traffic_class` sets the TOS / Traffic Class byte the operating system then
+/// reports (`getsockopt` of `IP_TOS`, `IPV6_TCLASS`): EF (46) with ECT(0) is 186. Printed on
+/// every platform (`--nocapture`: what Windows answers is recorded, not asserted, since it
+/// ignores `IP_TOS`); asserted where the platform marks.
+#[test]
+fn a_udp_socket_reports_the_traffic_class_it_was_given() {
+    let tos = (46u8 << 2) | 0b10;
+    for (address, ipv6) in [("127.0.0.1:0", false), ("[::1]:0", true)] {
+        let Ok(socket) = std::net::UdpSocket::bind(address) else {
+            println!("{address}: no socket of this family here");
+            continue;
+        };
+        let set = sockets::set_traffic_class(socket2::SockRef::from(&socket), ipv6, tos);
+        let read = sockets::traffic_class(socket2::SockRef::from(&socket), ipv6);
+        println!("{address}: set {set:?}, read back {read:?}");
+        #[cfg(not(windows))]
+        {
+            assert!(set.is_ok(), "{address}: {set:?}");
+            assert_eq!(read.ok(), Some(u32::from(tos)), "{address}");
+        }
     }
 }

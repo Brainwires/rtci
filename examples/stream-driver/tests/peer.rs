@@ -582,3 +582,64 @@ fn collide(polite: &mut Side, impolite: &mut Side) -> Result<()> {
     impolite.negotiation_needed = false;
     Ok(())
 }
+
+/// RFC 8837 / RFC 8835 section 4.2 through the driver: each datagram leaves its UDP socket
+/// with the DSCP (and ECN bits) the engine gives it (`RTCPeerConnection::traffic_class`), set
+/// with `IP_TOS` before the datagram. Audio at `high` is EF (46), TOS 184 as the operating
+/// system reports it (`getsockopt`) after each packet; under `RTCDscpMarking::Off` the socket
+/// is never marked. The audio arrives either way. On Windows, where `IP_TOS` does not mark
+/// (see `sockets::set_traffic_class`), what the system reported is printed, not asserted.
+#[tokio::test]
+async fn the_driver_marks_each_datagram_with_its_flows_codepoint() -> Result<()> {
+    use rtci::peer_connection::priority::{RTCDscpMarking, RTCPriorityType};
+    for (marking, expected) in [
+        (RTCDscpMarking::Rfc8837, 46u32 << 2),
+        (RTCDscpMarking::Off, 0),
+    ] {
+        let mut a = Side::new(SettingEngineBuilder::new().with_dscp_marking(marking))?;
+        let mut b = Side::new(SettingEngineBuilder::new())?;
+        let audio = connected(&mut a, &mut b).await?;
+        {
+            let pc = a.driver.pc_mut();
+            let sender = pc
+                .rtp_transceiver(audio)
+                .and_then(|t| t.sender())
+                .ok_or("a sender")?;
+            let mut sender = pc.rtp_sender(sender).ok_or("the sender")?;
+            let mut parameters = sender.get_parameters().clone();
+            parameters.encodings[0].priority = RTCPriorityType::High;
+            sender.set_parameters(parameters, None)?;
+        }
+        let locals = a.driver.local_addresses();
+        assert_eq!(locals.len(), 1, "{locals:?}");
+        let mut seen = HashSet::new();
+        for seq in 1..=20 {
+            write_audio(&mut a, audio, seq)?;
+            if let Ok(value) = a
+                .driver
+                .socket_traffic_class(locals[0])
+                .ok_or("the socket")?
+            {
+                seen.insert(value);
+            }
+            round(&mut a, &mut b).await?;
+        }
+        run_until(&mut a, &mut b, Duration::from_secs(5), |_, b| {
+            !b.rtp.is_empty()
+        })
+        .await?;
+        assert!(!b.rtp.is_empty(), "{marking:?}: audio arrives");
+        println!(
+            "{marking:?}: read back {seen:?}, unmarked sockets {}",
+            a.driver.unmarked_sockets()
+        );
+        #[cfg(not(windows))]
+        assert_eq!(a.driver.unmarked_sockets(), 0);
+        #[cfg(not(windows))]
+        match marking {
+            RTCDscpMarking::Off => assert_eq!(seen, HashSet::from([0]), "{marking:?}"),
+            _ => assert!(seen.contains(&expected), "{marking:?}: {seen:?}"),
+        }
+    }
+    Ok(())
+}

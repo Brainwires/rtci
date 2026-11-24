@@ -1261,6 +1261,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // RFC 8837 section 5: the association's congestion control starts over when its
         // codepoint changed (a channel of another priority came or went).
         self.restart_sctp_congestion_control_on_dscp_change(now);
+        // RFC 8835 section 4.2: a marked media flow the network blocks goes back to DSCP 0.
+        self.detect_blocked_dscp(now);
         // The connection's handlers once, each transport's for every transport.
         process_handler_list!(call_macro: process_handler!(self, handler, {
             handler.handle_timeout(now)?;

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`StreamTransmit` has a new public field, `dscp`** (rtci-shared): the codepoint the driver
+  sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
+  flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
+
+### Behaviour changes
+
+- **`rtci-stream-driver` marks what it sends (RFC 8835 section 4.2 SHOULD, RFC 8837).**
+  `PeerDriver` sets `IP_TOS` / `IPV6_TCLASS` on its UDP socket before each datagram whose byte
+  differs from the last (the new `RTCPeerConnection::traffic_class`: the RFC 8837 DSCP with the
+  datagram's ECN bits), and `StreamDriver` sets each TCP connection's from
+  `StreamTransmit::dscp`. Linux, macOS and the BSDs mark; Windows accepts `IP_TOS` and leaves the
+  packets unmarked (marking there needs qWAVE or a Group Policy QoS rule; the driver uses
+  neither). New: `sockets::set_traffic_class` / `traffic_class`,
+  `PeerDriver::socket_traffic_class`, `PeerDriver::unmarked_sockets`,
+  `StreamDriver::socket_traffic_class`.
+- **A media flow whose DSCP the network blocks goes back to DSCP 0 (RFC 8835 section 4.2
+  MAY).** Under the default `RTCDscpMarking::Rfc8837`, a flow sent with a codepoint other than
+  DF that the peer's sender and receiver reports on its transport never name (three of them, at
+  least two seconds after the flow began) is marked DF from then on, its RTX and FEC streams
+  too; the other flows keep theirs. `RTCPeerConnection::dscp_blocked_flows` lists them.
+  `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
+  `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
+  packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
+
 ### Features
 
 - **A connection can take an existing connection's RTCP CNAME (RFC 8834 section 4.9 MAY).**
