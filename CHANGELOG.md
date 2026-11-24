@@ -79,6 +79,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same in every run under virtual time. Also `sdp::description::session::Origin::jsep`,
   `SessionDescription::new_jsep_session_description_with_origin` and
   `NTP_UNIX_EPOCH_OFFSET_SECS`.
+### Features
+
+- **SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers** (`conf/jsep-76-spec-conflicts`):
+  RFC 8858 section 4.5's form, a subsequent offer saying `a=rtcp-mux-only` again in the m=
+  sections it carries over (under the `require` mux policy; in the tagged section, or in every
+  bundled one with the bundle attributes repeated). Off by default and in the `Rfc` and
+  `Chrome` profiles, on in `StrictRfc`: RFC 9429 section 5.2.2, which governs a JSEP endpoint,
+  says "The 'a=rtcp-mux-only' line MUST NOT be added". No change to what the engine generates
+  by default. RFC8858-4.5-1 is `conflict` (was `violated`), with
+  `tests/jsep_rtcp_mux.rs::when_asked_a_subsequent_offer_says_rtcp_mux_only_again`; RFC8858-4.5-4
+  is `n/a`.
+- **jsep**: RFC9429-4.1.1-4 (ignore `max-bundle`) is `conflict` (was `violated`): the existing
+  `with_max_bundle_as_must_bundle(false)` is RFC 9429's form and the default is W3C
+  webrtc-pc 4.2.5's; the test is split in two, one per form
+  (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
+  `max_bundle_is_ignored_when_set_to_be_ignored`).
 
 ## [0.1.0] - 2026-11-24
 

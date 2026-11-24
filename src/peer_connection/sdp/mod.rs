@@ -164,6 +164,7 @@ mod rejected_mline_tests {
             bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: true,
+            rtcp_mux_only_renegotiated: false,
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
@@ -1436,6 +1437,9 @@ pub(crate) struct AddTransceiverSdpParams {
     is_offer: bool,
     /// The RTCP mux policy is "require".
     rtcp_mux_only: bool,
+    /// `SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers`: a section a subsequent
+    /// offer carries over says `a=rtcp-mux-only` again (RFC 8858 section 4.5).
+    rtcp_mux_only_renegotiated: bool,
     /// `SettingEngineBuilder::with_ecn` with the initiation it prefers, unless ECN is used
     /// without signalling (`with_ecn_without_signalling`): `a=ecn-capable-rtp` is written.
     ecn: Option<interceptor::EcnInitiation>,
@@ -1486,11 +1490,16 @@ impl RTCPeerConnection {
                 .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned());
         // Under the mux policy "require" a new m= section of an offer says this endpoint only
         // multiplexes (RFC 9429 sections 4.1.1 and 5.2.1, RFC 8858 section 4.2); a section
-        // negotiated before does not get the line (RFC 9429 section 5.2.2). An answer does
-        // not carry it (RFC 8858 section 4.3), but for the answerer-tagged section of a
-        // BUNDLE group whose offer had it (RFC 9143 section 9.3.1.2), which `populate_sdp`
-        // adds.
-        if is_offer && params.rtcp_mux_only && !media_section.renegotiated {
+        // negotiated before does not get the line (RFC 9429 section 5.2.2: "The
+        // 'a=rtcp-mux-only' line MUST NOT be added"), unless the application asked for RFC
+        // 8858 section 4.5's form ("the offerer SHOULD associate an SDP 'rtcp-mux-only' with
+        // the corresponding SDP media description"). An answer does not carry it (RFC 8858
+        // section 4.3), but for the answerer-tagged section of a BUNDLE group whose offer had
+        // it (RFC 9143 section 9.3.1.2), which `populate_sdp` adds.
+        if is_offer
+            && params.rtcp_mux_only
+            && (!media_section.renegotiated || params.rtcp_mux_only_renegotiated)
+        {
             media = media.with_property_attribute(ATTR_KEY_RTCP_MUX_ONLY.to_owned());
         }
         // RFC 9429 section 5.2.1: an offer's new section has "An "a=rtcp" line ... containing
@@ -2656,6 +2665,9 @@ pub(crate) struct PopulateSdpParams {
     /// The RTCP mux policy is "require" (the default): new m= sections of an offer say
     /// `a=rtcp-mux-only`.
     pub(crate) rtcp_mux_only: bool,
+    /// `SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers`: under the "require"
+    /// policy the sections a subsequent offer carries over say `a=rtcp-mux-only` too.
+    pub(crate) rtcp_mux_only_renegotiated: bool,
     /// The bundle policy (RFC 9429 section 4.1.1), `Unspecified` being the default,
     /// `balanced`. It decides which m= sections of an initial offer are bundle-only, and which
     /// sections of an offer without a BUNDLE group an answer accepts.
@@ -2884,6 +2896,7 @@ impl RTCPeerConnection {
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle.is_offer(),
                     rtcp_mux_only: params.rtcp_mux_only,
+                    rtcp_mux_only_renegotiated: params.rtcp_mux_only_renegotiated,
                     ecn: params.ecn,
                     answer_payload_types: answer_payload_types.clone(),
                 };

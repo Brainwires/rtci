@@ -586,6 +586,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| !s.max_bundle_ignored,
     },
     {
+        id: "jsep.rtcp-mux-only-in-subsequent-offers",
+        setting: "SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers",
+        clause: "RFC 8858 4.5 (RFC 9429 5.2.2 MUST NOT add it)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "Chromium's subsequent offers carry a=rtcp-mux and no a=rtcp-mux-only (fixture chromium--direction-changes-are-answered-with-the-complementary-direction--3-offer.sdp)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_rtcp_mux_only_in_subsequent_offers(v),
+        read: |s: &SettingEngine| s.rtcp_mux_only_in_subsequent_offers,
+    },
+    {
         id: "jsep.stopping-transceiver-rejected-in-answer",
         setting: "SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer",
         clause: "RFC 9429 5.3.1",

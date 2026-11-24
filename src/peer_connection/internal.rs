@@ -856,6 +856,7 @@ impl RTCPeerConnection {
             bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
             bundle_attributes_in_tagged_section_only: self
@@ -1328,6 +1329,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .bundle_attributes_tagged_only,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
                     .as_ref()

@@ -551,3 +551,81 @@ fn a_later_offer_cannot_stop_multiplexing_a_negotiated_section() -> TestResult {
     assert_eq!(port_of(&sections[2]), 0, "{}", answer.sdp);
     Ok(())
 }
+
+/// A peer whose subsequent offers say `a=rtcp-mux-only` again, with the bundle attributes
+/// repeated or in the tagged section only, under `policy`.
+fn rtcp_mux_only_again_peer(
+    repeated: bool,
+    policy: RTCRtcpMuxPolicy,
+) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_rtcp_mux_policy(policy)
+                .build(),
+        )
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_bundle_attributes_repeated(repeated)
+                .with_rtcp_mux_only_in_subsequent_offers(true)
+                .build(),
+        )
+        .with_media_engine(media_engine)
+        .build(Instant::now())?)
+}
+
+/// RFC 8858 section 4.5, on request (`with_rtcp_mux_only_in_subsequent_offers`): "if the
+/// offerer and answerer have previously negotiated usage of exclusive RTP/RTCP multiplexing
+/// ... the offerer SHOULD associate an SDP 'rtcp-mux-only' with the corresponding SDP media
+/// description", with `a=rtcp-mux` beside it. Under BUNDLE the attribute is of the IDENTICAL
+/// category (RFC 8858 section 6): in the tagged section, and in every bundled one when the
+/// bundle attributes are repeated. The answerer takes the offer and multiplexes, and the
+/// offerer takes the answer. Not under the "negotiate" policy, where nothing said exclusive.
+/// The default, RFC 9429 section 5.2.2's form, is
+/// `a_subsequent_offer_follows_the_most_recent_answer`.
+#[test]
+fn when_asked_a_subsequent_offer_says_rtcp_mux_only_again() -> TestResult {
+    for repeated in [false, true] {
+        let mut offerer = rtcp_mux_only_again_peer(repeated, RTCRtcpMuxPolicy::Require)?;
+        let mut answerer = default_peer()?;
+        offerer.add_track(video_track("first", 0x0404_0404))?;
+        exchange(&mut offerer, &mut answerer)?;
+
+        offerer.add_track(video_track("second", 0x0505_0505))?;
+        let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+        let sections = media_sections(&offer);
+        assert_eq!(sections.len(), 2, "{offer}");
+        // The negotiated section, the tagged one: both attributes again.
+        assert!(has(&sections[0], "a=rtcp-mux"), "{offer}");
+        assert!(has(&sections[0], "a=rtcp-mux-only"), "{offer}");
+        // The new bundled section has them only when the attributes are repeated.
+        for line in ["a=rtcp-mux", "a=rtcp-mux-only"] {
+            assert_eq!(has(&sections[1], line), repeated, "{line}:\n{offer}");
+        }
+        // What the peer makes of it: both sections accepted and multiplexed.
+        let answered = media_sections(&answer);
+        assert_eq!(answered.len(), 2, "{answer}");
+        for section in &answered {
+            assert_ne!(port_of(section), 0, "{answer}");
+        }
+        assert!(has(&answered[0], "a=rtcp-mux"), "{answer}");
+
+        // Once more with nothing changed: the negotiated sections keep saying it.
+        let (offer, _) = exchange(&mut offerer, &mut answerer)?;
+        assert!(
+            has(&media_sections(&offer)[0], "a=rtcp-mux-only"),
+            "{offer}"
+        );
+    }
+
+    let mut offerer = rtcp_mux_only_again_peer(true, RTCRtcpMuxPolicy::Negotiate)?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("first", 0x0404_0404))?;
+    exchange(&mut offerer, &mut answerer)?;
+    let offer = offerer.create_offer(None)?;
+    assert!(offer.sdp.contains("a=rtcp-mux\r\n"), "{}", offer.sdp);
+    assert!(!offer.sdp.contains("a=rtcp-mux-only"), "{}", offer.sdp);
+    Ok(())
+}

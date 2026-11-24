@@ -465,6 +465,8 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     /// Inverted so that the derived default is "honoured".
     pub(crate) max_bundle_ignored: bool,
+    /// `with_rtcp_mux_only_in_subsequent_offers`.
+    pub(crate) rtcp_mux_only_in_subsequent_offers: bool,
     /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
     /// connection gets ICE credentials of its own. The derived default `false` shares the first
     /// transport's.
@@ -656,6 +658,7 @@ impl SettingEngine {
             accept_lowercase_fingerprints: Default::default(),
             bundle_attributes_tagged_only: Default::default(),
             max_bundle_ignored: Default::default(),
+            rtcp_mux_only_in_subsequent_offers: false,
             unique_transport_credentials: Default::default(),
             explicit_rollback_only: Default::default(),
             answering_dtls_role: Default::default(),
@@ -2277,6 +2280,24 @@ impl SettingEngineBuilder {
     /// `RTCBundlePolicy::MaxBundle` then behaves as the default policy, `balanced`.
     pub fn with_max_bundle_as_must_bundle(mut self, honoured: bool) -> Self {
         self.0.max_bundle_ignored = !honoured;
+        self
+    }
+
+    /// Whether a subsequent offer says `a=rtcp-mux-only` again in the m= sections it carries
+    /// over from the last exchange, under the RTCP mux policy `require`. The default is
+    /// `false`.
+    ///
+    /// Two specifications disagree here. RFC 9429 section 5.2.2, which governs a JSEP
+    /// endpoint, says of such a section "The 'a=rtcp-mux-only' line MUST NOT be added", and
+    /// that is the default. RFC 8858 section 4.5 says "if the offerer and answerer have
+    /// previously negotiated usage of exclusive RTP/RTCP multiplexing ... the offerer SHOULD
+    /// associate an SDP 'rtcp-mux-only' with the corresponding SDP media description"; `true`
+    /// does that. In a BUNDLE group the attribute (IDENTICAL category, RFC 8858 section 6)
+    /// is then in the tagged section, and in every bundled one when the bundle attributes
+    /// are repeated ([`with_bundle_attributes_repeated`](Self::with_bundle_attributes_repeated)).
+    /// New sections of an offer say it either way (RFC 9429 section 4.1.1).
+    pub fn with_rtcp_mux_only_in_subsequent_offers(mut self, repeated: bool) -> Self {
+        self.0.rtcp_mux_only_in_subsequent_offers = repeated;
         self
     }
 
