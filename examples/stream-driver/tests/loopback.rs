@@ -180,13 +180,17 @@ async fn framed_messages_cross_real_sockets_both_ways_and_the_connection_closes(
 #[tokio::test]
 async fn a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer() {
     let mut client = Side::new(StreamConfig::default());
-    // A port held bound for the whole connect, never listening: a SYN to it is refused (RST)
-    // on Linux, macOS and Windows alike, and while it is bound no other socket on 127.0.0.1
-    // can be given it, so the client cannot pick it as its own source port and connect to
-    // itself (a port found free and closed again could be: seen on Linux).
-    let held = tokio::net::TcpSocket::new_v4().unwrap();
-    held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let closed = held.local_addr().unwrap();
+    // A port nothing listens on, held for the whole connect by an established connection's
+    // own end: a SYN to it matches no listening socket and is refused (RST) on Linux, macOS
+    // and Windows (a bound socket that is not listening is not enough: macOS drops the SYN),
+    // and while the connection holds it no other socket on 127.0.0.1 can be given the port,
+    // so the client cannot pick it as its source port and connect to itself (a port found
+    // free and closed again could be: seen on Linux).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let holder = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    drop(listener);
+    let closed = holder.local_addr().unwrap();
     let failed = client
         .table
         .connect(
@@ -212,7 +216,7 @@ async fn a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer() {
         "{:?}",
         client.notices
     );
-    drop(held);
+    drop((holder, accepted));
 
     // A reset from one side is a reset on the other.
     let mut server = Side::new(StreamConfig::default());
