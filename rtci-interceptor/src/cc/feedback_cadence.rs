@@ -14,7 +14,7 @@ pub(crate) const FEEDBACK_SHARE: f64 = 0.05;
 /// section 6.2's 5% for RTCP, of which "1/4 of the RTCP bandwidth be dedicated to participants
 /// that are sending data": the receivers, who send the feedback, have the other three
 /// quarters.
-pub const RTCP_BUDGET_FEEDBACK_SHARE: f64 = 0.05 * 0.75;
+pub const RTCP_BUDGET_FEEDBACK_SHARE: f64 = 0.0375;
 /// The window the received media bit rate is measured over.
 const RATE_WINDOW: Duration = Duration::from_secs(2);
 const RATE_BUCKET: Duration = Duration::from_millis(250);
