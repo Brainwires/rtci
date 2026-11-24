@@ -170,9 +170,13 @@ test("ULPFEC in RED to the browser: Rust's FEC reaches the browser's decoder thr
   await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "send", video: "VP8" });
     window.S = s;
+    // No NACK in anything either side applies, renegotiations included: only FEC repairs.
+    const withoutNack = (sdp) => sdp.replace(/^a=rtcp-fb:\d+ nack\r\n/gm, "");
+    s.mungeAnswer = withoutNack;
+    s.mungeRemoteOffer = withoutNack;
     s.pc.addTransceiver("video", { direction: "recvonly" });
     s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
-    await s.negotiate((sdp) => sdp.replace(/^a=rtcp-fb:\d+ nack\r\n/gm, ""));
+    await s.negotiate(withoutNack);
     await s.connected();
   }, `${WS}/?video_red_ulpfec=1`);
   const answer = await page.evaluate(() => S.pc.remoteDescription.sdp);
@@ -202,9 +206,22 @@ test("ULPFEC in RED to the browser: Rust's FEC reaches the browser's decoder thr
   // webrtc-stats 8.5: the browser received the FEC, and used some of it (received minus
   // discarded) where it reports both.
   console.log(`[ulpfec to the browser] inbound-rtp: ${JSON.stringify(r.inbound)}; Rust sent: ${JSON.stringify(sent)}; wire: ${JSON.stringify(r.report.wireRtp?.sent)}`);
-  expect(r.inbound?.fecPacketsReceived, JSON.stringify(r.inbound)).toBeGreaterThan(0);
-  if (r.inbound?.fecPacketsDiscarded !== undefined) {
-    expect(r.inbound.fecPacketsReceived - r.inbound.fecPacketsDiscarded, JSON.stringify(r.inbound)).toBeGreaterThan(0);
+  const i = r.inbound;
+  expect(i, "the browser received the video").toBeTruthy();
+  // Nothing was asked again: whatever the loss took and the decoder still had came from FEC.
+  expect(i.nackCount ?? 0, `the browser sent NACKs: ${JSON.stringify(i)}`).toBe(0);
+  if (i.fecPacketsReceived !== undefined) {
+    // webrtc-stats 8.5: the browser received the FEC, and used some of it.
+    expect(i.fecPacketsReceived, JSON.stringify(i)).toBeGreaterThan(0);
+    if (i.fecPacketsDiscarded !== undefined) {
+      expect(i.fecPacketsReceived - i.fecPacketsDiscarded, JSON.stringify(i)).toBeGreaterThan(0);
+    }
+  } else {
+    // Chromium's inbound-rtp for video has no FEC members (observed: this cell's log). With
+    // 5% loss, no NACK and no FEC a VP8 stream loses frames until a key frame; with the FEC
+    // they are rebuilt before the jitter buffer gives up on them.
+    expect(i.framesDecoded, JSON.stringify(i)).toBeGreaterThanOrEqual(0.97 * i.framesReceived);
+    expect(i.packetsLost, JSON.stringify(i)).toBeGreaterThan(0);
   }
 });
 
