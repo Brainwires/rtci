@@ -1,7 +1,7 @@
 //! NACK Generator Interceptor - Generates NACK requests for missing packets.
 
 use super::receive_log::ReceiveLog;
-use super::stream_supports_nack;
+use super::{older_than, stream_supports_nack};
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
 use crate::{AttributedPacket, Packet, TaggedPacket};
@@ -396,12 +396,6 @@ impl NackGeneratorInterceptor {
             });
         }
     }
-}
-
-/// Whether `sequence_number` comes before `horizon` (RFC 3550 A.1 wrap-around: up to 32767
-/// behind it).
-fn older_than(sequence_number: u16, horizon: u16) -> bool {
-    (1..0x8000).contains(&horizon.wrapping_sub(sequence_number))
 }
 
 /// A missing packet and what has been done about it.

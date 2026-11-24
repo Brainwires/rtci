@@ -780,7 +780,9 @@ impl RTCRtpReceiver<'_> {
     /// at the time it is received". A video pipeline that has released or given up every frame
     /// before `oldest_useful` gives it here after each frame, and the generator
     /// (`interceptor::NackControl::Horizon`) no longer asks for missing packets older than it;
-    /// newer ones are asked for as before. Sequence numbers compare with wrap-around (RFC 3550
+    /// newer ones are asked for as before. A request for an older packet that still waits in
+    /// the RTCP session for its packet (RFC 4585 3.5.2) is dropped there, so no NACK sent
+    /// after this call names a packet before `oldest_useful`. Sequence numbers compare with wrap-around (RFC 3550
     /// A.1), so the horizon is to be moved on as playout advances.
     ///
     /// Only effective with the default interceptors (their NACK generator holds the request
