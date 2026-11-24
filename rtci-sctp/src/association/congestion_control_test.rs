@@ -172,7 +172,11 @@ fn slow_start_grows_by_at_most_one_packet_per_sack() {
     let cwnd = small.cwnd;
     assert!(flight(&small) >= cwnd);
     sack(&mut small, small_first, &[], now);
-    assert_eq!(cwnd + 100, small.cwnd, "the bytes acknowledged");
+    assert_eq!(
+        cwnd + 116,
+        small.cwnd,
+        "the bytes acknowledged, the chunk header with them (RFC 9260 7.2)"
+    );
 
     // Not in full use: no growth.
     let mut idle = sender(config(), 1, now);
@@ -500,7 +504,8 @@ fn max_burst_limits_what_is_released_at_once() {
     );
     assert_eq!(None, unlimited.max_burst);
     let now = Instant::now();
-    for (max_burst, packets) in [(Some(3), 4), (None, 40)] {
+    // With the chunks counted on the wire (RFC 9260 7.2), Max.Burst 3 lets out three packets.
+    for (max_burst, packets) in [(Some(3), 3), (None, 40)] {
         let mut a = sender(config().with_max_burst(max_burst), 40, now);
         let pmdcs = a.pmdcs;
         a.cwnd = 40 * CHUNK as u32;
