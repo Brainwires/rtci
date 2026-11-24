@@ -268,7 +268,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
   highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
   libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
-  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
+  longer through a capacity cap (`measure_report_blocks_from_every_ssrc_against_once`: mean
   1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
   `setting`, measured).
 
@@ -581,6 +581,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
+  `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
+  one run in fifty (28 of 1500 runs on master, alike under every crypto feature set; in CI it
+  happened to show in the ring-only jobs). The engine was right. The test took the first
+  packet of each SRTCP datagram, all that is readable on the wire, for the reporting SSRC's
+  report. Once the stream sends, its RTX SSRC is a participant too (the congestion
+  controller's padding goes out on it, RFC 4588 section 6.1), a compound packet carries the
+  reports of both SSRCs (RFC 8108 section 5.3.2) and is led by the one whose timer expired:
+  in the runs that failed the RTX SSRC led every compound packet sent while the stream had
+  sender status, the stream's sender report second in each. The test now reads the compound
+  packets whole, below the session, and states the requirement: from the stream's first
+  packet on and while it sends, every report of that SSRC is a sender report (RFC 3550
+  section 6.4); nothing says BYE; no SSRC reports but that one and the stream's RTX SSRC. It
+  sends until the SSRC has reported twice instead of for a fixed number of packets. No engine
+  change.
+- **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): RFC 8108 section 5.1 is checked in
+  the RTCP between two peer connections
+  (`every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without`: with
+  `rtcp_report_from_every_ssrc` each of a stream's SSRC and its RTX SSRC reports on the remote
+  SSRC and on the other; without it the report blocks are carried once and none names a
+  co-located SSRC). `report_blocks_from_every_ssrc_measured_against_once`, which asserted
+  that the RFC form froze the video longer through a capacity cap on two seeds, is now the
+  ignored measurement `measure_report_blocks_from_every_ssrc_against_once`: it prints the
+  figures and asserts nothing, because that order is chance on so few runs (it failed with
+  the order reversed under an unrelated change). Row RFC8108-5.1-1 cites the new test. No
+  engine change.
 - **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
   checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length
   4 followed by other bytes read a New Cumulative TSN it does not hold and panicked. Not
