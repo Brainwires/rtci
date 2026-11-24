@@ -11,10 +11,10 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, port_of, vp8,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
-use rtc::shared::error::Error;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
+use rtci::shared::error::Error;
 
 #[test]
 fn a_codec_is_not_registered_with_a_payload_type_of_64_to_95() {
@@ -88,7 +88,7 @@ a=fmtp:96 profile-id=0
 fn telephone_event_is_offered_with_the_dtmf_events_and_answered() -> TestResult {
     let mut a = default_peer()?;
     let mut b = default_peer()?;
-    a.add_transceiver_from_kind(rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio, None)?;
+    a.add_transceiver_from_kind(rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Audio, None)?;
     let (offer, answer) = jsep_common::exchange(&mut a, &mut b)?;
     for sdp in [&offer, &answer] {
         let audio = &media_sections(sdp)[0];

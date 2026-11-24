@@ -11,13 +11,13 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TestResult, crlf, default_peer, exchange, media_sections, port_of, video_track,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpTransceiverId;
-use rtc::shared::error::Error;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpTransceiverId;
+use rtci::shared::error::Error;
 
 /// The transport lines of a remote section, without `a=rtcp-mux`.
 const TRANSPORT_NO_MUX: &str = "c=IN IP4 0.0.0.0

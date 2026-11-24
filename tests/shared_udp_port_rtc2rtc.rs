@@ -1,18 +1,18 @@
 //! One UDP port shared by two peer connections, as a server does it: both announce the same
 //! host candidate, and what arrives on the port goes to the connection the first Binding
-//! request from each remote address names by its ICE ufrag (`rtc-stream-driver`'s `UfragMux`,
+//! request from each remote address names by its ICE ufrag (`rtci-stream-driver`'s `UfragMux`,
 //! fed `RTCPeerConnection::ice_username_fragments`). Two remote peers connect, one to each, on
 //! a virtual clock; nothing crosses between the sessions.
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use stream_driver::sockets::UfragMux;
@@ -21,7 +21,7 @@ struct Node {
     pc: RTCPeerConnection,
     addr: SocketAddr,
     received: Vec<Vec<u8>>,
-    open: Option<rtc::data_channel::RTCDataChannelId>,
+    open: Option<rtci::data_channel::RTCDataChannelId>,
 }
 
 fn node(addr: &str) -> Node {

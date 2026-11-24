@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::peer_connection::{
+use rtci::peer_connection::{
     RTCPeerConnection, event::RTCPeerConnectionEvent, state::RTCPeerConnectionState,
 };
 use sansio::Protocol;

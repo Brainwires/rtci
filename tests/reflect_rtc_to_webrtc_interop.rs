@@ -21,22 +21,22 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry as RtcRegistry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngine;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
 };
-use rtc::shared::error::Error;
+use rtci::shared::error::Error;
 
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -101,7 +101,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
 
     // Use the default set of Interceptors
     let registry =
-        rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+        rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
             registry,
             &mut media_engine,
         )?;
@@ -241,7 +241,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
 
     // Convert webrtc answer to rtc answer
     let rtc_answer =
-        rtc::peer_connection::sdp::RTCSessionDescription::answer(answer_with_candidates.sdp)?;
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(answer_with_candidates.sdp)?;
 
     // Set remote description on rtc
     log::info!("RTC set remote description {}", rtc_answer);
@@ -387,8 +387,8 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;
 
             // Create RTP packet
-            let packet = rtc::rtp::packet::Packet {
-                header: rtc::rtp::header::Header {
+            let packet = rtci::rtp::packet::Packet {
+                header: rtci::rtp::header::Header {
                     version: 2,
                     padding: false,
                     extension: false,

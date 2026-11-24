@@ -13,13 +13,13 @@ use std::time::Instant;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, keep};
-use rtc::peer_connection::certificate::{CertificateParams, RTCCertificate};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::shared::error::Error;
+use rtci::peer_connection::certificate::{CertificateParams, RTCCertificate};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::shared::error::Error;
 
 /// The text with the `a=fingerprint` lines of m= section `index` replaced by a well-formed
 /// fingerprint of no certificate this test has.
@@ -45,10 +45,10 @@ fn other_fingerprint_in_section(sdp: &str, index: usize) -> String {
 }
 
 fn certificate() -> Result<RTCCertificate> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     Ok(RTCCertificate::generate(
         provider.crypto(),
-        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        rtci::crypto::SignatureScheme::EcdsaP256Sha256,
         CertificateParams::new(vec!["bundle-fingerprints".to_owned()])?,
     )?)
 }

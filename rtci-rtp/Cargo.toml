@@ -1,0 +1,36 @@
+[package]
+name = "rtci-rtp"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "RTP packets, header extensions (RFC 3550, RFC 8285) and codec payload formats for WebRTC"
+license.workspace = true
+repository.workspace = true
+keywords = ["webrtc", "rtp", "packetizer", "media", "sans-io"]
+categories = ["network-programming", "multimedia", "parser-implementations"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = ["marshal"] }
+
+bytes.workspace = true
+rand.workspace = true
+serde.workspace = true
+memchr.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }

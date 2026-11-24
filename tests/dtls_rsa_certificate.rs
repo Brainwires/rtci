@@ -8,12 +8,12 @@
 //! under the `ring` backend.
 
 use anyhow::Result;
-use rtc::crypto::{self, SignatureScheme};
-use rtc::peer_connection::certificate::{CertificateParams, RTCCertificate};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
+use rtci::crypto::{self, SignatureScheme};
+use rtci::peer_connection::certificate::{CertificateParams, RTCCertificate};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;

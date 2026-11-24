@@ -12,16 +12,16 @@
 //! scheduling.
 
 use anyhow::Result;
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};

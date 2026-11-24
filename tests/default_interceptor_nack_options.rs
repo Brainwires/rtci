@@ -8,21 +8,21 @@
 //! builders would build the builders' defaults, and the counts would be those of the default.
 
 use bytes::Bytes;
-use rtc::interceptor::{
+use rtci::interceptor::{
     AttributedPacket, Interceptor, PacerQueueOverflow, Packet, RTCPFeedback, Registry,
     RetransmissionRateLimit, RtcpSessionControl, RtpSession, StreamInfo, TaggedPacket,
 };
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorOptions, register_default_interceptors_with_options,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
-use rtc::rtcp::transport_feedbacks::transport_layer_nack::{
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
+use rtci::rtcp::transport_feedbacks::transport_layer_nack::{
     TransportLayerNack, nack_pairs_from_sequence_numbers,
 };
-use rtc::rtp::header::Header;
-use rtc::sansio::Protocol;
-use rtc::shared::TransportContext;
+use rtci::rtp::header::Header;
+use rtci::sansio::Protocol;
+use rtci::shared::TransportContext;
 use std::time::{Duration, Instant};
 
 const LOCAL_SSRC: u32 = 0x1111_1111;
@@ -57,7 +57,7 @@ fn tagged(now: Instant, packet: Packet) -> TaggedPacket {
 }
 
 fn rtp(ssrc: u32, sequence_number: u16, payload: usize) -> Packet {
-    Packet::Rtp(rtc::rtp::packet::Packet {
+    Packet::Rtp(rtci::rtp::packet::Packet {
         header: Header {
             version: 2,
             payload_type: 96,

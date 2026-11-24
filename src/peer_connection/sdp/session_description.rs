@@ -35,7 +35,7 @@ use shared::error::{Error, Result};
 /// ## Creating an Offer Description
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+/// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // In a real application, this SDP would come from create_offer()
@@ -58,7 +58,7 @@ use shared::error::{Error, Result};
 /// ## Creating an Answer Description
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::RTCSessionDescription;
+/// use rtci::peer_connection::sdp::RTCSessionDescription;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let sdp_text = "v=0\r\no=- 987654321 2 IN IP4 127.0.0.1\r\n...".to_string();
@@ -72,7 +72,7 @@ use shared::error::{Error, Result};
 /// ## Signaling Exchange via JSON
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+/// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Peer A: Create and serialize offer
@@ -95,7 +95,7 @@ use shared::error::{Error, Result};
 /// ## Parsing SDP Content
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::RTCSessionDescription;
+/// use rtci::peer_connection::sdp::RTCSessionDescription;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let description = RTCSessionDescription::offer("v=0\r\no=- 123 456 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n".to_string())?;
@@ -112,7 +112,7 @@ use shared::error::{Error, Result};
 /// ## Using Provisional Answers
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::RTCSessionDescription;
+/// use rtci::peer_connection::sdp::RTCSessionDescription;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Send a provisional answer with limited codecs
@@ -128,7 +128,7 @@ use shared::error::{Error, Result};
 /// ## Displaying SDP for Debugging
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::RTCSessionDescription;
+/// use rtci::peer_connection::sdp::RTCSessionDescription;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let offer = RTCSessionDescription::offer("v=0\r\no=- 123 456 IN IP4 0.0.0.0\r\ns=-\r\n".to_string())?;
@@ -205,7 +205,7 @@ impl RTCSessionDescription {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+    /// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Typically this SDP comes from create_answer()
@@ -261,7 +261,7 @@ impl RTCSessionDescription {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+    /// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Typically this SDP comes from create_offer()
@@ -317,7 +317,7 @@ impl RTCSessionDescription {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+    /// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Send provisional answer with a subset of codecs
@@ -399,8 +399,8 @@ impl RTCSessionDescription {
     ///
     /// ```no_run
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -462,7 +462,7 @@ impl RTCSessionDescription {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::sdp::RTCSessionDescription;
+    /// use rtci::peer_connection::sdp::RTCSessionDescription;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let offer = RTCSessionDescription::offer(

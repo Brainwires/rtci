@@ -263,7 +263,7 @@ impl RTCPeerConnection {
             .set_multi_codec_negotiation(!setting_engine.disable_media_engine_multiple_codecs);
         media_engine.own_payload_types_in_answers = setting_engine.own_payload_types_in_answers;
 
-        // The one place in `rtc` that resolves a default crypto provider. The application
+        // The one place in `rtci` that resolves a default crypto provider. The application
         // either supplies one through `SettingEngineBuilder::with_crypto_provider` — which is also how
         // a wrapper crate injects a provider it resolved itself — or gets the feature-selected
         // built-in here, once, at construction. Everything downstream —
@@ -297,7 +297,7 @@ impl RTCPeerConnection {
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
-        // a counter is ambient state, and `rtc` may be used many times over in one process.
+        // a counter is ambient state, and `rtci` may be used many times over in one process.
         // Randomness is what keeps two connections' transports from comparing equal — see
         // `RTCTransportId`.
         let transport_id_nonce: u64 = rand::rng().random();

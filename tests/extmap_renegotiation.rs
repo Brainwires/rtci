@@ -1,7 +1,7 @@
 //! Extension ID reassignment after a bundled section is rejected must agree
 //! across answers, RTP receiver parameters, and subsequent local offers.
 
-use rtc::{
+use rtci::{
     peer_connection::{
         RTCPeerConnection, RTCPeerConnectionBuilder, configuration::media_engine::MediaEngine,
         sdp::RTCSessionDescription,

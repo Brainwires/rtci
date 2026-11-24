@@ -60,8 +60,8 @@ impl fmt::Display for StateChangeOp {
 /// ## Monitoring Signaling State (Offerer)
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCSignalingState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCSignalingState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_event_offerer(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -87,8 +87,8 @@ impl fmt::Display for StateChangeOp {
 /// ## Monitoring Signaling State (Answerer)
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCSignalingState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCSignalingState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_event_answerer(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -112,7 +112,7 @@ impl fmt::Display for StateChangeOp {
 /// ## Checking if Negotiation is in Progress
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCSignalingState;
+/// use rtci::peer_connection::state::RTCSignalingState;
 ///
 /// fn is_negotiating(state: RTCSignalingState) -> bool {
 ///     !matches!(state, RTCSignalingState::Stable | RTCSignalingState::Closed)
@@ -131,7 +131,7 @@ impl fmt::Display for StateChangeOp {
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCSignalingState;
+/// use rtci::peer_connection::state::RTCSignalingState;
 ///
 /// // Convert to string
 /// let state = RTCSignalingState::HaveLocalOffer;
@@ -145,8 +145,8 @@ impl fmt::Display for StateChangeOp {
 /// ## Handling State Transitions
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCSignalingState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCSignalingState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_transitions(event: RTCPeerConnectionEvent, is_offerer: bool) {
 /// match event {

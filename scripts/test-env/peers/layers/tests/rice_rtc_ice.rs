@@ -1,6 +1,6 @@
-//! rtc-ice against librice's sans-I/O agent (rice-proto 0.4.3, an independent RFC 8445
+//! rtci-ice against librice's sans-I/O agent (rice-proto 0.4.3, an independent RFC 8445
 //! implementation), in memory with virtual time: full ICE with either side controlling,
-//! trickled candidates (RFC 8838), rtc-ice as an ICE lite agent (RFC 8445 2.5) under a full
+//! trickled candidates (RFC 8838), rtci-ice as an ICE lite agent (RFC 8445 2.5) under a full
 //! rice controller, and a role conflict (RFC 8445 7.3.1.1) resolved from both starting
 //! roles. Candidates cross as SDP `a=candidate` lines (RFC 8839 5.1), as they would in an
 //! offer or answer.
@@ -38,9 +38,9 @@ struct Pair {
     rice_state: ComponentConnectionState,
     /// The pair rice selected (AgentPoll::SelectedPair): local and remote addresses.
     rice_selected: Option<(SocketAddr, SocketAddr)>,
-    /// rice's gathered candidates, as SDP lines, not yet given to rtc-ice.
+    /// rice's gathered candidates, as SDP lines, not yet given to rtci-ice.
     rice_candidates: Vec<String>,
-    /// Hold rice's candidates back from rtc-ice until released (trickle).
+    /// Hold rice's candidates back from rtci-ice until released (trickle).
     hold: bool,
     /// Binding requests each side sent.
     to_rice: usize,
@@ -93,7 +93,7 @@ impl Pair {
             ));
             let rc = rtc.get_local_credentials().clone();
             s.set_remote_credentials(Credentials::new(rc.ufrag, rc.pwd));
-            // rtc-ice's candidate, as its description would carry it.
+            // rtci-ice's candidate, as its description would carry it.
             let line = format!("a=candidate:{}", rtc_host(RTC_ADDR)?.marshal());
             s.add_remote_candidate(
                 line.parse::<RiceCandidate>()
@@ -231,7 +231,7 @@ impl Pair {
             self.rtc.handle_timeout(self.now)?;
         }
         Err(format!(
-            "{what} within 20 s of virtual time: rtc-ice {:?}, rice {:?}",
+            "{what} within 20 s of virtual time: rtci-ice {:?}, rice {:?}",
             self.rtc.state(),
             self.rice_state
         )
@@ -249,7 +249,7 @@ impl Pair {
         let (local, remote) = self
             .rtc
             .get_selected_candidate_pair()
-            .ok_or("rtc-ice selected no pair")?;
+            .ok_or("rtci-ice selected no pair")?;
         assert_eq!(format!("{}:{}", local.address(), local.port()), RTC_ADDR);
         assert_eq!(format!("{}:{}", remote.address(), remote.port()), RICE_ADDR);
         let (local, remote) = self.rice_selected.ok_or("rice selected no pair")?;
@@ -275,7 +275,7 @@ fn full_ice_rice_controlling_rtc_controlled_connects() -> R {
     Ok(())
 }
 
-/// rice's candidates reach rtc-ice only after a while: rtc-ice learns rice as a peer-reflexive
+/// rice's candidates reach rtci-ice only after a while: rtci-ice learns rice as a peer-reflexive
 /// candidate from its checks first (RFC 8445 7.3.1.3), and the trickled candidate joins
 /// the same pair (RFC 8838 11).
 #[test]
@@ -294,17 +294,17 @@ fn trickled_candidates_arrive_after_the_checks_started() -> R {
     Ok(())
 }
 
-/// rtc-ice as a lite agent (only answers checks, RFC 8445 2.5) under rice controlling and
+/// rtci-ice as a lite agent (only answers checks, RFC 8445 2.5) under rice controlling and
 /// nominating.
 #[test]
 fn rtc_lite_agent_under_a_full_rice_controller_connects() -> R {
     let mut p = Pair::new(false, true, true, false)?;
     p.run_until("both connected", Pair::both_connected)?;
     p.check_selected()?;
-    // A lite agent sends no checks of its own: everything rtc-ice sent answered rice.
+    // A lite agent sends no checks of its own: everything rtci-ice sent answered rice.
     assert!(
         p.to_rice <= p.to_rtc,
-        "rtc-ice (lite) sent {} for rice's {}",
+        "rtci-ice (lite) sent {} for rice's {}",
         p.to_rice,
         p.to_rtc
     );

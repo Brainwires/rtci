@@ -8,8 +8,8 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCSignalingState;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCSignalingState;
 
 /// Section 5.5 (local) and 5.8: a description that does not parse is refused with an error
 /// and the session is as it was (no pending description, still stable); section 5.9: one that
@@ -83,7 +83,7 @@ fn a_later_offer_lists_the_formats_in_the_order_of_the_last_answer() -> TestResu
     let mut offerer = default_peer()?;
     let mut answerer = default_peer()?;
     let sender = offerer
-        .add_transceiver_from_kind(rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video, None)?;
+        .add_transceiver_from_kind(rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video, None)?;
     let _ = sender;
     let now = Instant::now();
     let offer = offerer.create_offer(None)?;

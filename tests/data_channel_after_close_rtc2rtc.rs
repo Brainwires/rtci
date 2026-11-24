@@ -6,10 +6,10 @@ mod dc_common;
 
 use anyhow::Result;
 use dc_common::{Pair, Peer};
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::time::Instant;
 
 /// What `from` writes now (after a timer turn at `now`), without delivering it.

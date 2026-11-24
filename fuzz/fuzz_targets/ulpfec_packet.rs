@@ -4,7 +4,7 @@
 //! packet; every block the RED reader hands out lies inside the input.
 
 use libfuzzer_sys::fuzz_target;
-use rtc::interceptor::{UlpfecPacket, depacketize_red_for_ulpfec};
+use rtci::interceptor::{UlpfecPacket, depacketize_red_for_ulpfec};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(packet) = UlpfecPacket::parse(data) {

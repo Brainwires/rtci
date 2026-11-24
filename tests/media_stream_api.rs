@@ -3,8 +3,8 @@
 //! attributes and methods (`enabled`, `muted`, `stop()`, the capability, constraint and
 //! settings getters). A receiver's track is the remote case (webrtc-pc 9.3).
 
-use rtc::media_stream::{MediaStream, MediaStreamTrack, MediaStreamTrackState, generate_id};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::media_stream::{MediaStream, MediaStreamTrack, MediaStreamTrackState, generate_id};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn is_uuid_v4(id: &str) -> bool {
     let parts: Vec<&str> = id.split('-').collect();

@@ -6,11 +6,11 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
-use rtc::sansio::Protocol;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
+use rtci::sansio::Protocol;
 
 /// Drains every queued event, returning how many were negotiation-needed.
 fn negotiation_needed(pc: &mut RTCPeerConnection) -> usize {
@@ -69,7 +69,7 @@ fn a_stopped_transceiver_that_never_had_a_section_needs_none() -> TestResult {
     let (mut offerer, mut answerer, _) = negotiated()?;
     let unused = offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     offerer
         .rtp_transceiver(unused)

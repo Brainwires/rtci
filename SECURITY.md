@@ -5,7 +5,7 @@
 Please report security problems **privately**, not in a public issue or pull request.
 
 Use GitHub's private vulnerability reporting: open the repository's **Security** tab and choose
-**Report a vulnerability** (https://github.com/Brainwires/webrtc-rs-rtc/security/advisories/new).
+**Report a vulnerability** (https://github.com/Brainwires/rtci/security/advisories/new).
 The report is visible only to the maintainers.
 
 Include what you can of:

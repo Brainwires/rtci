@@ -1,6 +1,6 @@
 # Crypto provider baseline
 
-This document records the crypto behavior and compatibility surface before the `rtc-crypto` provider migration. It is the baseline for G3 and must be updated when a migration intentionally changes an algorithm, preference, public adapter, or test expectation.
+This document records the crypto behavior and compatibility surface before the `rtci-crypto` provider migration. It is the baseline for G3 and must be updated when a migration intentionally changes an algorithm, preference, public adapter, or test expectation.
 
 ## DTLS
 
@@ -60,15 +60,15 @@ Certificate parsing currently extracts the subject-public-key bit string from X.
 | `SRTP_AEAD_AES_128_GCM` | 16 | 12 | 0 | 0 | 16 | 0 |
 | `SRTP_AEAD_AES_256_GCM` | 32 | 12 | 0 | 0 | 16 | 0 |
 
-Lengths are bytes. DTLS-SRTP negotiation currently exposes AES-128-CM HMAC-SHA1 80/32 and AEAD AES-128/256-GCM; the two AES-256-CM profiles are implemented by `rtc-srtp` but are not currently represented in the DTLS `use_srtp` extension.
+Lengths are bytes. DTLS-SRTP negotiation currently exposes AES-128-CM HMAC-SHA1 80/32 and AEAD AES-128/256-GCM; the two AES-256-CM profiles are implemented by `rtci-srtp` but are not currently represented in the DTLS `use_srtp` extension.
 
 ## STUN
 
 | Operation | Current call site and behavior |
 |---|---|
-| MD5 | `rtc-stun/src/integrity.rs` derives a long-term credential key from `username:realm:password`. |
-| HMAC-SHA1 | `rtc-stun/src/integrity.rs` calculates and verifies `MESSAGE-INTEGRITY`. |
-| Constant-time equality | `rtc-stun/src/checks.rs` compares complete integrity values with `subtle::ConstantTimeEq`. |
+| MD5 | `rtci-stun/src/integrity.rs` derives a long-term credential key from `username:realm:password`. |
+| HMAC-SHA1 | `rtci-stun/src/integrity.rs` calculates and verifies `MESSAGE-INTEGRITY`. |
+| Constant-time equality | `rtci-stun/src/checks.rs` compares complete integrity values with `subtle::ConstantTimeEq`. |
 | Transaction randomness | `TransactionId::new()` and `Message::new_transaction_id()` use `rand::rng().fill` for the 96-bit ID. |
 
 `ATTR_MESSAGE_INTEGRITY_SHA256` is defined, but the current implementation only implements HMAC-SHA1 `MESSAGE-INTEGRITY`. Adding STUN SHA-256 integrity is not implicit G3 work. `MessageIntegrity` publicly wraps a `Vec<u8>`, and its current `Display` implementation exposes the key; migration must replace this with a redacted secret type without changing wire behavior.
@@ -77,15 +77,15 @@ Lengths are bytes. DTLS-SRTP negotiation currently exposes AES-128-CM HMAC-SHA1 
 
 | Surface | Current dependency | G3 disposition |
 |---|---|---|
-| `rtc_dtls::crypto::CryptoPrivateKeyKind` | Ring-compatible Ed25519/ECDSA key pairs, RSA key pair, or `CustomSigner` | Compatibility adapter during migration; remove before 1.0. |
-| `rtc_dtls::crypto::CryptoPrivateKey` and `Certificate` | Concrete key variants and X.509 parsing | Replace internals with provider-neutral signing keys and SPKI DER. |
-| `rtc_dtls::crypto::CustomSigner` | DTLS-specific signing extension | Adapt temporarily to `SigningKey`; remove before 1.0. |
+| `rtci_dtls::crypto::CryptoPrivateKeyKind` | Ring-compatible Ed25519/ECDSA key pairs, RSA key pair, or `CustomSigner` | Compatibility adapter during migration; remove before 1.0. |
+| `rtci_dtls::crypto::CryptoPrivateKey` and `Certificate` | Concrete key variants and X.509 parsing | Replace internals with provider-neutral signing keys and SPKI DER. |
+| `rtci_dtls::crypto::CustomSigner` | DTLS-specific signing extension | Adapt temporarily to `SigningKey`; remove before 1.0. |
 | DTLS `Config` certificate verification | rustls `RootCertStore`, verifier traits, and certificate types | Keep behind an explicit certificate-verification adapter; do not put X.509 policy into `RTCCrypto`. |
 | Top-level `RTCCertificate::from_key_pair` | `rcgen::KeyPair` | Keep as a deprecated migration adapter until provider-neutral import/generation lands; remove before 1.0. |
-| `rtc_shared::crypto::KeyingMaterialExporter` | DTLS-to-SRTP trait coupling | Replace with byte-oriented keying material and remove. |
+| `rtci_shared::crypto::KeyingMaterialExporter` | DTLS-to-SRTP trait coupling | Replace with byte-oriented keying material and remove. |
 | `ring` and `aws-lc-rs` feature guards and aliases | DTLS, SRTP, STUN, ICE, TURN, and top-level RTC | Replace with additive provider selection in P1-09 and remove per-crate direct dependencies after migration. |
 | `openssl` and `vendored-openssl` | Partial SRTP AES-CTR implementation only | Deprecate and remove before 1.0; no partial provider will remain. |
-| Shared backend error variants | Ring, AWS-LC-RS, and OpenSSL errors in `rtc-shared` | Map provider failures at protocol boundaries, then remove backend-specific variants. |
+| Shared backend error variants | Ring, AWS-LC-RS, and OpenSSL errors in `rtci-shared` | Map provider failures at protocol boundaries, then remove backend-specific variants. |
 
 ## Initial provider operation-to-caller map
 

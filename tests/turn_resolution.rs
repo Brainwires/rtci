@@ -5,27 +5,27 @@
 //! from the beginning. The TURN server is scripted by the test, behind the stream interface.
 
 use anyhow::Result;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{StreamCommand, StreamEvent, StreamId};
-use rtc::stun::addr::MappedAddress;
-use rtc::stun::attributes::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{StreamCommand, StreamEvent, StreamId};
+use rtci::stun::addr::MappedAddress;
+use rtci::stun::attributes::{
     ATTR_ALTERNATE_SERVER, ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM,
 };
-use rtc::stun::error_code::{CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute};
-use rtc::stun::fingerprint::FINGERPRINT;
-use rtc::stun::integrity::MessageIntegrity;
-use rtc::stun::message::{
+use rtci::stun::error_code::{CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute};
+use rtci::stun::fingerprint::FINGERPRINT;
+use rtci::stun::integrity::MessageIntegrity;
+use rtci::stun::message::{
     CLASS_ERROR_RESPONSE, CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, METHOD_ALLOCATE, Message,
     MessageType, Setter,
 };
-use rtc::stun::textattrs::{Nonce, Realm};
-use rtc::stun::xoraddr::XorMappedAddress;
-use rtc::turn::proto::lifetime::Lifetime;
-use rtc::turn::proto::relayaddr::RelayedAddress;
+use rtci::stun::textattrs::{Nonce, Realm};
+use rtci::stun::xoraddr::XorMappedAddress;
+use rtci::turn::proto::lifetime::Lifetime;
+use rtci::turn::proto::relayaddr::RelayedAddress;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -80,7 +80,7 @@ impl Harness {
             .build(now)?;
         pc.create_data_channel("resolution", None)?;
         let answerer = RTCPeerConnectionBuilder::new().build(now)?;
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let key = MessageIntegrity::long_term_integrity_key(
             USER.to_owned(),
             REALM.to_owned(),
@@ -122,11 +122,11 @@ impl Harness {
     fn reply(
         &self,
         request: &Message,
-        class: rtc::stun::message::MessageClass,
+        class: rtci::stun::message::MessageClass,
         attrs: Vec<Box<dyn Setter>>,
         sign: bool,
     ) -> Result<Vec<u8>> {
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let mut setters: Vec<Box<dyn Setter>> = vec![
             Box::new(request.transaction_id),
             Box::new(MessageType::new(request.typ.method, class)),
@@ -291,7 +291,7 @@ impl Harness {
 struct AlternateServer(MappedAddress);
 
 impl Setter for AlternateServer {
-    fn add_to(&self, m: &mut Message) -> rtc::shared::error::Result<()> {
+    fn add_to(&self, m: &mut Message) -> rtci::shared::error::Result<()> {
         self.0.add_to_as(m, ATTR_ALTERNATE_SERVER)
     }
 }

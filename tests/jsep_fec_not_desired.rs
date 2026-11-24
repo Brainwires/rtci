@@ -8,7 +8,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 /// A remote offer of VP8 with RED, ULPFEC, FlexFEC-03 and RFC 8627 FlexFEC. The default
 /// answer keeps VP8 (beside formats of its own) and drops the rest: the FEC formats, and RED, whose only secondary codec

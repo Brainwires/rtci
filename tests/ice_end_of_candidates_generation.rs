@@ -10,11 +10,11 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values, keep, replace_lines};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateInit};
-use rtc::sansio::Protocol;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateInit};
+use rtci::sansio::Protocol;
 use std::time::Instant;
 
 fn end_of_candidates(pc: &mut RTCPeerConnection) -> Option<RTCIceCandidate> {

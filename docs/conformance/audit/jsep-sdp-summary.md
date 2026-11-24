@@ -1,6 +1,6 @@
 # JSEP and SDP area: audit summary
 
-Clause-level audit of the specifications behind `rtc-sdp/`, `src/peer_connection/{mod,internal}.rs`,
+Clause-level audit of the specifications behind `rtci-sdp/`, `src/peer_connection/{mod,internal}.rs`,
 `src/peer_connection/sdp/`, `src/rtp_transceiver/` and
 `src/peer_connection/configuration/media_engine.rs`, at fork master 8916bc3. No test was run: every
 verdict comes from reading the code and the tests.

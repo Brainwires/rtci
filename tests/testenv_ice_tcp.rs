@@ -7,24 +7,24 @@
 //! NAT's public address and a port the NAT chose, which the passive agent learns as a
 //! peer-reflexive candidate (RFC 6544 7.2.2, RFC 8445 7.3.1.3). Both agents are TCP-only, so
 //! nothing can fall back to UDP. Every packet on a connection is framed with RFC 4571's 16-bit
-//! length (`rtc::shared::tcp_framing`).
+//! length (`rtci::shared::tcp_framing`).
 
 mod common;
 mod testenv;
 
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::ice::network_type::NetworkType;
-use rtc::ice::tcp_type::TcpType;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::data_channel::RTCDataChannelId;
+use rtci::ice::network_type::NetworkType;
+use rtci::ice::tcp_type::TcpType;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -93,7 +93,7 @@ impl TcpPeer {
         }
     }
 
-    fn candidate(&self) -> rtc::peer_connection::transport::RTCIceCandidateInit {
+    fn candidate(&self) -> rtci::peer_connection::transport::RTCIceCandidateInit {
         let c = CandidateHostConfig {
             base_config: CandidateConfig {
                 network: "tcp".to_owned(),
@@ -378,8 +378,8 @@ fn engine_tcp_peer(
     rx: std::sync::mpsc::Receiver<Signal>,
     messages: Vec<Vec<u8>>,
 ) -> io::Result<(bool, Vec<Vec<u8>>, String)> {
-    use rtc::peer_connection::sdp::RTCSessionDescription;
-    use rtc::peer_connection::transport::RTCIceCandidateInit;
+    use rtci::peer_connection::sdp::RTCSessionDescription;
+    use rtci::peer_connection::transport::RTCIceCandidateInit;
     use stream_driver::{DriverInput, StreamDriver};
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -468,7 +468,7 @@ fn engine_tcp_peer(
                 }
             }
             if connected && selected.is_empty() {
-                let report = pc.get_stats(Instant::now(), rtc::statistics::StatsSelector::None);
+                let report = pc.get_stats(Instant::now(), rtci::statistics::StatsSelector::None);
                 if let Some(pair) = report.candidate_pairs().find(|p| p.nominated) {
                     selected = format!(
                         "{} -> {}",

@@ -49,8 +49,8 @@
 //! connection for processing and transmission:
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::media_stream::MediaStreamTrackId;
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::media_stream::MediaStreamTrackId;
 //!
 //! # fn send_media(track_id: MediaStreamTrackId, rtp_packet: rtp::Packet) {
 //! // Create a message
@@ -67,7 +67,7 @@
 //! them based on type:
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 //!
 //! # fn receive_messages(message: RTCMessage) {
 //! match message {
@@ -98,8 +98,8 @@
 //! ## Media Streaming
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::media_stream::MediaStreamTrackId;
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::media_stream::MediaStreamTrackId;
 //!
 //! # fn stream_media(track_id: MediaStreamTrackId) {
 //! // Capture and encode media frame
@@ -128,7 +128,7 @@
 //! ## Quality Monitoring
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 //!
 //! # fn monitor_quality(message: RTCMessage) {
 //! if let RTCMessage::RtcpPacket(track_id, packets) = message {
@@ -144,8 +144,8 @@
 //! ## Data Channel Communication
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
 //! use bytes::BytesMut;
 //!
 //! # fn send_data(channel_id: RTCDataChannelId) {
@@ -170,7 +170,7 @@
 //! ## Filtering Messages by Type
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 //!
 //! fn process_messages(messages: Vec<RTCMessage>) {
 //!     // Process only media messages
@@ -192,8 +192,8 @@
 //! ## Batching Messages
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-//! use rtc::media_stream::MediaStreamTrackId;
+//! use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtci::media_stream::MediaStreamTrackId;
 //!
 //! # fn batch_send(track_id: MediaStreamTrackId, packets: Vec<rtp::Packet>) {
 //! // Send multiple packets efficiently
@@ -260,8 +260,8 @@ pub(crate) mod internal;
 /// ## Sending RTP Media
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-/// use rtc::media_stream::MediaStreamTrackId;
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::media_stream::MediaStreamTrackId;
 ///
 /// # fn example(track_id: MediaStreamTrackId, rtp_packet: rtp::Packet) {
 /// // Create an RTP message for a specific track
@@ -275,8 +275,8 @@ pub(crate) mod internal;
 /// ## Sending RTCP Feedback
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-/// use rtc::media_stream::MediaStreamTrackId;
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::media_stream::MediaStreamTrackId;
 ///
 /// # fn example(track_id: MediaStreamTrackId, rtcp_packets: Vec<Box<dyn rtcp::Packet>>) {
 /// // Create an RTCP message with control packets
@@ -290,8 +290,8 @@ pub(crate) mod internal;
 /// ## Sending Data Channel Message
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-/// use rtc::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
 /// use bytes::BytesMut;
 ///
 /// # fn example(channel_id: RTCDataChannelId) -> Result<(), Box<dyn std::error::Error>> {
@@ -315,7 +315,7 @@ pub(crate) mod internal;
 /// ## Processing Incoming Messages
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 ///
 /// # fn handle_message(message: RTCMessage) {
 /// match message {
@@ -341,7 +341,7 @@ pub(crate) mod internal;
 /// ## Filtering by Message Type
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 ///
 /// fn is_media_message(message: &RTCMessage) -> bool {
 ///     matches!(message, RTCMessage::RtpPacket(_, _) | RTCMessage::RtcpPacket(_, _))
@@ -363,8 +363,8 @@ pub(crate) mod internal;
 /// ## Extracting Message Content
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-/// use rtc::media_stream::MediaStreamTrackId;
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::media_stream::MediaStreamTrackId;
 ///
 /// # fn example(message: RTCMessage) {
 /// match message {
@@ -439,8 +439,8 @@ pub enum RTCMessage {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-    /// use rtc::media_stream::MediaStreamTrackId;
+    /// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+    /// use rtci::media_stream::MediaStreamTrackId;
     ///
     /// # fn example(track_id: MediaStreamTrackId, rtp_packet: rtp::Packet) {
     /// let message = RTCMessage::RtpPacket(track_id, rtp_packet);
@@ -481,8 +481,8 @@ pub enum RTCMessage {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-    /// use rtc::media_stream::MediaStreamTrackId;
+    /// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+    /// use rtci::media_stream::MediaStreamTrackId;
     ///
     /// # fn example(track_id: MediaStreamTrackId, rtcp_packets: Vec<Box<dyn rtcp::Packet>>) {
     /// let message = RTCMessage::RtcpPacket(track_id, rtcp_packets);
@@ -523,8 +523,8 @@ pub enum RTCMessage {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-    /// use rtc::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
+    /// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+    /// use rtci::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
     /// use bytes::BytesMut;
     ///
     /// # fn example(channel_id: RTCDataChannelId) {

@@ -87,7 +87,7 @@
 //!
 //! ```
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create with default configuration
@@ -100,7 +100,7 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -124,8 +124,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::sdp::RTCSessionDescription;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::sdp::RTCSessionDescription;
 //!
 //! # fn example(remote_offer_sdp: String) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -152,9 +152,9 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::media_stream::MediaStreamTrack;
-//! use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::media_stream::MediaStreamTrack;
+//! use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 //!
 //! # fn example(audio_track: MediaStreamTrack) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -172,8 +172,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::data_channel::RTCDataChannelInit;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::data_channel::RTCDataChannelInit;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -193,8 +193,8 @@
 //! ## ICE Candidate Exchange
 //!
 //! ```no_run
-//! use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-//! use rtc::peer_connection::transport::RTCIceCandidateInit;
+//! use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+//! use rtci::peer_connection::transport::RTCIceCandidateInit;
 //!
 //! # fn example(mut pc: RTCPeerConnection) -> Result<(), Box<dyn std::error::Error>> {
 //! // When local candidates are gathered, send to remote peer
@@ -388,7 +388,7 @@ const MAX_TRICKLED_REMOTE_CANDIDATES: usize = 256;
 ///
 /// ```
 /// # use std::time::Instant;
-/// use rtc::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -400,8 +400,8 @@ const MAX_TRICKLED_REMOTE_CANDIDATES: usize = 256;
 ///
 /// ```
 /// # use std::time::Instant;
-/// use rtc::peer_connection::RTCPeerConnectionBuilder;
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let pc = RTCPeerConnectionBuilder::new()
@@ -422,8 +422,8 @@ const MAX_TRICKLED_REMOTE_CANDIDATES: usize = 256;
 ///
 /// ```
 /// # use std::time::Instant;
-/// use rtc::peer_connection::RTCPeerConnectionBuilder;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -440,9 +440,9 @@ const MAX_TRICKLED_REMOTE_CANDIDATES: usize = 256;
 ///
 /// ```
 /// # use std::time::Instant;
-/// use rtc::peer_connection::RTCPeerConnectionBuilder;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
-/// use rtc::peer_connection::configuration::interceptor_registry::{
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::configuration::interceptor_registry::{
 ///     Registry, register_default_interceptors,
 /// };
 ///
@@ -482,7 +482,7 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -504,8 +504,8 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = RTCConfigurationBuilder::new()
@@ -534,8 +534,8 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::configuration::media_engine::MediaEngine;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut media_engine = MediaEngine::default();
@@ -561,8 +561,8 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     /// use std::time::Duration;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -607,9 +607,9 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    /// use rtc::peer_connection::configuration::interceptor_registry::{
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    /// use rtci::peer_connection::configuration::interceptor_registry::{
     ///     Registry, register_default_interceptors,
     /// };
     ///
@@ -634,11 +634,11 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::configuration::interceptor_registry::{
+    /// use rtci::peer_connection::configuration::interceptor_registry::{
     ///     Registry, register_default_interceptors,
     /// };
-    /// use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    /// use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+    /// use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    /// use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
     ///
     /// struct Session {
     ///     peer_connection: RTCPeerConnection, // no type parameter
@@ -683,7 +683,7 @@ impl RTCPeerConnectionBuilder {
     ///
     /// ```
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -778,7 +778,7 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
 /// session reproducible in a test with no socket and no sleep.
 ///
 /// The driving methods come from the [`sansio::Protocol`] trait, so **the trait must be in scope**
-/// (`use rtc::sansio::Protocol;`) or none of them will resolve:
+/// (`use rtci::sansio::Protocol;`) or none of them will resolve:
 ///
 /// | Method | Direction | What it does |
 /// | --- | --- | --- |
@@ -818,7 +818,7 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
 ///
 /// ```
 /// # use std::time::Instant;
-/// use rtc::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -1168,8 +1168,8 @@ impl RTCPeerConnection {
     ///
     /// ```no_run
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::sdp::RTCSessionDescription;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::sdp::RTCSessionDescription;
     ///
     /// # fn example(remote_offer_sdp: String) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -1194,9 +1194,9 @@ impl RTCPeerConnection {
     ///
     /// ```no_run
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::sdp::RTCSessionDescription;
-    /// use rtc::media_stream::MediaStreamTrack;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::sdp::RTCSessionDescription;
+    /// use rtci::media_stream::MediaStreamTrack;
     ///
     /// # fn example(
     /// #     remote_offer_sdp: String,
@@ -1386,7 +1386,7 @@ impl RTCPeerConnection {
     ///
     /// ```no_run
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -1407,8 +1407,8 @@ impl RTCPeerConnection {
     ///
     /// ```no_run
     /// # use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::sdp::RTCSessionDescription;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::sdp::RTCSessionDescription;
     ///
     /// # fn example(remote_offer_sdp: String) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -3715,8 +3715,8 @@ impl RTCPeerConnection {
     ///
     /// ```no_run
     /// # use std::time::Instant;
-    /// # use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::peer_connection::transport::RTCIceCandidateInit;
+    /// # use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::peer_connection::transport::RTCIceCandidateInit;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -4882,7 +4882,7 @@ impl RTCPeerConnection {
     /// its end (RFC 5764 section 4.4), unless
     /// `SettingEngineBuilder::with_srtp_automatic_rekeying(false)`; at the end the engine
     /// refuses to protect more with the key and the DTLS transport fails. The peer must take a
-    /// new association on a transport that has one, which an `rtc` peer does; browsers ignore
+    /// new association on a transport that has one, which an `rtci` peer does; browsers ignore
     /// the new `tls-id`.
     ///
     /// With several transports (sections outside a BUNDLE group, several groups) every
@@ -5084,8 +5084,8 @@ impl RTCPeerConnection {
     ///
     /// ```no_run
     /// use std::time::Instant;
-    /// use rtc::peer_connection::RTCPeerConnectionBuilder;
-    /// use rtc::statistics::StatsSelector;
+    /// use rtci::peer_connection::RTCPeerConnectionBuilder;
+    /// use rtci::statistics::StatsSelector;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;

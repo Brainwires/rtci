@@ -3,22 +3,22 @@ use bytes::BytesMut;
 use clap::Parser;
 use env_logger::Target;
 use log::error;
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::fs::OpenOptions;
 use std::time::{Duration, Instant};
 use std::{io::Write, str::FromStr};
 use tokio::net::UdpSocket;
 
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day duration
 const BUFFERED_AMOUNT_LOW_THRESHOLD: u32 = 512 * 1024; // 512 KB

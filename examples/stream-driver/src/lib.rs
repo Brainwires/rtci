@@ -1,9 +1,9 @@
 //! The reference driver for the stream half of WebRTC.rs's sans-I/O engine
-//! (`rtc_shared::stream`): it owns the TCP sockets, on tokio, and does what the engine asks.
+//! (`rtci_shared::stream`): it owns the TCP sockets, on tokio, and does what the engine asks.
 //!
 //! # Engine and driver
 //!
-//! The engine (`rtc::peer_connection::RTCPeerConnection`) performs no I/O. For its datagrams
+//! The engine (`rtci::peer_connection::RTCPeerConnection`) performs no I/O. For its datagrams
 //! the application reads and writes its own UDP sockets (`handle_read` / `poll_write`). For
 //! TCP it is the engine that **decides** — which ICE-TCP candidates to gather (RFC 6544), which
 //! connections to open and close, the RFC 4571 framing, TURN over TCP, TLS and DTLS, relayed
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! A complete program, two peer connections over loopback TCP with a data channel, is the
-//! `stream-driver-loopback` example of the `rtc` crate (`cargo run --example
+//! `stream-driver-loopback` example of the `rtci` crate (`cargo run --example
 //! stream-driver-loopback`); the test environment runs it.
 //!
 //! # Server choices
@@ -59,7 +59,7 @@
 //!
 //! # A whole peer connection
 //!
-//! [`peer::PeerDriver`] (feature `peer`, on by default) drives an `rtc` peer connection over
+//! [`peer::PeerDriver`] (feature `peer`, on by default) drives an `rtci` peer connection over
 //! sockets it owns, its UDP host sockets included, and gathers for it: at the first local
 //! description, and again on its own when a transport needs a new set of local candidates
 //! (`OnLocalCandidatesNeeded`: a new DTLS association runs on a new 3-tuple, RFC 8842 section
@@ -67,7 +67,7 @@
 //!
 //! # Features
 //!
-//! - `peer` (default): [`peer`], with a dependency on `rtc`.
+//! - `peer` (default): [`peer`], with a dependency on `rtci`.
 //! - `dns-records`: SRV and NAPTR lookups (RFC 5928, RFC 8489 section 8) and AAAA / A answered
 //!   apart (RFC 8305 section 3), with hickory-resolver (MIT OR Apache-2.0). Without it, names go
 //!   to the system resolver and record queries are answered with none (the engine then uses

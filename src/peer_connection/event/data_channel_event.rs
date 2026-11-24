@@ -28,7 +28,7 @@ use crate::data_channel::RTCDataChannelId;
 /// ## Handling data channel events in event loop
 ///
 /// ```
-/// use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+/// use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
 ///
 /// # fn example(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -54,7 +54,7 @@ use crate::data_channel::RTCDataChannelId;
 /// ## Implementing flow control with buffer events
 ///
 /// ```
-/// use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+/// use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
 ///
 /// # fn example(event: RTCPeerConnectionEvent, paused: &mut bool) {
 /// match event {

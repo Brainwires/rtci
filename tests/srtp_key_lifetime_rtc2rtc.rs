@@ -6,25 +6,25 @@
 
 use anyhow::Result;
 use bytes::Bytes;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::rtc_error::RTCErrorDetailType;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::srtp::keying::KeyLifetime;
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::srtp::keying::KeyLifetime;
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -50,7 +50,7 @@ struct Peer {
     addr: SocketAddr,
     inbox: Vec<TaggedBytesMut>,
     events: Vec<(Instant, RTCPeerConnectionEvent)>,
-    rtp: Vec<(Instant, rtc::rtp::Packet)>,
+    rtp: Vec<(Instant, rtci::rtp::Packet)>,
 }
 
 impl Peer {
@@ -218,8 +218,8 @@ fn an_exhausted_srtp_key_fails_the_transport_with_its_reason() -> Result<()> {
             // Refused once the key is exhausted: the error is the pipeline's, not the caller's.
             let _ = caller.pc.rtp_sender(sender).expect("sender").write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: 111,
                         sequence_number: written,
@@ -321,10 +321,10 @@ fn exchange(offerer: &mut Peer, answerer: &mut Peer, now: Instant) -> Result<()>
 /// Whether the peer's DTLS transport is connected (`RTCTransportStats.dtlsState`).
 fn dtls_connected(peer: &mut Peer, now: Instant) -> bool {
     peer.pc
-        .get_stats(now, rtc::statistics::StatsSelector::None)
+        .get_stats(now, rtci::statistics::StatsSelector::None)
         .transport()
         .is_some_and(|t| {
-            t.dtls_state == rtc::peer_connection::transport::RTCDtlsTransportState::Connected
+            t.dtls_state == rtci::peer_connection::transport::RTCDtlsTransportState::Connected
         })
 }
 
@@ -425,8 +425,8 @@ fn a_new_dtls_association_re_keys_srtp_and_starts_the_key_lifetime_over() -> Res
             seq += 1;
             let _ = caller.pc.rtp_sender(sender).expect("sender").write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: 111,
                         sequence_number: seq,

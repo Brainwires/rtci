@@ -2,7 +2,7 @@
 //! 3550 section 6: RTCP is "the control protocol" of an RTP session; RFC 8834 section 4.1;
 //! RFC 9429 section 5.2.1: a transport carries RTP only for the sections that use it), and
 //! what it sends is SRTCP (RFC 3711 section 3.4, RFC 5764 section 4.1, RFC 8827 section 6.5).
-//! Between two `rtc` peers on an in-memory network and a virtual clock:
+//! Between two `rtci` peers on an in-memory network and a virtual clock:
 //!
 //! - a data-channel-only connection sends no datagram in the RTP / RTCP range (RFC 7983:
 //!   first byte 128 to 191) at all, whether or not its DTLS association negotiated
@@ -18,9 +18,9 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use std::time::Duration;
 
 fn world(use_srtp_on_every_association: bool) -> Result<World> {

@@ -7,20 +7,20 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_TELEPHONE_EVENT, MIME_TYPE_VP9,
 };
-use rtc::peer_connection::configuration::{RTCAnswerOptions, RTCOfferOptions};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::{RTCAnswerOptions, RTCOfferOptions};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::shared::error::Error;
+use rtci::shared::error::Error;
 use sansio::Protocol;
 
 /// W3C 4.4.1.6: applying a local description "set[s] the transceiver's [[Mid]] slot to
@@ -81,7 +81,7 @@ fn an_encoding_codec_the_answer_did_not_negotiate_is_removed() -> TestResult {
     ));
     let now = Instant::now();
     pc.set_remote_description(now, RTCSessionDescription::offer(offer)?)?;
-    let codec_of = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+    let codec_of = |pc: &mut rtci::peer_connection::RTCPeerConnection| {
         pc.rtp_sender(sender)
             .expect("sender")
             .get_parameters()
@@ -116,7 +116,7 @@ fn legacy_offer_to_receive_options_set_directions_and_add_a_silent_transceiver()
     let sendrecv = pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
     let recvonly = pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     negotiation_needed_events(&mut pc);
     let offer = pc.create_offer(Some(RTCOfferOptions {
@@ -270,9 +270,9 @@ fn codec_preferences_match_capabilities_by_their_format_parameters() -> TestResu
 /// with a query is refused by both, and both keep at most the first 32 servers.
 #[test]
 fn the_constructor_and_set_configuration_validate_servers_alike() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-    use rtc::peer_connection::transport::RTCIceServer;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+    use rtci::peer_connection::transport::RTCIceServer;
     let with_servers = |urls: Vec<&str>| {
         RTCConfigurationBuilder::new()
             .with_ice_servers(

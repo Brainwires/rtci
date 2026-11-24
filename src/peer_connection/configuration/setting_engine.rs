@@ -19,7 +19,7 @@
 //! ## Configuring ICE timeouts for unstable networks
 //!
 //! ```
-//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//! use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 //! use std::time::Duration;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,8 +42,8 @@
 //! ## Setting up 1:1 NAT for cloud deployments
 //!
 //! ```
-//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-//! use rtc::peer_connection::transport::RTCIceCandidateType;
+//! use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//! use rtci::peer_connection::transport::RTCIceCandidateType;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Configure for AWS EC2 instance with Elastic IP
@@ -63,7 +63,7 @@
 //! ## Configuring replay protection for security-critical applications
 //!
 //! ```
-//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//! use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Increase replay protection window sizes
@@ -81,7 +81,7 @@
 //! ## Restricting network types for controlled environments
 //!
 //! ```
-//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//! use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 //! use ice::network_type::NetworkType;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -385,7 +385,7 @@ impl Default for SctpMaxMessageSize {
 /// ## Basic usage with RTCConfiguration
 ///
 /// ```
-/// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+/// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 /// use std::time::Duration;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -483,10 +483,10 @@ pub struct SettingEngine {
     /// Determines the max size of any message that may be sent through an SCTP transport.
     pub(crate) sctp_max_message_size: SctpMaxMessageSize,
     /// Overrides the SCTP receive-buffer size (the a_rwnd flow-control window), in bytes.
-    /// `None` uses the rtc-sctp default (`INITIAL_RECV_BUF_SIZE`, 1 MiB).
+    /// `None` uses the rtci-sctp default (`INITIAL_RECV_BUF_SIZE`, 1 MiB).
     pub(crate) sctp_max_receive_buffer_size: Option<u32>,
     /// Overrides the outbound SCTP DATA-packet budget, converted to a payload
-    /// budget via rtc-sctp's `max_payload_size_for_mtu`. `None` uses the rtc-sctp
+    /// budget via rtci-sctp's `max_payload_size_for_mtu`. `None` uses the rtci-sctp
     /// default (`INITIAL_MTU`, 1191 — the TURN-relayed IPv6 minimum-MTU budget).
     pub(crate) sctp_mtu: Option<u32>,
     /// SCTP path MTU discovery (RFC 8899 section 6.2.3): `Some` with the largest IP packet to
@@ -867,8 +867,8 @@ impl SettingEngineBuilder {
     /// takes it, so that the whole peer connection follows one profile.
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::BehaviourProfile;
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::BehaviourProfile;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_behaviour_profile(BehaviourProfile::Chrome)
@@ -907,7 +907,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     /// use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -941,7 +941,7 @@ impl SettingEngineBuilder {
     ///
     /// ```
     /// use dtls::cipher_suite::CipherSuiteId;
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_dtls_cipher_suites(vec![
@@ -987,7 +987,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     /// use std::time::Duration;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -1129,7 +1129,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Enable ICE Lite for a publicly accessible server
@@ -1161,7 +1161,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     /// use ice::network_type::NetworkType;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -1216,8 +1216,8 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    /// use rtc::peer_connection::transport::RTCIceCandidateType;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::transport::RTCIceCandidateType;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // AWS EC2: Private IP 10.0.1.5, Elastic IP 54.123.45.67
@@ -1286,8 +1286,8 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    /// use rtc::peer_connection::transport::RTCDtlsRole;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::transport::RTCDtlsRole;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Force this peer to always act as DTLS client when answering
@@ -1351,7 +1351,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Set static credentials for reproducible testing
@@ -1387,7 +1387,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Only for testing/debugging!
@@ -1430,7 +1430,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Increase window for high-latency or reordering networks
@@ -1465,7 +1465,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // A wider window for a high packet rate
@@ -1496,7 +1496,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Smaller window sufficient for RTCP
@@ -1524,7 +1524,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Enable for certain VM configurations
@@ -1581,7 +1581,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Pairs with a transport that rebinds its sockets during ICE restart.
@@ -1619,7 +1619,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// // Pair loopback remote candidates with any local candidate; keep link-local ones scoped.
     /// let _setting_engine = SettingEngineBuilder::new()
@@ -1701,8 +1701,8 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    /// use rtc::ice::NominationAcceptance;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::ice::NominationAcceptance;
     ///
     /// let _setting_engine = SettingEngineBuilder::new()
     ///     .with_ice_nomination_acceptance(NominationAcceptance::Latest)
@@ -1728,8 +1728,8 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    /// use rtc::ice::FailedNomination;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::ice::FailedNomination;
     ///
     /// let _setting_engine = SettingEngineBuilder::new()
     ///     .with_ice_failed_nomination(FailedNomination::Retry)
@@ -1826,8 +1826,8 @@ impl SettingEngineBuilder {
     /// servers, over UDP, TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind,
     /// ConnectionBind).
     ///
-    /// Without this call the ICE agent sends `rtc-ice` and its version
-    /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtc-turn` and its version
+    /// Without this call the ICE agent sends `rtci-ice` and its version
+    /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtci-turn` and its version
     /// ([`turn::client::DEFAULT_SOFTWARE`]): RFC 8489 sections 6.1 and 6.3.1.1, requests and
     /// responses "SHOULD" carry one. `Some(text)` sends `text` in all of them. `None` (or an
     /// empty text) sends no SOFTWARE attribute at all, for an application that must not put
@@ -1842,7 +1842,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// // No SOFTWARE attribute in any STUN message of the peer connection.
     /// let _setting_engine = SettingEngineBuilder::new().with_ice_software(None).build();
@@ -1867,7 +1867,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     /// use std::sync::Arc;
     ///
     /// // Drop every remote candidate on a loopback address.
@@ -1897,7 +1897,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // One fingerprint at session level
@@ -1923,7 +1923,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_disable_sdp_tls_id(true)
@@ -1949,7 +1949,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_dtls_new_association_without_ice_restart(true)
@@ -1996,7 +1996,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_dtls_new_association_on_previous_addresses(true)
@@ -2022,7 +2022,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_msid_removal_ends_track(true)
@@ -2048,7 +2048,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_msid_appdata_change_renews_track(true)
@@ -2089,7 +2089,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_stopping_transceiver_rejected_in_answer(true)
@@ -2118,7 +2118,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_dtls_use_srtp_on_every_association(true)
@@ -2138,7 +2138,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_lowercase_fingerprints_accepted(true)
@@ -2349,7 +2349,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Share MediaEngine across connections
@@ -2396,7 +2396,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Force same codecs for all media sections
@@ -2462,7 +2462,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Use larger MTU for jumbo frames
@@ -2507,7 +2507,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Generate MIDs with a custom prefix
@@ -2551,7 +2551,7 @@ impl SettingEngineBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::setting_engine::{
+    /// use rtci::peer_connection::configuration::setting_engine::{
     ///     SctpMaxMessageSize, SettingEngineBuilder,
     /// };
     ///
@@ -2984,7 +2984,7 @@ impl SettingEngineBuilder {
     /// followed by a token), and the strict reading refuses it
     /// (`tests/media_rejection_interop.rs::test_video_only_webrtc_offerer_rtc_answerer`:
     /// "a=rtcp-fb: `96 goog-remb `"), so an engine that reads them strictly cannot answer
-    /// its offers. webrtc-rs fixed it on its default branch (`rtc` commit 718d405), as Pion
+    /// its offers. webrtc-rs fixed it on its default branch (`rtci` commit 718d405), as Pion
     /// did in v4.1.5 (pion/webrtc#3207, PR #3218); 0.17.x still writes it. `true` is the
     /// strict RFC form.
     pub fn with_strict_sdp_attribute_grammar(mut self, strict: bool) -> Self {
@@ -3091,7 +3091,7 @@ impl SettingEngineBuilder {
     /// `false` is the default because libwebrtc's receivers (Chromium, WebKit) do not follow
     /// the new SSRC: the browser interop matrix's RFC-form cells saw their track stay on the
     /// signalled SSRC and stop counting packets at the switch, in both offer directions, while
-    /// Firefox followed. Turn it on for receivers known to follow (another `rtc` peer
+    /// Firefox followed. Turn it on for receivers known to follow (another `rtci` peer
     /// connection does).
     pub fn with_ssrc_per_clock_rate(mut self, ssrc_per_clock_rate: bool) -> Self {
         self.0.ssrc_per_clock_rate = ssrc_per_clock_rate;
@@ -3108,7 +3108,7 @@ impl SettingEngineBuilder {
     /// preference", and the sender "SHOULD use the format with the highest preference". The
     /// default codecs offer RED after Opus, as Chromium and WebKit do, and those browsers
     /// answer it after Opus too; libwebrtc sends RED only when it precedes the codec it
-    /// protects. So by default a call with them, or with another `rtc` peer connection,
+    /// protects. So by default a call with them, or with another `rtci` peer connection,
     /// carries plain Opus: RED is negotiated, not used. RFC 8854 recommends Opus's in-band FEC
     /// for Opus (section 4.1) and FEC only for the loss observed or when the application asks
     /// (section 8).

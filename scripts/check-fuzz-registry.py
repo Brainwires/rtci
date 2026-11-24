@@ -2,7 +2,7 @@
 """Every fuzz target is built and run.
 
 A fuzz target that no job builds is coverage on paper only. For every cargo-fuzz crate in the
-repository (`fuzz/` for the `rtc` crate, `<crate>/fuzz/` for the others) this fails when:
+repository (`fuzz/` for the `rtci` crate, `<crate>/fuzz/` for the others) this fails when:
 
 * a ``[[bin]]`` entry points at a file that does not exist;
 * a file in ``fuzz_targets/`` that defines a target (``fuzz_target!``) has no ``[[bin]]``;
@@ -33,7 +33,7 @@ def fuzz_crates() -> dict[str, Path]:
         if not manifest.exists() or "cargo-fuzz = true" not in manifest.read_text(encoding="utf-8"):
             continue
         fuzz_dir = manifest.parent
-        crate = "rtc" if fuzz_dir.parent == ROOT else fuzz_dir.parent.name
+        crate = "rtci" if fuzz_dir.parent == ROOT else fuzz_dir.parent.name
         out[crate] = fuzz_dir
     return out
 

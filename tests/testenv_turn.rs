@@ -12,10 +12,10 @@
 mod common;
 mod testenv;
 
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
 use std::time::{Duration, Instant};
 use testenv::{Env, EnvPeer, Gather, TurnTransport, negotiate, pump};
 
@@ -137,8 +137,8 @@ fn relayed_call_outlives_a_stale_nonce() {
 #[test]
 #[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
 fn an_application_gathering_its_own_relay_gets_no_engine_allocation_beside() {
-    use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
-    use rtc::peer_connection::transport::{RTCIceCandidateType, RTCIceServer};
+    use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+    use rtci::peer_connection::transport::{RTCIceCandidateType, RTCIceServer};
     common::install_crypto_provider();
     let env = Env::get();
     let new_pc = || {

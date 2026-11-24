@@ -7,7 +7,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, video_track};
-use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
 
 #[test]
 fn local_candidates_are_written_for_the_rtp_component_only() -> TestResult {
@@ -129,10 +129,10 @@ fn one_cname_is_in_every_source_attribute_and_in_the_rtcp_parameters() -> TestRe
 /// section, as the browsers write them (`tests/fixtures/browser-sdp/`).
 #[test]
 fn each_section_with_a_transport_lists_that_transports_candidates() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
-    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
     let candidates_of = |section: &[String]| -> Vec<String> {
         section
@@ -141,7 +141,7 @@ fn each_section_with_a_transport_lists_that_transports_candidates() -> TestResul
             .map(|c| c.split(' ').nth(4).unwrap_or_default().to_owned())
             .collect()
     };
-    let add = |pc: &mut rtc::peer_connection::RTCPeerConnection, mid: &str, address: &str| {
+    let add = |pc: &mut rtci::peer_connection::RTCPeerConnection, mid: &str, address: &str| {
         pc.add_local_candidate(RTCIceCandidateInit {
             candidate: format!("candidate:1 1 udp 2130706431 {address} 50000 typ host"),
             sdp_mid: Some(mid.to_owned()),

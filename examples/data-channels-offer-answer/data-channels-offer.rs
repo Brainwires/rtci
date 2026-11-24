@@ -9,22 +9,22 @@ use clap::Parser;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use log::error;
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use signal::http::{Body, BodyExt, Incoming};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::shared::util::math_rand_alpha;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::shared::util::math_rand_alpha;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400);
 
@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     let local_addr = socket.local_addr()?;
 
-    use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+    use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
             network: "udp".to_owned(),

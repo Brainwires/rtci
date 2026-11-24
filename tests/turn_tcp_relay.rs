@@ -7,31 +7,31 @@
 //! scripted by the test, behind the stream interface.
 
 use anyhow::Result;
-use rtc::ice::attributes::control::AttrControlled;
-use rtc::ice::attributes::priority::PriorityAttr;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{Framing, StreamCommand, StreamEvent, StreamId};
-use rtc::stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME};
-use rtc::stun::error_code::{CODE_UNAUTHORIZED, ErrorCodeAttribute};
-use rtc::stun::fingerprint::FINGERPRINT;
-use rtc::stun::integrity::MessageIntegrity;
-use rtc::stun::message::{
+use rtci::ice::attributes::control::AttrControlled;
+use rtci::ice::attributes::priority::PriorityAttr;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{Framing, StreamCommand, StreamEvent, StreamId};
+use rtci::stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME};
+use rtci::stun::error_code::{CODE_UNAUTHORIZED, ErrorCodeAttribute};
+use rtci::stun::fingerprint::FINGERPRINT;
+use rtci::stun::integrity::MessageIntegrity;
+use rtci::stun::message::{
     BINDING_REQUEST, BINDING_SUCCESS, CLASS_ERROR_RESPONSE, CLASS_INDICATION, CLASS_REQUEST,
     CLASS_SUCCESS_RESPONSE, Getter, METHOD_ALLOCATE, METHOD_CONNECT, METHOD_CONNECTION_ATTEMPT,
     METHOD_CONNECTION_BIND, Message, MessageType, Setter, TransactionId,
 };
-use rtc::stun::textattrs::{Nonce, Realm, Username};
-use rtc::stun::xoraddr::XorMappedAddress;
-use rtc::turn::proto::connid::ConnectionId;
-use rtc::turn::proto::lifetime::Lifetime;
-use rtc::turn::proto::peeraddr::PeerAddress;
-use rtc::turn::proto::relayaddr::RelayedAddress;
-use rtc::turn::proto::reqtrans::RequestedTransport;
+use rtci::stun::textattrs::{Nonce, Realm, Username};
+use rtci::stun::xoraddr::XorMappedAddress;
+use rtci::turn::proto::connid::ConnectionId;
+use rtci::turn::proto::lifetime::Lifetime;
+use rtci::turn::proto::peeraddr::PeerAddress;
+use rtci::turn::proto::relayaddr::RelayedAddress;
+use rtci::turn::proto::reqtrans::RequestedTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -119,7 +119,7 @@ impl Harness {
         let answer = answerer.create_answer(None)?;
         answerer.set_local_description(now, answer.clone())?;
         pc.set_remote_description(now, answer.clone())?;
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let key = MessageIntegrity::long_term_integrity_key(
             USER.to_owned(),
             REALM.to_owned(),
@@ -149,11 +149,11 @@ impl Harness {
     fn reply(
         &self,
         request: &Message,
-        class: rtc::stun::message::MessageClass,
+        class: rtci::stun::message::MessageClass,
         attrs: Vec<Box<dyn Setter>>,
         sign: bool,
     ) -> Result<Vec<u8>> {
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let mut setters: Vec<Box<dyn Setter>> = vec![
             Box::new(request.transaction_id),
             Box::new(MessageType::new(request.typ.method, class)),
@@ -197,7 +197,7 @@ impl Harness {
             METHOD_ALLOCATE => {
                 let mut transport = RequestedTransport::default();
                 transport.get_from(request)?;
-                let tcp = transport.protocol == rtc::turn::proto::PROTO_TCP;
+                let tcp = transport.protocol == rtci::turn::proto::PROTO_TCP;
                 self.roles.insert(id, Role::Control(Some(tcp)));
                 let relay = a(if tcp { TCP_RELAY } else { UDP_RELAY });
                 vec![
@@ -336,7 +336,7 @@ impl Harness {
             .collect()
     }
 
-    fn requests_of(&self, method: rtc::stun::message::Method) -> Vec<(StreamId, Message)> {
+    fn requests_of(&self, method: rtci::stun::message::Method) -> Vec<(StreamId, Message)> {
         self.requests
             .iter()
             .filter(|(_, m)| m.typ.method == method && m.typ.class == CLASS_REQUEST)
@@ -346,7 +346,7 @@ impl Harness {
 
     /// A check from the peer at the engine's candidate, as the controlled agent sends it.
     fn check(&self) -> Result<Vec<u8>> {
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let mut m = Message::new();
         m.build(&[
             Box::new(BINDING_REQUEST),
@@ -376,7 +376,7 @@ fn no_peer() -> PeerAddress {
 
 /// The STUN messages an RFC 4571 stream carries.
 fn framed_stun(bytes: &[u8]) -> Vec<Message> {
-    let mut decoder = rtc::shared::stream::StreamDecoder::new(Framing::Rfc4571);
+    let mut decoder = rtci::shared::stream::StreamDecoder::new(Framing::Rfc4571);
     decoder
         .decode(bytes)
         .unwrap()
@@ -403,9 +403,9 @@ fn a_tcp_allocation_gives_a_passive_and_an_active_relayed_tcp_candidate() -> Res
         let mut transport = RequestedTransport::default();
         transport.get_from(m)?;
         let expected = if *id == tcp {
-            rtc::turn::proto::PROTO_TCP
+            rtci::turn::proto::PROTO_TCP
         } else {
-            rtc::turn::proto::PROTO_UDP
+            rtci::turn::proto::PROTO_UDP
         };
         assert_eq!(transport.protocol, expected);
     }
@@ -455,7 +455,7 @@ fn a_peer_connecting_to_the_relayed_address_reaches_ice_over_a_data_connection()
     h.pump()?;
     let tcp = h.control(true);
     let permission: Vec<Message> = h
-        .requests_of(rtc::stun::message::METHOD_CREATE_PERMISSION)
+        .requests_of(rtci::stun::message::METHOD_CREATE_PERMISSION)
         .into_iter()
         .filter(|(id, _)| *id == tcp)
         .map(|(_, m)| m)
@@ -511,14 +511,14 @@ fn a_peer_connecting_to_the_relayed_address_reaches_ice_over_a_data_connection()
 /// The SOFTWARE of the engine's TURN client over TCP (RFC 8656 section 5, RFC 8489 section
 /// 16.1.2: "Implementers SHOULD make usage of the SOFTWARE attribute a configurable option"),
 /// in the Allocate requests of both control connections, the CreatePermission and the
-/// ConnectionBind of a data connection (RFC 6062 section 4.3): `rtc-turn` and its version by
+/// ConnectionBind of a data connection (RFC 6062 section 4.3): `rtci-turn` and its version by
 /// default, the text `with_ice_software` names, none with `with_ice_software(None)`.
 #[test]
 fn the_engine_tcp_turn_client_sends_the_software_with_ice_software_names() -> Result<()> {
-    use rtc::stun::attributes::ATTR_SOFTWARE;
-    use rtc::stun::textattrs::Software;
+    use rtci::stun::attributes::ATTR_SOFTWARE;
+    use rtci::stun::textattrs::Software;
     for (setting, expected) in [
-        (None, Some(rtc::turn::client::DEFAULT_SOFTWARE.to_owned())),
+        (None, Some(rtci::turn::client::DEFAULT_SOFTWARE.to_owned())),
         (Some(None), None),
         (Some(Some("app 1.0".to_owned())), Some("app 1.0".to_owned())),
     ] {
@@ -555,7 +555,7 @@ fn the_engine_tcp_turn_client_sends_the_software_with_ice_software_names() -> Re
         h.pump()?;
         for method in [
             METHOD_ALLOCATE,
-            rtc::stun::message::METHOD_CREATE_PERMISSION,
+            rtci::stun::message::METHOD_CREATE_PERMISSION,
             METHOD_CONNECTION_BIND,
         ] {
             assert!(!h.requests_of(method).is_empty(), "{setting:?}: a {method}");
@@ -613,7 +613,7 @@ fn answer_checks(
     peer: SocketAddr,
     answered: &mut Vec<TransactionId>,
 ) -> Result<()> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let requests = framed_stun(h.to_peer.get(&id).map_or(&[][..], |v| &v[..]));
     for request in requests.into_iter().filter(|m| m.typ == BINDING_REQUEST) {
         if answered.contains(&request.transaction_id) {
@@ -688,8 +688,8 @@ fn turn_connections_follow_the_selected_pair_and_a_lost_one_is_reallocated() -> 
             matches!(
                 e,
                 RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(
-                    rtc::peer_connection::state::RTCIceConnectionState::Connected
-                        | rtc::peer_connection::state::RTCIceConnectionState::Completed
+                    rtci::peer_connection::state::RTCIceConnectionState::Connected
+                        | rtci::peer_connection::state::RTCIceConnectionState::Completed
                 )
             )
         })

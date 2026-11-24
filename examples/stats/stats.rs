@@ -3,29 +3,29 @@ use bytes::BytesMut;
 use clap::Parser;
 use env_logger::Target;
 use log::{error, trace};
-use rtc::interceptor::Registry;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCTrackEvent;
+use rtci::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceServer,
 };
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::stats::RTCStatsType;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::stats::RTCStatsType;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::{fs, fs::OpenOptions, io::Write, str::FromStr};
@@ -349,7 +349,7 @@ async fn run(
 
                 // Print ICE candidate stats (only remote candidates)
                 for entry in report.iter_by_type(RTCStatsType::RemoteCandidate) {
-                    if let rtc::statistics::report::RTCStatsReportEntry::RemoteCandidate(
+                    if let rtci::statistics::report::RTCStatsReportEntry::RemoteCandidate(
                         cand_stats,
                     ) = entry
                     {

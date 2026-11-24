@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

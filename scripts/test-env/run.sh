@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One command for the whole webrtc-rs-rtc test environment:
+# One command for the whole rtci test environment:
 #
 #   scripts/test-env/run.sh [stage ...]        stages: unit env interop (default: all three)
 #

@@ -1,0 +1,23 @@
+[package]
+name = "rtci-interceptor-derive"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Derive and attribute macros for the interceptor traits of a sans-I/O WebRTC stack"
+license.workspace = true
+repository.workspace = true
+keywords = ["webrtc", "rtp", "interceptor", "derive"]
+categories = ["development-tools::procedural-macro-helpers"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

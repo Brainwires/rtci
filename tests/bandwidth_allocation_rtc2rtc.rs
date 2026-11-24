@@ -6,26 +6,26 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{
+use rtci::interceptor::{
     AdaptiveJitterBufferBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
 };
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::cell::Cell;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -44,7 +44,7 @@ struct Peer {
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
     /// The RTP packets `poll_read` yielded.
-    read_rtp: Vec<rtc::rtp::Packet>,
+    read_rtp: Vec<rtci::rtp::Packet>,
     /// The FIR entries (SSRC, sequence number) of the RTCP packets `poll_read` yielded.
     read_fir: Vec<(u32, u8)>,
     /// The events other than connection state changes.
@@ -69,8 +69,8 @@ impl Peer {
             );
         }
         media_engine.register_header_extension(
-            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
-                uri: rtc::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
+            rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtci::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
             },
             RtpCodecKind::Video,
             None,
@@ -181,7 +181,7 @@ impl World {
                     RTCMessage::RtcpPacket(_, packets) => {
                         for packet in packets {
                             if let Some(fir) = packet.as_any().downcast_ref::<
-                                rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
+                                rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
                             >() {
                                 peer.read_fir
                                     .extend(fir.fir.iter().map(|e| (e.ssrc, e.sequence_number)));
@@ -268,7 +268,7 @@ impl World {
             // asks for Cryptex (whose default policy, "negotiate", would encrypt them).
             peer.pc
                 .set_rtp_header_encryption_policy(
-                    rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
+                    rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
                 )
                 .expect("before any description");
             prepare(&mut peer.pc);
@@ -358,7 +358,7 @@ impl World {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header,
                     payload: Bytes::from(vec![0x10u8; 100]),
                 },
@@ -406,7 +406,7 @@ fn send_video(
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type: pt,
@@ -515,7 +515,7 @@ fn the_congestion_target_reaches_the_sender_capped_at_max_bitrate() -> Result<()
     assert!(shares[0].1 > 0.0 && shares[0].1 <= 150_000.0, "{shares:?}");
     let report = world.peers[0]
         .pc
-        .get_stats(world.now, rtc::statistics::StatsSelector::None);
+        .get_stats(world.now, rtci::statistics::StatsSelector::None);
     let target = report
         .outbound_rtp_streams()
         .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
@@ -546,7 +546,7 @@ fn the_jitter_buffer_target_holds_the_receivers_packets() -> Result<()> {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type: pt,

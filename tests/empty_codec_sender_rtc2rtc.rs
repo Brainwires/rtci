@@ -6,34 +6,34 @@
 //! reference times negotiated (`a=rtcp-fb:<pt> rrtr`), the receiver's remote-outbound stats
 //! carry a round trip time measured over RTCP XR (RFC 3611 sections 4.4, 4.5).
 //!
-//! Two `rtc` peers on a simulated network, virtual time, no sockets.
+//! Two `rtci` peers on a simulated network, virtual time, no sockets.
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_nack, configure_receiver_reference_time, configure_rtcp_reports,
 };
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -351,8 +351,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: pt,
                             sequence_number: FIRST_SEQ.wrapping_add(n),
@@ -550,8 +550,8 @@ fn the_receiver_measures_a_round_trip_time_over_rtcp_xr() -> Result<()> {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: pt,
                         sequence_number,
@@ -619,8 +619,8 @@ fn round_trip_time_measured(world: &mut World, sender: RTCRtpSenderId) -> Result
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: pt,
                         sequence_number: FIRST_SEQ.wrapping_add(PACKETS).wrapping_add(n),

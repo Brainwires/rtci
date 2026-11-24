@@ -1,4 +1,4 @@
-//! webrtc-extensions section 7 between two `rtc` peer connections: the candidate pairs the
+//! webrtc-extensions section 7 between two `rtci` peer connections: the candidate pairs the
 //! ICE agent forms are announced (`OnIceCandidatePairAdd`) and listed
 //! (`RTCIceTransport::get_candidate_pairs`); `select_candidate_pair` moves the data to another
 //! pair, `remove_candidate_pair` drops one (`OnIceCandidatePairRemove`); both refuse what the
@@ -7,17 +7,17 @@
 //! The peers exchange datagrams in memory, on a virtual clock.
 
 use anyhow::Result;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidatePair,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,7 @@ impl World {
             Ok(Peer {
                 pc: RTCPeerConnectionBuilder::new()
                     .with_setting_engine(
-                        rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                        rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
                             .with_candidate_pair_proposals(proposals)
                             .build(),
                     )

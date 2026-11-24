@@ -1,4 +1,4 @@
-//! Simulcast with RTX between two `rtc` peer connections, in virtual time: the sender offers
+//! Simulcast with RTX between two `rtci` peer connections, in virtual time: the sender offers
 //! three layers (`a=rid` / `a=simulcast`, RFC 8851 / RFC 8853) with RTX (RFC 4588) and the
 //! MID / RtpStreamId / RepairedRtpStreamId header extensions (RFC 9143 section 15, RFC 8852
 //! sections 3.1 and 3.2); the receiver answers. One packet of every layer is lost on the way,
@@ -9,30 +9,30 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::interceptor::Registry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_simulcast_extension_headers, register_default_interceptors,
 };
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
     RTCRtpEncodingParameters, RTCRtpRtxParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ struct Peer {
     /// The (SSRC, sequence number) of every RTP packet `poll_read` yielded.
     read_rtp: HashSet<(u32, u16)>,
     /// The RTCP packets `poll_read` yielded.
-    read_rtcp: Vec<Box<dyn rtc::rtcp::Packet>>,
+    read_rtcp: Vec<Box<dyn rtci::rtcp::Packet>>,
     /// The SSRC and rid of every stream `OnTrack(OnOpen)` announced.
     opened: Vec<(u32, Option<String>)>,
     /// The SSRCs `OnUnassociatedRtpDiscarded` reported.
@@ -192,7 +192,7 @@ impl World {
                     && let Some(rtp) = wire_rtp(&data)
                 {
                     *self.sent_by_ssrc.entry(rtp.0).or_default() += 1;
-                    if let Ok(header) = rtc::rtp::header::Header::unmarshal(&mut &data[..])
+                    if let Ok(header) = rtci::rtp::header::Header::unmarshal(&mut &data[..])
                         && self
                             .id_extensions
                             .iter()
@@ -338,7 +338,7 @@ impl World {
             })
             .collect();
         let offer =
-            rtc::peer_connection::sdp::RTCSessionDescription::offer(edit(&offer.sdp, &layers))?;
+            rtci::peer_connection::sdp::RTCSessionDescription::offer(edit(&offer.sdp, &layers))?;
         world.peers[1].pc.set_remote_description(now, offer)?;
         let answer = world.peers[1].pc.create_answer(None)?;
         world.peers[1]
@@ -363,7 +363,7 @@ impl World {
                         && ID_EXTENSIONS.iter().any(|uri| line.contains(uri)))
                 })
                 .collect();
-            rtc::peer_connection::sdp::RTCSessionDescription::answer(sdp)?
+            rtci::peer_connection::sdp::RTCSessionDescription::answer(sdp)?
         } else {
             answer
         };
@@ -437,8 +437,8 @@ impl World {
                     .expect("sender")
                     .write_rtp(
                         now,
-                        rtc::rtp::Packet {
-                            header: rtc::rtp::header::Header {
+                        rtci::rtp::Packet {
+                            header: rtci::rtp::header::Header {
                                 version: 2,
                                 payload_type: pt,
                                 sequence_number,

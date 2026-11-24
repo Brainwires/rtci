@@ -7,13 +7,13 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, exchange, media_sections, mid_of, video_track};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
 
 fn peer(
     configuration: RTCConfigurationBuilder,

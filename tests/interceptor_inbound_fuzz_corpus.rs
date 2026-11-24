@@ -10,32 +10,32 @@
 //! congestion controller's target stays a finite number that is not negative.
 
 use bytes::Bytes;
-use rtc::interceptor::{
+use rtci::interceptor::{
     AttributedPacket, Interceptor, Packet, RTCPFeedback, RTPHeaderExtension, Registry, StreamInfo,
     TaggedPacket,
 };
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, DefaultInterceptorOptions, register_default_interceptors_with_options,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::rtcp::goodbye::Goodbye;
-use rtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
-use rtc::rtcp::raw_packet::RawPacket;
-use rtc::rtcp::receiver_report::ReceiverReport;
-use rtc::rtcp::reception_report::ReceptionReport;
-use rtc::rtcp::transport_feedbacks::cc_feedback_report::{
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::rtcp::goodbye::Goodbye;
+use rtci::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
+use rtci::rtcp::raw_packet::RawPacket;
+use rtci::rtcp::receiver_report::ReceiverReport;
+use rtci::rtcp::reception_report::ReceptionReport;
+use rtci::rtcp::transport_feedbacks::cc_feedback_report::{
     CcFeedbackMetricBlock, CcFeedbackReport, CcFeedbackReportBlock, Ecn,
 };
-use rtc::rtcp::transport_feedbacks::transport_layer_cc::{
+use rtci::rtcp::transport_feedbacks::transport_layer_cc::{
     PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc,
     TransportLayerCc,
 };
-use rtc::rtcp::transport_feedbacks::transport_layer_nack::{NackPair, TransportLayerNack};
-use rtc::rtp::header::Header;
-use rtc::sansio::Protocol;
-use rtc::sdp::extmap::TRANSPORT_CC_URI;
-use rtc::shared::TransportContext;
-use rtc::shared::marshal::{Marshal, Unmarshal};
+use rtci::rtcp::transport_feedbacks::transport_layer_nack::{NackPair, TransportLayerNack};
+use rtci::rtp::header::Header;
+use rtci::sansio::Protocol;
+use rtci::sdp::extmap::TRANSPORT_CC_URI;
+use rtci::shared::TransportContext;
+use rtci::shared::marshal::{Marshal, Unmarshal};
 use std::time::{Duration, Instant};
 
 const LOCAL_SSRC: u32 = 0x1111_1111;
@@ -170,13 +170,13 @@ fn interceptor_inbound(data: &[u8]) {
         match op % 6 {
             // Inbound RTCP, as parsed from what the peer sent.
             0 | 1 => {
-                if let Ok(packets) = rtc::rtcp::packet::unmarshal(&mut &arg[..]) {
+                if let Ok(packets) = rtci::rtcp::packet::unmarshal(&mut &arg[..]) {
                     let _ = chain.handle_read(tagged(now, Packet::Rtcp(packets)));
                 }
             }
             // Inbound RTP: parsed from the input, on the remote stream unless the op says not.
             2 => {
-                if let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
+                if let Ok(mut packet) = rtci::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
                     if op & 0x80 == 0 {
                         packet.header.ssrc = REMOTE_SSRC;
                     }
@@ -186,7 +186,7 @@ fn interceptor_inbound(data: &[u8]) {
             // Outbound RTP on the local stream, so the send history has something in it.
             3 => {
                 local_seq = local_seq.wrapping_add(1 + u16::from(byte(arg, 0) & 0x03));
-                let packet = rtc::rtp::packet::Packet {
+                let packet = rtci::rtp::packet::Packet {
                     header: Header {
                         version: 2,
                         marker: byte(arg, 1) & 0x01 != 0,
@@ -236,7 +236,7 @@ fn interceptor_inbound(data: &[u8]) {
 // ---------------------------------------------------------------------------------------------
 
 /// Transport-wide feedback about sequence numbers near `base`.
-fn twcc(rng: &mut Lcg, base: u16) -> Box<dyn rtc::rtcp::packet::Packet> {
+fn twcc(rng: &mut Lcg, base: u16) -> Box<dyn rtci::rtcp::packet::Packet> {
     let count = 1 + rng.below(12) as u16;
     let mut packet_chunks = Vec::new();
     let mut recv_deltas = Vec::new();
@@ -281,7 +281,7 @@ fn twcc(rng: &mut Lcg, base: u16) -> Box<dyn rtc::rtcp::packet::Packet> {
 }
 
 /// RFC 8888 feedback about RTP sequence numbers near `base`.
-fn ccfb(rng: &mut Lcg, base: u16) -> Box<dyn rtc::rtcp::packet::Packet> {
+fn ccfb(rng: &mut Lcg, base: u16) -> Box<dyn rtci::rtcp::packet::Packet> {
     let blocks = 1 + rng.below(3);
     let report_blocks = (0..blocks)
         .map(|index| CcFeedbackReportBlock {
@@ -323,7 +323,7 @@ fn ccfb(rng: &mut Lcg, base: u16) -> Box<dyn rtc::rtcp::packet::Packet> {
 }
 
 /// A TMMBR (RFC 5104 section 4.2.1) with one entry, as raw octets.
-fn tmmbr(rng: &mut Lcg) -> Box<dyn rtc::rtcp::packet::Packet> {
+fn tmmbr(rng: &mut Lcg) -> Box<dyn rtci::rtcp::packet::Packet> {
     let mut raw = vec![0x83, 205, 0, 4];
     raw.extend_from_slice(&REMOTE_SSRC.to_be_bytes());
     raw.extend_from_slice(&0u32.to_be_bytes());
@@ -341,7 +341,7 @@ fn tmmbr(rng: &mut Lcg) -> Box<dyn rtc::rtcp::packet::Packet> {
 }
 
 fn rtcp_argument(rng: &mut Lcg, local_seq: u16) -> Vec<u8> {
-    let mut packets: Vec<Box<dyn rtc::rtcp::packet::Packet>> = Vec::new();
+    let mut packets: Vec<Box<dyn rtci::rtcp::packet::Packet>> = Vec::new();
     for _ in 0..1 + rng.below(3) {
         packets.push(match rng.below(9) {
             0..=2 => {
@@ -395,7 +395,7 @@ fn rtcp_argument(rng: &mut Lcg, local_seq: u16) -> Vec<u8> {
             }
         });
     }
-    let mut raw = rtc::rtcp::packet::marshal(&packets)
+    let mut raw = rtci::rtcp::packet::marshal(&packets)
         .map(|bytes| bytes.to_vec())
         .unwrap_or_default();
     // One input in six is damaged: a byte changed, or the end cut off.
@@ -425,14 +425,14 @@ fn rtp_argument(rng: &mut Lcg, sequence_number: u16) -> Vec<u8> {
         ..Default::default()
     };
     if rng.below(8) != 0 {
-        let extension = rtc::rtp::extension::transport_cc_extension::TransportCcExtension {
+        let extension = rtci::rtp::extension::transport_cc_extension::TransportCcExtension {
             transport_sequence: sequence_number.wrapping_add(rng.below(3) as u16),
         };
         if let Ok(payload) = extension.marshal() {
             let _ = header.set_extension(TWCC_ID as u8, payload.freeze());
         }
     }
-    let packet = rtc::rtp::packet::Packet {
+    let packet = rtci::rtp::packet::Packet {
         header,
         payload: Bytes::from(vec![0u8; rng.below(64) as usize]),
     };

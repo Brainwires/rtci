@@ -12,22 +12,22 @@ use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, port_of,
     video_track,
 };
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RTCRtpHeaderExtensionCapability, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
 
 const MID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
 
@@ -340,7 +340,7 @@ fn add_transceiver_fills_scale_resolution_down_by_and_drops_a_lone_rid() -> Test
 #[test]
 fn add_transceiver_keeps_at_most_the_maximum_number_of_encodings() -> TestResult {
     let mut pc = default_peer()?;
-    let encodings: Vec<_> = (0..rtc::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS + 3)
+    let encodings: Vec<_> = (0..rtci::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS + 3)
         .map(|n| with_rid(&format!("r{n}")))
         .collect();
     let id = pc.add_transceiver_from_kind(
@@ -350,7 +350,7 @@ fn add_transceiver_keeps_at_most_the_maximum_number_of_encodings() -> TestResult
     let mut sender = pc.rtp_sender(id.into()).expect("sender");
     assert_eq!(
         sender.get_parameters().encodings.len(),
-        rtc::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
+        rtci::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
     );
     Ok(())
 }
@@ -535,7 +535,7 @@ fn replace_track_with_none_stops_sending() -> TestResult {
     let mut handle = offerer.rtp_sender(sender).expect("sender");
     handle.replace_track(None)?;
     assert!(handle.track().is_none());
-    let mut packet = rtc::rtp::Packet::default();
+    let mut packet = rtci::rtp::Packet::default();
     packet.header.ssrc = 0x0a01_0101;
     packet.header.payload_type = 96;
     assert_eq!(
@@ -938,7 +938,7 @@ fn an_answer_made_while_stopping_still_answers_the_section() -> TestResult {
 /// the W3C form (answered `a=inactive`), so the group keeps its transport.
 #[test]
 fn an_answer_rejects_a_stopping_transceivers_section_when_asked() -> TestResult {
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     for (stopped_index, rejected) in [(1usize, true), (0, false)] {
         let mut offerer = default_peer()?;
         let mut media_engine = MediaEngine::default();
@@ -1103,7 +1103,7 @@ fn set_codec_preferences_with_an_empty_list_resets_to_the_engine_codecs() -> Tes
 fn down_to(rid: &str, max_width: u32, max_height: u32) -> RTCRtpEncodingParameters {
     RTCRtpEncodingParameters {
         scale_resolution_down_to: Some(
-            rtc::rtp_transceiver::rtp_sender::RTCResolutionRestriction {
+            rtci::rtp_transceiver::rtp_sender::RTCResolutionRestriction {
                 max_width,
                 max_height,
             },
