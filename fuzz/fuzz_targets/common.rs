@@ -51,6 +51,18 @@ pub fn certificate(which: usize) -> Option<RTCCertificate> {
 /// one of the fixed certificates, and randomness seeded from `seed` (the engine also draws some
 /// of its own, so an input replays closely but not always byte for byte).
 pub fn peer(which: usize, seed: u64, answering_role: RTCDtlsRole) -> Option<RTCPeerConnection> {
+    peer_with(which, seed, answering_role, false)
+}
+
+/// [`peer`], taking an offered FEC session of its own (RFC 5109 section 14.1) when
+/// `separate_fec_sessions`: its section, its group and its feedback lines are then negotiated.
+#[allow(dead_code)]
+pub fn peer_with(
+    which: usize,
+    seed: u64,
+    answering_role: RTCDtlsRole,
+    separate_fec_sessions: bool,
+) -> Option<RTCPeerConnection> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().ok()?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine).ok()?;
@@ -66,6 +78,7 @@ pub fn peer(which: usize, seed: u64, answering_role: RTCDtlsRole) -> Option<RTCP
         .with_setting_engine(
             SettingEngineBuilder::new()
                 .with_answering_dtls_role(answering_role)
+                .with_separate_fec_sessions(separate_fec_sessions)
                 .with_crypto_provider(provider)
                 .build(),
         )
