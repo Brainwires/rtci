@@ -191,3 +191,32 @@ fn each_section_with_a_transport_lists_that_transports_candidates() -> TestResul
     );
     Ok(())
 }
+
+/// RFC 5124 section 3.3.1: an offerer "SHOULD NOT" offer a secure and an insecure profile
+/// as alternatives, and section 5: security is not left to such a choice. Every RTP section
+/// of an offer (sending, receive-only) is `UDP/TLS/RTP/SAVPF`, the data section DTLS: no
+/// `RTP/AVP` or `RTP/AVPF` section is ever offered.
+#[test]
+fn an_offer_has_only_secure_profiles() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.add_track(video_track("local", 0x0303_0303))?;
+    pc.add_transceiver_from_kind(
+        rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    pc.create_data_channel("data", None)?;
+    let offer = pc.create_offer(None)?;
+    let profiles: Vec<&str> = offer
+        .sdp
+        .lines()
+        .filter(|line| line.starts_with("m="))
+        .filter_map(|line| line.split(' ').nth(2))
+        .collect();
+    assert_eq!(
+        profiles,
+        vec!["UDP/TLS/RTP/SAVPF", "UDP/TLS/RTP/SAVPF", "UDP/DTLS/SCTP"],
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
