@@ -943,7 +943,7 @@ impl Client {
                     // granted, and they are asked for again.
                     if let Some(peer_addr) = peer_addr {
                         if let Some(relay) = self.relays.get_mut(&relayed_addr) {
-                            relay.perm_map.remove(&peer_addr.ip());
+                            relay.forget_unless_permitted(peer_addr.ip(), now);
                         }
                         self.events.push_back(Event::CreatePermissionError(
                             id,
