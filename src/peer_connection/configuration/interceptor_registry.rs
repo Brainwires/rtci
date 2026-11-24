@@ -424,6 +424,19 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Whether the chain carries the RTP circuit breaker (RFC 8083). `true` by default: RFC
+    /// 8834 section 7.1, "WebRTC Endpoints MUST implement the RTP circuit breaker algorithm".
+    /// `false` in the `Chrome` behaviour profile: libwebrtc has none. Without it
+    /// [`DefaultInterceptorHandles::circuit_breaker`] watches nothing and no
+    /// `OnCircuitBreaker` event is raised.
+    pub circuit_breaker: bool,
+    /// Whether the circuit breaker restarts a ceased flow itself when the receiver's reports
+    /// on the transport's other flows show what stopped it has gone (RFC 8083 section 4.5:
+    /// "unless the sender has received information that the congestion has dissipated").
+    /// `true` by default; with `false` every restart is the application's
+    /// (`CircuitBreakerHandle::restart` after `OnCircuitBreaker`). See
+    /// [`CircuitBreakerBuilder::with_automatic_restart`](interceptor::CircuitBreakerBuilder::with_automatic_restart).
+    pub circuit_breaker_automatic_restart: bool,
     /// Whether congestion control feedback that leaves at once counts against the RTCP
     /// bandwidth of the regular reports, which then space out to keep both inside it. `false`
     /// by default. See
@@ -504,6 +517,11 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "circuit_breaker_packet_size",
                 &self.circuit_breaker_packet_size,
             )
+            .field("circuit_breaker", &self.circuit_breaker)
+            .field(
+                "circuit_breaker_automatic_restart",
+                &self.circuit_breaker_automatic_restart,
+            )
             .field(
                 "rtcp_congestion_feedback_in_budget",
                 &self.rtcp_congestion_feedback_in_budget,
@@ -552,6 +570,8 @@ impl DefaultInterceptorOptions {
             receiver_reference_time_on_audio: false,
             video_red_ulpfec: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            circuit_breaker: true,
+            circuit_breaker_automatic_restart: true,
             rtcp_congestion_feedback_in_budget: false,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
             congestion_feedback_share: 0.05,
@@ -672,22 +692,24 @@ pub fn register_default_interceptors_with_options(
     // RTCP), given to that transport's congestion controller.
     let transports = TransportHandles::default();
     let circuit_breaker = transports.breaker_for(0);
-    let registry = {
+    let registry = if options.circuit_breaker {
         let transports = transports.clone();
         let packet_size = options.circuit_breaker_packet_size;
+        let automatic_restart = options.circuit_breaker_automatic_restart;
+        let breaker = move || {
+            CircuitBreakerBuilder::new()
+                .with_packet_size(packet_size)
+                .with_automatic_restart(automatic_restart)
+        };
         registry.with_per_rtp_session(
             Slot::CircuitBreaker,
             PerRtpSession::with_first_for_sessions(
-                CircuitBreakerBuilder::new()
-                    .with_packet_size(packet_size)
-                    .build_with_handle(&circuit_breaker),
-                move |session| {
-                    CircuitBreakerBuilder::new()
-                        .with_packet_size(packet_size)
-                        .build_with_handle(&transports.breaker_for(session))
-                },
+                breaker().build_with_handle(&circuit_breaker),
+                move |session| breaker().build_with_handle(&transports.breaker_for(session)),
             ),
         )
+    } else {
+        registry
     };
 
     // The estimator runs on whichever per-packet feedback each stream negotiated: RFC 8888

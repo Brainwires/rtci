@@ -204,16 +204,26 @@ pub(crate) fn allocate_target_bitrate(
     transceivers: &mut [crate::rtp_transceiver::internal::RTCRtpTransceiverInternal],
     total: f64,
 ) -> std::collections::HashMap<u32, f64> {
-    allocate_target_bitrate_on(transceivers, total, |_| true)
+    allocate_target_bitrate_on(
+        transceivers,
+        total,
+        |_| true,
+        &std::collections::BTreeSet::new(),
+    )
 }
 
 /// [`allocate_target_bitrate`] among the encodings of the m= sections `on_transport` accepts
 /// (by MID): one transport's congestion controller's target is divided among the senders that
 /// transport carries (RFC 8836 section 2: each path has its own capacity).
+///
+/// An encoding whose media SSRC is in `ceased` takes no share: the RTP circuit breaker
+/// stopped it (RFC 8083 section 4.5), nothing of it leaves, and what it would have had goes to
+/// the encodings that still send. It has its share again when it is restarted.
 pub(crate) fn allocate_target_bitrate_on(
     transceivers: &mut [crate::rtp_transceiver::internal::RTCRtpTransceiverInternal],
     total: f64,
     on_transport: impl Fn(&str) -> bool,
+    ceased: &std::collections::BTreeSet<u32>,
 ) -> std::collections::HashMap<u32, f64> {
     let mut flows = Vec::new();
     let mut owners = Vec::new();
@@ -231,7 +241,7 @@ pub(crate) fn allocate_target_bitrate_on(
             let Some(ssrc) = encoding.rtp_coding_parameters.ssrc else {
                 continue;
             };
-            if !encoding.active {
+            if !encoding.active || ceased.contains(&ssrc) {
                 continue;
             }
             flows.push((
@@ -269,11 +279,19 @@ impl crate::peer_connection::RTCPeerConnection {
             .interceptor_handler_context
             .transport_targets
             .clone();
+        let ceased = self
+            .pipeline_context
+            .interceptor_handler_context
+            .ceased_flows
+            .clone();
         for (key, total) in targets {
             let stats = &self.pipeline_context.stats;
-            let shares = allocate_target_bitrate_on(&mut self.rtp_transceivers, total, |mid| {
-                stats.section_transport_key(mid) == key
-            });
+            let shares = allocate_target_bitrate_on(
+                &mut self.rtp_transceivers,
+                total,
+                |mid| stats.section_transport_key(mid) == key,
+                &ceased,
+            );
             self.pipeline_context
                 .stats
                 .on_target_bitrate(key, total, &shares);

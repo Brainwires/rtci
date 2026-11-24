@@ -1026,6 +1026,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.circuit_breaker_packet_size,
     },
     {
+        id: "cb.enabled",
+        setting: "DefaultInterceptorOptions::circuit_breaker",
+        clause: "RFC 8834 7.1, RFC 8083",
+        rfc: true => "true",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc has no RTP circuit breaker (searched the snapshot @ a222406d for \"circuit\", \"8083\" and a media or RTCP timeout that stops a send stream: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, pacing_controller.h lines 206, 285), so the Chrome profile runs without one: a send stream is never ceased on the receiver's reports. Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.circuit_breaker = v,
+        read: |o: &DefaultInterceptorOptions| o.circuit_breaker,
+    },
+    {
         id: "nack.max-requests-per-packet",
         setting: "DefaultInterceptorOptions::nack_max_nacks_per_packet",
         clause: "RFC 4588 6.3, Appendix A",
@@ -1581,6 +1593,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
         class: NotGovernedClass::Same,
         note: "the same in every profile: the engine default (UpToTarget on master, the measured choice in tests/capacity_cap_video_rtc2rtc.rs; WithinTarget, RFC 4588 7, once conf/gcc-2-rfc-retransmission lands). libwebrtc has no retransmission rate limit on video at a222406d: call/rtp_video_sender.cc (lines 292-354) configures no retransmission_rate_limiter, which modules/rtp_rtcp/source/rtp_rtcp_interface.h line 92 defaults to nullptr, so RTPSender::ReSendPacket's TryUseRate check (rtp_sender.cc lines 331-333) never applies; instead modules/video_coding/fec_controller_default.cc (lines 146-167) lowers the encoder target by the share NACK and FEC took, capped at kProtectionOverheadRateThreshold 0.5 (line 31). That is the RFC's form (retransmissions inside the target, the originals lowered to make room) closer than UpToTarget, which is not libwebrtc's rule at this revision; Performance keeps the default (UpToTarget measured worse than WithinTarget on the paced default chain by gcc-2's owner)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::circuit_breaker_automatic_restart",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8083 4.5: a ceased flow is restarted by the breaker on the receiver's reports that the cause has gone, on in every profile that has a breaker (cb.enabled); off leaves every restart to the application. libwebrtc has no circuit breaker",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::rtcp_random",

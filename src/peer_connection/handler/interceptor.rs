@@ -96,6 +96,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// `allocate_target_bitrate_on` divides among that transport's encodings, again when the
     /// encodings change.
     pub(crate) transport_targets: std::collections::BTreeMap<usize, f64>,
+    /// The SSRCs of the flows the RTP circuit breaker has ceased and not restarted
+    /// (`CircuitBreakerNotice`): an encoding whose media SSRC is here takes no share of the
+    /// target.
+    pub(crate) ceased_flows: std::collections::BTreeSet<u32>,
     /// The RTP sessions (transport ids) whose RTCP session has been told to join and not to
     /// leave since (`RTCPeerConnection::sync_rtcp_sessions`).
     pub(crate) rtcp_joined: std::collections::BTreeSet<usize>,
@@ -181,6 +185,7 @@ impl Default for InterceptorHandlerContext {
             arrival_mids: None,
             target_bitrate: None,
             transport_targets: std::collections::BTreeMap::new(),
+            ceased_flows: std::collections::BTreeSet::new(),
             rtcp_joined: Default::default(),
             rtcp_leaving: Default::default(),
             fec_session_map: None,
@@ -1919,12 +1924,30 @@ impl<'a> InterceptorHandler<'a> {
 
     /// A flow the RTP circuit breaker ceased or restarted (`CircuitBreakerNotice`):
     /// `OnCircuitBreaker` for the sender that sends it (the flow is its encoding's media,
-    /// RTX or FEC SSRC), with the encoding's RID.
+    /// RTX or FEC SSRC), with the encoding's RID. The target is divided again: a ceased
+    /// encoding takes no share of it, a restarted one has its share back.
     fn announce_circuit_breaker(
         &mut self,
         now: Instant,
         notice: &interceptor::CircuitBreakerNotice,
     ) {
+        let changed = if notice.ceased.is_some() {
+            self.ctx.ceased_flows.insert(notice.ssrc)
+        } else {
+            self.ctx.ceased_flows.remove(&notice.ssrc)
+        };
+        if changed {
+            for (key, total) in self.ctx.transport_targets.clone() {
+                let stats = &*self.stats;
+                let shares = crate::peer_connection::priority::allocate_target_bitrate_on(
+                    self.rtp_transceivers,
+                    total,
+                    |mid: &str| stats.section_transport_key(mid) == key,
+                    &self.ctx.ceased_flows,
+                );
+                self.stats.on_target_bitrate(key, total, &shares);
+            }
+        }
         let found = self
             .rtp_transceivers
             .iter()
@@ -2481,6 +2504,7 @@ impl<'a>
                                     self.rtp_transceivers,
                                     *bits_per_second,
                                     on_transport,
+                                    &self.ctx.ceased_flows,
                                 );
                             self.stats.on_target_bitrate(key, *bits_per_second, &shares);
                             // A pause of the source (the pacer's queue is long) is a target

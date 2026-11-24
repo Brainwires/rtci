@@ -301,6 +301,26 @@ pub enum RtcpSessionEvent {
     },
 }
 
+/// The deterministic RTCP reporting interval Td (RFC 3550 section 6.3.1: the calculated
+/// interval without its random variation) as this session calculates it now, for a member
+/// that sends RTP and for one that does not.
+///
+/// The session attaches it to every RTCP packet it hands application-ward. It is what RFC
+/// 8083 section 3 has a sender estimate its receiver's interval by ("Tdr ... can be estimated
+/// by executing the algorithm in Section 6.2 of \[RFC3550\] using the average RTCP packet size
+/// seen at the sender, the number of members ... and whether the receiver is sending SR or RR
+/// packets"): the RTP circuit breaker application-ward of the session reads it. Both values
+/// are computed with the session's own bandwidth, membership, average packet size and
+/// minimum interval (none under RTP/AVPF); a `T_rr_interval` is not in them. Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RtcpReportingInterval {
+    /// Td of a member that has sent RTP lately (it reports with sender reports).
+    pub sender: Duration,
+    /// Td of a member that has not (receiver reports).
+    pub receiver: Duration,
+}
+
 /// Builder for [`RtcpSessionInterceptor`].
 ///
 /// ```
@@ -1362,6 +1382,27 @@ impl RtcpSessionInterceptor {
         let td = deterministic_interval(&self.interval_input(now, we_sent, initial, senders));
         let random = self.unit();
         randomized_interval(td, random).max(MIN_INTERVAL)
+    }
+
+    /// Td as the session calculates it now for a member that sends and for one that does not
+    /// ([`RtcpReportingInterval`]).
+    fn reporting_interval(&self, now: Instant) -> RtcpReportingInterval {
+        let senders = self.sender_count(now);
+        let td = |we_sent: bool| {
+            let td = deterministic_interval(&self.interval_input(now, we_sent, false, senders));
+            // A member with no share of the RTCP bandwidth sends no regular report: an hour
+            // stands for never.
+            let td = if td.is_finite() {
+                td.min(3600.0)
+            } else {
+                3600.0
+            };
+            Duration::from_secs_f64(td.max(MIN_INTERVAL))
+        };
+        RtcpReportingInterval {
+            sender: td(true),
+            receiver: td(false),
+        }
     }
 
     /// The `T_rr_interval` regular reports keep (RFC 4585 3.5.3), seconds: the configured or
@@ -2934,7 +2975,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         let now = msg.now;
         self.sync(now);
         let pass = match &msg.message.packet {
@@ -2944,6 +2985,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                 true
             }
         };
+        if pass
+            && self.started
+            && matches!(&msg.message.packet, Packet::Rtcp(packets) if !packets.is_empty())
+        {
+            // What this session calculates as the reporting interval, for the circuit breaker
+            // application-ward (RFC 8083 section 3, Tdr).
+            let interval = self.reporting_interval(now);
+            msg.message.add(Attribute::Custom(Arc::new(interval)));
+        }
         if pass {
             self.read_queue.push_back(msg);
         }
