@@ -18,7 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per window, holding at most a tenth of it (at least 1500 octets), each retransmission
   taking its size. The window and its allowance are unchanged, so what may be retransmitted
   over any window is what it was (RFC 4588 section 7); only the release is spread. No
-  setting keeps the burst. RTX_2R_MEASURED
+  setting keeps the burst. Measured in `tests/capacity_cap_video_rtc2rtc.rs` (cap after 20 s,
+  six seeds on three wall clocks, hosted run 45409358750, against the release of the repairs a
+  window at a time, run 45408404348): without a pacer longest freeze 0.74 to 1.08 s (1.28 to
+  1.29), 43 to 48 retransmissions of which 1 to 4 dropped at the path's queue (57 to 64, 21 to
+  25), oldest picture 2.88 to 3.12 s (2.90 to 3.15), the recovery's mean 15 to 25 s after the
+  cap 1118 to 1263 kbit/s (1089 to 1230); the default chain 0.81 to 1.05 s (0.75 to 1.13), 55
+  to 63 retransmissions (59 to 80), 3.97 to 5.91 s (4.14 to 7.13), recovery 1048 to 2500
+  kbit/s (898 to 2500). After a 4 s outage and an ICE restart (six seeds) the chain without a
+  pacer is frozen 0.09 to 0.14 s from one second after the switch (0.33 to 0.92). Costs: the
+  median target under the cap without a pacer is 231 to 237 kbit/s (242 to 250), some
+  10 kbit/s lower; the default chain after the outage still shows no usable frame to the end
+  of the run (7.95 to 8.02 s against 7.76 to 7.79 s of the measured window: a known limit of
+  0.1.0). The tests' bounds are tightened to these figures (3.6 s and 55 retransmissions
+  without a pacer, 6.8 s and 72 with it).
 
 - **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
   (`conf/rtx-1r-duplicate-repairs`): a request for a packet whose retransmission per-packet
