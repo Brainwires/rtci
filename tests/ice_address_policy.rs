@@ -6,12 +6,16 @@
 //! host address is used or revealed.
 //!
 //! No network: peers exchange datagrams in memory, servers and drivers are the test, and the
-//! clock is virtual.
+//! clock is virtual. Where two peers run through time (consent checks, RFC 7675, are drawn at
+//! random intervals) the engine's random numbers come from a seed, so a run is the same every
+//! time, and what an input makes a peer write is carried before time moves on, as a driver
+//! does (see [`exchange`]).
 
 mod common;
 
 use anyhow::Result;
 use bytes::BytesMut;
+use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtci::ice::attributes::priority::PriorityAttr;
 use rtci::ice::{AddressDirection, AddressPurpose, IceAddressPolicy};
 use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
@@ -31,8 +35,8 @@ use rtci::stun::integrity::MessageIntegrity;
 use rtci::stun::message::{BINDING_REQUEST, Message, Setter, TransactionId};
 use rtci::stun::textattrs::Username;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn a(s: &str) -> SocketAddr {
@@ -76,6 +80,59 @@ fn no_private_peers() -> IceAddressPolicy {
         assert_eq!(direction, purpose.direction());
         purpose == AddressPurpose::StunTurnServer || !is_private(addr.ip())
     })
+}
+
+/// A small deterministic generator (SplitMix64).
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
+
+/// The built-in crypto provider with its random source replaced by a seeded [`Rng`]: what the
+/// engine draws through `RTCCryptoProvider::random()` (ICE credentials and tiebreaker, the
+/// consent check intervals of RFC 7675, DTLS, SCTP) is the same in every run of a seed.
+struct SeededProvider {
+    inner: Arc<dyn RTCCryptoProvider>,
+    rng: Mutex<Rng>,
+}
+
+impl RTCCryptoProvider for SeededProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn crypto(&self) -> &dyn RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn RTCRandom {
+        self
+    }
+}
+
+impl RTCRandom for SeededProvider {
+    fn fill(&self, output: &mut [u8]) -> std::result::Result<(), CryptoError> {
+        let mut rng = self.rng.lock().map_err(|_| CryptoError::RandomnessFailed)?;
+        for chunk in output.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next_u64().to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
+/// Settings whose random numbers come from `seed`.
+fn seeded(seed: u64) -> SettingEngineBuilder {
+    SettingEngineBuilder::new().with_crypto_provider(Arc::new(SeededProvider {
+        inner: default_provider().expect("a built-in crypto provider"),
+        rng: Mutex::new(Rng(seed)),
+    }))
 }
 
 fn pc(configuration: RTCConfiguration, settings: SettingEngine, now: Instant) -> RTCPeerConnection {
@@ -223,22 +280,65 @@ fn tick(x: &mut Peer, y: &mut Peer, now: &mut Instant, deadline: Instant) -> boo
     true
 }
 
+/// Carries datagrams between the two peers until neither writes any more: what an input makes
+/// a peer write leaves before time moves on, as it does with a driver that polls `poll_write`
+/// after every input. `x_to_y` and `y_to_x` say where a datagram arrives, as (local address,
+/// source address) at the other peer, once for each copy the network delivers (none: lost).
+/// Returns how many datagrams of `x` were delivered.
+///
+/// A loop that takes each peer's writes once and then moves to the next timer delivers the
+/// answer to a request only after that timer. For a consent request (RFC 7675), which is not
+/// retransmitted, the next timer can be the requester's own end of the transaction, 500 ms on:
+/// the answer then arrives for a transaction that is gone, consent is never refreshed and the
+/// requester leaves the connected state five seconds later, whenever no other timer happens to
+/// fall inside those 500 ms. That depends on the random consent intervals.
+fn exchange(
+    x: &mut Peer,
+    y: &mut Peer,
+    now: Instant,
+    x_to_y: impl Fn(&TransportContext) -> Vec<(SocketAddr, SocketAddr)>,
+    y_to_x: impl Fn(&TransportContext) -> Vec<(SocketAddr, SocketAddr)>,
+) -> Result<usize> {
+    let mut delivered = 0;
+    loop {
+        let mut moved = false;
+        for w in x.turn() {
+            moved = true;
+            for (local, source) in x_to_y(&w.transport) {
+                delivered += 1;
+                y.pc.handle_read(udp(local, source, now, &w.message))?;
+            }
+        }
+        for w in y.turn() {
+            moved = true;
+            for (local, source) in y_to_x(&w.transport) {
+                x.pc.handle_read(udp(local, source, now, &w.message))?;
+            }
+        }
+        if !moved {
+            return Ok(delivered);
+        }
+    }
+}
+
+/// The seeds the two-peer runs are made with. With the loop that moved time on before a
+/// peer's answer had left (see [`exchange`]), seeds 4, 6, 9 and 10 of these left the answerer
+/// disconnected (54 of the seeds 0 to 199 did, the same ones in every run).
+const SEEDS: std::ops::Range<u64> = 0..12;
+
+const NAT: &str = "198.51.100.7:40000";
+
 /// The offerer sits behind a NAT that maps its host address to `NAT`; the answerer is given
 /// none of its candidates and meets it only as the source of its checks (a peer-reflexive
-/// candidate, RFC 8445 Section 7.3.1.3). `refuse_nat` makes the answerer's policy refuse that
-/// source as an inbound datagram source. Returns (offerer, answerer, checks the answerer got).
-fn behind_a_nat(refuse_nat: bool) -> Result<(Peer, Peer, usize)> {
-    const NAT: &str = "198.51.100.7:40000";
+/// candidate, RFC 8445 Section 7.3.1.3). The answerer's policy refuses the IP address
+/// `refused` for `purpose`. Both peers draw their random numbers from `seed`. Returns
+/// (offerer, answerer, datagrams of the offerer that reached the answerer).
+fn behind_a_nat(refused: &str, purpose: AddressPurpose, seed: u64) -> Result<(Peer, Peer, usize)> {
     let start = Instant::now();
-    let refused = if refuse_nat {
-        "198.51.100.7"
-    } else {
-        "203.0.113.99"
-    };
     let mut o = Peer::new(
         pc(
             RTCConfigurationBuilder::new().build(),
-            SettingEngine::default(),
+            seeded(seed).build(),
             start,
         ),
         "10.0.0.1:4000",
@@ -246,11 +346,8 @@ fn behind_a_nat(refuse_nat: bool) -> Result<(Peer, Peer, usize)> {
     let mut b = Peer::new(
         pc(
             RTCConfigurationBuilder::new().build(),
-            SettingEngineBuilder::new()
-                .with_ice_address_policy(refusing(
-                    &[refused],
-                    AddressPurpose::InboundDatagramSource,
-                ))
+            seeded(seed ^ 0x5eed_0000)
+                .with_ice_address_policy(refusing(&[refused], purpose))
                 .build(),
             start,
         ),
@@ -261,51 +358,96 @@ fn behind_a_nat(refuse_nat: bool) -> Result<(Peer, Peer, usize)> {
     b.pc.add_local_candidate(host(b.addr))?;
     o.pc.add_remote_candidate(host(b.addr))?;
 
+    let (o_addr, b_addr) = (o.addr, b.addr);
     let mut now = start;
     let deadline = start + Duration::from_secs(15);
-    let mut checks = 0;
+    let mut reached = 0;
     loop {
-        for w in o.turn() {
-            if w.transport.peer_addr == b.addr {
-                checks += 1;
-                b.pc.handle_read(udp(b.addr, a(NAT), now, &w.message))?;
-            }
-        }
-        for w in b.turn() {
-            if w.transport.peer_addr == a(NAT) {
-                o.pc.handle_read(udp(o.addr, b.addr, now, &w.message))?;
-            }
-        }
+        reached += exchange(
+            &mut o,
+            &mut b,
+            now,
+            // The NAT rewrites the offerer's source address.
+            |t| {
+                if t.peer_addr == b_addr {
+                    vec![(b_addr, a(NAT))]
+                } else {
+                    vec![]
+                }
+            },
+            |t| {
+                if t.peer_addr == a(NAT) {
+                    vec![(o_addr, b_addr)]
+                } else {
+                    vec![]
+                }
+            },
+        )?;
         if !tick(&mut o, &mut b, &mut now, deadline) {
             break;
         }
     }
-    Ok((o, b, checks))
+    Ok((o, b, reached))
 }
 
 /// A Binding request from a source the policy refuses gets no answer out of `poll_write`, and
 /// the source is not learned, so ICE never connects; the same peer from an allowed source
-/// (the policy refusing another address) is answered and connects.
+/// (the policy refusing another address) is answered, connects and stays connected through
+/// its consent checks, on every seed.
 #[test]
 fn a_denied_sources_checks_get_no_answer_from_poll_write_and_an_allowed_one_connects() -> Result<()>
 {
-    let nat = a("198.51.100.7:40000");
-    let (_, b, checks) = behind_a_nat(true)?;
-    assert!(checks > 0, "the offerer's checks reached the answerer");
-    let to_nat = b
-        .written
-        .iter()
-        .filter(|w| w.transport.peer_addr == nat)
-        .count();
-    assert_eq!(to_nat, 0, "nothing leaves poll_write for a refused source");
-    assert!(!connected(&b.pc), "no pair with a refused source");
+    let nat = a(NAT);
+    for seed in SEEDS {
+        let (_, b, checks) =
+            behind_a_nat("198.51.100.7", AddressPurpose::InboundDatagramSource, seed)?;
+        assert!(
+            checks > 0,
+            "seed {seed}: the offerer's checks reached the answerer"
+        );
+        let to_nat = b
+            .written
+            .iter()
+            .filter(|w| w.transport.peer_addr == nat)
+            .count();
+        assert_eq!(
+            to_nat, 0,
+            "seed {seed}: nothing leaves poll_write for a refused source"
+        );
+        assert!(
+            !connected(&b.pc),
+            "seed {seed}: no pair with a refused source"
+        );
 
-    let (o, b, _) = behind_a_nat(false)?;
+        let (o, b, _) = behind_a_nat("203.0.113.99", AddressPurpose::InboundDatagramSource, seed)?;
+        assert!(
+            b.written.iter().any(|w| w.transport.peer_addr == nat),
+            "seed {seed}: an allowed source is answered"
+        );
+        assert!(
+            connected(&b.pc) && connected(&o.pc),
+            "seed {seed}: and connects, and is connected 15 s on: offerer {:?}, answerer {:?}",
+            o.pc.ice_connection_state(),
+            b.pc.ice_connection_state()
+        );
+    }
+    Ok(())
+}
+
+/// The policy reaches the peer connection's ICE agent, which is where a peer-reflexive source
+/// is judged (RFC 8445 Section 7.3.1.3): one the policy refuses as such, and only as such
+/// (its datagrams are let in), is not learned, so its checks get no answer and ICE never
+/// connects.
+#[test]
+fn a_source_denied_as_peer_reflexive_is_not_answered_by_the_peer_connection() -> Result<()> {
+    let nat = a(NAT);
+    let (o, b, checks) = behind_a_nat("198.51.100.7", AddressPurpose::PeerReflexiveSource, 1)?;
+    assert!(checks > 0, "the offerer's checks reached the answerer");
     assert!(
-        b.written.iter().any(|w| w.transport.peer_addr == nat),
-        "an allowed source is answered"
+        !b.written.iter().any(|w| w.transport.peer_addr == nat),
+        "a refused peer-reflexive source is not answered"
     );
-    assert!(connected(&b.pc) && connected(&o.pc), "and connects");
+    assert!(!connected(&b.pc) && !connected(&o.pc), "and never connects");
     Ok(())
 }
 
@@ -558,7 +700,7 @@ fn relay_only_with_a_policy_neither_uses_nor_reveals_a_host_address() -> Result<
             RTCConfigurationBuilder::new()
                 .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
                 .build(),
-            SettingEngineBuilder::new()
+            seeded(1)
                 .with_tcp_candidate_gathering(false)
                 .with_ice_address_policy(no_private_peers())
                 .build(),
@@ -569,9 +711,7 @@ fn relay_only_with_a_policy_neither_uses_nor_reveals_a_host_address() -> Result<
     let mut p = Peer::new(
         pc(
             RTCConfigurationBuilder::new().build(),
-            SettingEngineBuilder::new()
-                .with_tcp_candidate_gathering(false)
-                .build(),
+            seeded(2).with_tcp_candidate_gathering(false).build(),
             start,
         ),
         "198.51.100.9:5000",
@@ -595,24 +735,36 @@ fn relay_only_with_a_policy_neither_uses_nor_reveals_a_host_address() -> Result<
 
     let mut now = start;
     let deadline = start + Duration::from_secs(15);
+    let (r_addr, p_addr) = (r.addr, p.addr);
     loop {
-        for w in r.turn() {
+        exchange(
+            &mut r,
+            &mut p,
+            now,
             // The TURN server relays what leaves the relayed candidate.
-            if w.transport.local_addr == r.addr
-                && (w.transport.peer_addr == p.addr || w.transport.peer_addr == a(PEER_PRIVATE))
-            {
-                p.pc.handle_read(udp(p.addr, r.addr, now, &w.message))?;
-            }
-        }
-        for w in p.turn() {
-            if w.transport.peer_addr == r.addr {
-                r.pc.handle_read(udp(r.addr, p.addr, now, &w.message))?;
-                // The same check reaching the host socket directly, and the relayed address
-                // from a private source.
-                r.pc.handle_read(udp(a(HOST), p.addr, now, &w.message))?;
-                r.pc.handle_read(udp(r.addr, a(PEER_PRIVATE), now, &w.message))?;
-            }
-        }
+            |t| {
+                if t.local_addr == r_addr
+                    && (t.peer_addr == p_addr || t.peer_addr == a(PEER_PRIVATE))
+                {
+                    vec![(p_addr, r_addr)]
+                } else {
+                    vec![]
+                }
+            },
+            // The peer's datagram at the relayed address, and the same one reaching the host
+            // socket directly, and the relayed address from a private source.
+            |t| {
+                if t.peer_addr == r_addr {
+                    vec![
+                        (r_addr, p_addr),
+                        (a(HOST), p_addr),
+                        (r_addr, a(PEER_PRIVATE)),
+                    ]
+                } else {
+                    vec![]
+                }
+            },
+        )?;
         if !tick(&mut r, &mut p, &mut now, deadline) {
             break;
         }
@@ -622,7 +774,10 @@ fn relay_only_with_a_policy_neither_uses_nor_reveals_a_host_address() -> Result<
     r.pc.handle_read(udp(r.addr, a(PEER_PRIVATE), now, &probe))?;
     r.turn();
 
-    assert!(connected(&r.pc), "the relayed path connects");
+    assert!(
+        connected(&r.pc) && connected(&p.pc),
+        "the relayed path connects, and is connected 15 s on"
+    );
     for w in &r.written {
         assert_ne!(
             w.transport.local_addr,
