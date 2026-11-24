@@ -464,6 +464,7 @@ pub struct RTCPeerConnectionBuilder {
     media_engine: MediaEngine,
     setting_engine: SettingEngine,
     interceptor_registry: Registry,
+    rtcp_cname: Option<String>,
 }
 
 impl RTCPeerConnectionBuilder {
@@ -666,6 +667,24 @@ impl RTCPeerConnectionBuilder {
         self
     }
 
+    /// Gives the connection the RTCP canonical name (CNAME) of an existing connection
+    /// ([`RTCPeerConnection::rtcp_cname`]) instead of a new one.
+    ///
+    /// RFC 8834 section 4.9: a WebRTC endpoint generates a new, unique CNAME for each
+    /// RTCPeerConnection (RFC 7022), "with a single exception; if explicitly requested at
+    /// creation, an RTCPeerConnection MAY use the same CNAME as an existing RTCPeerConnection
+    /// within their common same-origin context". Streams with one CNAME are one
+    /// synchronisation context (RFC 3550 6.5.1): a receiver may synchronise the two
+    /// connections' audio and video, so both must take their RTP and NTP timestamps from
+    /// the same clock (the application drives both with the same `Instant`s and wall clock).
+    ///
+    /// Without this call (the default) the connection generates its own CNAME. Checked by
+    /// [`build`](Self::build): a CNAME is 1 to 255 octets (an SDES item's length).
+    pub fn with_rtcp_cname(mut self, cname: impl Into<String>) -> Self {
+        self.rtcp_cname = Some(cname.into());
+        self
+    }
+
     /// Builds the RTCPeerConnection with the configured settings.
     ///
     /// This method validates the configuration and creates a new peer connection.
@@ -702,16 +721,31 @@ impl RTCPeerConnectionBuilder {
         if let Some(lifetime) = self.setting_engine.srtp_key_lifetime {
             ::srtp::keying::validate_key_lifetime(lifetime)?;
         }
+        if self
+            .rtcp_cname
+            .as_ref()
+            .is_some_and(|cname| cname.is_empty() || cname.len() > 255)
+        {
+            return Err(Error::ErrRtcpCnameLength);
+        }
         let interceptor =
             with_rtcp_session(self.interceptor_registry, &self.setting_engine).build();
-        RTCPeerConnection::new(
+        let mut pc = RTCPeerConnection::new(
             now,
             self.configuration,
             self.media_engine,
             self.setting_engine,
             // The registry is a list until here; `build` freezes it into the chain.
             Box::new(interceptor),
-        )
+        )?;
+        if let Some(cname) = self.rtcp_cname {
+            // Before any sender or RTCP session exists: every place the CNAME goes (the
+            // RTCP session, the descriptions' `a=ssrc` lines, the senders' parameters) reads
+            // it from these two.
+            pc.media_engine.rtcp_cname = cname.clone();
+            pc.pipeline_context.interceptor_handler_context.cname = cname;
+        }
+        Ok(pc)
     }
 }
 
@@ -4024,7 +4058,8 @@ impl RTCPeerConnection {
     /// It is generated with the connection as RFC 7022 section 4.2 defines a short-term
     /// persistent CNAME (96 random bits, Base64: 16 characters), is the same for senders,
     /// retransmission and FEC streams and receiver reports, and does not change (RFC 8834
-    /// 4.9).
+    /// 4.9). A connection built with
+    /// [`RTCPeerConnectionBuilder::with_rtcp_cname`] has the CNAME it was given instead.
     pub fn rtcp_cname(&self) -> &str {
         &self.pipeline_context.interceptor_handler_context.cname
     }

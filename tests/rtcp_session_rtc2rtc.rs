@@ -157,12 +157,33 @@ impl Peer {
         registry: Registry,
         setting_engine: SettingEngine,
     ) -> Result<Self> {
-        let pc = RTCPeerConnectionBuilder::new()
-            .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_media_engine(media_engine)
-            .with_setting_engine(setting_engine)
-            .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+        Self::built_from(
+            addr,
+            RTCPeerConnectionBuilder::new()
+                .with_configuration(RTCConfigurationBuilder::new().build())
+                .with_media_engine(media_engine)
+                .with_setting_engine(setting_engine)
+                .with_interceptor_registry(registry),
+        )
+    }
+
+    /// A peer as [`new`](Self::new) (no FEC), created with the RTCP CNAME `cname`
+    /// (`RTCPeerConnectionBuilder::with_rtcp_cname`).
+    fn with_cname(addr: &str, cname: &str) -> Result<Self> {
+        let mut media_engine = Self::media_engine(false)?;
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        Self::built_from(
+            addr,
+            RTCPeerConnectionBuilder::new()
+                .with_configuration(RTCConfigurationBuilder::new().build())
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
+                .with_rtcp_cname(cname),
+        )
+    }
+
+    fn built_from(addr: &str, builder: RTCPeerConnectionBuilder) -> Result<Self> {
+        let pc = builder.build(Instant::now())?;
         Ok(Self {
             pc,
             addr: addr.parse()?,
@@ -545,6 +566,51 @@ fn the_receiver_learns_one_cname_for_the_media_and_the_rtx_ssrc() -> Result<()> 
         world.peers[1].pc.remote_rtcp_cname(rtx_ssrc),
         "the RTX SSRC is described with the same CNAME"
     );
+    Ok(())
+}
+
+/// RFC 8834 4.9: "if explicitly requested at creation, an RTCPeerConnection MAY use the same
+/// CNAME as an existing RTCPeerConnection". A connection built with another connection's
+/// CNAME (`RTCPeerConnectionBuilder::with_rtcp_cname`) describes its SSRC with it in its
+/// description (RFC 5576 `a=ssrc:<ssrc> cname:`) and in its RTCP SDES, so the receiver binds
+/// the stream to that synchronisation context; a CNAME an SDES item cannot carry (empty, over
+/// 255 octets) is refused when the connection is built.
+#[test]
+fn a_connection_created_with_an_existing_connections_cname_uses_it() -> Result<()> {
+    let existing = Peer::new("10.0.0.3:5000", false)?;
+    let cname = existing.pc.rtcp_cname().to_owned();
+    let (mut world, sender) = World::connected_peers([
+        Peer::with_cname("10.0.0.1:5000", &cname)?,
+        Peer::new("10.0.0.2:5000", false)?,
+    ])?;
+    assert_eq!(cname, world.peers[0].pc.rtcp_cname());
+    let (ssrc, _, _) = world.sender_stream(sender);
+    let offer = world.peers[0]
+        .pc
+        .local_description()
+        .expect("a local description")
+        .sdp;
+    assert!(
+        offer.contains(&format!("a=ssrc:{ssrc} cname:{cname}")),
+        "{offer}"
+    );
+
+    world.send_media(sender, FIRST_SEQ, 50)?;
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    assert_eq!(
+        Some(cname.as_str()),
+        world.peers[1].pc.remote_rtcp_cname(ssrc)
+    );
+
+    for refused in [String::new(), "x".repeat(256)] {
+        assert!(
+            RTCPeerConnectionBuilder::new()
+                .with_rtcp_cname(refused)
+                .build(Instant::now())
+                .is_err()
+        );
+    }
     Ok(())
 }
 
