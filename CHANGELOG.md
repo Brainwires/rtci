@@ -1171,6 +1171,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the local end of an established connection: refused on Linux, macOS and Windows (a bound,
   not listening socket is dropped silently on macOS), and no client can take it as its source
   port. `a_socket_connected_to_itself_is_a_failed_connection` connects 127.0.0.1:P to itself.
+- **peer connection**: a DTLS server that alone has a short SRTP key lifetime failed the call
+  when the re-keying took longer than half the margin (`conf/rekey-3-server-margin`, found by
+  ParolNet's `turn_rekey::a_relay_only_call_re_keys_on_new_allocations`, a relayed call: 9600
+  packets at 188 a second, so 3.2 s of margin, and about 2 s to re-key through TURN). The
+  tie-break of `with_srtp_rekeying_dtls_client_first` had the server wait for the client's offer
+  until a thirty-second of the lifetime was left, half the margin; lifetimes are local, so the
+  server cannot know that the client re-keys at all. The server now waits at most 500 ms and at
+  most an eighth of the time its keys have left at their packet rate (not at all without packets
+  to measure it by), then asks itself; glare is resolved by rollback as before. The lifetime docs
+  state the margin a re-keying needs (`16 x packet rate x re-keying time`), and a margin under
+  2 s at the warning is logged. Test:
+  `tests/srtp_rekeying_glare_rtc2rtc.rs::a_dtls_server_alone_with_a_short_lifetime_re_keys_in_time_on_a_slow_path`.
 - **stream-driver** (`conf/deps-1-hickory`, security): the optional `dns-records` feature
   takes hickory-resolver 0.26.2 or later instead of 0.25, whose hickory-proto 0.25.2 and
   hickory-resolver 0.25.2 carried 17 RustSec advisories. One is reachable from the driver's

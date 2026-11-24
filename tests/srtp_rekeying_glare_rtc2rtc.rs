@@ -1060,3 +1060,26 @@ fn a_packet_that_cannot_be_sent_is_counted() -> Result<()> {
     assert_eq!(peer.pc.unsent_media_packets(), before + 1);
     Ok(())
 }
+
+/// ParolNet's relayed call (`turn_rekey::a_relay_only_call_re_keys_on_new_allocations`): only
+/// A, the DTLS server, has a short key lifetime, so only A re-keys; B never will. A re-keying
+/// takes seconds on this path (1.2 s each way for the offer, the answer and the candidates,
+/// like a relayed path). Lifetimes are local, so A cannot know B will not re-key: its wait
+/// for B's offer is bounded in time (at most 500 ms, at most an eighth of the time its keys
+/// have left) and never takes half the margin, as the wait until a thirty-second of the
+/// lifetime did (2 s of margin left there, for a re-keying that needs about 2.5 s: the key ran
+/// out and the transport failed). Every packet arrives across the renewal.
+#[test]
+fn a_dtls_server_alone_with_a_short_lifetime_re_keys_in_time_on_a_slow_path() -> Result<()> {
+    let scenario = Scenario {
+        settings: [short(3200), SettingEngineBuilder::new()],
+        polite: 1,
+        signal_delay: Duration::from_millis(1200),
+        packets: 3400,
+        ..Default::default()
+    };
+    let packets = scenario.packets;
+    let outcome = run(scenario)?;
+    check_call(&outcome, packets, 1);
+    Ok(())
+}
