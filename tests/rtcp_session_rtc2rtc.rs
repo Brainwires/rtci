@@ -1344,6 +1344,170 @@ fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
     Ok(())
 }
 
+/// A small deterministic generator (SplitMix64).
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
+
+/// The built-in crypto provider with its random source replaced by a seeded [`Rng`]: what the
+/// engine draws through `RTCCryptoProvider::random()` and, through
+/// `DefaultInterceptorOptions::rtcp_random`, the times of its RTCP packets (RFC 3550 6.3.1:
+/// each interval is varied at random) are the same in every run of a seed.
+struct SeededProvider {
+    inner: std::sync::Arc<dyn rtci::crypto::RTCCryptoProvider>,
+    rng: std::sync::Mutex<Rng>,
+}
+
+impl rtci::crypto::RTCCryptoProvider for SeededProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn crypto(&self) -> &dyn rtci::crypto::RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn rtci::crypto::RTCRandom {
+        self
+    }
+}
+
+impl rtci::crypto::RTCRandom for SeededProvider {
+    fn fill(&self, output: &mut [u8]) -> std::result::Result<(), rtci::crypto::CryptoError> {
+        let mut rng = self
+            .rng
+            .lock()
+            .map_err(|_| rtci::crypto::CryptoError::RandomnessFailed)?;
+        for chunk in output.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next_u64().to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
+impl Peer {
+    /// A peer as [`new`](Self::new) (no FEC) whose random numbers, the RTCP session's
+    /// included, come from `seed`.
+    fn seeded(addr: &str, seed: u64) -> Result<Self> {
+        use rtci::peer_connection::configuration::interceptor_registry::{
+            DefaultInterceptorOptions, register_default_interceptors_with_options,
+        };
+        let provider: std::sync::Arc<dyn rtci::crypto::RTCCryptoProvider> =
+            std::sync::Arc::new(SeededProvider {
+                inner: rtci::crypto::default_provider()?,
+                rng: std::sync::Mutex::new(Rng(seed)),
+            });
+        let mut media_engine = Self::media_engine(false)?;
+        let mut options = DefaultInterceptorOptions::default();
+        options.rtcp_random = Some(provider.clone());
+        let (registry, _handles) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            &options,
+        )?;
+        Self::built(
+            addr,
+            media_engine,
+            registry,
+            SettingEngineBuilder::new()
+                .with_crypto_provider(provider)
+                .build(),
+        )
+    }
+}
+
+/// RFC 4588 6.3 from the receiving application: `RTCRtpReceiver::set_nack_horizon` tells the
+/// receiver which packets are no longer useful. A packet lost for good (its RTX copies too)
+/// is asked for again and again; from the moment the horizon passes it no NACK leaves for it
+/// (`nackCount` of its inbound stream stays put), and removing the horizon starts them again.
+///
+/// "From the moment" includes the NACK the RTCP session holds: early feedback is rate-limited
+/// (RFC 4585 3.5.2), so a request made before the horizon usually still waits for the next
+/// regular packet when the horizon is given, and that packet can be most of two seconds away
+/// (the interval is varied at random, RFC 3550 6.3.1). Sent then, it would ask for a packet
+/// the application has said it cannot use (RFC 4585 3.5.2, step 4a: stored feedback is sent
+/// if it is still useful). The seeds are four of those on which, in a seeded scan of this
+/// scenario under either crypto backend, that NACK left more than a second after the horizon
+/// (about one seed in a hundred).
+#[test]
+fn a_receiver_stops_asking_for_packets_behind_its_nack_horizon() -> Result<()> {
+    use rtci::statistics::StatsSelector;
+    let nacks = |pc: &mut RTCPeerConnection, now: Instant, ssrc: u32| -> u32 {
+        pc.get_stats(now, StatsSelector::None)
+            .inbound_rtp_streams()
+            .find(|s| s.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+            .map_or(0, |s| s.nack_count)
+    };
+    for seed in [25, 311, 349, 644] {
+        let (mut world, sender) = World::connected_peers([
+            Peer::seeded("10.0.0.1:5000", seed)?,
+            Peer::seeded("10.0.0.2:5000", seed ^ 0xb0b)?,
+        ])?;
+        let (ssrc, rtx_ssrc, _) = world.sender_stream(sender);
+        world.blocked_ssrcs.extend(rtx_ssrc);
+        let lost = FIRST_SEQ + 10;
+        world.lose_for_good = Some((ssrc, lost));
+        world.send_media(sender, FIRST_SEQ, 30)?;
+        let until = world.now + Duration::from_secs(1);
+        world.run_until(until)?;
+        let asked = nacks(&mut world.peers[1].pc, world.now, ssrc);
+        assert!(asked > 0, "seed {seed}: the lost packet is asked for");
+        let until = world.now + Duration::from_secs(1);
+        world.run_until(until)?;
+        let still_asked = nacks(&mut world.peers[1].pc, world.now, ssrc);
+        assert!(
+            still_asked > asked,
+            "seed {seed}: and asked for again: {asked} -> {still_asked}"
+        );
+
+        let receiver = *world.peers[1].opened.first().expect("the track opened");
+        let now = world.now;
+        world.peers[1]
+            .pc
+            .rtp_receiver(receiver)
+            .expect("receiver")
+            .set_nack_horizon(now, ssrc, Some(lost + 1))?;
+        world.pump()?;
+        let at_horizon = nacks(&mut world.peers[1].pc, world.now, ssrc);
+        assert_eq!(
+            at_horizon, still_asked,
+            "seed {seed}: giving the horizon sends nothing"
+        );
+        // Several regular RTCP intervals: whatever was held has had its packet.
+        let until = world.now + Duration::from_secs(6);
+        world.run_until(until)?;
+        assert_eq!(
+            nacks(&mut world.peers[1].pc, world.now, ssrc),
+            at_horizon,
+            "seed {seed}: no NACK for a packet behind the horizon"
+        );
+
+        let now = world.now;
+        world.peers[1]
+            .pc
+            .rtp_receiver(receiver)
+            .expect("receiver")
+            .set_nack_horizon(now, ssrc, None)?;
+        world.pump()?;
+        // The request may have to wait for a regular RTCP packet.
+        let until = world.now + Duration::from_secs(3);
+        world.run_until(until)?;
+        assert!(
+            nacks(&mut world.peers[1].pc, world.now, ssrc) > at_horizon,
+            "seed {seed}: asked for again without the horizon"
+        );
+    }
+    Ok(())
+}
+
 /// The receive bandwidth API end to end: `RTCRtpTransceiver::set_receive_bandwidth` writes
 /// `b=TIAS` and `b=AS` in the receiver's answer (RFC 3264 section 6: what the answerer "would
 /// like the offerer to send"), the sender reads it as its maximum (RFC 9429 section 5.10), and
