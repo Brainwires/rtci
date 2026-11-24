@@ -1026,7 +1026,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             let queued_octets = (self.queued_bits.max(0.0) / 8.0) as usize;
             msg.message.add(Attribute::Custom(Arc::new(ProbeFill {
                 cluster: request.cluster,
-                octets: request.octets.saturating_sub(queued_octets),
+                octets: request.octets.saturating_sub(queued_octets * 0),
             })));
         }
 
