@@ -16,7 +16,8 @@
 //!
 //! There is no global or default runtime in the library, and none can be set: each driver is
 //! given its own. Cargo features only decide which built-in runtime *types* exist
-//! (`runtime-tokio`, on by default: [`TokioRuntime`]); they never decide what the driver uses.
+//! (`runtime-tokio`, on by default: `TokioRuntime`; `runtime-smol`: `SmolRuntime`); they never
+//! decide what the driver uses, and several can be on at once.
 //! With `default-features = false` and no built-in runtime the crate builds without any of them,
 //! and an application implements [`Runtime`] for its own executor (the `custom-runtime`
 //! example).
@@ -26,8 +27,12 @@
 //! because the driver stamps every engine input with a time and a virtual clock must be the
 //! one both the engine and the timers see.
 
+#[cfg(feature = "runtime-smol")]
+mod smol_runtime;
 #[cfg(feature = "runtime-tokio")]
 mod tokio_runtime;
+#[cfg(feature = "runtime-smol")]
+pub use smol_runtime::SmolRuntime;
 #[cfg(feature = "runtime-tokio")]
 pub use tokio_runtime::TokioRuntime;
 
@@ -576,6 +581,38 @@ pub fn std_tcp_bound(local: SocketAddr, reuse_address: bool) -> io::Result<Socke
     let socket = tcp_socket(local, reuse_address)?;
     socket.bind(&local.into())?;
     Ok(socket)
+}
+
+/// Starts a non-blocking TCP connection from `local` to `remote`: the socket is bound, and the
+/// handshake runs. A runtime waits for it to become writable, then reads `take_error` and
+/// `peer_addr` (what async-io's own `connect` does), for runtimes whose connect cannot bind a
+/// local address first.
+///
+/// # Errors
+///
+/// The bind failed, or the connection failed at once.
+pub fn std_tcp_connect_start(
+    local: SocketAddr,
+    remote: SocketAddr,
+    reuse_address: bool,
+) -> io::Result<std::net::TcpStream> {
+    let socket = std_tcp_bound(local, reuse_address)?;
+    match socket.connect(&remote.into()) {
+        Ok(()) => {}
+        Err(e) if connect_in_progress(&e) => {}
+        Err(e) => return Err(e),
+    }
+    Ok(socket.into())
+}
+
+/// Whether a non-blocking connect's error only says the handshake is under way.
+fn connect_in_progress(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::EINPROGRESS) {
+        return true;
+    }
+    // Windows: WSAEWOULDBLOCK.
+    e.kind() == io::ErrorKind::WouldBlock
 }
 
 /// Sets `socket`'s TOS / Traffic Class and reads it back (for [`AsyncTcpStream::set_traffic_class`]).

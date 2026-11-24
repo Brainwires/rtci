@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     dependency tree (no tokio, mio, smol, async-io, hickory): CI checks it
     (`tests/dependency_tree.rs`, the `cargo.yml` step "Stream driver without a built-in
     runtime").
+  - (runtime-3) `runtime-smol` gives `SmolRuntime` (smol's global executor, async-io's reactor
+    and timers, smol's resolver). Several runtime features can be on at once; drivers on
+    different runtimes live in one process (`tests/runtimes.rs`: a peer on tokio and a peer on
+    smol connect and exchange data-channel messages).
 
 ### Behaviour changes
 

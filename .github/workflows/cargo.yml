@@ -56,6 +56,9 @@ jobs:
         run: |
           cargo check --package rtci-stream-driver --no-default-features --features peer --verbose
           cargo test --package rtci-stream-driver --test dependency_tree --verbose
+      # The built-in runtimes other than tokio (off by default): their tests need the features.
+      - name: Stream driver on every built-in runtime
+        run: cargo test --package rtci-stream-driver --features runtime-smol --verbose
       - name: Disk left after the build
         if: always()
         run: df -h
