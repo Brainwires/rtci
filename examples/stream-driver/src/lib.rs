@@ -1,5 +1,6 @@
 //! The reference driver for the stream half of WebRTC.rs's sans-I/O engine
-//! (`rtci_shared::stream`): it owns the TCP sockets, on tokio, and does what the engine asks.
+//! (`rtci_shared::stream`): it owns the TCP sockets, on the async runtime it is given
+//! ([`runtime`]), and does what the engine asks.
 //!
 //! # Engine and driver
 //!
@@ -73,17 +74,32 @@
 //! (`OnLocalCandidatesNeeded`: a new DTLS association runs on a new 3-tuple, RFC 8842 section
 //! 5.1), closing the previous sockets once a pair on the new ones is selected.
 //!
+//! # Runtime
+//!
+//! The driver's sockets, tasks, timers and name lookups belong to the [`runtime::Runtime`] it
+//! is given ([`StreamDriver::with_runtime`], [`peer::PeerDriver::with_runtime`]): there is no
+//! global or default runtime. The [`runtime`] module says what is injected and what is not,
+//! and how to bring your own.
+//!
 //! # Features
 //!
+//! - `runtime-tokio` (default): `runtime::TokioRuntime`, and `StreamDriver::new` /
+//!   `default` and `PeerDriver::new` on it.
+//! - `runtime-smol`: `runtime::SmolRuntime`.
+//! - `runtime-mock`: `runtime::MockRuntime`, virtual time and an in-memory network.
 //! - `peer` (default): [`peer`], with a dependency on `rtci`.
 //! - `dns-records`: SRV and NAPTR lookups (RFC 5928, RFC 8489 section 8) and AAAA / A answered
-//!   apart (RFC 8305 section 3), with hickory-resolver (MIT OR Apache-2.0). Without it, names go
-//!   to the system resolver and record queries are answered with none (the engine then uses
-//!   the host and the scheme's default port).
+//!   apart (RFC 8305 section 3) in `TokioRuntime`, with hickory-resolver (MIT OR Apache-2.0);
+//!   it turns `runtime-tokio` on. Without it, names go to the runtime's resolver and record
+//!   queries are answered with none (the engine then uses the host and the scheme's default
+//!   port).
 //!
-//! Each connection has a reader task and a writer task. Sockets are created on the thread that
-//! calls [`StreamDriver::execute`] inside a tokio runtime, so a current-thread runtime on a
-//! thread that entered a network namespace keeps them there.
+//! With `default-features = false` and no runtime feature the crate has no async runtime in
+//! its dependency tree.
+//!
+//! Each connection has a reader task and a writer task. With `TokioRuntime::new()` sockets are
+//! created on the thread that calls [`StreamDriver::execute`] inside a tokio runtime, so a
+//! current-thread runtime on a thread that entered a network namespace keeps them there.
 
 #![warn(missing_docs)]
 
@@ -259,7 +275,7 @@ impl StreamDriver {
         &self.runtime
     }
 
-    /// Carries out a command of the engine. With [`runtime::TokioRuntime::new`] it must be
+    /// Carries out a command of the engine. With `runtime::TokioRuntime::new()` it must be
     /// called inside a tokio runtime.
     pub fn execute(&mut self, command: StreamCommand) {
         match command {

@@ -125,7 +125,9 @@ fn is_client_hello(data: &[u8]) -> bool {
 
 /// RFC 6347 section 4.2.4 (RFC 9147 section 5.8): a flight that gets no answer is sent again
 /// when its timer fires. The network drops the first ClientHello; the client sends it again
-/// about a second (the initial timer) of virtual time later, and the peers connect.
+/// when its first timer runs out on virtual time, and the peers connect. The engine's first
+/// timer for DTLS-SRTP follows RFC 9147 section 5.8.2: 400 ms, or 1.5 times ICE's round trip
+/// time and never under 100 ms (`DtlsFlightInterval::Rfc9147`).
 #[test]
 fn a_lost_client_hello_is_retransmitted_on_virtual_time_and_the_peers_connect() -> Result<()> {
     let runtime = MockRuntime::new();
@@ -151,7 +153,7 @@ fn a_lost_client_hello_is_retransmitted_on_virtual_time_and_the_peers_connect() 
     );
     let gap = hellos[1].duration_since(hellos[0]);
     assert!(
-        gap >= Duration::from_millis(500) && gap <= Duration::from_secs(3),
+        gap >= Duration::from_millis(100) && gap <= Duration::from_millis(400),
         "retransmitted after its timer: {gap:?}"
     );
     let filtered = runtime
