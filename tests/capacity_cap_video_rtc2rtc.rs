@@ -1533,8 +1533,9 @@ fn run(setup: &Setup) -> Result<Outcome> {
     })
 }
 
-/// Whether the whole matrix runs (`RTC_CAP_FULL` set): twice the seeds of every test of this
-/// file, three times those of the cap lengths other than 20 s.
+/// Whether the whole matrix runs (`RTC_CAP_FULL` set): every test of this file on all its
+/// seeds (two to six times those of an ordinary run, which is sized to take a hosted runner
+/// some ninety seconds).
 fn full() -> bool {
     std::env::var_os("RTC_CAP_FULL").is_some()
 }
@@ -1687,7 +1688,10 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
     // 1.36 s, the oldest picture 2.49 to 3.35 s, 49 to 54 retransmissions (15 to 17 dropped
     // at the link's queue, against 13 to 15 under the default).
     assert_the_call_holds(
-        &seeds(Some(RetransmissionRateLimit::UpToTarget), &cap_20())?,
+        &seeds(
+            Some(RetransmissionRateLimit::UpToTarget),
+            &[(20, seed_range(2, 6))],
+        )?,
         Duration::from_millis(4_000),
     );
     Ok(())
@@ -1697,8 +1701,13 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions_up_to_the_target()
 -> Result<()> {
+    // The shortest and the longest cap in an ordinary run; all four with `RTC_CAP_FULL`.
+    let lengths: Vec<_> = cap_lengths()
+        .into_iter()
+        .filter(|(cap, _)| full() || matches!(cap, 14 | 26))
+        .collect();
     assert_the_call_holds(
-        &seeds(Some(RetransmissionRateLimit::UpToTarget), &cap_lengths())?,
+        &seeds(Some(RetransmissionRateLimit::UpToTarget), &lengths)?,
         Duration::from_millis(4_000),
     );
     Ok(())
@@ -1726,7 +1735,7 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// reads a queue filling within a feedback interval (both planned).
 #[test]
 fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Result<()> {
-    for seed in seed_range(2, 6) {
+    for seed in seed_range(1, 6) {
         let outcome = run(&Setup::new(seed, None).anchor(ANCHORS[0]))?;
         println!("cap after 20 s seed {seed}: {outcome:?}");
         assert!(
@@ -1860,7 +1869,7 @@ fn measure_the_capacity_cap() -> Result<()> {
 /// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
-    let outcomes: Result<Vec<_>> = seed_range(3, 6)
+    let outcomes: Result<Vec<_>> = seed_range(2, 6)
         .map(|seed| {
             let outcome = run(&Setup::new(seed, None)
                 .chain(Chain::Default)
@@ -2057,7 +2066,7 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
 /// 437 to 242 kbit/s, and the video froze for 7 s. ParolNet's chain (the TWCC-driven GCC).
 #[test]
 fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<()> {
-    for seed in seed_range(2, 3) {
+    for seed in seed_range(1, 3) {
         let outcome = path_change_run(&Setup::new(seed, None))?;
         println!("ParolNet chain seed {seed}: {outcome:?}");
         assert!(
@@ -2095,7 +2104,7 @@ fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<(
 /// at it.
 #[test]
 fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chain() -> Result<()> {
-    let outcomes: Result<Vec<_>> = seed_range(2, 3)
+    let outcomes: Result<Vec<_>> = seed_range(1, 3)
         .map(|seed| {
             let outcome = path_change_run(&Setup::new(seed, None).chain(Chain::Default))?;
             println!("default chain seed {seed}: {outcome:?}");
@@ -2242,7 +2251,7 @@ fn the_estimate_climbs_on_an_open_link_and_never_steps_down() -> Result<()> {
 /// interceptor, the pacer, bandwidth probing).
 #[test]
 fn the_estimate_climbs_on_an_open_link_in_the_default_chain() -> Result<()> {
-    for seed in seed_range(2, 3) {
+    for seed in seed_range(1, 3) {
         let setup = Setup::new(seed, None)
             .chain(Chain::Default)
             .anchor(ANCHORS[0]);
@@ -2409,7 +2418,7 @@ fn an_estimate_is_held_while_only_audio_is_sent_and_video_resumes_from_it() -> R
 /// The same call through the engine's default interceptors.
 #[test]
 fn an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain() -> Result<()> {
-    for seed in seed_range(2, 3) {
+    for seed in seed_range(1, 3) {
         let setup = Setup::new(seed, None)
             .chain(Chain::Default)
             .anchor(ANCHORS[0]);
@@ -2428,7 +2437,7 @@ fn an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain() -> Result
 #[test]
 fn an_estimate_started_over_on_a_new_path_does_not_fall_without_evidence() -> Result<()> {
     for chain in [Chain::ParolNet, Chain::Default] {
-        for seed in seed_range(2, 3) {
+        for seed in seed_range(1, 3) {
             let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
             let outcome = path_change_run(&setup)?;
             println!("path change, {chain:?} seed {seed}: {outcome:?}");
