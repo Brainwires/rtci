@@ -30,7 +30,10 @@
 //! per clock rate), and `?profile=chrome` (or `rfc`, `strict-rfc`, `performance`) under that
 //! behaviour profile (`docs/behaviour-profiles.md`): `SettingEngineBuilder::with_behaviour_profile`
 //! and `MediaEngine::for_profile`, the settings below applied after it. Without them the peer
-//! takes the build's default profile and its value. `?previous_addresses=1` builds it with
+//! takes the build's default profile and its value. `?video_red_ulpfec=1` (or `=0`) sets
+//! `DefaultInterceptorOptions::video_red_ulpfec` whatever the profile: video `red` + `ulpfec`
+//! offered and answered, ULPFEC in RED sent and recovered (the report's `fec` has the engine's
+//! FEC counts, `RTCPeerConnection::fec_stats`). `?previous_addresses=1` builds it with
 //! `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)`: a new DTLS
 //! association keeps the transport's candidates and addresses. Without it (the RFC 8842
 //! section 5.1 default), when the engine says a transport needs new local candidates
@@ -73,7 +76,8 @@ use rtci::media::io::ogg_reader::OggReader;
 use rtci::media_stream::{MediaStreamTrack, MediaStreamTrackId};
 use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::interceptor_registry::{
-    configure_simulcast_extension_headers, register_default_interceptors,
+    DefaultInterceptorOptions, configure_simulcast_extension_headers,
+    register_default_interceptors_with_options,
 };
 use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_HEVC, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,
@@ -142,6 +146,7 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut ssrc_per_clock_rate = None;
             let mut previous_addresses = false;
+            let mut video_red_ulpfec = None;
             let mut profile = BehaviourProfile::default();
             let mut unknown_profile = None;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
@@ -152,6 +157,8 @@ async fn main() -> Result<()> {
                         ssrc_per_clock_rate = Some(true);
                     } else if pair == "previous_addresses=1" {
                         previous_addresses = true;
+                    } else if let Some(value) = pair.strip_prefix("video_red_ulpfec=") {
+                        video_red_ulpfec = Some(value == "1");
                     } else if let Some(name) = pair.strip_prefix("profile=") {
                         match BehaviourProfile::from_name(name) {
                             Some(named) => profile = named,
@@ -170,6 +177,7 @@ async fn main() -> Result<()> {
                     let options = SessionOptions {
                         ssrc_per_clock_rate,
                         previous_addresses,
+                        video_red_ulpfec,
                         profile,
                     };
                     if let Err(e) = Session::run(ws, ip, dir, options).await {
@@ -405,6 +413,9 @@ struct SessionOptions {
     ssrc_per_clock_rate: Option<bool>,
     /// `previous_addresses=1`: `with_dtls_new_association_on_previous_addresses(true)`.
     previous_addresses: bool,
+    /// `video_red_ulpfec=1` / `=0`: `DefaultInterceptorOptions::video_red_ulpfec` (video `red`
+    /// + `ulpfec` offered and ULPFEC in RED in the chain) whatever the profile says.
+    video_red_ulpfec: Option<bool>,
     profile: BehaviourProfile,
 }
 
@@ -491,6 +502,7 @@ impl Session {
         let SessionOptions {
             ssrc_per_clock_rate,
             previous_addresses,
+            video_red_ulpfec,
             profile,
         } = options;
         let (mut ws_tx, mut ws_rx) = ws.split();
@@ -499,7 +511,15 @@ impl Session {
         let mut me = MediaEngine::for_profile(profile);
         me.register_default_codecs()?;
         configure_simulcast_extension_headers(&mut me)?;
-        let registry = register_default_interceptors(Registry::new(), &mut me)?;
+        let mut interceptor_options = DefaultInterceptorOptions::for_profile(profile);
+        if let Some(on) = video_red_ulpfec {
+            interceptor_options.video_red_ulpfec = on;
+        }
+        let (registry, _) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut me,
+            &interceptor_options,
+        )?;
         // 256 KiB messages (what Chromium and WebKit state; RFC 8841 6.1), `.local` remote
         // candidates resolved over mDNS (a browser hides its host address by default).
         // Browsers do not announce SCTP message interleaving, and the engine's default then
@@ -1089,12 +1109,39 @@ impl Session {
                     "rtcp": self.rtcp_by_type,
                     "discardedSsrcs": self.discarded_ssrcs,
                     "sctp": sctp,
+                    "fec": self.fec_stats(),
                     "errors": self.errors,
                 }));
             }
             other => return Err(anyhow!("unknown message type {other:?}")),
         }
         Ok(())
+    }
+
+    /// The engine's FEC counts that webrtc-stats has no member for
+    /// (`RTCPeerConnection::fec_stats`): per outbound stream the FEC sent, per inbound stream
+    /// the FEC received (all carriages, in RED among them), the packets FEC rebuilt and the
+    /// discards by reason.
+    fn fec_stats(&self) -> Value {
+        let stats = self.pc.fec_stats();
+        json!({
+            "sent": stats.sent.iter().map(|s| json!({
+                "ssrc": s.ssrc,
+                "fecPacketsSent": s.fec_packets_sent,
+                "fecBytesSent": s.fec_bytes_sent,
+            })).collect::<Vec<_>>(),
+            "received": stats.received.iter().map(|r| json!({
+                "ssrc": r.ssrc,
+                "fecPacketsReceived": r.fec_packets_received,
+                "fecBytesReceived": r.fec_bytes_received,
+                "fecPacketsInRed": r.fec_packets_in_red,
+                "packetsRecovered": r.packets_recovered,
+                "fecPacketsDiscarded": r.fec_packets_discarded,
+                "discardedUnneeded": r.discarded_unneeded,
+                "discardedExpired": r.discarded_expired,
+                "discardedRejected": r.discarded_rejected,
+            })).collect::<Vec<_>>(),
+        })
     }
 
     /// The W3C stats a test compares with the browser's: RTP counters per SSRC, the remote

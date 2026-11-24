@@ -78,6 +78,28 @@ export function impair(port) {
   };
 }
 
+// The same band for what Rust sends from `port`, on the Rust host's side (run.sh adds it on
+// open-b's eth0 too): the browser receives through loss.
+export function impairFromRust(port) {
+  const prio = String(100 + test.info().parallelIndex);
+  const tc = (...args) =>
+    execFileSync("ip", ["netns", "exec", "open-b", "tc", ...args], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+  tc("filter", "add", "dev", "eth0", "parent", "1:", "protocol", "ip", "prio", prio, "u32",
+    "match", "ip", "protocol", "17", "0xff", "match", "ip", "sport", String(port), "0xffff", "flowid", "1:4");
+  return () => {
+    try {
+      tc("filter", "del", "dev", "eth0", "parent", "1:", "prio", prio);
+    } catch {}
+  };
+}
+
+// Packets open-b's netem band (what Rust sends) has dropped so far.
+export function netemDropsFromRust() {
+  const out = execFileSync("ip", ["netns", "exec", "open-b", "tc", "-s", "qdisc", "show", "dev", "eth0"]).toString();
+  const m = out.match(/qdisc netem 40:[\s\S]*?dropped (\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+
 // Packets the netem band has dropped so far (shared by every impaired test running).
 export function netemDrops() {
   const out = execFileSync("tc", ["-s", "qdisc", "show", "dev", "eth0"]).toString();
