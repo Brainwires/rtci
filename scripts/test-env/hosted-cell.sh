@@ -30,8 +30,11 @@ sudo mkdir -p "$MEDIA"
 sudo gst-launch-1.0 -q videotestsrc num-buffers=300 pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1 \
   ! vp8enc deadline=1 keyframe-max-dist=60 target-bitrate=800000 ! avmux_ivf ! filesink location="$MEDIA/vp8.ivf"
 
-cargo build --example interop-peer > "$A/interop-build.log" 2>&1 || { tail -30 "$A/interop-build.log"; exit 1; }
-PEER=${CARGO_TARGET_DIR:-$ROOT/target}/debug/examples/interop-peer
+# The peer interop/run.sh starts: examples/interop-peer built by the rtci-video-interop package
+# with its `pipeline` feature (the same peer plus the video pipeline scenario, for the
+# "pipeline receive" cells).
+cargo build -p rtci-video-interop --features pipeline --bin interop-peer-video > "$A/interop-build.log" 2>&1 || { tail -30 "$A/interop-build.log"; exit 1; }
+PEER=${CARGO_TARGET_DIR:-$ROOT/target}/debug/interop-peer-video
 
 sudo bash "$HERE/topology.sh" down > /dev/null 2>&1 || true
 sudo bash "$HERE/topology.sh" up > "$A/topology.log" 2>&1 || { tail -30 "$A/topology.log"; exit 1; }
