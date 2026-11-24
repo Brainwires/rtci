@@ -82,7 +82,10 @@ impl<T: Depacketizer> SampleBuilder<T> {
     /// Sets how long to wait for a missing packet before giving up on the sample it belongs to.
     ///
     /// Bounds head-of-line blocking: without it a single lost packet would stall reassembly
-    /// indefinitely.
+    /// indefinitely. A bound in packets (`max_late`) is a bound in time only at one bit rate (256
+    /// packets are 0.3 s at 2.5 Mbit/s and 8.6 s at 100 kbit/s): a receiver should bound the wait
+    /// in time, about the NACK repair window, and ask for a key frame when a sample after a gap
+    /// reports [`Sample::prev_dropped_packets`]. See `docs/receiver-gap-policy.md`.
     pub fn with_max_time_delay(mut self, max_late_duration: Duration) -> Self {
         self.max_late_timestamp =
             (self.sample_rate as u128 * max_late_duration.as_millis() / 1000) as u32;
