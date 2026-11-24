@@ -80,6 +80,10 @@ pub(crate) struct SrtpHandlerContext {
     pub(crate) rekeying_time: Option<Duration>,
     /// [`RTCEventInternal::SrtpRekeyingMarginReached`] was raised for the current keys.
     pub(crate) rekeying_margin_reported: bool,
+    /// When the current keys first protected or unprotected a packet: the start of the span
+    /// the re-keying margin's packet rate is measured over (media may begin well after the
+    /// handshake).
+    pub(crate) keys_first_used: Option<Instant>,
     /// A new DTLS association replaced the one that keyed the current contexts and its
     /// handshake has not completed: the peer may already protect with its keys.
     pub(crate) awaiting_new_keys: bool,
@@ -222,10 +226,11 @@ impl SrtpHandlerContext {
     /// rate it has been used since the keys were installed, in the time a re-keying needs
     /// ([`Self::rekeying_time`]), and that is more packets than the sixteenth of its lifetime
     /// the lifetime warning leaves (`ContextEvent::KeyLifetimeExpiring`): the margin is the
-    /// larger of the two. The rate is taken once the keys have been in use for that time at
-    /// least, so that a first burst does not stand for it.
+    /// larger of the two. The rate is measured from the keys' first packet, and taken once
+    /// they have been in use for that time at least, so that a first burst does not stand
+    /// for it.
     pub(crate) fn rekeying_margin_reached(&self, now: Instant) -> bool {
-        let (Some(needed), Some(since)) = (self.rekeying_time, self.keys_since) else {
+        let (Some(needed), Some(since)) = (self.rekeying_time, self.keys_first_used) else {
             return false;
         };
         let elapsed = now.saturating_duration_since(since);
@@ -465,6 +470,20 @@ impl<'a> SrtpHandler<'a> {
             self.ctx.rekeying_due_reported = true;
             events.push(RTCEventInternal::SrtpRekeyingDue);
         }
+        if self.ctx.keys_first_used.is_none()
+            && [
+                self.ctx.local_srtp_context.as_ref(),
+                self.ctx.remote_srtp_context.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|context| {
+                let usage = context.key_usage();
+                usage.srtp_packets > 0 || usage.srtcp_packets > 0
+            })
+        {
+            self.ctx.keys_first_used = Some(now);
+        }
         // The re-keying margin measured in time, where it is larger than the lifetime
         // warning's sixteenth (a short lifetime on a slow path), once per key set.
         if !self.ctx.rekeying_margin_reported && self.ctx.rekeying_margin_reached(now) {
@@ -616,6 +635,7 @@ impl<'a>
             });
             self.ctx.rekeying_due_reported = false;
             self.ctx.rekeying_margin_reported = false;
+            self.ctx.keys_first_used = None;
             self.ctx.keys_since = Some(evt.now);
             self.ctx.awaiting_new_keys = false;
 

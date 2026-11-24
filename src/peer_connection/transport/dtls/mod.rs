@@ -172,9 +172,9 @@ pub(crate) struct DtlsTransport {
     pub(crate) handshake_began: Option<std::time::Instant>,
     /// The time a re-keying of this transport needs, measured on the handshake of the
     /// current association: its duration (its round trips and flights, and any
-    /// retransmission it took), the ICE checks of the restart a new association comes with
-    /// (two round trips of the selected pair: a check and its nomination), and one DTLS
-    /// retransmission timer for a lost flight. The SRTP re-keying margin is at least the
+    /// retransmission it took), as much again for the ICE checks of the restart a new
+    /// association comes with (a check and its nomination: two round trips, no more than
+    /// the handshake's own), and one DTLS retransmission timer for a lost flight. The SRTP re-keying margin is at least the
     /// packets the keys protect in that time (`SrtpHandlerContext::rekeying_margin_reached`).
     pub(crate) rekeying_handshake_time: Option<std::time::Duration>,
 

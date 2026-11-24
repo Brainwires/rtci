@@ -508,9 +508,11 @@ impl<'a>
                 // (`DtlsTransport::rekeying_handshake_time`).
                 if let Some(began) = self.ctx.dtls_transport.handshake_began.take() {
                     let dtls = &mut self.ctx.dtls_transport;
+                    // The ICE checks of the restart (a check and its nomination, two round
+                    // trips) take no longer than the handshake's own round trips, so the
+                    // handshake's duration counts twice.
                     dtls.rekeying_handshake_time = Some(
-                        msg.now.saturating_duration_since(began)
-                            + round_trip_time.unwrap_or_default() * 2
+                        msg.now.saturating_duration_since(began) * 2
                             + dtls.flight_interval_rule.initial(round_trip_time),
                     );
                 }

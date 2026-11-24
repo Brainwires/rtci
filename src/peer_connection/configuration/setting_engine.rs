@@ -2855,9 +2855,10 @@ impl SettingEngineBuilder {
     /// the application's signalling, ICE checks on new candidates and a DTLS handshake, which
     /// takes seconds on a relayed path or with loss. Its margin is the larger of two: the last
     /// sixteenth of the lifetime, and the packets the key protects, at the rate it has been
-    /// used, in the time a re-keying needs as measured on the handshake that gave the key (its
-    /// duration, two round trips of the selected pair for the ICE checks, and one DTLS
-    /// retransmission timer for a lost flight). On a slow path the second is the larger and
+    /// used since its first packet, in the time a re-keying needs as measured on the
+    /// handshake that gave the key (twice its duration: the handshake and the ICE checks
+    /// before it, which take no more round trips; and one DTLS retransmission timer for a
+    /// lost flight). On a slow path the second is the larger and
     /// the re-keying starts earlier than the sixteenth (the lifetime event still comes at
     /// the sixteenth). The signalling's own delay is not measured: a lifetime so short that
     /// neither margin covers it ends the session instead (a 9600-packet lifetime at 188
