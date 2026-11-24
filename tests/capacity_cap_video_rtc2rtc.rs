@@ -873,6 +873,8 @@ struct World {
     trace: Vec<String>,
     /// Nothing sent either way arrives (both hosts' network is gone).
     blackhole: bool,
+    /// TRACE: octets the caller wrote while the network was gone: video, RTX, other.
+    bh: [u64; 3],
     /// Only STUN arrives until the caller's application is told of a newly selected pair: the
     /// path the media went on is gone, and the new one carries the restart's checks first.
     stun_only: bool,
@@ -906,6 +908,14 @@ impl World {
                     if self.blackhole
                         || (self.stun_only && !stun && self.peers[0].pair_changes.is_empty())
                     {
+                        if i == 0 {
+                            let k = match payload_type {
+                                Some(VP8_PT) => 0,
+                                Some(RTX_PT) => 1,
+                                _ => 2,
+                            };
+                            self.bh[k] += msg.message.len() as u64;
+                        }
                         continue;
                     }
                     let arrives = self.uplinks[i].send(self.now, msg.message.len());
@@ -1104,7 +1114,7 @@ impl World {
             let link = &self.uplinks[0];
             let (delay_based, loss_based) = self.peers[0].halves();
             self.trace.push(format!(
-                "{:6.1} target {:7} estimate {:7} delay {:7} loss {:7} callee {:7} queue {:3} ms drops {:5} audio {:4} rtx {:5}/{:5} lost padding {:5} usable {:5} unusable {:4}",
+                "{:6.1} target {:7} estimate {:7} delay {:7} loss {:7} callee {:7} queue {:3} ms drops {:5} audio {:4} rtx {:5}/{:5} lost padding {:5} usable {:5} unusable {:4} | bh video {} rtx {} other {} | kfreq {} kfsent {} plirx {} bh {} stun_only {}",
                 at.as_secs_f64(),
                 self.peers[0].target_bps,
                 self.peers[0].estimate().unwrap_or(0),
@@ -1120,6 +1130,14 @@ impl World {
                 link.padding_sent,
                 self.peers[1].usable_at.len(),
                 self.peers[1].unusable,
+                self.bh[0],
+                self.bh[1],
+                self.bh[2],
+                self.peers[1].keyframe_requests.len(),
+                self.peers[0].keyframes_sent.len(),
+                self.peers[0].key_requests_received,
+                self.blackhole,
+                self.stun_only,
             ));
             for peer in self.peers.iter_mut() {
                 // Only a peer connection whose chain tells it the estimate has one to report.
@@ -1308,6 +1326,7 @@ impl World {
             video_on: setup.video,
             trace: Vec::new(),
             blackhole: false,
+            bh: [0; 3],
             stun_only: false,
             sampling: false,
             samples: Vec::new(),
