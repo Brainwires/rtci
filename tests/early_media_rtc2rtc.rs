@@ -902,6 +902,12 @@ fn retransmissions_before_their_unsignalled_stream_are_not_reported_unassociated
                 rtx: Some(RTCRtpRtxParameters { ssrc: RTX_SSRC }),
                 ..Default::default()
             },
+            codec: rtci::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                mime_type: rtci::peer_connection::configuration::media_engine::MIME_TYPE_VP8
+                    .to_owned(),
+                clock_rate: 90000,
+                ..Default::default()
+            },
             active: true,
             ..Default::default()
         }],
