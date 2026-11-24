@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use rtci::interceptor::Registry;
+use rtci::interceptor::{Registry, Slot, UlpfecReceiveBuilder, UlpfecSendBuilder};
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::{
     configure_ulpfec_sessions, register_default_interceptors,
@@ -67,12 +67,26 @@ struct Peer {
 
 impl Peer {
     /// A peer with the default interceptors and ULPFEC for FEC sessions; `accept`: whether it
-    /// takes an offered FEC session.
-    fn new(ip: &str, accept: bool) -> Result<Self> {
+    /// takes an offered FEC session. `fixed_amount`: one FEC packet for each frame whatever
+    /// loss is reported, instead of the amount `configure_ulpfec_sessions` has follow the
+    /// reported loss (none while no loss is reported: RFC 8854 section 8).
+    fn new(ip: &str, accept: bool, fixed_amount: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
-        let registry = configure_ulpfec_sessions(registry);
+        let registry = if fixed_amount {
+            let mut encoder = UlpfecSendBuilder::stream()
+                .with_flush_on_marker(true)
+                .with_adaptive_rate(false)
+                .build();
+            let tap = encoder.wire_tap();
+            registry
+                .with(Slot::FecEncoder, encoder)
+                .with(Slot::FecWireImage, tap)
+                .with(Slot::FecDecoder, UlpfecReceiveBuilder::sessions().build())
+        } else {
+            configure_ulpfec_sessions(registry)
+        };
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(
@@ -143,10 +157,15 @@ struct World {
 impl World {
     /// The offerer and an answerer that takes an offered FEC session, or not.
     fn new(answerer_accepts: bool) -> Result<Self> {
+        Self::with_fec_amount(answerer_accepts, false)
+    }
+
+    /// `new`, with a fixed amount of FEC (`Peer::new`) or the amount that follows the loss.
+    fn with_fec_amount(answerer_accepts: bool, fixed_amount: bool) -> Result<Self> {
         Ok(Self {
             peers: [
-                Peer::new("10.0.0.1", false)?,
-                Peer::new("10.0.0.2", answerer_accepts)?,
+                Peer::new("10.0.0.1", false, fixed_amount)?,
+                Peer::new("10.0.0.2", answerer_accepts, fixed_amount)?,
             ],
             now: Instant::now(),
             srtp: vec![],
@@ -573,13 +592,25 @@ fn by_default_an_offered_fec_session_is_refused_and_the_media_goes_on_without_fe
     }
     world.advance(Duration::from_millis(500))?;
     assert_eq!(world.peers[1].rtp.len(), 10);
+    // Everything travels between the one pair of addresses, and none of it is FEC. (The
+    // stream's RTX flow may carry padding there: bandwidth probes.)
+    let media_from = world.peers[0].addrs[0];
+    assert_eq!(world.peers[0].addrs.len(), 1, "one transport is left");
     assert!(
         world
             .srtp
             .iter()
-            .all(|packet| packet.ssrc == ssrc && packet.payload_type == media_payload_type),
-        "only media leaves: {:?}",
+            .all(|packet| packet.from == media_from && packet.payload_type != 127),
+        "no FEC leaves: {:?}",
         world.srtp
+    );
+    assert_eq!(
+        world
+            .srtp
+            .iter()
+            .filter(|packet| packet.ssrc == ssrc && packet.payload_type == media_payload_type)
+            .count(),
+        10
     );
     Ok(())
 }
@@ -592,7 +623,7 @@ fn by_default_an_offered_fec_session_is_refused_and_the_media_goes_on_without_fe
 /// The FEC session is an RTP session with RTCP of its own, under the same SSRC.
 #[test]
 fn the_fec_travels_in_its_own_session_under_the_media_ssrc_and_repairs_a_loss() -> Result<()> {
-    let mut world = World::new(true)?;
+    let mut world = World::with_fec_amount(true, true)?;
     let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
     let (offer, _) = world.negotiate()?;
     let mids: Vec<String> = sections(&offer)
@@ -653,7 +684,12 @@ fn the_fec_travels_in_its_own_session_under_the_media_ssrc_and_repairs_a_loss() 
         .iter()
         .filter(|packet| packet.from == fec_from)
         .collect();
-    assert!(fec.len() >= 3, "FEC for the frames: {:?}", world.srtp);
+    assert_eq!(
+        fec.len(),
+        4,
+        "one FEC packet for each frame: {:?}",
+        world.srtp
+    );
     for packet in &fec {
         assert_eq!(packet.to, fec_to);
         assert_eq!(
@@ -717,5 +753,82 @@ fn the_fec_travels_in_its_own_session_under_the_media_ssrc_and_repairs_a_loss() 
         "RTCP of the FEC session under the media SSRC: {:?}",
         world.rtcp
     );
+    Ok(())
+}
+
+/// The chain `configure_ulpfec_sessions` builds, between two peers: the amount of FEC follows
+/// the loss the receiver reports (RFC 8854 section 8: "SHOULD only transmit the amount of FEC
+/// needed to protect against the observed packet loss"; RFC 5109 section 12). So no FEC
+/// leaves while no loss is reported, and once the receiver's reports show the loss, FEC
+/// travels in the FEC session and repairs what is lost from then on.
+#[test]
+fn with_the_default_helper_fec_starts_once_loss_is_reported_and_then_repairs_it() -> Result<()> {
+    let mut world = World::new(true)?;
+    let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
+    let (offer, _) = world.negotiate()?;
+    let mids: Vec<String> = sections(&offer)
+        .iter()
+        .filter_map(|section| value(section, "mid").map(str::to_owned))
+        .collect();
+    world.gather()?;
+    world.run("connect", |p| p[0].connected && p[1].connected)?;
+    let media_from = world.peers[0].addr_of(&mids[0])?;
+    let fec_from = world.peers[0].addr_of(&mids[1])?;
+    let ssrc = world.sender_ssrc(sender);
+    let media_payload_type = world.media_payload_type(sender);
+    world.only_first_transmissions = Some((media_from, media_payload_type));
+
+    // Thirty frames a second of five packets, for ten seconds. The network loses the third
+    // packet of every other frame (a tenth of the packets), and every retransmission.
+    const FRAMES: u16 = 300;
+    for frame in 0..FRAMES {
+        if frame % 2 == 0 {
+            world.lose.insert((media_from, frame * 5 + 2));
+        }
+        for index in 0..5u16 {
+            world.send_video(sender, frame * 5 + index, u32::from(frame), index == 4)?;
+        }
+        world.advance(Duration::from_millis(33))?;
+    }
+    world.advance(Duration::from_millis(500))?;
+
+    let fec: Vec<&OnTheWire> = world
+        .srtp
+        .iter()
+        .filter(|packet| packet.from == fec_from)
+        .collect();
+    assert!(!fec.is_empty(), "FEC is sent once the loss is known");
+    assert!(
+        fec.iter()
+            .all(|packet| packet.ssrc == ssrc && packet.payload_type == 127),
+        "{fec:?}"
+    );
+    assert!(
+        world
+            .srtp
+            .iter()
+            .filter(|packet| packet.from == media_from)
+            .all(|packet| packet.payload_type != 127),
+        "no FEC in the media's session"
+    );
+    // The first frame left before any report: its lost packet stays lost.
+    let received = &world.peers[1].rtp;
+    assert!(
+        !received
+            .iter()
+            .any(|packet| packet.header.sequence_number == 2),
+        "nothing repaired the first frame"
+    );
+    // The last second: every frame complete, the lost packets rebuilt octet for octet.
+    for frame in FRAMES - 30..FRAMES {
+        for index in 0..5u16 {
+            let sequence_number = frame * 5 + index;
+            let packet = received
+                .iter()
+                .find(|packet| packet.header.sequence_number == sequence_number)
+                .with_context(|| format!("packet {sequence_number} was not delivered"))?;
+            assert_eq!(packet.payload, video_payload(sequence_number));
+        }
+    }
     Ok(())
 }
