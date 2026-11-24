@@ -25,6 +25,15 @@ should follow, and why. Nothing here changes engine behaviour.
 3. **A gap the sender will never fill is skipped at once.** After a key frame arrives, packets
    older than it are no longer needed.
 
+A receiver that plays in order without a gap bound never recovers from an outage whose loss
+outlasts its packet window: after a 4 s outage and an ICE restart in
+`tests/capacity_cap_video_rtc2rtc.rs` (the default chain, `SampleBuilder::new(256)`), it
+released no frame for the rest of the run and, seeing no frame to judge, asked for no key frame
+either, while the sender, the repairs and the congestion controller behaved as the RFCs ask
+(hosted runs 45356693998, 45352461984). Use `SampleBuilder::with_max_gap_wait` with its
+key-frame request, or the `rtc-video` receive pipeline (on the `conf/vp-*` line), whose NACK
+horizon gives up packets it can no longer use and asks for a key frame.
+
 libwebrtc's receiver follows the same idea in its own terms: when its NACK list would grow past
 1000 packets it clears the list and requests a key frame
 (`modules/video_coding/nack_requester.cc:213-219` at revision a222406d: "NACK list full,

@@ -1771,7 +1771,7 @@ fn seeds(
 ///
 /// - never more than 2 s without a usable frame on the receiving side;
 /// - the oldest picture shown from the cap on (capture to decoder) no older than `lag`;
-/// - the retransmissions congestion controlled (RFC 4588 section 7): at most 63 sent
+/// - the retransmissions congestion controlled (RFC 4588 section 7): at most 38 sent
 ///   through the cap (without a limit 54 to 105 were sent and more than half dropped);
 /// - the capped link used: the median target under the cap at least 200 kbit/s of the 300;
 /// - the estimate recovered: at least 800 kbit/s on average from 15 to 25 s after the cap
@@ -1782,14 +1782,13 @@ fn seeds(
 /// The freeze is a REQUIREMENT (what the call's user sees; it never moves). The others are
 /// regression tripwires, set from the ensemble of six seeds, three wall clocks and six
 /// incidental perturbations ([`Perturbation`]) of every cap length and both rules these tests
-/// run (`measure_the_capacity_cap` with `RTC_CAP_AT_TARGET=1000000`; 864 cells on master
-/// d7dcb9ab, hosted runs 45457600557 and 45461075118, and the 20 s cap again on b8dd935d,
-/// 45470063852): freeze 0.54 to 1.35 s; the oldest picture 1.68 to 2.55 s (both rules); 38 to
-/// 55 retransmissions (54 under the engine's rule, 55 under `UpToTarget`); 237 to 258 kbit/s
-/// under the cap; 979 to 1434 kbit/s on average 15 to 25 s after it. The picture and
-/// retransmission bounds are those maxima and some 15 % (2.9 s, 63; they were 3.5 s (4 s
-/// under `UpToTarget`) and 100, set from one draw per seed); the rate under the cap and the
-/// recovery keep their bounds, some 15 % and 18 % under the least measured.
+/// run (`measure_the_capacity_cap` with `RTC_CAP_AT_TARGET=1000000`; 864 cells on d7dcb9ab +
+/// rtx-2r, hosted runs 45457633522 and 45461087685, and the 20 s cap again on b8dd935d +
+/// rtx-2r, 45470090397): freeze 0.44 to 0.98 s; the oldest picture 1.30 to 1.70 s (both rules);
+/// 20 to 33 retransmissions; 231 to 274 kbit/s under the cap; 955 to 1486 kbit/s on average 15
+/// to 25 s after it. The picture and retransmission bounds are those maxima and some 15 %
+/// (2.0 s, 38; on master they are 2.9 s and 63); the rate under the cap and the recovery keep
+/// their bounds, some 13 % and 16 % under the least measured.
 fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
     for (cap, seed, outcome) in outcomes {
         assert!(
@@ -1803,7 +1802,7 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 63,
+            outcome.rtx_sent <= 38,
             "cap {cap} s seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -1854,14 +1853,14 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
     // 234 to 251, 977 to 1344. With the cap arriving after 20 s at the 0.99 Mbit/s the
     // earlier estimator had reached by then (runs 45315535896, 45312738975): 0.83 to
     // 1.24 s, 2.26 to 3.21 s, 43 to 66, 238 to 266, 988 to 1352.
-    assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(2_900));
+    assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(2_000));
     Ok(())
 }
 
 /// The same bounds whenever the cap goes: after 14, 17, 23 and 26 s.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
-    assert_the_call_holds(&seeds(None, &cap_lengths())?, Duration::from_millis(2_900));
+    assert_the_call_holds(&seeds(None, &cap_lengths())?, Duration::from_millis(2_000));
     Ok(())
 }
 
@@ -1880,7 +1879,7 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
             Some(RetransmissionRateLimit::UpToTarget),
             &[(20, seed_range(2, 6))],
         )?,
-        Duration::from_millis(2_900),
+        Duration::from_millis(2_000),
     );
     Ok(())
 }
@@ -1896,7 +1895,7 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
         .collect();
     assert_the_call_holds(
         &seeds(Some(RetransmissionRateLimit::UpToTarget), &lengths)?,
-        Duration::from_millis(2_900),
+        Duration::from_millis(2_000),
     );
     Ok(())
 }
@@ -1907,11 +1906,13 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
 /// and the retransmissions, held here to what was measured so that they do not grow.
 ///
-/// Measured (hosted run 45408404348, six seeds on three wall clocks, rtci 0.1.0's wire
-/// sizes): freeze 1.28 to 1.29 s, the oldest picture 2.90 to 3.15 s, 57 to 64
-/// retransmissions (21 to 25 dropped at the link's queue), 242 to 250 kbit/s under the cap,
-/// 1089 to 1230 kbit/s on average 15 to 25 s after it; the bounds below are the most measured
-/// and some 15 % (3.6 s, 74). Before a repair the feedback reports received was no longer
+/// Measured (hosted run 45409358750, six seeds on three wall clocks, rtci 0.1.0's wire
+/// sizes): freeze 0.74 to 1.08 s, the oldest picture 2.88 to 3.12 s, 43 to 48
+/// retransmissions (1 to 4 dropped at the link's queue), 231 to 237 kbit/s under the cap,
+/// 1118 to 1263 kbit/s on average 15 to 25 s after it; the bounds below are set from the
+/// perturbed ensemble (in the test). With the retransmissions released a window at a time (run
+/// 45408404348): 1.28 to 1.29 s, 2.90 to 3.15 s, 57 to 64 (21 to 25 dropped), 242 to 250 and
+/// 1089 to 1230 kbit/s. Before a repair the feedback reports received was no longer
 /// sent again (rtci 0.1.0, run 45407054812): 1.28 to 1.32 s, 4.35 to 4.51 s, 89 to 97
 /// retransmissions (23 to 29 dropped), 246 to 252 and 1060 to 1363 kbit/s. Some sixty video
 /// packets are lost before the first feedback about the capped link can arrive and while
@@ -1952,21 +1953,19 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             outcome.freeze
         );
         // The freeze above is a requirement; what follows are tripwires. Ensemble (six seeds,
-        // three wall clocks, six incidental perturbations: 108 cells each on master d7dcb9ab,
-        // hosted run 45457611150, and b8dd935d, 45470063852): freeze 1.28 to 1.34 s, the
-        // oldest picture 4.11 to 5.28 s (median 4.40 to 4.45), 87 to 106 retransmissions, 234 to
-        // 253 kbit/s under the cap, 990 to 1414 kbit/s on average 15 to 25 s after it, the cap
-        // met at 1412 to 1483 kbit/s. The picture and retransmission bounds are the most
-        // measured and some 15 % (6.1 s, 122; they were 5.5 s and 130 from one draw per seed:
-        // the picture's bound moves up, because one draw per seed put it 4 % over the most
-        // measured on b8dd935d, inside the spread of nothing but incidental perturbations).
+        // three wall clocks, six incidental perturbations: 108 cells each on d7dcb9ab + rtx-2r,
+        // hosted run 45457641533, and b8dd935d + rtx-2r, 45470090397): freeze 0.67 to 1.32 s,
+        // the oldest picture 2.82 to 3.21 s, 44 to 50 retransmissions, 226 to 244 kbit/s under
+        // the cap, 961 to 1269 kbit/s on average 15 to 25 s after it. The picture and
+        // retransmission bounds are the most measured and some 15 % (3.7 s, 58; were 3.6 s and
+        // 55 from one draw per seed).
         assert!(
-            outcome.lag <= Duration::from_millis(6_100),
+            outcome.lag <= Duration::from_millis(3_700),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 122,
+            outcome.rtx_sent <= 58,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -2205,16 +2204,26 @@ fn report_blocks_from_every_ssrc_measured_against_once() -> Result<()> {
 /// | median target under the cap, kbit/s | 144 / 207 / 225 / 234 | 117 / 206 / 228 / 245 |
 /// | recovery over the draft's climb from the lift reference | 0.98 / 1.10 / 2.76 / 3.61 | 0.98 / 1.09 / 2.89 / 3.32 |
 ///
-/// KNOWN LIMIT: the engine does not meet the 2 s freeze requirement in this chain today. On
-/// d7dcb9ab 4 of the 108 cells froze for 2.10 to 2.28 s (one of them seed 3 on the first wall
-/// clock unperturbed, which this test runs under `RTC_CAP_FULL`: the full matrix failed); on
-/// b8dd935d 1 cell (seed 6, third wall clock, two draws: 2.31 s), none of the cells this test
-/// runs. Which cells cross moves with every incidental change; that some do does not. The
-/// freeze falls in the pacer's pause after the cap, while the stale repairs drain inside an
-/// estimate of 100 to 250 kbit/s. Not repeating a repair whose first copy is still in flight
-/// and releasing the retransmissions smoothly (`conf/rtx-1r-duplicate-repairs`,
-/// `conf/rtx-2r-smooth-limiter`) bring every cell under it: 0.74 to 1.10 s on d7dcb9ab (run
-/// 45457621523), 0.75 to 1.28 s on b8dd935d (runs 45470070664, 45470078615).
+/// The table is master's. On master the engine did not meet the 2 s freeze requirement in
+/// the tail (4 of 108 cells on d7dcb9ab, 2.10 to 2.28 s; 1 of 108 on b8dd935d, 2.31 s). With
+/// repeat repairs gone and the retransmissions released at the limit's rate
+/// (`conf/rtx-1r-duplicate-repairs`, `conf/rtx-2r-smooth-limiter`) every cell meets it, and the
+/// tripwires below are set from that ensemble (hosted runs 45457621523 on d7dcb9ab, 45470070664
+/// and 45470078615 on b8dd935d), min / median / 95th percentile / max:
+///
+/// | figure | d7dcb9ab + rtx-2r | b8dd935d + rtx-2r |
+/// |---|---|---|
+/// | freeze, s | 0.74 / 0.98 / 1.06 / 1.10 | 0.75 / 0.93 / 1.10 / 1.28 |
+/// | oldest picture, s | 3.87 / 5.52 / 6.92 / 7.14 | 3.88 / 5.55 / 6.19 / 7.91 |
+/// | retransmissions | 56 / 58 / 86 / 89 | 55 / 62 / 65 / 65 |
+/// | recovery over the draft's climb from the lift reference | 0.96 / 1.11 / 2.89 / 3.05 | 0.21 / 1.12 / 2.64 / 3.16 |
+///
+/// The 0.21 is three cells (seed 5, two draws, every wall clock) whose estimate stays at the
+/// 100 kbit/s floor for the 35 s after the pause: a known engine defect, not this branch's, that
+/// the tripwire would catch were it a cell this test runs (hosted traces 45473838394,
+/// 45476534581: an application-limited sender at the floor under the received-rate bound,
+/// whose probe clusters after the cap are forgotten with packets never reported; master has
+/// the same forgotten clusters, 45477161059).
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
     let seeds: Vec<u64> = if full() {
@@ -2274,19 +2283,19 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // inside an estimate of 100 to 250 kbit/s, of which the audio takes 76, and 35 to 41 of
         // the repairs repeat a packet whose first repair was still in flight when the receiver
         // asked again (hosted traces 45341865225, 45342290711; CHANGELOG, "Known limits").
-        // Ensemble (above): 5.49 to 10.47 s. The bound, 11.75 s, is that maximum and 12 %;
-        // the freeze and the retransmissions hold the finer regressions (a pacer that queues
-        // duplicate repairs reached 11.41 s here and failed on the freeze, run 45381547020).
+        // Ensemble (above): 3.87 to 7.91 s. The bound, 9.1 s, is that maximum and 15 % (was
+        // 6.8 s, set from one draw per seed: 7.14 s on d7dcb9ab and 7.91 s on b8dd935d were
+        // measured with nothing but incidental perturbations).
         check(
-            outcome.lag <= Duration::from_millis(11_750),
+            outcome.lag <= Duration::from_millis(9_100),
             format!("a picture {:?} old", outcome.lag),
         );
         // Tripwire. The retransmissions, apart from the probe clusters' padding on the RTX
         // stream (154 to 330 packets, which this test counted with them until it told them
-        // apart): ensemble 88 to 110. The bound is that maximum and some 15 % (127); it also
-        // fails if the padding is counted with them again.
+        // apart): ensemble 55 to 89. The bound is that maximum and some 15 % (102; was 72 from
+        // one draw per seed); it also fails if the padding is counted with them again.
         check(
-            outcome.rtx_sent <= 127,
+            outcome.rtx_sent <= 102,
             format!("{} retransmissions", outcome.rtx_sent),
         );
         // Tripwire. The recovery: from 1 s after the cap went the target never falls, and
