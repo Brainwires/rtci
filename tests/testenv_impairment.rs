@@ -131,6 +131,7 @@ struct Delivery {
     got: Vec<u32>,
     drained_after: Option<Duration>,
     /// The sender's association counters when its queue drained, and when the run ended.
+    sender_at_open: Option<AssociationStats>,
     sender_at_drain: Option<AssociationStats>,
     sender_at_end: Option<AssociationStats>,
 }
@@ -151,6 +152,7 @@ fn send_numbered(
     let mut last_send = Instant::now();
     let started = Instant::now();
     let mut drained_at: Option<Instant> = None;
+    let mut sender_at_open = None;
     let mut sender_at_drain = None;
     pump(&mut [&mut a, &mut b], timeout, |p| {
         if let Some(id) = dc_open_id(p[0])
@@ -164,6 +166,9 @@ fn send_numbered(
                 .send(Instant::now(), BytesMut::from(&payload[..]))
                 .is_ok()
             {
+                if next == 0 {
+                    sender_at_open = p[0].pc.sctp().and_then(|t| t.association_stats());
+                }
                 next += 1;
                 last_send = Instant::now();
             }
@@ -222,6 +227,7 @@ fn send_numbered(
     Delivery {
         got: dc_messages(&b),
         drained_after: drained_at.map(|t| t - started),
+        sender_at_open,
         sender_at_drain,
         sender_at_end,
     }

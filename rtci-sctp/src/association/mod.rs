@@ -5115,6 +5115,7 @@ impl Association {
                     // Retire an exhausted candidate's whole message first.
                     match self.abandon_retransmit_candidate(tsn, now) {
                         Ok(true) => {
+                            self.stats.inc_fast_retrans_abandoned();
                             to_fast_retrans.retain(|chunk| {
                                 self.inflight_queue
                                     .get(chunk.tsn)

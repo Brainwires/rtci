@@ -9,6 +9,7 @@ pub struct AssociationStats {
     n_retransmissions: u64,
     n_abandoned_messages: u64,
     n_forward_tsns: u64,
+    n_fast_retrans_abandoned: u64,
     t3_wait_ms: u64,
 }
 
@@ -95,6 +96,19 @@ impl AssociationStats {
         self.n_forward_tsns
     }
 
+    /// Counts one chunk that Fast Retransmit would have sent again and abandoned instead: its
+    /// message's retransmission budget was spent (RFC 3758 3.5 A2, RFC 7496).
+    pub fn inc_fast_retrans_abandoned(&mut self) {
+        self.n_fast_retrans_abandoned += 1;
+    }
+
+    /// The number of losses Fast Retransmit found in partially reliable messages whose budget
+    /// was spent, so that they were abandoned (and skipped by FORWARD TSN) without waiting for
+    /// T3-rtx.
+    pub fn get_num_fast_retrans_abandoned(&mut self) -> u64 {
+        self.n_fast_retrans_abandoned
+    }
+
     /// Adds the RTO, in milliseconds, that a T3-rtx expiry waited out.
     pub fn add_t3_wait(&mut self, rto_ms: u64) {
         self.t3_wait_ms = self.t3_wait_ms.saturating_add(rto_ms);
@@ -117,6 +131,7 @@ impl AssociationStats {
         self.n_retransmissions = 0;
         self.n_abandoned_messages = 0;
         self.n_forward_tsns = 0;
+        self.n_fast_retrans_abandoned = 0;
         self.t3_wait_ms = 0;
     }
 }
