@@ -149,6 +149,22 @@ struct SendStream {
 struct ReceiveStream {
     red_payload_type: u8,
     decoder: RedDecoder,
+    /// The ids of the stream's audio level extensions (RFC 6464 `ssrc-audio-level`, RFC 6465
+    /// `csrc-audio-level`): what a packet rebuilt from a redundant block takes from the RED
+    /// packet that carried it, as an approximation (RFC 8854 section 4.1).
+    level_extensions: Vec<u8>,
+}
+
+/// The ids `info` negotiated the audio level extensions under.
+fn level_extension_ids(info: &StreamInfo) -> Vec<u8> {
+    info.rtp_header_extensions
+        .iter()
+        .filter(|extension| {
+            extension.uri == rtp::extension::AUDIO_LEVEL_URI
+                || extension.uri == rtp::extension::CSRC_AUDIO_LEVEL_URI
+        })
+        .filter_map(|extension| u8::try_from(extension.id).ok())
+        .collect()
 }
 
 /// RFC 2198 audio redundancy for the streams that negotiated it; see the module
@@ -250,10 +266,26 @@ impl RedAudioInterceptor {
                         .position(|ts| *ts == recovered.block.timestamp)
                         .map_or(1, |i| redundant.len() - i);
                     header.sequence_number = header.sequence_number.wrapping_sub(back as u16);
-                    // The extensions and padding were the RED packet's.
+                    // The extensions and padding were the RED packet's. RFC 8854 section 4.1:
+                    // the header parts RED cannot recover, "RTP header extensions like those
+                    // specified in [RFC6464] and [RFC6465]", are approximated "using an
+                    // approach similar to those described in [RFC2198], Section 4": as RFC
+                    // 2198 applies the RED packet's CSRCs to the rebuilt data, the rebuilt
+                    // packet takes the RED packet's audio levels (one packet later in time,
+                    // the nearest measure there is). Every other extension is left out.
+                    let levels: Vec<(u8, bytes::Bytes)> = stream
+                        .level_extensions
+                        .iter()
+                        .filter_map(|id| packet.header.get_extension(*id).map(|v| (*id, v)))
+                        .collect();
                     header.extension = false;
                     header.extensions.clear();
                     header.extension_profile = 0;
+                    header.extensions_padding = 0;
+                    for (id, value) in levels {
+                        // The RED packet carried it in this form, so it fits.
+                        let _ = header.set_extension(id, value);
+                    }
                 }
                 header.padding = false;
                 rtp::Packet {
@@ -377,13 +409,13 @@ impl Interceptor for RedAudioInterceptor {
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
         match negotiated_red(info, info.payload_type) {
             Some(red_payload_type) => {
-                self.receivers
-                    .entry(info.ssrc)
-                    .or_insert(ReceiveStream {
-                        red_payload_type,
-                        decoder: RedDecoder::default(),
-                    })
-                    .red_payload_type = red_payload_type;
+                let stream = self.receivers.entry(info.ssrc).or_insert(ReceiveStream {
+                    red_payload_type,
+                    decoder: RedDecoder::default(),
+                    level_extensions: vec![],
+                });
+                stream.red_payload_type = red_payload_type;
+                stream.level_extensions = level_extension_ids(info);
             }
             None => {
                 self.receivers.remove(&info.ssrc);
@@ -525,6 +557,217 @@ mod tests {
                 (2, 1920, OPUS, false, b"two".as_ref()),
                 (3, 2880, OPUS, false, b"three".as_ref()),
                 (4, 3840, OPUS, false, b"four".as_ref()),
+            ]
+        );
+    }
+
+    /// Sends `payloads` through `sender`, each RED packet given header extensions by `extend`,
+    /// loses the packets at `lost` (indices) and returns what `receiver` delivered.
+    fn through(
+        sender: &mut RedAudioInterceptor,
+        receiver: &mut RedAudioInterceptor,
+        payloads: &[&'static [u8]],
+        lost: &[usize],
+        extend: impl Fn(usize, &mut rtp::header::Header),
+    ) -> Vec<rtp::Packet> {
+        let mut delivered = vec![];
+        for (i, payload) in payloads.iter().enumerate() {
+            sender.handle_write(opus(1, i as u16 + 1, payload)).unwrap();
+            let mut red = rtp(sender.poll_write().unwrap());
+            extend(i, &mut red.header);
+            if lost.contains(&i) {
+                continue;
+            }
+            receiver
+                .handle_read(TaggedPacket {
+                    now: Instant::now(),
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtp(red)),
+                })
+                .unwrap();
+            while let Some(out) = receiver.poll_read() {
+                delivered.push(rtp(out));
+            }
+        }
+        delivered
+    }
+
+    /// RFC 8854 section 4.1: "the recommended mechanisms do not allow recovery of parts of the
+    /// RTP header that may be important in certain audio applications, e.g., CSRCs and RTP
+    /// header extensions like those specified in [RFC6464] and [RFC6465]. Implementations
+    /// SHOULD account for this and attempt to approximate this information, using an approach
+    /// similar to those described in [RFC2198], Section 4". A packet rebuilt from a redundant
+    /// block takes the audio levels of the RED packet that carried it (as RFC 2198 section 4
+    /// applies that packet's CSRCs), and no other extension of it.
+    #[test]
+    fn a_rebuilt_packet_takes_the_audio_levels_of_the_red_packet_that_carried_it() {
+        const LEVEL: u8 = 1;
+        const CSRC_LEVELS: u8 = 2;
+        const OTHER: u8 = 3;
+        let mut sender = RedAudioBuilder::new().build();
+        let mut receiver = RedAudioBuilder::new().build();
+        sender.bind_local_stream(&info_red_first(1, "111/111"));
+        let mut remote = info(1, "111/111");
+        for (uri, id) in [
+            (rtp::extension::AUDIO_LEVEL_URI, LEVEL),
+            (rtp::extension::CSRC_AUDIO_LEVEL_URI, CSRC_LEVELS),
+            (
+                "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+                OTHER,
+            ),
+        ] {
+            remote
+                .rtp_header_extensions
+                .push(crate::RTPHeaderExtension {
+                    uri: uri.to_owned(),
+                    id: u16::from(id),
+                });
+        }
+        receiver.bind_remote_stream(&remote);
+
+        let payloads: [&'static [u8]; 4] = [b"one", b"two", b"three", b"four"];
+        let delivered = through(&mut sender, &mut receiver, &payloads, &[2], |i, header| {
+            header.csrc = vec![77];
+            let level = 0x80 | (10 + i as u8);
+            header
+                .set_extension(LEVEL, Bytes::from(vec![level]))
+                .unwrap();
+            header
+                .set_extension(CSRC_LEVELS, Bytes::from(vec![20 + i as u8]))
+                .unwrap();
+            header
+                .set_extension(OTHER, Bytes::from(vec![1, 2, 3]))
+                .unwrap();
+        });
+        let rebuilt = delivered
+            .iter()
+            .find(|p| p.header.sequence_number == 3)
+            .expect("the lost packet is rebuilt");
+        assert_eq!(rebuilt.payload.as_ref(), b"three");
+        assert_eq!(
+            rebuilt.header.get_extension(LEVEL).as_deref(),
+            Some([0x80 | 13].as_ref()),
+            "the audio level of the packet that carried it"
+        );
+        assert_eq!(
+            rebuilt.header.get_extension(CSRC_LEVELS).as_deref(),
+            Some([23].as_ref())
+        );
+        assert_eq!(rebuilt.header.csrc, vec![77]);
+        assert_eq!(rebuilt.header.get_extension(OTHER), None, "nothing else");
+        // The primaries keep their own extensions.
+        let primary = delivered
+            .iter()
+            .find(|p| p.header.sequence_number == 4)
+            .unwrap();
+        assert_eq!(
+            primary.header.get_extension(LEVEL).as_deref(),
+            Some([0x80 | 13].as_ref())
+        );
+        assert!(primary.header.get_extension(OTHER).is_some());
+    }
+
+    /// RFC 8854 section 4.1: "if multi-packet protection is needed, the aforementioned
+    /// redundant encoding ... SHOULD be used instead". With two redundant blocks per packet
+    /// (`with_redundancy(2)`) two consecutive losses are both rebuilt from the packet after
+    /// them; with one, only the second of them.
+    #[test]
+    fn two_redundant_blocks_rebuild_two_consecutive_losses() {
+        let payloads: [&'static [u8]; 5] = [b"one", b"two", b"three", b"four", b"five"];
+        for (redundancy, rebuilt) in [(2usize, vec![2u16, 3]), (1, vec![3])] {
+            let mut sender = RedAudioBuilder::new().with_redundancy(redundancy).build();
+            let mut receiver = RedAudioBuilder::new().build();
+            sender.bind_local_stream(&info_red_first(1, "111/111/111"));
+            receiver.bind_remote_stream(&info(1, "111/111/111"));
+            let delivered = through(&mut sender, &mut receiver, &payloads, &[1, 2], |_, _| {});
+            let got: Vec<u16> = delivered
+                .iter()
+                .map(|p| p.header.sequence_number)
+                .filter(|seq| [2, 3].contains(seq))
+                .collect();
+            assert_eq!(got, rebuilt, "redundancy {redundancy}");
+            for packet in &delivered {
+                assert_eq!(
+                    packet.payload.as_ref(),
+                    payloads[usize::from(packet.header.sequence_number) - 1]
+                );
+            }
+        }
+    }
+
+    /// RFC 8854 section 4.1: "When using constant-bitrate codecs, e.g., PCMU [RFC5391],
+    /// redundant encoding MAY be used". A PCMU stream whose section negotiated `red/8000`
+    /// naming PCMU (an application's registration: the default codecs offer RED for Opus
+    /// only, the clause warning that it "will result in a potentially significant bitrate
+    /// increase") is sent in RED and a lost packet comes back from the next one.
+    #[test]
+    fn a_constant_bitrate_codec_gets_redundancy_when_its_section_negotiated_red() {
+        const PCMU: u8 = 0;
+        const RED_8K: u8 = 98;
+        let pcmu = |red_first: bool| {
+            let mut formats = vec![
+                (PCMU, "audio/PCMU".to_owned()),
+                (RED_8K, "audio/red".to_owned()),
+            ];
+            if red_first {
+                formats.reverse();
+            }
+            StreamInfo {
+                ssrc: 1,
+                payload_type: PCMU,
+                mime_type: "audio/PCMU".to_owned(),
+                clock_rate: 8_000,
+                channels: 1,
+                section_mime_types: formats,
+                section_fmtp_lines: vec![(RED_8K, "0/0".to_owned())],
+                ..Default::default()
+            }
+        };
+        let mut sender = RedAudioBuilder::new().build();
+        let mut receiver = RedAudioBuilder::new().build();
+        sender.bind_local_stream(&pcmu(true));
+        receiver.bind_remote_stream(&pcmu(false));
+        let mut delivered = vec![];
+        for (i, payload) in [b"aaaa", b"bbbb", b"cccc", b"dddd"].iter().enumerate() {
+            let mut packet = opus(1, i as u16 + 1, payload.as_slice());
+            if let Packet::Rtp(rtp) = &mut packet.message.packet {
+                rtp.header.payload_type = PCMU;
+                rtp.header.timestamp = u32::from(rtp.header.sequence_number) * 160;
+            }
+            sender.handle_write(packet).unwrap();
+            let red = rtp(sender.poll_write().unwrap());
+            assert_eq!(red.header.payload_type, RED_8K);
+            if i == 1 {
+                continue;
+            }
+            receiver
+                .handle_read(TaggedPacket {
+                    now: Instant::now(),
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtp(red)),
+                })
+                .unwrap();
+            while let Some(out) = receiver.poll_read() {
+                delivered.push(rtp(out));
+            }
+        }
+        let got: Vec<(u16, u8, &[u8])> = delivered
+            .iter()
+            .map(|p| {
+                (
+                    p.header.sequence_number,
+                    p.header.payload_type,
+                    p.payload.as_ref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, PCMU, b"aaaa".as_ref()),
+                (2, PCMU, b"bbbb".as_ref()),
+                (3, PCMU, b"cccc".as_ref()),
+                (4, PCMU, b"dddd".as_ref()),
             ]
         );
     }

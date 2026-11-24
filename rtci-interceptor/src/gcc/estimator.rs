@@ -255,8 +255,8 @@ impl Gcc {
     }
 
     /// The time step of the adaptive threshold (draft-ietf-rmcat-gcc-02 section 5.4):
-    /// [`ThresholdTimeBase::Departure`] (the default), the draft's
-    /// [`ThresholdTimeBase::Arrival`] or libwebrtc's [`ThresholdTimeBase::ArrivalCapped`].
+    /// the draft's [`ThresholdTimeBase::Arrival`] (the default), libwebrtc's
+    /// [`ThresholdTimeBase::ArrivalCapped`] or [`ThresholdTimeBase::Departure`].
     pub fn with_threshold_time_base(mut self, time_base: ThresholdTimeBase) -> Self {
         self.threshold_time_base = time_base;
         self.detector = self.detector.with_threshold_time_base(time_base);
@@ -264,7 +264,7 @@ impl Gcc {
     }
 
     /// See [`ThresholdTimeBase`]: the time step of the adaptive threshold (draft-ietf-rmcat-gcc-02
-    /// section 5.4), the departure gaps by default.
+    /// section 5.4), the arrival gaps by default.
     pub fn threshold_time_base(&self) -> ThresholdTimeBase {
         self.threshold_time_base
     }

@@ -443,4 +443,24 @@ mod to_json_section_tests {
         assert_eq!(init.sdp_mid, None);
         assert_eq!(init.sdp_mline_index, Some(0));
     }
+
+    /// What the application signals for a TCP host candidate the agent hid behind an mDNS
+    /// name: `to_json` rebuilds the candidate from its members, and the line says `tcp`.
+    #[test]
+    fn to_json_of_a_tcp_candidate_under_an_mdns_name_says_tcp() {
+        let candidate = RTCIceCandidate {
+            protocol: RTCIceProtocol::Tcp,
+            address: "1f4712db-ea17-4bcf-a596-105139dfd8bf.local".to_owned(),
+            port: 9,
+            component: 1,
+            typ: RTCIceCandidateType::Host,
+            tcp_type: RTCIceTcpCandidateType::Passive,
+            priority: 1_694_498_815,
+            foundation: "1".to_owned(),
+            ..Default::default()
+        };
+        let line = candidate.to_json().unwrap().candidate;
+        assert_eq!(line.split_whitespace().nth(2), Some("tcp"), "{line}");
+        assert!(line.ends_with("typ host tcptype passive"), "{line}");
+    }
 }

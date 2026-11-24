@@ -7,7 +7,8 @@
 //! role, `sctp-port` / `max-message-size` and Cryptex. The input is up to three descriptions
 //! separated by NUL bytes, applied in turn so renegotiation and glare paths run too. As an
 //! offer, the peer then answers it; as an answer, the peer first makes an offer with audio, video
-//! and a data channel for it to answer.
+//! and a data channel for it to answer. With the config byte's top bit the peer accepts FEC
+//! sessions of their own (RFC 5109 section 14.1), so their sections are negotiated too.
 
 #[path = "common.rs"]
 mod common;
@@ -27,7 +28,9 @@ fuzz_target!(|data: &[u8]| {
     } else {
         RTCDtlsRole::Server
     };
-    let Some(mut pc) = common::peer(0, u64::from(config), role) else {
+    // The top bit: the peer takes an offered FEC session of its own (`a=group:FEC-FR` /
+    // `FEC` with a `ulpfec`-only section, its `extmap` and `rtcp-fb` feedback lines).
+    let Some(mut pc) = common::peer_with(0, u64::from(config), role, config & 0x80 != 0) else {
         return;
     };
     let _ = common::add_host_candidate(&mut pc, "192.0.2.1:5000".parse().unwrap());
