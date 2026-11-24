@@ -7,10 +7,9 @@ rust-version.workspace = true
 description = "Audio capture and playout for the rtc-audio pipeline: ring buffers, device selection and hot-swap, a fake backend, and cpal behind an opt-in feature"
 license.workspace = true
 documentation = "https://docs.rs/rtc-devices"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "audio", "capture", "playout"]
+categories = ["multimedia::audio"]
 readme = "README.md"
 
 # No device is opened, and no thread started, unless the application turns `devices` on and
