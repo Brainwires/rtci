@@ -1076,7 +1076,18 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                 if self.departures.len() > 4096 {
                     self.departures.pop_front();
                 }
-                self.estimator.on_packet_sent(msg.now, size);
+                // Only a packet that per-packet feedback will report starts the estimator's
+                // wait for feedback: audio without transport-wide sequence numbers, sent
+                // while the video that has them is off, is not "sent and nothing came back".
+                if self
+                    .streams
+                    .get(&rtp_packet.header.ssrc)
+                    .is_some_and(|stream| stream.feedback.is_some())
+                {
+                    self.estimator.on_packet_sent(msg.now, size);
+                } else {
+                    self.estimator.on_unreported_packet_sent(msg.now, size);
+                }
 
                 if self.probing.is_some() {
                     self.sent.push_back((msg.now, size));

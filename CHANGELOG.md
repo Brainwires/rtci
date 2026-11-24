@@ -24,10 +24,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1352 kbit/s twenty seconds after a cap of any of those lengths, 238 to 266 kbit/s of the
   300 used under the cap (145 to 200 before), longest freeze 0.83 to 1.24 s.
   **What an application polling the handle notices**: the estimate no longer runs ahead of
-  what is sent (at most one and a half times the rate the receiver reports as arriving: a
-  source that sends little is given a target near what it sends and climbs from there);
-  feedback that stops while packets are sent halves it (`Gcc::with_feedback_timeout`, 500 ms);
-  a REMB or a TMMBR from the peer bounds it.
+  what is sent: it is not increased past one and a half times the rate the receiver reports
+  as arriving, and an estimate once reached is kept while less is sent (see the next
+  entry). The estimator this interceptor had before climbed 8% a second whatever was sent:
+  to 1.4 Mbit/s in twenty seconds of audio alone, and on to the maximum. Feedback that stops
+  while packets are sent halves the estimate (`Gcc::with_feedback_timeout`, 500 ms); a REMB or
+  a TMMBR from the peer bounds it.
+- **interceptors (congestion control)**: an application that sends less than the estimate
+  keeps the estimate (`conf/gcc-5-app-limited`). draft-ietf-rmcat-gcc-02 section 5.5
+  introduces `A_hat(i) < 1.5 * R_hat(i)` so that the estimate "does not diverge from the rate
+  at which the sender is actually sending", and lowers the estimate for one reason: "As soon
+  as over-use has been detected". `Gcc` applied the inequality as a clamp after every update,
+  so whenever less was sent than the estimate, with nothing lost and no over-use, the
+  estimate came down to one and a half times what was sent: on audio alone to 106 kbit/s (the
+  floor, with lighter audio: an application was told of a weak connection on a perfect path,
+  and video climbed from the floor at 8% a second every time a camera came back on); on an
+  open link by a step each time a key frame left the 500 ms window of the received rate
+  (1 Mbit/s reached after 20.3 s instead of 15.6 s); after a path change from the start rate
+  of 300 kbit/s down to 178 kbit/s within three seconds. Now an estimate at or above the
+  bound is not increased and is not lowered (`ReceivedRateBound::LimitsIncrease`, the default;
+  libwebrtc limits the increase alike, `modules/remote_bitrate_estimator/aimd_rate_control.cc`
+  lines 235 to 249 and 266); over-use, loss above 10% and feedback that stops while packets
+  are sent lower it as before. The inequality as a clamp is
+  `ReceivedRateBound::Clamps` (`Gcc::with_received_rate_bound`,
+  `GccInterceptorBuilder::with_received_rate_bound`,
+  `DefaultInterceptorOptions::gcc_received_rate_bound`; `BehaviourProfile::StrictRfc` selects
+  it). Measured in `tests/capacity_cap_video_rtc2rtc.rs`, both chains: an open link reaches
+  1 Mbit/s after 15.47 to 15.52 s without a pacer (15.82 s on v0.22.0+brainwires.6) and
+  never steps down; a call whose cameras go on and off never has an estimate under the
+  start rate, and video that comes back starts from the estimate it left (622 to 656 kbit/s
+  when the camera went off, 637 to 674 when it came back five seconds later, where it had
+  fallen to 106); after a path change the estimate does not go under the start rate.
+- **interceptors (congestion control)**: over-use lowers the estimate on every update while
+  it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it (`A_hat = beta * R_hat` in the
+  Decrease state); the default waited a round trip (10 to 200 ms) between cuts, which is
+  libwebrtc's form (`AimdRateControl::TimeToReduceFurther`) and is now the `Chrome` profile's
+  (`gcc.one-decrease-per-round-trip`: `Rfc` `false`, `Chrome` `true`;
+  `Gcc::with_one_decrease_per_round_trip(true)`,
+  `DefaultInterceptorOptions::gcc_one_decrease_per_round_trip`). Both forms hold every test
+  of the workspace. Measured, the draft's form against one decrease per round trip: a
+  300 kbit/s cap under a sender at 1 Mbit/s freezes the video 0.56 to 1.26 s (0.85 to 1.36 s)
+  and leaves the oldest picture 1.68 to 2.48 s old (2.33 to 2.61 s); two flows that share a
+  2 Mbit/s bottleneck have 0.49 / 0.49 of it (0.48 / 0.50) and keep a longer queue, 18.5 ms
+  mean and 93 ms at the 95th percentile (2.8 ms and 10.8 ms); a flow that joins late has
+  0.50 after 40 s (0.49), and 0.50 without probing (0.42); beside a TCP-like transfer the
+  share is 0.22 with a 0.2 s buffer (0.19) and 0.25 with a 0.05 s buffer (0.37)
+  (`rtc-interceptor/tests/rfc8836_multi_flow.rs`).
+- **statistics**: `availableOutgoingBitrate` keeps the congestion controller's estimate
+  through the whole of a pacer pause. While the source was paused, the NACK responder's own
+  target announcements (sent when its retransmission reserve moved) carried the zero target
+  without the estimate that the pacer's carry (`PacerPause`), and the statistic had no value
+  until the pacer next spoke. They carry it now.
+  (`a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer` reads the statistic
+  every 100 ms and counts a report without the member as zero.)
+- **interceptors (congestion control)**: `BandwidthEstimator::on_unreported_packet_sent` (a
+  provided method): the congestion control interceptor calls it, and no longer
+  `on_packet_sent`, for a packet of a stream that negotiated no per-packet feedback (no
+  transport-wide sequence numbers, no RFC 8888). `Gcc` counted such packets as "sent and
+  nothing came back": audio without transport-wide sequence numbers, sent while the video
+  that has them was off, halved the estimate every 500 ms down to the floor.
 - **interceptors (congestion control)**: `Gcc` starts over from its starting estimate on a new
   path (another candidate pair selected) in the default interceptors too; it kept its
   estimate and restarted only the delay measurements. libwebrtc restarts likewise
@@ -642,6 +697,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
+- **interceptors (congestion control), a capacity drop that meets a higher rate**: without
+  the downward steps the estimate of an open link is at 1.41 Mbit/s after twenty seconds
+  where it was at 0.99, and a path that drops to 300 kbit/s at that moment costs more than
+  it did at the lower rate. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
+  (`a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`; a chain without a
+  pacer, six seeds), against v0.22.0+brainwires.6 on the same test, whose estimator met the
+  same drop at 1.38 Mbit/s: longest time without a usable frame 1.28 to 1.32 s (0.98 to
+  1.23 s), oldest picture shown 4.40 to 4.51 s (4.24 to 4.39 s), 92 to 101 retransmissions of
+  which 23 to 32 are dropped at the path's queue (62 to 67, 11 to 12); the capped path
+  carries 246 to 254 kbit/s (199 to 206) and the estimate is at 1086 to 1361 kbit/s twenty
+  seconds after the capacity is back (473 to 1501: two seeds of six at 473 and 737). So
+  three figures are behind the earlier release at this rate (the freeze by 0.1 to 0.3 s,
+  both under 2 s; the picture's age by up to 0.3 s; half again as many retransmissions) and
+  two are ahead. Cause: for some 0.45 s (the path's 300 ms of queue, its delay and a feedback
+  interval) nothing can tell the sender; the first cuts follow the received rate, whose
+  500 ms window still holds what arrived before the drop (803, then 461, then 252 kbit/s);
+  and with the estimate at 250 kbit/s the retransmissions have room and leave into a queue
+  that is still full. The earlier estimator cut its own estimate to the floor within a
+  second and a half and sent less into that queue, at the price of 200 kbit/s under the cap
+  and a recovery that depended on where the estimate stood when the capacity came back.
+  The same drop met at 1 Mbit/s: 0.56 to 1.26 s, 1.68 to 2.48 s, 39 to 47 retransmissions.
+  Planned: the sender gives up a repair backlog that has gone stale and asks for a key frame
+  (below), and a delay-based detector that reads a queue filling within one feedback
+  interval.
 - **interceptors (pacer), a sudden drop of the path's capacity**: with the default
   interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
   after a sudden drop, though it never stops for more than 2 s. Measured in
@@ -653,7 +732,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   17 packets a second, ahead of the media the paused source left in the pacer, and a receiver
   that plays in order shows each repaired frame as it completes. It is the same under every
   retransmission rule: the pacer holds repairs to the estimate, where a chain without one
-  lets them leave in a burst while the estimate is still falling. Planned after this
+  lets them leave in a burst while the estimate is still falling. (With over-use lowering
+  the estimate on every update, the default since: 0.97 to 1.91 s and 5.59 to 9.84 s on six
+  seeds.) Planned after this
   release: when a stream's repair backlog cannot leave within about 2 s at the target, the
   sender drops it and asks the application for a key frame; a receiver must then skip the
   gap in time (`SampleBuilder::with_max_gap_wait`), because one that waits by packet count

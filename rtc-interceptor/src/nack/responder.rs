@@ -781,6 +781,33 @@ impl NackResponderInterceptor {
 
     /// Announces a reserve that moved: down the write leg for the congestion controller, and
     /// up the read leg as the lowered target for the application.
+    /// The carrier that tells the application its target when only the reserve moved: the
+    /// controller's target less the reserve, or, while the pacer has the source paused, zero
+    /// with the controller's target riding along as the pacer's own announcement of a pause
+    /// has it ([`PacerPause`](crate::PacerPause)). Without it a reader of the carrier takes
+    /// the zero for the congestion controller's estimate (`availableOutgoingBitrate` read
+    /// nothing until the next target from the pacer).
+    fn target_carrier(&self, now: Instant, target_bps: f64, reserve: f64) -> TaggedPacket {
+        let mut message = AttributedPacket::new(Packet::Rtcp(vec![]));
+        if self.paused {
+            message.add(Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            });
+            message.add(Attribute::Custom(std::sync::Arc::new(crate::PacerPause {
+                target_bits_per_second: target_bps,
+            })));
+        } else {
+            message.add(Attribute::TargetBitrateChanged {
+                bits_per_second: media_target(target_bps, reserve, self.minimum_bps.unwrap_or(0.0)),
+            });
+        }
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message,
+        }
+    }
+
     fn announce_reserve(&mut self, now: Instant, carrier: bool) {
         let Some(target_bps) = self.target_bps else {
             return;
@@ -801,19 +828,8 @@ impl NackResponderInterceptor {
             )),
         });
         if carrier {
-            self.read_queue.push_back(TaggedPacket {
-                now,
-                transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
-                    Attribute::TargetBitrateChanged {
-                        bits_per_second: if self.paused {
-                            0.0
-                        } else {
-                            media_target(target_bps, reserve, self.minimum_bps.unwrap_or(0.0))
-                        },
-                    },
-                ),
-            });
+            let carrier = self.target_carrier(now, target_bps, reserve);
+            self.read_queue.push_back(carrier);
         }
         if self.at_floor() {
             // Near the floor the window's room is the retransmissions': use it now.
@@ -1225,23 +1241,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             && let Some(target_bps) = self.target_bps
         {
             // Moved while the NACK was read: the application hears of it here.
-            self.read_queue.push_back(TaggedPacket {
-                now,
-                transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
-                    Attribute::TargetBitrateChanged {
-                        bits_per_second: if self.paused {
-                            0.0
-                        } else {
-                            media_target(
-                                target_bps,
-                                self.announced_reserve,
-                                self.minimum_bps.unwrap_or(0.0),
-                            )
-                        },
-                    },
-                ),
-            });
+            let carrier = self.target_carrier(now, target_bps, self.announced_reserve);
+            self.read_queue.push_back(carrier);
         }
         self.announce_reserve(now, !carries_target);
         if carries_target && self.announced_reserve > 0.0 {
