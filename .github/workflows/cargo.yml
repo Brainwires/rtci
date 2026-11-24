@@ -42,6 +42,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run tests
         run: cargo test --verbose
+      # rtc-stream-driver's optional DNS lookups (hickory-resolver) against a name server on
+      # loopback: no other job turns the feature on.
+      - name: Stream driver with dns-records
+        run: cargo test --package rtc-stream-driver --features dns-records --lib --verbose
       - name: Disk left after the build
         if: always()
         run: df -h

@@ -26,8 +26,9 @@ match driver.next().await {
 The crate documentation has the command table and the complete loop; the root crate's
 `stream-driver-loopback` example runs two peer connections over loopback TCP through it.
 Feature `dns-records` adds SRV / NAPTR lookups and per-family answers through
-hickory-resolver; without it, records are answered as none and names through the system
-resolver.
+hickory-resolver (0.26.2 or later, which has no open RustSec advisory; the lookups are
+those of a stub resolver asking the system's name servers, without DNSSEC validation);
+without it, records are answered as none and names through the system resolver.
 
 ## A whole peer connection
 

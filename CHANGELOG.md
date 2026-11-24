@@ -869,6 +869,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **stream-driver** (`conf/deps-1-hickory`, security): the optional `dns-records` feature
+  takes hickory-resolver 0.26.2 or later instead of 0.25, whose hickory-proto 0.25.2 and
+  hickory-resolver 0.25.2 carried 17 RustSec advisories. One is reachable from the driver's
+  lookups (A, AAAA, SRV and NAPTR from the system's name servers): RUSTSEC-2026-0491, memory
+  amplification from the record counts of a DNS response's header, which any name server the
+  client asks, or anyone spoofing its answers, could send (fixed in 0.26.2). Thirteen concern
+  DNSSEC validation, which the feature does not compile in (no `dnssec-*` feature), and are
+  not present in 0.26 (`unaffected >= 0.26.0-beta.1`); RUSTSEC-2026-0487, -0489 and -0490
+  parse zone files and SVCB text, a server's work (fixed in 0.26.2); RUSTSEC-2026-0119 is
+  quadratic name compression when encoding, here only of the client's one-name queries (fixed
+  in 0.26.1). The driver follows 0.26's API (`Lookup::answers`, public record fields,
+  `ResolverBuilder::build` returning a `Result`); hickory 0.26 declares Rust 1.88, within the
+  workspace's 1.89. New test
+  `srv_and_naptr_records_and_each_address_family_come_back_whole`: the lookups against a name
+  server on loopback, the first test of the feature. `audit.yml` passes `--workspace` to all
+  three cargo-deny checks, the library advisory check included: they read every member's
+  graph, not the root package's alone.
 - **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
   dropped the local candidates (a new DTLS association on new ports), the side that selected
   the new pair first dropped the packets the peer still sent on the previous pair before its
