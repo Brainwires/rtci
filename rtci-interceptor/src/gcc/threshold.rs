@@ -9,12 +9,15 @@ pub const DEFAULT_INITIAL_MS: f64 = 12.5;
 /// `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)| - del_var_th(i-1))`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThresholdTimeBase {
-    /// The draft's: t(i) is the arrival time of group i on the receiver's clock (section 5.3),
-    /// the step not capped.
-    Arrival,
-    /// The engine's default: the gap between the times the groups' readings are taken on the
-    /// sender's clock, capped at 100 ms.
+    /// The draft's, the default: t(i) is the arrival time of group i on the receiver's clock
+    /// (section 5.3), the step not capped.
     #[default]
+    Arrival,
+    /// The engine's default until 0.1.0, a named setting since: the gap between the times the
+    /// groups' readings are taken on the sender's clock, capped at 100 ms. Measured against
+    /// the draft's on `rtci-interceptor/tests/rfc8836_multi_flow.rs`: two flows queue 18.5 ms
+    /// mean / 93.2 ms p95 against 2.9 / 11.0 ms; beside a TCP-like transfer with a 0.2 s buffer
+    /// it keeps a share of 0.22 against 0.14 (0.25 against 0.33 with a 0.05 s buffer).
     Departure,
     /// libwebrtc's: the gap between the groups' arrival times on the receiver's clock, as the
     /// draft's, capped at 100 ms (`TrendlineEstimator::UpdateThreshold`,

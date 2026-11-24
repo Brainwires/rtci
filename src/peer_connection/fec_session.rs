@@ -31,7 +31,7 @@
 
 use super::*;
 use crate::peer_connection::sdp::fec_session::{FecSection, FecSessionSections};
-use crate::rtp_transceiver::internal::{FecSessionFormat, FecSessionState};
+use crate::rtp_transceiver::internal::{FecSessionFeedback, FecSessionFormat, FecSessionState};
 use crate::rtp_transceiver::rtp_sender::internal::FecSessionBinding;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{is_repair_codec, repair_family};
 use crate::rtp_transceiver::{PayloadType, RTCFecGroupSemantics, RTCRtpTransceiverId, SSRC};
@@ -39,6 +39,43 @@ use crate::rtp_transceiver::{PayloadType, RTCFecGroupSemantics, RTCRtpTransceive
 /// The payload type a FEC session's section offers when the application registered no
 /// `ulpfec` format for the kind: the section has one format, so any dynamic number is free.
 const DEFAULT_FEC_SESSION_PAYLOAD_TYPE: PayloadType = 127;
+
+/// The id a FEC session's offer gives the transport-wide sequence number extension: the
+/// section is an RTP session of its own with no other extension, so any id is free there
+/// (RFC 8285 section 5: the mapping is per media section).
+const FEC_SESSION_TRANSPORT_CC_EXTENSION_ID: u8 = 1;
+
+/// The per-packet congestion feedback this endpoint can run for a FEC session of `kind`: what
+/// it states for the media of that kind (the transport-wide sequence number extension
+/// registered with `transport-cc` feedback; RFC 8888 `ack ccfb`).
+fn local_fec_session_feedback(
+    media_engine: &MediaEngine,
+    kind: RtpCodecKind,
+) -> FecSessionFeedback {
+    let codecs = media_engine.get_codecs_by_kind(kind);
+    let has_feedback = |typ: &str, parameter: &str| {
+        codecs.iter().any(|codec| {
+            codec
+                .rtp_codec
+                .rtcp_feedback
+                .iter()
+                .any(|f| f.typ == typ && f.parameter == parameter)
+        })
+    };
+    let extension = media_engine.header_extensions.iter().any(|extension| {
+        extension.uri == ::sdp::extmap::TRANSPORT_CC_URI
+            && match kind {
+                RtpCodecKind::Audio => extension.is_audio,
+                RtpCodecKind::Video => extension.is_video,
+                _ => false,
+            }
+    });
+    FecSessionFeedback {
+        transport_cc_extension: (extension && has_feedback("transport-cc", ""))
+            .then_some(FEC_SESSION_TRANSPORT_CC_EXTENSION_ID),
+        ccfb: has_feedback("ack", "ccfb"),
+    }
+}
 
 /// A transport that carries a FEC session, as the pipeline needs to know it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +90,9 @@ pub(crate) struct FecSessionTransport {
     pub(crate) one_level_only: bool,
     /// The media kind of the section.
     pub(crate) kind: RtpCodecKind,
+    /// The per-packet congestion feedback negotiated for the session: what the streams read
+    /// there are bound with.
+    pub(crate) feedback: FecSessionFeedback,
 }
 
 impl RTCPeerConnection {
@@ -131,6 +171,7 @@ impl RTCPeerConnection {
                 .filter(|rate| *rate > 1000)
                 .unwrap_or(media_rate),
             one_level_only: false,
+            feedback: local_fec_session_feedback(&self.media_engine, kind),
         };
         let direction = match transceiver.direction() {
             direction @ (RTCRtpTransceiverDirection::Sendrecv
@@ -251,9 +292,15 @@ impl RTCPeerConnection {
         kind: RtpCodecKind,
         existing: Option<usize>,
     ) -> Result<(usize, bool)> {
-        // RFC 3264 section 6.1: the answer uses the offer's payload type for the format.
+        // RFC 3264 section 6.1: the answer uses the offer's payload type for the format. Of
+        // the offered feedback it states what this endpoint runs, under the offer's extension
+        // id (RFC 8285 section 6).
         let local = FecSessionFormat {
             one_level_only: false,
+            feedback: FecSessionFeedback::negotiated(
+                local_fec_session_feedback(&self.media_engine, kind),
+                offered.format.feedback,
+            ),
             ..offered.format
         };
         if let Some(index) = existing {
@@ -398,6 +445,15 @@ impl RTCPeerConnection {
                         clock_rate: session.local.clock_rate,
                         one_level_only: session.local.one_level_only,
                         kind: transceiver.kind(),
+                        feedback: session.remote.map_or_else(
+                            FecSessionFeedback::default,
+                            |remote| {
+                                FecSessionFeedback::negotiated(
+                                    session.local.feedback,
+                                    remote.feedback,
+                                )
+                            },
+                        ),
                     },
                 );
                 // Sent once the remote description accepted the session and this side's
@@ -410,6 +466,10 @@ impl RTCPeerConnection {
                         key: map.key(),
                         payload_type: remote.payload_type,
                         one_level_only: remote.one_level_only,
+                        feedback: FecSessionFeedback::negotiated(
+                            session.local.feedback,
+                            remote.feedback,
+                        ),
                     });
                 }
             }
