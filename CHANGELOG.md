@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
+  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
+  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
+  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
+  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
+  original stream has arrived). Seen as Firefox's bandwidth probes on its RTX SSRC before its
+  first frame (`discardedRtp 15` with `discardedSsrcs` = the RTX SSRC in the "RTX by payload
+  type" interop cell). Engine behaviour change (a counter and an event; nothing was ever
+  delivered from such a packet).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
