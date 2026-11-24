@@ -138,3 +138,94 @@ fn h265_nal_units_come_out_in_order_and_duplicates_once() {
     );
     assert_eq!(1, out.iter().filter(|(_, ts)| *ts == 3000).count());
 }
+
+/// Pushes an access unit whose packets are `fragments` (sequence numbers from 10, timestamp
+/// 3000, the marker on the last) with the one at `lost` left out, then single-packet access
+/// units until the builder has given up the gap; returns the samples.
+fn samples_after_a_lost_fragment<T: Depacketizer>(
+    depacketizer: T,
+    fragments: &[&[u8]],
+    lost: usize,
+    next: &[u8],
+) -> Vec<(Bytes, u32)> {
+    let mut packets = vec![];
+    for (i, fragment) in fragments.iter().enumerate() {
+        if i != lost {
+            packets.push(packet(
+                10 + i as u16,
+                3000,
+                i == fragments.len() - 1,
+                fragment,
+            ));
+        }
+    }
+    let first_next = 10 + fragments.len() as u16;
+    for n in 0..16u16 {
+        packets.push(packet(
+            first_next + n,
+            6000 + 3000 * u32::from(n),
+            true,
+            next,
+        ));
+    }
+    samples(depacketizer, packets)
+}
+
+/// RFC 6184 section 5.8: "the receiver SHOULD discard the following fragmentation units ...
+/// in transmission order corresponding to the same fragmented NAL unit" after a lost one.
+/// The sample builder never hands a depacketizer packets across a missing sequence number:
+/// the access unit whose middle FU-A was lost is dropped whole (its start, and the end that
+/// follows the loss), never spliced into a NAL unit with a hole in it; the next access unit
+/// comes out.
+#[test]
+fn h264_an_access_unit_whose_middle_fragment_was_lost_is_dropped() {
+    let out = samples_after_a_lost_fragment(
+        H264Packet::default(),
+        &[
+            &[0x7C, 0x85, 0x01, 0x02],
+            &[0x7C, 0x05, 0x03, 0x04],
+            &[0x7C, 0x45, 0x05, 0x06],
+        ],
+        1,
+        NEXT,
+    );
+    assert!(
+        out.iter().all(|(_, ts)| *ts != 3000),
+        "the access unit with the lost fragment is not delivered: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .all(|(data, _)| !data.windows(2).any(|w| w == [0x05, 0x06])),
+        "the fragment after the loss is discarded: {out:?}"
+    );
+    assert_eq!((annex_b(&[NEXT]), 6000), out[0]);
+}
+
+/// RFC 7798 section 4.4.3: "the receiver SHOULD discard the following fragmentation units
+/// in transmission order corresponding to the same fragmented NAL unit" after a lost one.
+/// As for H.264: the access unit is dropped, the next one comes out.
+#[test]
+fn h265_an_access_unit_whose_middle_fragment_was_lost_is_dropped() {
+    // An IDR_W_RADL NAL unit (type 19) in three FUs: payload header type 49 (0x62 0x01), FU
+    // headers start (0x93), middle (0x13), end (0x53).
+    let out = samples_after_a_lost_fragment(
+        H265Packet::default(),
+        &[
+            &[0x62, 0x01, 0x93, 0x01, 0x02],
+            &[0x62, 0x01, 0x13, 0x03, 0x04],
+            &[0x62, 0x01, 0x53, 0x05, 0x06],
+        ],
+        1,
+        H265_TRAIL_1,
+    );
+    assert!(
+        out.iter().all(|(_, ts)| *ts != 3000),
+        "the access unit with the lost fragment is not delivered: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .all(|(data, _)| !data.windows(2).any(|w| w == [0x05, 0x06])),
+        "the fragment after the loss is discarded: {out:?}"
+    );
+    assert_eq!((annex_b(&[H265_TRAIL_1]), 6000), out[0]);
+}
