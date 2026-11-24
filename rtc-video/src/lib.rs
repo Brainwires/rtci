@@ -36,6 +36,8 @@ pub mod decoder;
 pub mod encoder;
 #[cfg(feature = "engine")]
 pub mod engine;
+#[cfg(feature = "engine")]
+mod engine_send;
 pub mod frame;
 pub mod keyframe;
 pub mod payload;
@@ -43,6 +45,7 @@ pub mod picture;
 pub mod receive;
 pub mod reference;
 pub mod render;
+pub mod send;
 pub mod seq;
 pub mod stats;
 pub mod timing;
@@ -53,6 +56,7 @@ mod test_util;
 
 pub use frame::{Codec, EncodedFrame};
 pub use receive::{DecodeOutcome, DecodeRequest, ReceiveConfig, ReceivePipeline};
+pub use send::{SendConfig, SendPipeline};
 
 /// The RTP clock rate of every video payload format WebRTC uses.
 pub const VIDEO_CLOCK_RATE: u32 = 90_000;

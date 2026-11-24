@@ -1,5 +1,6 @@
-//! The encoder interface (phase 2: what the codec backends and their tests need; phase 3
-//! extends it with layers and per-layer rates, docs/video-pipeline.md section 3).
+//! The encoder interface: what the codec backends implement and what the send pipeline
+//! ([`crate::send`]) drives. Layers and per-layer rates (simulcast, SVC) are not in it yet
+//! (docs/video-pipeline.md section 3, phase 3).
 
 use crate::picture::I420;
 
@@ -50,6 +51,56 @@ pub trait VideoEncoder: Send {
     /// The target bitrate from now on, in bits per second.
     fn set_bitrate(&mut self, bitrate_bps: u32);
 
+    /// The target bitrate and the frame rate pictures will now arrive at (the send pipeline
+    /// lowers the frame rate under `maintain-resolution`). An encoder whose rate control
+    /// budgets per frame needs the frame rate; the default passes the bitrate on alone.
+    fn set_rates(&mut self, bitrate_bps: u32, framerate: f64) {
+        let _ = framerate;
+        self.set_bitrate(bitrate_bps);
+    }
+
+    /// The lowest bitrate the encoder is given, in bits per second: below it the send pipeline
+    /// keeps the encoder at this rate and drops pictures instead, so that what is sent stays
+    /// under the target. 0 (the default) for an encoder that states none.
+    fn min_bitrate_bps(&self) -> u32 {
+        0
+    }
+
     /// The implementation's name (W3C `encoderImplementation`).
     fn implementation_name(&self) -> &str;
+}
+
+/// Makes encoders for the send pipeline, which needs a new one when it changes the resolution
+/// (resolution degradation, a source that changes size). A closure
+/// `FnMut(width, height, framerate, bitrate_bps) -> Result<Box<dyn VideoEncoder>, EncodeError>`
+/// is one.
+pub trait EncoderFactory: Send {
+    /// An encoder for `width` x `height` pictures arriving at `framerate`, aiming at
+    /// `bitrate_bps`. Its first picture is a key frame.
+    ///
+    /// # Errors
+    ///
+    /// What the backend refuses.
+    fn create(
+        &mut self,
+        width: u32,
+        height: u32,
+        framerate: f64,
+        bitrate_bps: u32,
+    ) -> Result<Box<dyn VideoEncoder>, EncodeError>;
+}
+
+impl<F> EncoderFactory for F
+where
+    F: FnMut(u32, u32, f64, u32) -> Result<Box<dyn VideoEncoder>, EncodeError> + Send,
+{
+    fn create(
+        &mut self,
+        width: u32,
+        height: u32,
+        framerate: f64,
+        bitrate_bps: u32,
+    ) -> Result<Box<dyn VideoEncoder>, EncodeError> {
+        self(width, height, framerate, bitrate_bps)
+    }
 }

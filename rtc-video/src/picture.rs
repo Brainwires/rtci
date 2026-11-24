@@ -117,6 +117,55 @@ impl I420Buffer {
     }
 }
 
+/// Scales `src` to `width` x `height` into `out` (reusing its allocation): each output sample
+/// is the mean of the source samples its area covers (a box filter, exact for the integer
+/// ratios and good enough for the send pipeline's resolution steps), nearest sample when
+/// enlarging. The send pipeline's resolution degradation uses it.
+pub fn scale_into(src: &I420<'_>, width: u32, height: u32, out: &mut I420Buffer) {
+    let (cw, ch) = (width.div_ceil(2) as usize, height.div_ceil(2) as usize);
+    let (w, h) = (width as usize, height as usize);
+    out.width = width;
+    out.height = height;
+    out.data.clear();
+    out.data.resize(w * h + 2 * cw * ch, 0);
+    let (y, rest) = out.data.split_at_mut(w * h);
+    let (u, v) = rest.split_at_mut(cw * ch);
+    let (sw, sh) = (src.width as usize, src.height as usize);
+    let (scw, sch) = (src.chroma_width() as usize, src.chroma_height() as usize);
+    scale_plane(src.y, src.y_stride, sw, sh, y, w, h);
+    scale_plane(src.u, src.uv_stride, scw, sch, u, cw, ch);
+    scale_plane(src.v, src.uv_stride, scw, sch, v, cw, ch);
+}
+
+fn scale_plane(
+    src: &[u8],
+    stride: usize,
+    sw: usize,
+    sh: usize,
+    dst: &mut [u8],
+    dw: usize,
+    dh: usize,
+) {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return;
+    }
+    for oy in 0..dh {
+        let y0 = oy * sh / dh;
+        let y1 = ((oy + 1) * sh / dh).max(y0 + 1).min(sh);
+        for ox in 0..dw {
+            let x0 = ox * sw / dw;
+            let x1 = ((ox + 1) * sw / dw).max(x0 + 1).min(sw);
+            let mut sum = 0u32;
+            for r in y0..y1 {
+                let row = &src[r * stride + x0..r * stride + x1];
+                sum += row.iter().map(|&p| u32::from(p)).sum::<u32>();
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            dst[oy * dw + ox] = ((sum + n / 2) / n) as u8;
+        }
+    }
+}
+
 /// The PSNR of `b` against `a` over all three planes (the libvpx / WebRTC convention: the
 /// mean squared error of every sample of Y, U and V together), in dB; `None` when the sizes
 /// differ. Identical pictures give 100 dB.
@@ -233,6 +282,34 @@ mod tests {
         let v = psnr(&a.view(), &b.view()).expect("same size");
         assert!((20.0..60.0).contains(&v), "{v}");
         assert_eq!(psnr(&a.view(), &I420Buffer::new(32, 32).view()), None);
+    }
+
+    #[test]
+    fn scaling_halves_by_averaging_and_keeps_the_picture_recognisable() {
+        let mut s = TestSource::new(64, 48);
+        let a = s.next_picture();
+        let mut half = I420Buffer::default();
+        scale_into(&a.view(), 32, 24, &mut half);
+        assert_eq!((half.width, half.height), (32, 24));
+        assert_eq!(half.data.len(), 32 * 24 + 2 * 16 * 12);
+        // Each output luma sample is the rounded mean of its 2x2 block.
+        let av = a.view();
+        let mean = (u32::from(av.y[0])
+            + u32::from(av.y[1])
+            + u32::from(av.y[64])
+            + u32::from(av.y[65])
+            + 2)
+            / 4;
+        assert_eq!(u32::from(half.view().y[0]), mean);
+        // Scaled back up (nearest), it is close to the source.
+        let mut back = I420Buffer::default();
+        scale_into(&half.view(), 64, 48, &mut back);
+        let q = psnr(&a.view(), &back.view()).expect("same size");
+        assert!(q > 18.0, "{q:.1} dB");
+        // The same size is a copy.
+        let mut same = I420Buffer::default();
+        scale_into(&a.view(), 64, 48, &mut same);
+        assert_eq!(same, a);
     }
 
     #[test]

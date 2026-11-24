@@ -1,5 +1,5 @@
-//! The glue between the receive pipeline and an `RTCRtpReceiver` of the `rtc` peer connection
-//! (feature `engine`).
+//! The glue between the pipelines and the `rtc` peer connection (feature `engine`):
+//! [`VideoReceiver`] for an `RTCRtpReceiver`, [`VideoSender`] for an `RTCRtpSender`.
 //!
 //! ```rust,ignore
 //! // On RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) for video:
@@ -35,18 +35,23 @@ use crate::keyframe::KeyFrameReason;
 use crate::receive::{DecodeOutcome, DecodeRequest, ReceiveConfig, ReceivePipeline};
 use crate::stats::ReceiveStats;
 
+pub use crate::engine_send::{DEFAULT_RTP_MTU, RtpStart, VideoSender};
+
 /// The playout-delay extension's URI (a webrtc.org experiment, no RFC).
 pub const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 
 /// Errors of the glue.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The receiver is gone.
-    #[error("no such receiver")]
+    /// The receiver (or sender) is gone.
+    #[error("no such receiver or sender")]
     NoReceiver,
     /// The engine refused an operation.
     #[error("engine: {0}")]
     Engine(String),
+    /// The encoder failed ([`VideoSender`]).
+    #[error(transparent)]
+    Encode(#[from] crate::encoder::EncodeError),
 }
 
 struct Stream {

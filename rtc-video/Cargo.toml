@@ -110,6 +110,11 @@ path = "tests/isolated.rs"
 required-features = ["isolation", "av1"]
 
 [[test]]
+name = "send_rtc2rtc"
+path = "tests/send_rtc2rtc.rs"
+required-features = ["engine", "vp8"]
+
+[[test]]
 name = "receive_rtc2rtc"
 path = "tests/receive_rtc2rtc.rs"
 required-features = ["engine"]

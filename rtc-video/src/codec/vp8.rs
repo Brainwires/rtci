@@ -113,6 +113,11 @@ impl VideoDecoder for Vp8Decoder {
     }
 }
 
+/// The lowest bitrate the VP8 encoder is given: libwebrtc's floor for a VP8 stream at any
+/// resolution (`video/config/simulcast.cc` `kSimulcastFormatsVP8`, "The min bitrate is still
+/// limited at 30 kbps", @ a222406d).
+pub const MIN_BITRATE_BPS: u32 = 30_000;
+
 /// The VP8 encoder: rate control to a target, key frames on request, no temporal layers
 /// (phase 3 adds them).
 pub struct Vp8Encoder {
@@ -175,6 +180,15 @@ impl VideoEncoder for Vp8Encoder {
 
     fn set_bitrate(&mut self, bitrate_bps: u32) {
         self.inner.set_rates(bitrate_bps, self.fps);
+    }
+
+    fn set_rates(&mut self, bitrate_bps: u32, framerate: f64) {
+        self.fps = (framerate.round() as u32).max(1);
+        self.inner.set_rates(bitrate_bps, self.fps);
+    }
+
+    fn min_bitrate_bps(&self) -> u32 {
+        MIN_BITRATE_BPS
     }
 
     fn implementation_name(&self) -> &str {
