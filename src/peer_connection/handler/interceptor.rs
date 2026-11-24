@@ -138,6 +138,13 @@ impl InterceptorHandlerContext {
         self.source_departure_ends_track = ends;
         self
     }
+
+    /// `SettingEngineBuilder::with_wall_clock`: the receivers' source timestamps on the
+    /// application's wall clock. `None` leaves the clock to be read at the first packet.
+    pub(crate) fn with_wall_clock(mut self, wall_clock: Option<SystemInstant>) -> Self {
+        self.wall_clock = wall_clock;
+        self
+    }
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
