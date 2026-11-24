@@ -879,10 +879,13 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
         world.run_until(step)?;
     }
     assert_eq!(world.peers[0].collisions, vec![SHARED], "reported once");
-    // Negotiation is asked for the first exchange, and again for the new SSRC (each peer
-    // may hear the other's sender report on the shared SSRC before any media).
+    // Negotiation is asked for the new SSRC (each peer may hear the other's sender report on
+    // the shared SSRC before any media). The event queued for the first exchange is not
+    // handed out: that exchange was made before the events were read, and W3C's queued task
+    // checks again whether negotiation is needed when it runs ("Updating the
+    // Negotiation-Needed flag").
     assert_eq!(
-        world.peers[0].negotiation_needed, 2,
+        world.peers[0].negotiation_needed, 1,
         "the new SSRC is to be signalled: {:?}",
         world.peers[0].log
     );

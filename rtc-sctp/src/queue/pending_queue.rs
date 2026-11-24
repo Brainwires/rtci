@@ -655,6 +655,13 @@ impl PendingQueue {
         self.n_bytes
     }
 
+    /// Whether anything written to `stream` waits here: a message, or part of one, or a reset.
+    pub(crate) fn holds_stream(&self, stream: u16) -> bool {
+        self.streams
+            .get(&stream)
+            .is_some_and(|q| !q.entries.is_empty())
+    }
+
     /// Whether a message is part sent: its remaining fragments go before a pause in sending.
     pub(crate) fn is_mid_message(&self) -> bool {
         !self.part_sent.is_empty()

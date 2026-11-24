@@ -443,6 +443,28 @@
 //! refused, and gives the ICE-TCP candidates of the address again (RFC 8842 section 5.1 asks a
 //! new 3-tuple of unordered transports only; their listener is kept).
 //!
+//! A local offer that is rolled back takes its ICE restart back (RFC 9429 section 5.7: "Any
+//! resources or candidates that were allocated by the abandoned local description are
+//! discarded"), its `OnLocalCandidatesNeeded` included, although the event has already
+//! fired: the transport holds its previous candidates again, on the previous addresses,
+//! which are no longer refused, and the candidates given for the abandoned generation are
+//! dropped (the peer, which ignored or never got that offer, drops the ones signalled to it:
+//! they carry the abandoned username fragment). The application then
+//!
+//! - keeps the previous sockets open and no longer counts them as retired: they carry the
+//!   transport's packets as before the offer;
+//! - closes the sockets it bound for the abandoned generation (or keeps them for the next
+//!   one: an address that no association used is not refused);
+//! - waits for the next `OnLocalCandidatesNeeded`: the answer to the peer's offer (the usual
+//!   end of an offer collision, W3C webrtc-pc "perfect negotiation") fires one when it sets up
+//!   a new association, and so does the next offer of this side that asks for one.
+//!
+//! The transport's candidates are what
+//! [`RTCIceTransport::get_local_candidates`](peer_connection::transport::RTCIceTransport::get_local_candidates)
+//! returns, so the application can match its sockets against them once the connection is
+//! back in the stable state (`OnSignalingStateChangeEvent(Stable)`). `rtc-stream-driver`'s
+//! `PeerDriver` does that.
+//!
 //! ```no_run
 //! use rtc::peer_connection::RTCPeerConnection;
 //! use rtc::peer_connection::event::{RTCLocalCandidatesNeededEvent, RTCPeerConnectionEvent};
