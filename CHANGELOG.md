@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `vec![]`; read `connection_information.first()` where one address was read, and
   `is_empty()` for `is_none()`.
 
+- **statistics** (vp-8r, `conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
+  fields (`jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay`,
+  `jitter_buffer_emitted_count`). A struct literal adds `..Default::default()`.
+
 ### Behaviour changes
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
@@ -157,6 +161,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
 
+- **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
+  section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
+  the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
+  the sending window's mean (libwebrtc has no RTP circuit breaker). Measured
+  (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
+  and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
+  section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
+  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
+
+- **video** (`conf/vp-9-no-keyframe-on-resume`): the send pipeline no longer forces a key
+  frame when sending resumes after a pause (a target of 0 from the pacer). Nothing encoded is
+  lost in a pause (the pacer keeps and sends what was written before it), so the receiver's
+  references are intact; no RFC asks for a key frame there, libwebrtc encodes the next picture
+  as it comes (`video/video_stream_encoder.cc` `OnBitrateUpdated`), and the engine's note on
+  `RTCRtpSender::target_bitrates` says none is needed. A receiver that did lose something asks
+  with a PLI or FIR, and the pacer's discards ask too; a request made during the pause is
+  served by the first picture after it. `SendConfig::key_frame_on_resume` (default now
+  `false`) keeps the forced key frame as an option; `SendConfig::chrome()` no longer sets it,
+  since libwebrtc's form is the default. Tests:
+  `a_pause_stops_the_encoder_and_the_resume_continues_with_delta_frames`,
+  `with_key_frame_on_resume_the_first_picture_after_a_pause_is_a_key_frame`,
+  `a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it` (a forced key frame by
+  default fails the first and `the_chrome_profile_resumes_as_the_default_does`; hosted run
+  45410448247), and in the capacity call
+  `a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second` (there the receiver's
+  requests during the long pause make a key frame due at the resume either way).
+
+### Changed
+
+- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
+  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
+  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
+  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
+  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
+  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
+  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
+
 ### Features
 
 - **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
@@ -187,117 +228,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
   6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
 
-### Added
-
-- **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
-  `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
-  the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
-  stream's FEC runs in a second RTP session. `UlpfecSendInterceptor` then sends the stream's
-  FEC as a stream of its own under that SSRC and `UlpfecReceiveInterceptor` reads it there,
-  whatever carriage the builder names and whatever the media section lists (section 14: the
-  multiplexing is "indicated out of band"); the media stream is left as it is, not wrapped in
-  RED. `FecSessionSsrcMap` is the boundary between the chain, which keys what it keeps on the
-  SSRC, and the FEC session's transport, where "the SSRC value SHALL be the same as the SSRC
-  value of the media stream it protects": every SSRC of the session's RTP and RTCP is the wire
-  SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
-  rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
-  has a new public field (`..Default::default()` in a struct literal covers it).
-
-### Fixed
-
-- **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
-  arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
-  performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
-  TSN; it was then never answered with this side's own reset (RFC 8831 6.7), so the peer's
-  channel stayed "closing" and the stream id stayed taken there, and the reset of a stream with
-  no state here was not reported. It is now answered as a reset performed at once is. (2)
-  Whether this side has reset its direction of a stream (so that the peer's reset is not
-  answered with a second one) was the Readable bit of the stream's `RecvSendState`, which the
-  peer's Incoming SSN Reset Request cleared: the stream stopped being readable although the
-  peer had not reset its direction (RFC 6525 5.2.3), and its unread messages were dropped when
-  the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
-  the peer resets it. Engine behaviour change. Tests:
-  `rtci-sctp/src/association/reset_answer_test.rs`.
-
-- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
-  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
-  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
-  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
-  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
-  original stream has arrived). The likely source of the Firefox interop cell's
-  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
-  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
-  delivered from such a packet).
-### Added
-
-- **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
-  (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
-  Retransmit found in messages whose retransmission budget was spent and abandoned instead
-  (`get_num_fast_retrans_abandoned`), FORWARD TSN chunks sent (`get_num_forward_tsns`) and the
-  time T3-rtx expiries waited (`get_t3_wait`, the RTO at each expiry); `RTCSctpTransport::
-  association_stats` gives them for the live association (a diagnostic, not a W3C member). The
-  documentation of `get_num_datas` said "sent"; it counts DATA chunks received.
-- **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
-  (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
-  protocol events: no DATA of the channel sent twice, every lost message abandoned and
-  skipped with FORWARD TSN, at least 45 % of the losses found by Fast Retransmit, T3-rtx
-  expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
-  waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
-  90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
-  behaviour change: no (counters only).
-### Added
-
-- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
-  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
-  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
-  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
-  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
-  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
-  stale cookie; a counter).
-- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
-  9260 8.1: "report the failure to the upper layer and optionally report back all
-  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
-  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
-  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
-  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
-  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
-- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
-  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
-  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
-  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
-  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
-  the outbound queues of an ended association are emptied into the undelivered list.
-- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
-  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
-  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
-  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
-  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
-  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
-  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
-  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
-  test.
-
-### Changed
-
-- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
-  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
-  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
-  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
-  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
-  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
-  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
-### Behaviour changes
-
-- **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
-  section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
-  the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
-  the sending window's mean (libwebrtc has no RTP circuit breaker). Measured
-  (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
-  and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
-  section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
-  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
-### Features
-
 - **A connection can take an existing connection's RTCP CNAME (RFC 8834 section 4.9 MAY).**
   `RTCPeerConnectionBuilder::with_rtcp_cname(existing.rtcp_cname())`: "if explicitly
   requested at creation, an RTCPeerConnection MAY use the same CNAME as an existing
@@ -309,28 +239,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **statistics** (`conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
   fields, `jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay` and
   `jitter_buffer_emitted_count`: a struct literal without `..Default::default()` needs them.
-
-### Behaviour changes
-
-- **video** (`conf/vp-9-no-keyframe-on-resume`): the send pipeline no longer forces a key
-  frame when sending resumes after a pause (a target of 0 from the pacer). Nothing encoded is
-  lost in a pause (the pacer keeps and sends what was written before it), so the receiver's
-  references are intact; no RFC asks for a key frame there, libwebrtc encodes the next picture
-  as it comes (`video/video_stream_encoder.cc` `OnBitrateUpdated`), and the engine's note on
-  `RTCRtpSender::target_bitrates` says none is needed. A receiver that did lose something asks
-  with a PLI or FIR, and the pacer's discards ask too; a request made during the pause is
-  served by the first picture after it. `SendConfig::key_frame_on_resume` (default now
-  `false`) keeps the forced key frame as an option; `SendConfig::chrome()` no longer sets it,
-  since libwebrtc's form is the default. Tests:
-  `a_pause_stops_the_encoder_and_the_resume_continues_with_delta_frames`,
-  `with_key_frame_on_resume_the_first_picture_after_a_pause_is_a_key_frame`,
-  `a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it` (a forced key frame by
-  default fails the first and `the_chrome_profile_resumes_as_the_default_does`; hosted run
-  45410448247), and in the capacity call
-  `a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second` (there the receiver's
-  requests during the long pause make a key frame due at the resume either way).
-
-### Features
 
 - **video pipeline, phase 3: the send pipeline** (`conf/vp-7-send`, `docs/video-pipeline.md`
   6.5; built on `conf/gcc-5-app-limited`, merged in, for the pacer's pause and discards):
@@ -470,6 +378,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stream allows, no freeze); calls between two peer connections at 2 % and 10 % loss and a
     300 kbit/s capacity drop (no wait beyond the slowest repair, no corrupt picture, no
     decode out of order).
+
+### Added
+
+- **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
+  `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
+  the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
+  stream's FEC runs in a second RTP session. `UlpfecSendInterceptor` then sends the stream's
+  FEC as a stream of its own under that SSRC and `UlpfecReceiveInterceptor` reads it there,
+  whatever carriage the builder names and whatever the media section lists (section 14: the
+  multiplexing is "indicated out of band"); the media stream is left as it is, not wrapped in
+  RED. `FecSessionSsrcMap` is the boundary between the chain, which keys what it keeps on the
+  SSRC, and the FEC session's transport, where "the SSRC value SHALL be the same as the SSRC
+  value of the media stream it protects": every SSRC of the session's RTP and RTCP is the wire
+  SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
+  rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
+  has a new public field (`..Default::default()` in a struct literal covers it).
+
+- **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
+  (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
+  Retransmit found in messages whose retransmission budget was spent and abandoned instead
+  (`get_num_fast_retrans_abandoned`), FORWARD TSN chunks sent (`get_num_forward_tsns`) and the
+  time T3-rtx expiries waited (`get_t3_wait`, the RTO at each expiry); `RTCSctpTransport::
+  association_stats` gives them for the live association (a diagnostic, not a W3C member). The
+  documentation of `get_num_datas` said "sent"; it counts DATA chunks received.
+- **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
+  (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
+  protocol events: no DATA of the channel sent twice, every lost message abandoned and
+  skipped with FORWARD TSN, at least 45 % of the losses found by Fast Retransmit, T3-rtx
+  expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
+  waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
+  90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
+  behaviour change: no (counters only).
+
+- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
+  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
+  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
+  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
+  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
+  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
+  stale cookie; a counter).
+- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
+  9260 8.1: "report the failure to the upper layer and optionally report back all
+  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
+  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
+  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
+  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
+  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
+- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
+  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
+  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
+  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
+  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
+  the outbound queues of an ended association are emptied into the undelivered list.
+- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
+  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
+  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
+  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
+  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
+  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
+  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
+  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
+  test.
+
+### Fixed
+
+- **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
+  arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
+  performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
+  TSN; it was then never answered with this side's own reset (RFC 8831 6.7), so the peer's
+  channel stayed "closing" and the stream id stayed taken there, and the reset of a stream with
+  no state here was not reported. It is now answered as a reset performed at once is. (2)
+  Whether this side has reset its direction of a stream (so that the peer's reset is not
+  answered with a second one) was the Readable bit of the stream's `RecvSendState`, which the
+  peer's Incoming SSN Reset Request cleared: the stream stopped being readable although the
+  peer had not reset its direction (RFC 6525 5.2.3), and its unread messages were dropped when
+  the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
+  the peer resets it. Engine behaviour change. Tests:
+  `rtci-sctp/src/association/reset_answer_test.rs`.
+
+- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
+  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
+  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
+  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
+  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
+  original stream has arrived). The likely source of the Firefox interop cell's
+  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
+  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
+  delivered from such a packet).
 
 ### Test environment and documentation
 
