@@ -1727,12 +1727,15 @@ fn every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_with
             World::connected_peers([offerer, Peer::new("10.0.0.2:5000", false)?])?;
         let (media, rtx, _) = world.sender_stream(sender);
         let rtx = rtx.expect("RTX is negotiated");
-        // The answerer sends too: the offerer has a remote SSRC to report on.
+        // The answerer's track opens with the first packets, and then the answerer sends
+        // too: the offerer has a remote SSRC to report on.
+        const OPENING: u16 = 10;
+        world.send_media(sender, FIRST_SEQ, OPENING)?;
         let back = world.answerer_sender()?;
         world.renegotiate_from_answerer(sender)?;
         let remote = encoding_ssrcs(&mut world, 1, back).0;
         // One of the offerer's packets is lost and asked for again: its RTX SSRC sends.
-        world.drop_once = Some((media, FIRST_SEQ + 5));
+        world.drop_once = Some((media, FIRST_SEQ + OPENING + 5));
 
         // The regular compound packets: those with a report of both of the offerer's SSRCs
         // (RFC 8108 5.3.2; a packet that only carries feedback has one report and no blocks,
@@ -1766,7 +1769,7 @@ fn every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_with
         let deadline = world.now + Duration::from_secs(30);
         let mut n = 0u16;
         while world.now < deadline && regular(&tap).len() < 3 {
-            world.send_media(sender, FIRST_SEQ + n, 1)?;
+            world.send_media(sender, FIRST_SEQ + OPENING + n, 1)?;
             world.send_back(back, 100 + n)?;
             n += 1;
         }
