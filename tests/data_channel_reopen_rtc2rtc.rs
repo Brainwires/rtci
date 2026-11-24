@@ -2,13 +2,14 @@
 //! stream is free for the next channel once that is done. The application here closes a
 //! channel in the middle of a file transfer (the receiver refused a record) and opens the next
 //! at once, which takes the same stream id (the lowest free one of its parity, RFC 8832 6).
-//! The sender writes 64 KiB messages under back-pressure, so the close reaches it in the
-//! middle of a message.
+//! The sender writes 64 KiB messages under back-pressure, so the close reaches it with
+//! messages written to the channel and not sent yet.
 //!
-//! Its reset of its own direction used to go out at once, ahead of the rest of that message;
-//! the rest arrived after the reset with its old Stream Sequence Number and waited, on the
-//! receiver, in front of the next channel's message with that number: the next channel got the
-//! messages before it and none after, all acknowledged (ParolNet `file_tamper`).
+//! Its reset of its own direction used to go out at once, ahead of those messages (or the rest
+//! of one half sent): they arrived after the reset with their old Stream Sequence Numbers and
+//! were taken, on the receiver, for the next channel's, in front of the next channel's own
+//! messages with those numbers: the next channel got the messages before them and none after,
+//! all acknowledged (ParolNet `file_tamper`).
 
 mod dc_common;
 
@@ -113,7 +114,9 @@ fn close_and_reopen(close_after: usize) -> Result<()> {
     );
 
     // The receiver refuses the transfer: it closes the channel; the sender's application
-    // stops writing when its end of the channel closes.
+    // stops writing when its end of the channel closes. The close reaches the sender with its
+    // send queue full: it has just written what its back-pressure allows, none of it sent.
+    top_up(&mut p, sender1, &mut next, 1000, 40);
     p.offerer.pc.data_channel(file1).expect("file-1").close()?;
     ensure!(
         drive(
