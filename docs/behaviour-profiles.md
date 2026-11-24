@@ -238,6 +238,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_remote_candidate_scopes` | loopback / link-local remote candidates paired only within their scope (a hardening, kept in every profile) |
 | `SettingEngineBuilder::with_multicast_dns_first_query_delay` | RFC 6762 5.2 delay on (mDNS rows are the engine's; Chrome's resolver is the platform's) |
 | `SettingEngineBuilder::with_multicast_dns_multi_question_delay` | RFC 6762 6.3 delay on |
+| `SettingEngineBuilder::with_ice_new_tie_breaker_on_restart` | RFC 8445 section 16.1 MAY; off in every profile, libwebrtc keeps its tiebreaker across restarts too |
 | `MediaEngine::set_audio_packet_time` | no a=ptime / a=maxptime, as Chromium (fixtures) |
 | `DefaultInterceptorOptions::pacer_immediate_release` | a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget and lets a burst build up over send_burst_interval (modules/pacing/pacing_controller.h @ a222406d), which Chromium sets to 40 ms (rtc_peer_connection_handler.cc pacer_burst_interval @ Chromium 8dafa8bc) |
 | `DefaultInterceptorOptions::bandwidth_probing` | probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate) |

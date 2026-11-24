@@ -364,6 +364,8 @@ pub enum DataPath<'a> {
 pub struct Agent {
     pub(crate) crypto_provider: Arc<dyn RTCCryptoProvider>,
     pub(crate) tie_breaker: u64,
+    /// [`AgentConfig::new_tie_breaker_on_restart`].
+    pub(crate) new_tie_breaker_on_restart: bool,
     pub(crate) is_controlling: bool,
     pub(crate) lite: bool,
 
@@ -625,6 +627,9 @@ impl Agent {
         let mut agent = Self {
             crypto_provider,
             tie_breaker,
+            // Set once the first `restart` below has initialised the agent: that one is not
+            // an ICE restart, and the configured tiebreaker must survive it.
+            new_tie_breaker_on_restart: false,
             is_controlling: config.is_controlling,
             lite: config.lite,
 
@@ -796,6 +801,7 @@ impl Agent {
             let _ = agent.close();
             return Err(err);
         }
+        agent.new_tie_breaker_on_restart = config.new_tie_breaker_on_restart;
 
         Ok(agent)
     }
@@ -2292,6 +2298,11 @@ impl Agent {
         }
         // A restart that is not revertible commits an earlier one.
         self.restart_undo = None;
+        // RFC 8445 Section 16.1: "The agent MAY change the number when an ICE restart
+        // occurs", when the application asked for it.
+        if self.new_tie_breaker_on_restart {
+            self.tie_breaker = generate_tie_breaker(self.crypto_provider.random())?;
+        }
         // Data keeps the path it has until the new generation selects a pair (RFC 8445
         // Section 9), whether or not the local candidates are kept: discarding them forgets
         // what was signalled, not the socket the path's packets leave from. An application

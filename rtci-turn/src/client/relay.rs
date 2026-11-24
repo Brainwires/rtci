@@ -890,6 +890,11 @@ impl Relay<'_> {
         if dont_fragment {
             setters.push(Box::new(proto::dontfrag::DontFragmentAttr));
         }
+        // RFC 8489 Section 6.1: "Indications MAY include a SOFTWARE attribute"; only when the
+        // application asked for it (`ClientConfig::software_in_indications`).
+        if self.client.software_in_indications && !self.client.software.text.is_empty() {
+            setters.push(Box::new(self.client.software.clone()));
+        }
         setters.push(Box::new(FINGERPRINT));
         let mut msg = Message::new();
         msg.build(&setters)?;

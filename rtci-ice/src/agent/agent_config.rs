@@ -377,6 +377,12 @@ pub struct AgentConfig {
     /// agent still draws a new one when a 487 (Role Conflict) tells it to (Section 7.2.5.1).
     pub tie_breaker: Option<u64>,
 
+    /// Whether an ICE restart draws a new tiebreaker (RFC 8445 Section 16.1: "The agent MAY
+    /// change the number when an ICE restart occurs"). Off by default: the tiebreaker stays
+    /// for the agent's life, as libwebrtc keeps it; a fixed [`AgentConfig::tie_breaker`] is
+    /// replaced at the first restart when this is on.
+    pub new_tie_breaker_on_restart: bool,
+
     /// Which of several nominations a controlled agent uses. The default is RFC 8445's rule
     /// (the nominated pair with the highest priority); [`NominationAcceptance::Latest`] is
     /// libwebrtc's.

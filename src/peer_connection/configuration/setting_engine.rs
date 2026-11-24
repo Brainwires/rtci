@@ -287,6 +287,8 @@ pub struct Candidates {
 pub struct IceBehaviour {
     /// See [`SettingEngineBuilder::with_ice_tie_breaker`].
     pub tie_breaker: Option<u64>,
+    /// See [`SettingEngineBuilder::with_ice_new_tie_breaker_on_restart`].
+    pub new_tie_breaker_on_restart: bool,
     /// See [`SettingEngineBuilder::with_ice_nomination_acceptance`].
     pub nomination_acceptance: NominationAcceptance,
     /// See [`SettingEngineBuilder::with_ice_failed_nomination`].
@@ -1715,6 +1717,15 @@ impl SettingEngineBuilder {
     /// one. For reproducible sessions and tests.
     pub fn with_ice_tie_breaker(mut self, tie_breaker: u64) -> Self {
         self.0.ice.tie_breaker = Some(tie_breaker);
+        self
+    }
+
+    /// Draws a new ICE tiebreaker at every ICE restart (RFC 8445 section 16.1: "The agent MAY
+    /// change the number when an ICE restart occurs"). Off by default: the tiebreaker stays
+    /// for the peer connection's life, as in libwebrtc. A restart that is rolled back
+    /// (RFC 9429 section 5.7) gives back the tiebreaker it replaced.
+    pub fn with_ice_new_tie_breaker_on_restart(mut self, new_tie_breaker: bool) -> Self {
+        self.0.ice.new_tie_breaker_on_restart = new_tie_breaker;
         self
     }
 

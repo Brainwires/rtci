@@ -238,6 +238,61 @@ fn first_check(a: &mut Agent, now: Instant) -> (Message, SocketAddr) {
         .expect("the agent sends a check")
 }
 
+/// Section 16.1: an agent "MAY change the number when an ICE restart occurs". With
+/// `AgentConfig::new_tie_breaker_on_restart` a restart draws a new tiebreaker, and the next
+/// generation's checks carry it; a restart taken back (RFC 9429 section 5.7) gives the old one
+/// back. By default the tiebreaker stays across restarts.
+#[test]
+fn test_ice_restart_draws_a_new_tie_breaker_only_when_configured() {
+    const FIXED: u64 = 0x0123_4567_89ab_cdef;
+    let controlling_value = |m: &Message| {
+        let mut attr = AttrControlling::default();
+        attr.get_from(m).unwrap();
+        attr.0
+    };
+    for new_on_restart in [true, false] {
+        let now = Instant::now();
+        let cfg = AgentConfig {
+            tie_breaker: Some(FIXED),
+            new_tie_breaker_on_restart: new_on_restart,
+            ..config(true)
+        };
+        let mut a = started_agent(now, cfg, &[REMOTE_A]);
+        let (check, _) = first_check(&mut a, now);
+        assert_eq!(controlling_value(&check), FIXED);
+
+        let later = now + Duration::from_secs(1);
+        a.restart(later, String::new(), String::new(), true)
+            .unwrap();
+        let after = a.tie_breaker();
+        if new_on_restart {
+            assert_ne!(after, FIXED, "a new tiebreaker is drawn");
+        } else {
+            assert_eq!(after, FIXED, "the tiebreaker stays");
+        }
+        // The new generation's checks carry it.
+        a.set_remote_credentials(
+            "restartufrag".to_owned(),
+            "restartpwdrestartpwdrestart".to_owned(),
+        )
+        .unwrap();
+        a.add_remote_candidate(host(addr(REMOTE_B))).unwrap();
+        let (check, _) = first_check(&mut a, later);
+        assert_eq!(controlling_value(&check), after);
+
+        // A revertible restart that is taken back keeps the tiebreaker of the session it
+        // returns to.
+        let before = a.tie_breaker();
+        a.generate_restart_credentials(String::new(), String::new())
+            .unwrap();
+        a.apply_restart_revertible(later, true).unwrap();
+        assert_eq!(a.tie_breaker() != before, new_on_restart);
+        assert!(a.revert_restart(later));
+        assert_eq!(a.tie_breaker(), before);
+    }
+    assert!(!AgentConfig::default().new_tie_breaker_on_restart);
+}
+
 // --- Section 7.3.1.1 and RFC 8489 Section 14.5: role attributes and MESSAGE-INTEGRITY ---
 
 /// Someone on the path replays a valid check with the opposite role attribute appended after
