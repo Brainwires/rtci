@@ -619,9 +619,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the frames decoded at 5 % loss, a figure calibrated to one packetization and one seeded loss
   pattern: RFC 7741's partition packets (every VP8 frame at least two packets) took 296 of
   300. They now state the requirement: every released frame decodes, and a frame is left out
-  only when the next key frame was released while that frame, or one it predicts from, still
-  waited for a repair (the frames skipped were 208, 209, 239 and 269, each just before a key
-  frame). No pipeline change: no frame split at a partition boundary was mishandled.
+  only when a repair held it up (its own, or that of a frame it predicts from, completed after
+  the frame's packets were all due without loss) and a key frame after it was released: the
+  frame buffer then released the key frame while it waited, or dropped it as too late
+  (libwebrtc's late-frame drop). The VP8 frames skipped were 208 (repaired), 209 (predicts
+  from 208), 239 and 269 (repaired), each just before a key frame. No pipeline change: no frame
+  split at a partition boundary was mishandled. A mutation where a key frame drops every older
+  frame, complete or not, fails them (VP8 260, VP9 154 released).
 
 - **audit**: the library's advisory check (`.github/deny-library.toml`, no ignores) covers the
   published crates (`exclude-unpublished`); the whole-workspace check (`deny.toml`) now resolves

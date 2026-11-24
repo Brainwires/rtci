@@ -148,6 +148,9 @@ struct Outcome {
     pictures_differ: usize,
     /// When the last packet of each frame first arrived (the frame became complete).
     completed_at: Vec<Instant>,
+    /// When each frame's last packet would have arrived at the latest without loss (sent, plus
+    /// the delay and the largest jitter).
+    on_time_by: Vec<Instant>,
     /// When each released frame was released, and whether it is a key frame.
     released_at: HashMap<usize, (Instant, bool)>,
 }
@@ -182,6 +185,7 @@ fn run_with(
     let mut sent: HashMap<u32, Bytes> = HashMap::new();
     let mut index_of: HashMap<u32, usize> = HashMap::new();
     let mut completed_at: Vec<Instant> = Vec::with_capacity(frames.len());
+    let mut on_time_by: Vec<Instant> = Vec::with_capacity(frames.len());
     for (i, frame) in frames.iter().enumerate() {
         let send = t0 + interval * i as u32;
         let ts = (i as u32).wrapping_mul(3003).wrapping_add(0xffff_0000);
@@ -226,6 +230,7 @@ fn run_with(
             }
         }
         completed_at.push(complete);
+        on_time_by.push(send + net.delay + net.jitter);
     }
     arrivals.sort_by_key(|a| a.0);
     let mut pipeline = ReceivePipeline::new(codec, t0, ReceiveConfig::default());
@@ -243,6 +248,7 @@ fn run_with(
         broken_chain: 0,
         pictures_differ: 0,
         completed_at,
+        on_time_by,
         released_at: HashMap::new(),
     };
     let end = t0 + interval * frames.len() as u32 + Duration::from_secs(3);
@@ -380,7 +386,7 @@ fn check(codec: Codec, frames: &[Bytes], payloader: impl Fn() -> Box<dyn Payload
         o.longest_ms
     );
     assert_eq!(o.decoded, o.released, "every released frame decodes");
-    only_frames_a_key_frame_superseded_are_skipped(codec, frames.len(), &o);
+    only_frames_a_repair_held_up_are_skipped(codec, frames.len(), &o);
 }
 
 #[test]
@@ -465,7 +471,7 @@ fn vp8_ivf_through_loss_decodes_bit_exactly_with_the_vp8_decoder() {
             o.decoded, o.released,
             "loss {loss}: every released frame decodes"
         );
-        only_frames_a_key_frame_superseded_are_skipped(Codec::Vp8, frames.len(), &o);
+        only_frames_a_repair_held_up_are_skipped(Codec::Vp8, frames.len(), &o);
         assert_eq!(o.freezes, 0, "loss {loss}: freezes");
     }
 }
@@ -532,23 +538,28 @@ fn av1_from_rav1e_through_loss_decodes_bit_exactly_with_rav1d() {
     }
 }
 
-/// Every frame arrives whole (`lost_for_good` is 0), so a frame may go unreleased only when a
-/// later key frame made it unnecessary: the frame buffer released that key frame while the
-/// frame, or one it predicts from (back to the key frame before it), still waited for a
-/// repair. Which frames that hits depends on how the frames were cut into packets and on the
-/// seeded loss, not on a share of the stream (RFC 7741's partition packetization makes every
-/// VP8 frame at least two packets and moves the losses to other frames).
-fn only_frames_a_key_frame_superseded_are_skipped(codec: Codec, frames: usize, o: &Outcome) {
+/// Every frame arrives whole (`lost_for_good` is 0), so a frame may go unreleased only because
+/// a repair held it up, and a later key frame then took its place: the frame buffer released
+/// the key frame while the frame waited (for its own repair or for a frame it predicts from),
+/// or dropped the frame as too late behind such a repair while later frames were decodable
+/// (libwebrtc's late-frame drop). So for each frame not released: a key frame after it was
+/// released, and a repair of the frame or of a frame it predicts from (back to the key frame
+/// before it) completed after the frame's own packets would all have arrived without loss.
+/// Which frames that hits depends on how the frames were cut into packets and on the seeded
+/// loss, not on a share of the stream (RFC 7741's partition packetization makes every VP8 frame
+/// at least two packets and moves the losses to other frames).
+fn only_frames_a_repair_held_up_are_skipped(codec: Codec, frames: usize, o: &Outcome) {
     let skipped: Vec<usize> = (0..frames)
         .filter(|i| !o.released_at.contains_key(i))
         .collect();
+    let mut causes = Vec::new();
     for &i in &skipped {
-        let (key, (key_released, _)) = o
-            .released_at
-            .iter()
-            .filter(|(k, (_, keyframe))| **k > i && *keyframe)
-            .min_by_key(|(k, _)| **k)
-            .unwrap_or_else(|| panic!("frame {i} skipped with no key frame released after it"));
+        assert!(
+            o.released_at
+                .iter()
+                .any(|(k, (_, keyframe))| *k > i && *keyframe),
+            "frame {i} skipped with no key frame released after it"
+        );
         let chain_start = o
             .released_at
             .iter()
@@ -556,11 +567,16 @@ fn only_frames_a_key_frame_superseded_are_skipped(codec: Codec, frames: usize, o
             .map(|(k, _)| *k)
             .max()
             .unwrap_or(0);
-        assert!(
-            (chain_start..=i).any(|j| o.completed_at[j] > *key_released),
-            "frame {i} skipped although it and the frames back to key frame {chain_start} were \
-             complete when key frame {key} was released"
-        );
+        let held_by = (chain_start..=i)
+            .rev()
+            .find(|j| o.completed_at[*j] > o.on_time_by[i]);
+        let Some(j) = held_by else {
+            panic!(
+                "frame {i} skipped although it and the frames back to key frame {chain_start} \
+                 were complete when its packets were all due"
+            );
+        };
+        causes.push((i, j));
     }
-    println!("{codec:?}: skipped {skipped:?}, each superseded by a key frame");
+    println!("{codec:?}: skipped (frame, held up by the repair of) {causes:?}");
 }
