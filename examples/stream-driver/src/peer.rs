@@ -445,9 +445,7 @@ impl PeerDriver {
                 RTCTransportEventKind::SelectedCandidatePairChange(pair) => {
                     let local = pair.local();
                     let on_retired = self.sockets.iter().any(|s| {
-                        s.retired_for.is_some()
-                            && s.local.port() == local.port
-                            && s.local.ip().to_string() == local.address
+                        s.retired_for.is_some() && names_socket(&local.address, local.port, s.local)
                     });
                     if !on_retired {
                         self.release_after_linger(event.ice_transport);
@@ -521,7 +519,7 @@ impl PeerDriver {
             .collect();
         let holds = |local: &SocketAddr| {
             held.iter()
-                .any(|(address, port)| *port == local.port() && *address == local.ip().to_string())
+                .any(|(address, port)| names_socket(address, *port, *local))
         };
         for host in self.sockets.iter_mut() {
             if host.retired_for.is_some() && holds(&host.local) {
@@ -557,7 +555,7 @@ impl PeerDriver {
             .filter(|s| s.retired_for.is_none())
             .filter(|s| {
                 held.iter()
-                    .any(|c| c.port == s.local.port() && c.address == s.local.ip().to_string())
+                    .any(|c| names_socket(&c.address, c.port, s.local))
             })
             .map(|s| (s.local, s.mid.clone()))
             .collect();
@@ -652,6 +650,15 @@ impl PeerDriver {
             host.close_at = Some(close_at);
         }
     }
+}
+
+/// Whether a local candidate of `address` and `port` is the one of the socket at `local`. With
+/// mDNS (`QueryAndGather`) the engine has replaced the candidate's address with a `.local` name
+/// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1): the port tells the socket then (two
+/// sockets of the driver on different addresses with one port number would both match).
+fn names_socket(address: &str, port: u16, local: SocketAddr) -> bool {
+    port == local.port()
+        && (address == local.ip().to_string() || address.to_ascii_lowercase().ends_with(".local"))
 }
 
 fn io_error(e: io::Error) -> Error {
