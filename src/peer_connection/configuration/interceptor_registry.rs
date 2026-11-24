@@ -419,8 +419,12 @@ pub struct DefaultInterceptorOptions {
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
     /// Whether congestion control feedback that leaves at once counts against the RTCP
-    /// bandwidth of the regular reports, which then space out to keep both inside it. `false`
-    /// by default. See
+    /// bandwidth of the regular reports, which then space out to keep both inside it. `true`
+    /// by default: RFC 3550 section 6.2 holds all control traffic to a known fraction of the
+    /// session bandwidth (5%), and RFC 4585 section 3.2 makes feedback "subject to the RTCP
+    /// bandwidth constraints". `false` (the `Chrome` profile, as libwebrtc) puts the feedback
+    /// on top: at 24 kbit/s of audio the connection's RTCP is then 7.5% of the media with RED
+    /// and 12% without. See
     /// [`RtcpSessionBuilder::with_congestion_feedback_in_budget`](interceptor::RtcpSessionBuilder::with_congestion_feedback_in_budget).
     pub rtcp_congestion_feedback_in_budget: bool,
     /// The least session bandwidth, bits per second, the RTCP bandwidth is computed from when
@@ -432,7 +436,12 @@ pub struct DefaultInterceptorOptions {
     /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share).
     pub congestion_feedback_share: f64,
     /// The longest interval between two congestion control feedback packets while media
-    /// arrives. 250 ms by default. See
+    /// arrives. 500 ms by default: below about 60 kbit/s of media the feedback's share of it
+    /// (with its SRTCP and lower layers) asks for more than 250 ms, and a 250 ms ceiling would
+    /// put the connection's RTCP over RFC 3550's 5% of the session bandwidth (RFC 4585
+    /// section 3.2); draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3 accepts
+    /// sending it "less frequently" on low bandwidth. 250 ms is libwebrtc's (the `Chrome`
+    /// profile). See
     /// [`TwccReceiverBuilder::with_max_adaptive_interval`](interceptor::TwccReceiverBuilder::with_max_adaptive_interval).
     pub congestion_feedback_max_interval: Duration,
     /// Where the RTCP sessions draw their random numbers from (the report interval's
@@ -544,10 +553,10 @@ impl DefaultInterceptorOptions {
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
-            rtcp_congestion_feedback_in_budget: false,
+            rtcp_congestion_feedback_in_budget: true,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
             congestion_feedback_share: 0.05,
-            congestion_feedback_max_interval: Duration::from_millis(250),
+            congestion_feedback_max_interval: Duration::from_millis(500),
             rtcp_random: None,
             nack_max_nacks_per_packet: 0,
             nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit::default(),

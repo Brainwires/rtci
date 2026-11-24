@@ -12,10 +12,16 @@ pub(crate) const FEEDBACK_SHARE: f64 = 0.05;
 /// The window the received media bit rate is measured over.
 const RATE_WINDOW: Duration = Duration::from_secs(2);
 const RATE_BUCKET: Duration = Duration::from_millis(250);
-/// What goes out with a feedback packet in the minimal compound RTCP packet it travels in
-/// without reduced-size RTCP (RFC 4585 section 3.1): a receiver report and an SDES with a
-/// short CNAME.
-const COMPOUND_OCTETS: f64 = 28.0;
+/// The report that leads the minimal compound RTCP packet a feedback packet travels in without
+/// reduced-size RTCP (RFC 4585 section 3.1): an RR without report blocks, or an SR without
+/// them from an endpoint that sends media.
+const RR_OCTETS: f64 = 8.0;
+const SR_OCTETS: f64 = 28.0;
+/// The CNAME assumed until the session's is seen: RFC 7022's 96 random bits in Base64.
+const DEFAULT_CNAME_OCTETS: usize = 16;
+/// How long after this endpoint's last RTP packet its RTCP leads with an SR: RFC 3550 section
+/// 6.3.8's two report intervals, taken at the five-second minimum.
+const SENDER_HORIZON: Duration = Duration::from_secs(10);
 /// UDP over IPv4, which RFC 3550 section 6.2 counts in the size of an RTCP packet.
 const LOWER_LAYER_OCTETS: f64 = 28.0;
 /// The size assumed for a feedback packet before one has been built.
@@ -53,6 +59,13 @@ pub(crate) struct FeedbackCadence {
     first_media: Option<Instant>,
     /// A running mean of the size of the feedback built, RTCP octets.
     feedback_octets: f64,
+    /// The octets SRTCP adds to every RTCP packet (`RtcpSessionControl::SrtcpOverhead`).
+    srtcp_octets: f64,
+    /// The length of the session's CNAME (`RtcpSessionControl::Cname`), for the SDES of a
+    /// minimal compound packet.
+    cname_octets: usize,
+    /// When this endpoint last sent RTP: its compound packets then lead with an SR.
+    last_sent: Option<Instant>,
 }
 
 impl FeedbackCadence {
@@ -67,6 +80,9 @@ impl FeedbackCadence {
             buckets: VecDeque::new(),
             first_media: None,
             feedback_octets: INITIAL_FEEDBACK_OCTETS,
+            srtcp_octets: 0.0,
+            cname_octets: DEFAULT_CNAME_OCTETS,
+            last_sent: None,
         }
     }
 
@@ -106,16 +122,41 @@ impl FeedbackCadence {
         }
     }
 
-    /// Something written towards the wire: what the session is told about its bandwidth and
-    /// packet form is read on its way past.
+    /// Something written towards the wire: what the session is told about its bandwidth,
+    /// packet form, SRTCP and CNAME is read on its way past, and this endpoint's own RTP tells
+    /// whether its compound packets lead with an SR.
     pub(crate) fn on_write(&mut self, message: &TaggedPacket) {
+        if let Packet::Rtp(_) = &message.message.packet {
+            self.last_sent = Some(message.now);
+        }
         match message.message.custom::<RtcpSessionControl>() {
             Some(RtcpSessionControl::Bandwidth(bandwidth)) => self.negotiated = *bandwidth,
             Some(RtcpSessionControl::ReducedSize(reduced_size)) => {
                 self.reduced_size = *reduced_size;
             }
+            Some(RtcpSessionControl::SrtcpOverhead(octets)) => self.srtcp_octets = *octets as f64,
+            Some(RtcpSessionControl::Cname(cname)) => self.cname_octets = cname.len(),
             _ => {}
         }
+    }
+
+    /// The octets around a feedback packet on the wire as of `now`: SRTCP and the lower layers
+    /// always, and without reduced-size RTCP the minimal compound packet's report and SDES
+    /// (RFC 4585 section 3.1: one SR or RR without report blocks, an SDES with the CNAME).
+    fn wrapping_octets(&self, now: Instant) -> f64 {
+        let compound = if self.reduced_size {
+            0.0
+        } else {
+            let sending = self
+                .last_sent
+                .is_some_and(|at| now.saturating_duration_since(at) <= SENDER_HORIZON);
+            let report = if sending { SR_OCTETS } else { RR_OCTETS };
+            // Header, SSRC, the CNAME item (type, length, text) and a terminating null, padded
+            // to 32 bits.
+            let chunk = (4 + 2 + self.cname_octets + 1).div_ceil(4) * 4;
+            report + (4 + chunk) as f64
+        };
+        self.srtcp_octets + LOWER_LAYER_OCTETS + compound
     }
 
     /// A feedback packet of `octets` was built.
@@ -153,13 +194,7 @@ impl FeedbackCadence {
         if share <= 0.0 {
             return self.max_interval;
         }
-        let packet_octets = self.feedback_octets
-            + LOWER_LAYER_OCTETS
-            + if self.reduced_size {
-                0.0
-            } else {
-                COMPOUND_OCTETS
-            };
+        let packet_octets = self.feedback_octets + self.wrapping_octets(now);
         Duration::from_secs_f64(packet_octets * 8.0 / share)
             .clamp(MIN_ADAPTIVE_INTERVAL, self.max_interval)
     }
@@ -199,7 +234,8 @@ mod tests {
     }
 
     /// At 64 kbit/s of media 5% is 3.2 kbit/s, and a 40-octet report in a minimal compound
-    /// packet with its lower layers is 96 octets: one every 0.24 s.
+    /// packet (an RR, an SDES with a 16-character CNAME: 36 octets) with its lower layers is
+    /// 104 octets: one every 0.26 s, held to 250 ms.
     #[test]
     fn the_interval_holds_the_feedback_in_five_percent_of_the_media() {
         let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
@@ -285,6 +321,41 @@ mod tests {
         faster.on_write(&RtcpSessionControl::ReducedSize(true).into_packet(now));
         let interval = faster.interval(now).as_secs_f64();
         assert!((0.065..=0.08).contains(&interval), "{interval}");
+    }
+
+    /// What wraps a feedback packet on the wire is counted as the session builds it: SRTCP's
+    /// fields (`RtcpSessionControl::SrtcpOverhead`), and without reduced-size RTCP an SR rather
+    /// than an RR once this endpoint sends media, and the session's CNAME. At 200 kbit/s of
+    /// media (10 kbit/s for feedback) a 40-octet reduced-size report with its lower layers is
+    /// 68 octets, 54 ms apart; with SRTCP's 14 octets it is 82, 66 ms apart.
+    #[test]
+    fn srtcp_and_the_compound_packet_around_the_feedback_are_counted() {
+        let mut plain = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = after_media(&mut plain, 200_000.0);
+        plain.on_write(&RtcpSessionControl::ReducedSize(true).into_packet(now));
+        let plain = plain.interval(now).as_secs_f64();
+        assert!((0.050..=0.058).contains(&plain), "{plain}");
+
+        let mut srtcp = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = after_media(&mut srtcp, 200_000.0);
+        srtcp.on_write(&RtcpSessionControl::ReducedSize(true).into_packet(now));
+        srtcp.on_write(&RtcpSessionControl::SrtcpOverhead(14).into_packet(now));
+        let with_srtcp = srtcp.interval(now).as_secs_f64();
+        assert!((0.062..=0.070).contains(&with_srtcp), "{with_srtcp}");
+
+        // Without reduced-size RTCP: an RR and a 16-character CNAME (36 octets) for a
+        // receive-only endpoint, 104 octets in all, 83 ms; an SR and a 24-character CNAME
+        // (28 + 36) for one that sends media, 132 octets, 106 ms.
+        let mut receiving = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = after_media(&mut receiving, 200_000.0);
+        let receiving = receiving.interval(now).as_secs_f64();
+        assert!((0.080..=0.087).contains(&receiving), "{receiving}");
+        let mut sending = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = after_media(&mut sending, 200_000.0);
+        sending.on_write(&RtcpSessionControl::Cname("a".repeat(24)).into_packet(now));
+        sending.on_write(&media(now, 1_200));
+        let sending = sending.interval(now).as_secs_f64();
+        assert!((0.105..=0.113).contains(&sending), "{sending}");
     }
 
     /// The fixed setting ignores all of it.
