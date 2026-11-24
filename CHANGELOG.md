@@ -132,6 +132,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
   (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
   6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
+### Fixed
+
+- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
+  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
+  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
+  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
+  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
+  original stream has arrived). The likely source of the Firefox interop cell's
+  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
+  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
+  delivered from such a packet).
 
 ## [0.1.0] - 2026-11-24
 
