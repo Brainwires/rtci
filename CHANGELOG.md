@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC7798-4.4.3-12 (`SampleBuilder` never depacketizes across a missing packet, now tested)
   and RFC7798-4.3-1 are `tested`.
 
+- **rtp**: `Vp8Payloader` starts each partition of a VP8 frame in a packet of its own, with the
+  partition's `PID` and `S` on its first packet (RFC 7741 sections 3, 4.2, 4.4): it reads the
+  frame tag, the token partition count from the first partition's header (RFC 6386 section
+  19.2) and the partition sizes. A frame with one token partition now goes out in at least two
+  packets (the first partition, then the residual). A frame whose sizes do not add up is cut
+  at MTU boundaries as before. `Vp8Payloader::ignore_partitions` (new public field) selects
+  the old cut, which is libwebrtc's. Conformance rows RFC7741-4-1, 4.2-7, 4.2-11, 4.4-4 and
+  4.4-6 are `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
