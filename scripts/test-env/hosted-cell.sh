@@ -7,9 +7,11 @@
 # netem bands of interop/run.sh, starts examples/interop-peer in "open-b" and runs Playwright
 # in "open-a" with `--project <project> -g <grep>`. No coturn: cells that need TURN fail here.
 # Only the network set-up and the Rust peer run as root. Playwright and its browsers run as the
-# invoking user inside open-a (`sudo ip netns exec open-a sudo -u <user>`): Firefox refuses to
-# start as root in a session whose $HOME / $XDG_RUNTIME_DIR belong to another user (the hosted
-# runner's), and the browsers need no privilege. A cell whose name says "pipeline" gets the
+# invoking user inside open-a (`sudo ip netns exec open-a setpriv --reuid <user> ...`): Firefox
+# refuses to start as root in a session whose $HOME / $XDG_RUNTIME_DIR belong to another user
+# (the hosted runner's). The test process keeps CAP_NET_ADMIN as an ambient capability, as the
+# image's root process has it: the loss cells add their own tc filters in open-a (common.mjs
+# impair()). A cell whose name says "pipeline" gets the
 # rtci-video-interop build (`interop-peer-video`, as interop/run.sh starts it where that package
 # exists); every other cell the plain example.
 #
@@ -68,9 +70,11 @@ npm install --no-audit --no-fund > "$A/npm.log" 2>&1
 PLAYWRIGHT_BROWSERS_PATH=$PW npx playwright install "$PROJECT" > "$A/playwright-install.log" 2>&1
 sudo env PATH="$PATH" npx playwright install-deps "$PROJECT" >> "$A/playwright-install.log" 2>&1
 rc=0
-# Enter open-a as root, then drop back to the user with its own environment: the browser's
-# sockets are in open-a, the browser itself is not root.
-sudo ip netns exec open-a sudo -u "$ME" env PATH="$PATH" HOME="$HOME" \
+# Enter open-a as root, then drop back to the user with its own environment and CAP_NET_ADMIN
+# (ambient, so the tc that a cell runs has it): the browser's sockets are in open-a, the browser
+# itself is not root.
+sudo ip netns exec open-a setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
+  --inh-caps=+net_admin --ambient-caps=+net_admin env PATH="$PATH" HOME="$HOME" USER="$ME" \
   XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" PLAYWRIGHT_BROWSERS_PATH="$PW" RTC_TESTENV_ARTIFACTS_DIR="$A" \
   RTC_INTEROP_WS=ws://203.0.113.51:8080 RTC_INTEROP_JSON="$A/results.json" \
   RTC_INTEROP_SDP_DIR="$A/browser-sdp" RTC_TESTENV_MEDIA="$MEDIA" \
