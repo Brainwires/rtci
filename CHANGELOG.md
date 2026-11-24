@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
   (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
   protocol events: no DATA of the channel sent twice, every lost message abandoned and
-  skipped with FORWARD TSN, at least a quarter of the losses found by Fast Retransmit, T3-rtx
+  skipped with FORWARD TSN, at least 45 % of the losses found by Fast Retransmit, T3-rtx
   expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
   waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
   90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine

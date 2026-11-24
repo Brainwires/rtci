@@ -358,12 +358,13 @@ fn unreliable_channel_loses_without_retransmitting() {
     // Most losses are found by Fast Retransmit (RFC 9260 7.2.4: three miss indications), and
     // since no retransmission is allowed the message is abandoned there and skipped with
     // FORWARD TSN at once (RFC 3758 3.5 A2, C3), without waiting for the timer. 36 runs on
-    // GitHub-hosted runners: 55 to 86 of 82 to 112 lost messages. Fewer means losses that
-    // gap reports show went to the timer instead.
+    // GitHub-hosted runners: 55 to 86 of 82 to 112 lost messages, at least 0.6 of them. With
+    // Fast Retransmit half broken (a mutation that left only its entry into Fast Recovery)
+    // it found 0.26 to 0.37 of them and the drain took 39 to 56 s.
     let by_fast_retransmit = at_end.get_num_fast_retrans_abandoned();
     assert!(
-        by_fast_retransmit * 4 >= lost,
-        "Fast Retransmit found {by_fast_retransmit} of {lost} losses"
+        by_fast_retransmit * 20 >= lost * 9,
+        "Fast Retransmit found {by_fast_retransmit} of {lost} losses, expected at least 45 %"
     );
     // The rest is found by T3-rtx: a lost DATA chunk with too few chunks after it for three
     // miss indications (the window is about four packets here, one after an expiry), a lost
