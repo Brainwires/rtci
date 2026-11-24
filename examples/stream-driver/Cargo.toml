@@ -82,3 +82,7 @@ required-features = ["runtime-tokio"]
 [[test]]
 name = "sockets"
 required-features = ["runtime-tokio"]
+
+[[test]]
+name = "mdns_fail_closed"
+required-features = ["peer", "runtime-tokio"]

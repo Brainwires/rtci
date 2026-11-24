@@ -73,8 +73,8 @@ use crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig
 use crate::candidate::{candidate_pair::*, *};
 use crate::external_ip_mapper::ExternalIpMapper;
 use crate::mdns::{
-    MdnsOptions, MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name,
-    is_ice_mdns_name, is_valid_local_mdns_name,
+    MdnsOptions, MulticastDnsMode, MulticastDnsPublishing, create_multicast_dns,
+    generate_multicast_dns_name, is_ice_mdns_name, is_valid_local_mdns_name,
 };
 use crate::network_type::NetworkType;
 use crate::rand::*;
@@ -467,6 +467,17 @@ pub struct Agent {
     /// `QueryAndGather` without a fixed `mdns_local_ip`: the `<uuid>.local` name each local
     /// address is published under, one per address, made when its first host candidate is added.
     pub(crate) mdns_local_names: Vec<(IpAddr, String)>,
+    /// `QueryAndGather`: the `<uuid>.local` name each local address whose name could not be
+    /// registered goes out under (never published), reused for its other candidates.
+    pub(crate) mdns_unpublished_names: Vec<(IpAddr, String)>,
+    /// [`AgentConfig::multicast_dns_fail_closed`].
+    pub(crate) mdns_fail_closed: bool,
+    /// [`AgentConfig::multicast_dns_publishing`], or what [`Agent::set_multicast_dns_publishing`]
+    /// set since.
+    pub(crate) mdns_publishing: MulticastDnsPublishing,
+    /// `QueryAndGather` with [`AgentConfig::multicast_dns_fail_closed`]: the local addresses
+    /// whose host candidates the agent withheld (their name could not be registered).
+    pub(crate) mdns_withheld: Vec<IpAddr>,
 
     pub(crate) candidate_types: Vec<CandidateType>,
     pub(crate) network_types: Vec<NetworkType>,
@@ -524,9 +535,13 @@ enum MdnsHostName {
     Hide(String),
     /// Keep its address.
     Literal,
-    /// Too many names are published already: the candidate takes this name, which is not
-    /// published, and so keeps its address private.
+    /// The name cannot be registered (no mDNS for the address's family, or too many names
+    /// are published already): the candidate takes this name, which is not published, and so
+    /// keeps its address private.
     Unpublished(String),
+    /// The name cannot be registered and the agent fails closed
+    /// ([`AgentConfig::multicast_dns_fail_closed`]): no candidate.
+    Withhold,
 }
 
 /// RFC 8839 section 5.4: `ice-ufrag` is 4 to 256 `ice-char`s and `ice-pwd` 22 to 256, with
@@ -737,6 +752,10 @@ impl Agent {
             mdns_local_name,
             mdns_local_ip: config.multicast_dns_local_ip,
             mdns_local_names: Vec::new(),
+            mdns_unpublished_names: Vec::new(),
+            mdns_fail_closed: config.multicast_dns_fail_closed,
+            mdns_publishing: config.multicast_dns_publishing,
+            mdns_withheld: Vec::new(),
 
             ufrag_pwd: UfragPwd::default(),
 
@@ -961,12 +980,26 @@ impl Agent {
                     // that is never published (it does not resolve), so neither its address
                     // nor the failure shows.
                     warn!(
-                        "[{}]: local host candidate {} goes out under an unpublished mDNS name: {} names already published (the cap)",
+                        "[{}]: local host candidate {} goes out under an unpublished mDNS name: no mDNS for its address family, or {} names already published (the cap)",
                         self.get_name(),
                         c.address,
                         mdns::MAX_LOCAL_NAMES
                     );
                     c.address = name;
+                }
+                MdnsHostName::Withhold => {
+                    // `multicast_dns_fail_closed`: the address is never written, and no
+                    // candidate the peer cannot resolve is offered either.
+                    warn!(
+                        "[{}]: local host candidate {} withheld: its mDNS name cannot be registered (fail closed)",
+                        self.get_name(),
+                        c.address
+                    );
+                    let ip = c.addr().ip();
+                    if !self.mdns_withheld.contains(&ip) {
+                        self.mdns_withheld.push(ip);
+                    }
+                    return Ok(false);
                 }
             }
         }
@@ -1250,15 +1283,44 @@ impl Agent {
         if let Some((_, name)) = self.mdns_local_names.iter().find(|(i, _)| *i == ip) {
             return MdnsHostName::Hide(name.clone());
         }
-        let Some(mdns_conn) = &mut self.mdns else {
-            return MdnsHostName::Literal;
-        };
         let name = generate_multicast_dns_name();
-        if !mdns_conn.add_local_name(&name, ip) {
-            return MdnsHostName::Unpublished(name);
+        // Section 3.1.1 step 4, register the name: on the network only where the application
+        // can send mDNS for the address's family, in a responder that has room for it.
+        let registered = self.mdns_publishing.covers(ip)
+            && self
+                .mdns
+                .as_mut()
+                .is_some_and(|mdns_conn| mdns_conn.add_local_name(&name, ip));
+        if registered {
+            self.mdns_local_names.push((ip, name.clone()));
+            return MdnsHostName::Hide(name);
         }
-        self.mdns_local_names.push((ip, name.clone()));
-        MdnsHostName::Hide(name)
+        if self.mdns_fail_closed {
+            return MdnsHostName::Withhold;
+        }
+        if let Some((_, name)) = self.mdns_unpublished_names.iter().find(|(i, _)| *i == ip) {
+            return MdnsHostName::Unpublished(name.clone());
+        }
+        self.mdns_unpublished_names.push((ip, name.clone()));
+        MdnsHostName::Unpublished(name)
+    }
+
+    /// Tells the agent for which address families the application can send mDNS (an mDNS
+    /// socket is open; both by default, [`AgentConfig::multicast_dns_publishing`]). In
+    /// `QueryAndGather`, the name of a host candidate added afterwards on an address of a
+    /// family it cannot send on is not registered (draft-ietf-mmusic-mdns-ice-candidates
+    /// Section 3.1.1 step 4 fails): the candidate goes out under an unpublished name, or not
+    /// at all with [`AgentConfig::multicast_dns_fail_closed`]. Names registered before stay.
+    pub fn set_multicast_dns_publishing(&mut self, publishing: MulticastDnsPublishing) {
+        self.mdns_publishing = publishing;
+    }
+
+    /// Whether the agent withheld the host candidates of `ip` because their mDNS name could
+    /// not be registered ([`AgentConfig::multicast_dns_fail_closed`]). The application may
+    /// still gather server-reflexive and relayed candidates from that address: they do not
+    /// carry it (Section 3.1.2.2).
+    pub fn multicast_dns_withholds(&self, ip: IpAddr) -> bool {
+        self.mdns_withheld.contains(&ip)
     }
 
     /// Adds a new remote candidate.

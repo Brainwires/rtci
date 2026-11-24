@@ -2706,3 +2706,110 @@ fn test_host_candidate_past_the_name_cap_is_provided_under_an_unpublished_name()
     a.close()?;
     Ok(())
 }
+
+fn fail_closed_mdns_agent(publishing: crate::mdns::MulticastDnsPublishing) -> Result<Agent> {
+    Agent::new(
+        Instant::now(),
+        Arc::new(AgentConfig {
+            multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryAndGather,
+            multicast_dns_fail_closed: true,
+            multicast_dns_publishing: publishing,
+            multicast_dns_first_query_delay: Some(false),
+            ..Default::default()
+        }),
+        test_crypto_provider(),
+    )
+}
+
+/// The mDNS datagrams the agent writes within a few seconds.
+fn mdns_writes(a: &mut Agent) -> Result<usize> {
+    let mut now = Instant::now();
+    let mut n = 0;
+    for _ in 0..40 {
+        a.handle_timeout(now)?;
+        while let Some(packet) = a.poll_write() {
+            if packet.transport.peer_addr.port() == mdns::MDNS_PORT {
+                n += 1;
+            }
+        }
+        now += Duration::from_millis(100);
+    }
+    Ok(n)
+}
+
+// draft-ietf-mmusic-mdns-ice-candidates section 3.1.1 step 4 fails because the application can
+// send no mDNS for the address's family (`set_multicast_dns_publishing`). By default the draft's
+// form: "the ICE agent SHOULD still provide mDNS candidates in step 6 even if the local network
+// does not support mDNS": the candidate goes out under a `.local` name that is neither
+// registered nor announced, one name for the address (its UDP and TCP candidates share it).
+#[test]
+fn test_host_candidate_without_mdns_for_its_family_goes_out_under_an_unpublished_name() -> Result<()>
+{
+    let mut a = mdns_agent(crate::mdns::MulticastDnsMode::QueryAndGather, None)?;
+    a.set_multicast_dns_publishing(crate::mdns::MulticastDnsPublishing {
+        ipv4: false,
+        ipv6: true,
+    });
+    assert!(a.add_local_candidate(host("udp", "10.0.7.5", 5000, TcpType::Unspecified)?)?);
+    assert!(a.add_local_candidate(host("tcp", "10.0.7.5", 5001, TcpType::Passive)?)?);
+    let names: Vec<&str> = a.local_candidates.iter().map(|c| c.address()).collect();
+    assert_eq!(names.len(), 2);
+    assert!(crate::mdns::is_ice_mdns_name(names[0]), "{names:?}");
+    assert_eq!(names[0], names[1], "one name for the address");
+    for c in &a.local_candidates {
+        assert!(!c.marshal().contains("10.0.7.5"), "{}", c.marshal());
+    }
+    assert!(a.mdns_local_names.is_empty(), "the name is not registered");
+    assert!(!a.multicast_dns_withholds("10.0.7.5".parse()?));
+    assert_eq!(mdns_writes(&mut a)?, 0, "nothing announces it");
+    // IPv6 can be published: its name is registered and announced.
+    assert!(a.add_local_candidate(host("udp", "fd00::7", 5000, TcpType::Unspecified)?)?);
+    assert_eq!(a.mdns_local_names.len(), 1);
+    assert!(mdns_writes(&mut a)? > 0, "the IPv6 name is announced");
+    a.close()?;
+    Ok(())
+}
+
+// `multicast_dns_fail_closed`: a host candidate whose name cannot be registered (no mDNS for its
+// family) is not provided at all, UDP or TCP: it is not held, not paired, and no datagram
+// announces it. An address whose family can publish is hidden as usual.
+#[test]
+fn test_fail_closed_agent_withholds_a_host_candidate_whose_name_cannot_be_registered() -> Result<()>
+{
+    let mut a = fail_closed_mdns_agent(crate::mdns::MulticastDnsPublishing {
+        ipv4: false,
+        ipv6: true,
+    })?;
+    let remote = host("udp", "10.0.7.9", 6000, TcpType::Unspecified)?;
+    a.add_remote_candidate(remote)?;
+    assert!(!a.add_local_candidate(host("udp", "10.0.7.5", 5000, TcpType::Unspecified)?)?);
+    assert!(!a.add_local_candidate(host("tcp", "10.0.7.5", 5001, TcpType::Passive)?)?);
+    assert!(a.local_candidates.is_empty(), "nothing is held");
+    assert!(a.candidate_pairs.is_empty(), "nothing is paired");
+    assert!(a.multicast_dns_withholds("10.0.7.5".parse()?));
+    assert_eq!(mdns_writes(&mut a)?, 0, "no name is announced");
+    assert!(a.add_local_candidate(host("udp", "fd00::7", 5000, TcpType::Unspecified)?)?);
+    assert!(crate::mdns::is_ice_mdns_name(
+        a.local_candidates[0].address()
+    ));
+    a.close()?;
+    Ok(())
+}
+
+// `multicast_dns_fail_closed` at the other failure of registration: past the cap of published
+// names, the next address's host candidate is withheld instead of going out under an
+// unpublished name.
+#[test]
+fn test_fail_closed_agent_withholds_a_host_candidate_past_the_name_cap() -> Result<()> {
+    let mut a = fail_closed_mdns_agent(Default::default())?;
+    let cap = mdns::MAX_LOCAL_NAMES;
+    for i in 0..cap {
+        let address = format!("10.0.{}.{}", i / 200, 1 + i % 200);
+        assert!(a.add_local_candidate(host("udp", &address, 5000, TcpType::Unspecified)?)?);
+    }
+    assert!(!a.add_local_candidate(host("udp", "10.9.9.9", 5000, TcpType::Unspecified)?)?);
+    assert_eq!(a.local_candidates.len(), cap);
+    assert!(a.multicast_dns_withholds("10.9.9.9".parse()?));
+    a.close()?;
+    Ok(())
+}

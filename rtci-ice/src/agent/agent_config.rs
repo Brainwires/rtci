@@ -458,6 +458,23 @@ pub struct AgentConfig {
     /// process-wide state of its own, so it cannot share one unasked.
     pub multicast_dns_rate_limit: Option<mdns::MdnsRateLimit>,
 
+    /// `QueryAndGather`: what a host candidate becomes when the name of its address cannot be
+    /// registered (no mDNS for its address family, [`MulticastDnsPublishing`]; or the
+    /// responder holds the most names it can, 64). Off, the default: the candidate is provided
+    /// under a `<uuid>.local` name that is not published, so neither its address nor the
+    /// failure shows (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.1: "the ICE agent
+    /// SHOULD still provide mDNS candidates in step 6 even if the local network does not
+    /// support mDNS or mDNS registration fails in step 4"). On: the agent provides no host
+    /// candidate for that address at all (UDP and TCP), as an embedder that must never offer
+    /// a candidate the peer cannot resolve may want; its server-reflexive and relayed
+    /// candidates are still gathered from it. A page that sees host candidates appear or
+    /// not learns whether mDNS works on the host, which is what the draft's form avoids.
+    pub multicast_dns_fail_closed: bool,
+
+    /// Whether the application can send mDNS for each address family (both by default); see
+    /// [`MulticastDnsPublishing`] and [`Agent::set_multicast_dns_publishing`](crate::Agent::set_multicast_dns_publishing).
+    pub multicast_dns_publishing: MulticastDnsPublishing,
+
     /// Send data on the best valid pair before a pair is selected (RFC 8445 Section 12.1: "An
     /// ICE agent MAY send data on any valid pair before selected pairs have been produced").
     /// Off by default: data is sent once a pair is selected.

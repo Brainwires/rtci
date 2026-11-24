@@ -1211,6 +1211,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "QueryOnly: remote .local candidates resolved, host addresses written as they are. Chrome hides them behind mDNS names only for a page without media permission; with it (what an application is) it writes them",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_fail_closed",
+        class: NotGovernedClass::Same,
+        note: "off: the draft form already (draft-ietf-mmusic-mdns-ice-candidates 3.1.1: a host candidate whose name cannot be registered still goes out under a .local name, unpublished). On (no host candidate at all) departs from that SHOULD and is an embedder's choice in every profile; only with QueryAndGather, which no profile turns on",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_sdp_media_level_fingerprints",
         class: NotGovernedClass::Same,
         note: "media level, as Chromium writes them (fixtures)",

@@ -183,6 +183,7 @@ pub(crate) fn ice_agent_config(
         multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
         multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
         multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
+        multicast_dns_fail_closed: setting_engine.multicast_dns.fail_closed,
         local_ufrag: setting_engine.candidates.username_fragment.clone(),
         local_pwd: setting_engine.candidates.password.clone(),
         allow_loopback_remote_candidates: setting_engine
@@ -464,6 +465,7 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
+            mdns_publishing: Default::default(),
             ssrc_history: HashSet::new(),
             local_description_was_set: false,
             sctp_closed_by_answer: false,
