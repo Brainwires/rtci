@@ -126,6 +126,8 @@ pub struct PeerDriver {
     /// The transports whose generation the driver gathered for on an
     /// `OnLocalCandidatesNeeded`: their `gatheringstatechange` that follows needs nothing.
     gathered: HashSet<RTCTransportId>,
+    /// Datagrams the engine wrote that no socket sent ([`Self::unsent_datagrams`]).
+    unsent: u64,
 }
 
 impl PeerDriver {
@@ -142,6 +144,7 @@ impl PeerDriver {
             datagrams,
             events: VecDeque::new(),
             gathered: HashSet::new(),
+            unsent: 0,
         }
     }
 
@@ -161,6 +164,13 @@ impl PeerDriver {
     /// pair included.
     pub fn local_addresses(&self) -> Vec<SocketAddr> {
         self.sockets.iter().map(|s| s.local).collect()
+    }
+
+    /// How many datagrams the connection wrote that were not sent: from a local address with
+    /// no open socket (one closed already), or refused by the socket (its send buffer full:
+    /// UDP drops them, as the wire would). Counted so that none is lost unseen.
+    pub fn unsent_datagrams(&self) -> u64 {
+        self.unsent
     }
 
     /// The next event of the connection. The driver has already done what is its to do
@@ -277,15 +287,18 @@ impl PeerDriver {
         if datagram.transport.transport_protocol != TransportProtocol::UDP {
             return;
         }
-        if let Some(host) = self
+        let sent = self
             .sockets
             .iter()
             .find(|s| s.local == datagram.transport.local_addr)
-        {
-            // UDP: a datagram the socket cannot take now is lost, as on the wire.
-            let _ = host
-                .socket
-                .try_send_to(&datagram.message, datagram.transport.peer_addr);
+            .is_some_and(|host| {
+                // UDP: a datagram the socket cannot take now is lost, as on the wire.
+                host.socket
+                    .try_send_to(&datagram.message, datagram.transport.peer_addr)
+                    .is_ok()
+            });
+        if !sent {
+            self.unsent += 1;
         }
     }
 

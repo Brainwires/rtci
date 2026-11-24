@@ -172,6 +172,9 @@ struct Scenario {
     policy: RTCBundlePolicy,
     /// Audio senders per peer.
     tracks: usize,
+    /// DTLS datagrams to this peer, once first connected, arrive this much later than the
+    /// rest (a path that delays the handshake's last flight behind the media).
+    delay_dtls_to: Option<(usize, Duration)>,
 }
 
 impl Default for Scenario {
@@ -184,6 +187,7 @@ impl Default for Scenario {
             packets: 700,
             policy: RTCBundlePolicy::Balanced,
             tracks: 1,
+            delay_dtls_to: None,
         }
     }
 }
@@ -213,6 +217,11 @@ struct World {
     unroutable: usize,
     /// `ignored` and `rolled_back` when the first connection completed.
     collisions_at_connection: [usize; 2],
+    /// `Scenario::delay_dtls_to`, active once first connected.
+    delay_dtls_to: Option<(usize, Duration)>,
+    delay_active: bool,
+    /// Delayed datagrams: (due, peer, datagram).
+    delayed: Vec<(Instant, usize, TaggedBytesMut)>,
 }
 
 impl World {
@@ -268,6 +277,9 @@ impl World {
             rolled_back: [0; 2],
             unroutable: 0,
             collisions_at_connection: [0; 2],
+            delay_dtls_to: scenario.delay_dtls_to,
+            delay_active: false,
+            delayed: vec![],
         };
         for i in 0..2 {
             for k in 0..scenario.tracks {
@@ -539,7 +551,7 @@ impl World {
                 self.unroutable += 1;
                 continue;
             }
-            self.peers[target].inbox.push(TaggedBytesMut {
+            let delivered = TaggedBytesMut {
                 now: self.now,
                 transport: TransportContext {
                     local_addr: to,
@@ -548,9 +560,33 @@ impl World {
                     transport_protocol: TransportProtocol::UDP,
                 },
                 message: datagram.message,
-            });
+            };
+            // DTLS records start with a content type of 20 to 63 (RFC 7983).
+            let dtls = delivered
+                .message
+                .first()
+                .is_some_and(|b| (20..=63).contains(b));
+            match self.delay_dtls_to {
+                Some((peer, delay)) if self.delay_active && peer == target && dtls => {
+                    self.delayed.push((self.now + delay, target, delivered));
+                }
+                _ => self.peers[target].inbox.push(delivered),
+            }
         }
         Ok(())
+    }
+
+    /// Hands the delayed datagrams that are due to their peers.
+    fn deliver_delayed(&mut self) {
+        let now = self.now;
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed)
+            .into_iter()
+            .partition(|(at, _, _)| *at <= now);
+        self.delayed = later;
+        for (_, peer, mut datagram) in due {
+            datagram.now = now;
+            self.peers[peer].inbox.push(datagram);
+        }
     }
 
     fn ignored_after_connected(&self) -> usize {
@@ -575,6 +611,8 @@ struct Outcome {
     /// Each peer's `(tls-ids, ufrags)` of its local description once first connected.
     first: [(Vec<String>, Vec<String>); 2],
     failed: bool,
+    /// Each peer's `unsent_media_packets` once first connected.
+    unsent_at_connection: [u64; 2],
 }
 
 /// Connects peer A (first offerer, with a data channel) to peer B, then has both send
@@ -593,6 +631,7 @@ fn run(scenario: Scenario) -> Result<Outcome> {
     let mut next_packet = start;
     let mut sent = 0u16;
     let mut failed = false;
+    let mut unsent_at_connection = [0u64; 2];
     for _ in 0..2_000_000 {
         for (i, gathered) in gathered.iter_mut().enumerate() {
             if !*gathered && world.peers[i].pc.local_description().is_some() {
@@ -602,6 +641,7 @@ fn run(scenario: Scenario) -> Result<Outcome> {
                 }
             }
         }
+        world.deliver_delayed();
         world.turn(0)?;
         world.turn(1)?;
         if world
@@ -638,6 +678,8 @@ fn run(scenario: Scenario) -> Result<Outcome> {
                 (attribute(&sdp, "tls-id"), attribute(&sdp, "ice-ufrag"))
             }));
             world.offers = [0; 2];
+            world.delay_active = true;
+            unsent_at_connection = [0, 1].map(|i| world.peers[i].pc.unsent_media_packets());
             world.collisions_at_connection =
                 [world.ignored.iter().sum(), world.rolled_back.iter().sum()];
             next_packet = world.now;
@@ -692,6 +734,7 @@ fn run(scenario: Scenario) -> Result<Outcome> {
             world.peers[0].pc.poll_timeout(),
             world.peers[1].pc.poll_timeout(),
             world.signals.front().map(|(due, _, _)| *due),
+            world.delayed.iter().map(|(due, _, _)| *due).min(),
         ]
         .into_iter()
         .flatten()
@@ -713,6 +756,7 @@ fn run(scenario: Scenario) -> Result<Outcome> {
         sent,
         first,
         failed,
+        unsent_at_connection,
     })
 }
 
@@ -745,6 +789,14 @@ fn check_call(outcome: &Outcome, scenario_packets: u16, renewals: usize) {
             problems.push(format!(
                 "{}: candidate errors {:?}",
                 p.name, p.candidate_errors
+            ));
+        }
+        // Nothing written after the connection went unsent (no path, a reused SRTP index).
+        if p.pc.unsent_media_packets() != outcome.unsent_at_connection[i] {
+            problems.push(format!(
+                "{}: {} media packets not sent",
+                p.name,
+                p.pc.unsent_media_packets() - outcome.unsent_at_connection[i]
             ));
         }
         if p.channel_closed {
@@ -951,5 +1003,60 @@ fn by_default_only_the_dtls_client_starts_the_re_keying() -> Result<()> {
         "only B offered, nothing collided\n{}",
         world.trace
     );
+    Ok(())
+}
+
+/// RFC 5764 section 4.3: "DTLS-SRTP implementations SHOULD store multiple SRTP keys sets
+/// during a rekey in order to avoid the need for receivers to drop packets for which they lack
+/// a key." The DTLS server of the new association (A) completes its handshake when the
+/// client's last flight arrives and protects its next packets with the new keys at once; the
+/// path delays DTLS to the client (B) by 50 ms, so B receives those packets before the
+/// server's last flight gives it the keys. B holds them and reads them once its handshake
+/// completes: every packet arrives.
+#[test]
+fn packets_under_the_new_keys_before_the_handshake_completes_are_held_not_dropped() -> Result<()> {
+    let scenario = Scenario {
+        settings: [short(LIFETIME), short(LIFETIME)],
+        polite: 1,
+        delay_dtls_to: Some((1, Duration::from_millis(50))),
+        ..Default::default()
+    };
+    let packets = scenario.packets;
+    let outcome = run(scenario)?;
+    check_call(&outcome, packets, 2);
+    Ok(())
+}
+
+/// A packet the engine cannot send is counted, not lost unseen: a different RTP packet with a
+/// sequence number already sent (its SRTP index protects one packet only, RFC 3711 section
+/// 3.3.1) is not sent and `unsent_media_packets` says so.
+#[test]
+fn a_packet_that_cannot_be_sent_is_counted() -> Result<()> {
+    let scenario = Scenario {
+        packets: 20,
+        ..Default::default()
+    };
+    let mut outcome = run(scenario)?;
+    let before = outcome.world.peers[0].pc.unsent_media_packets();
+    let now = outcome.world.now;
+    let peer = &mut outcome.world.peers[0];
+    let sender = peer.senders[0];
+    let ssrc = peer.ssrc;
+    peer.pc.rtp_sender(sender).expect("sender").write_rtp(
+        now,
+        rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                version: 2,
+                payload_type: 111,
+                sequence_number: 5,
+                timestamp: 5 * 960,
+                ssrc,
+                ..Default::default()
+            },
+            payload: Bytes::from_static(&[0xF8, 0xFF, 0x00, 0x01]),
+        },
+    )?;
+    while peer.pc.poll_write().is_some() {}
+    assert_eq!(peer.pc.unsent_media_packets(), before + 1);
     Ok(())
 }

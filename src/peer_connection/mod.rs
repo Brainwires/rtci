@@ -1781,6 +1781,25 @@ impl RTCPeerConnection {
             .discarded_rtp_packets
     }
 
+    /// How many RTP and RTCP packets written to the connection were not sent, over all its
+    /// transports: written while a transport had no ICE path to send them on (before
+    /// connectivity, or after it was lost), or RTP whose SRTP index was already used for a
+    /// different packet (RFC 3711 section 3.3.1: an index protects one packet). Media the
+    /// engine cannot send is counted here rather than lost unseen. Not a W3C attribute: a fork
+    /// addition.
+    pub fn unsent_media_packets(&self) -> u64 {
+        let transports = &self.pipeline_context.transports;
+        transports
+            .ids()
+            .into_iter()
+            .filter_map(|id| transports.transport(id))
+            .map(|bundle| {
+                bundle.ice_handler_context.unsent_media
+                    + bundle.srtp_handler_context.unsent_index_reused
+            })
+            .sum()
+    }
+
     /// See [currentLocalDescription](https://www.w3.org/TR/webrtc/#dom-peerconnection-currentlocaldesc)
     pub fn current_local_description(&self) -> Option<RTCSessionDescription> {
         self.populate_local_candidates(self.current_local_description.as_ref())
@@ -2263,6 +2282,14 @@ impl RTCPeerConnection {
                     },
                 )?;
                 if association == DtlsAssociationUpdate::New {
+                    // The peer may complete the new handshake first and protect with its keys
+                    // before this side has them: such packets are held, not dropped
+                    // (`SrtpHandler::read_protected`, RFC 5764 section 4.3).
+                    self.pipeline_context
+                        .transports
+                        .active_mut()
+                        .srtp_handler_context
+                        .awaiting_new_keys = true;
                     self.pipeline_context
                         .stats
                         .transport
