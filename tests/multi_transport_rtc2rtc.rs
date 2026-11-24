@@ -171,6 +171,8 @@ struct World {
     dtls: Vec<(u64, SocketAddr, SocketAddr, BytesMut)>,
     /// A peer connection that fails does not end the run.
     tolerate_failure: bool,
+    /// DTLS datagrams are lost (recorded in `dtls`, not delivered).
+    drop_dtls: bool,
 }
 
 impl World {
@@ -215,6 +217,7 @@ impl World {
             steps: 0,
             dtls: vec![],
             tolerate_failure: false,
+            drop_dtls: false,
         })
     }
 
@@ -524,6 +527,9 @@ impl World {
             }
             if data.first().is_some_and(|first| (20..=63).contains(first)) {
                 self.dtls.push((self.steps, from, to, data.clone()));
+                if self.drop_dtls {
+                    continue;
+                }
             }
             if self.blocked.contains(&from)
                 || self.blocked.contains(&to)
@@ -3689,7 +3695,28 @@ fn three_unbundled_transports(resumption: bool) -> Result<(World, Vec<RTCRtpSend
 /// every transport.
 #[test]
 fn unbundled_transports_wait_for_the_first_and_resume_its_dtls_session() -> Result<()> {
-    let (mut world, senders) = three_unbundled_transports(true)?;
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
+        SettingEngineBuilder::new().with_dtls_session_resumption(true)
+    })?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    // DTLS is lost until every transport has selected its pair: each could start its
+    // handshake by then, and only the first does.
+    world.drop_dtls = true;
+    world.run_traced("every transport selected a pair", |peers| {
+        peers.iter().all(|p| {
+            let transports = p.pc.dtls_transports();
+            transports.len() == 3
+                && transports
+                    .iter()
+                    .all(|t| t.ice_transport().get_selected_candidate_pair().is_some())
+        })
+    })?;
+    world.advance(Duration::from_millis(100))?;
+    world.drop_dtls = false;
+    world.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
     let handshakes = wire_handshakes(&world, 0);
     assert_eq!(
         handshakes.len(),
