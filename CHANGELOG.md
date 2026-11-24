@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=quality` (RFC 8866 sections 6.3, 6.9, 6.8, 6.14) now have their grammar checked, so a
   remote description with a malformed one, or one at the wrong level, is refused (RFC 9429
   section 5.8) (`conf/jsep-78-sdp-informational`). Browsers send neither.
+- **rtp**: `Vp8Payloader` starts each partition of a VP8 frame in a packet of its own, with the
+  partition's `PID` and `S` on its first packet (RFC 7741 sections 3, 4.2, 4.4): it reads the
+  frame tag, the token partition count from the first partition's header (RFC 6386 section
+  19.2) and the partition sizes. A frame with one token partition now goes out in at least two
+  packets (the first partition, then the residual). A frame whose sizes do not add up is cut
+  at MTU boundaries as before. `Vp8Payloader::ignore_partitions` (new public field) selects
+  the old cut, which is libwebrtc's. Conformance rows RFC7741-4-1, 4.2-7, 4.2-11, 4.4-4 and
+  4.4-6 are `tested`.
 
 - **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
   application; no default format is one) is offered and answered with
@@ -214,6 +222,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a new SSRC or a changed value (sections 4.2.4.1, 4.2.4.3). libwebrtc stops the same
   way, on the first report about the SSRC. Engine behaviour change (RTP header extensions on
   the wire). Rows: RFC7941-4.2.3-1, 4.2.4-1, 4.2.4-2 (`missing` -> `tested`).
+- **rtp**: `HevcPayloader` puts the parameter sets, AUD and prefix SEI that precede a slice in
+  the slice's aggregation packet when the slice does not fit the packet being filled and they
+  fit one together, instead of leaving them with the units before them (RFC 7798 section 5).
+  Conformance row RFC7798-5-5 is `tested`.
+
+- **sdp**: an H.265 answer to an offer with `sprop-max-don-diff` above 0, and an H.265 format
+  of this endpoint with it, state `depack-buf-cap=33554432`, the de-packetization buffer the
+  depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
+  section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
+  `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
 
 ## [0.1.0] - 2026-11-24
 

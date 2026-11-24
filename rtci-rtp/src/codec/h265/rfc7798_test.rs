@@ -732,3 +732,101 @@ fn the_multi_stream_receiver_is_bounded() -> Result<()> {
     }
     Ok(())
 }
+
+/// The NAL units each payload carries: an aggregation packet's units, or the single NAL unit.
+fn units_per_packet(payloads: &[Bytes]) -> Vec<Vec<Vec<u8>>> {
+    payloads
+        .iter()
+        .map(|p| {
+            if (p[0] >> 1) & 0x3F == 48 {
+                let mut units = vec![];
+                let mut i = 2;
+                while i + 2 <= p.len() {
+                    let len = usize::from(u16::from_be_bytes([p[i], p[i + 1]]));
+                    units.push(p[i + 2..i + 2 + len].to_vec());
+                    i += 2 + len;
+                }
+                units
+            } else {
+                vec![p.to_vec()]
+            }
+        })
+        .collect()
+}
+
+fn nal_unit(header: [u8; 2], len: usize, fill: u8) -> Vec<u8> {
+    let mut nalu = header.to_vec();
+    nalu.resize(len, fill);
+    nalu
+}
+
+/// RFC 7798 section 5: "Each non-VCL NAL unit SHOULD, when possible from an MTU size match
+/// viewpoint, be encapsulated in an aggregation packet together with its associated VCL NAL
+/// unit". A prefix SEI and a PPS that precede a slice go in the slice's aggregation packet
+/// when the three fit, not with the slice before them; a suffix SEI stays with the slice it
+/// follows; and when the units cannot share a packet with their slice they are not moved.
+#[test]
+fn a_non_vcl_nal_unit_is_aggregated_with_its_vcl_nal_unit() -> Result<()> {
+    let slice_a = nal_unit([0x02, 0x01], 50, 0xA0); // TRAIL_R
+    let slice_b = nal_unit([0x02, 0x01], 50, 0xB0);
+    let prefix_sei = nal_unit([0x4E, 0x01], 10, 0x5E); // PREFIX_SEI_NUT 39
+    let suffix_sei = nal_unit([0x50, 0x01], 10, 0x5F); // SUFFIX_SEI_NUT 40
+    let pps = PPS.to_vec();
+
+    // A, prefix SEI, PPS, B with an MTU of 100: A with the SEI and the PPS is 71 octets, B
+    // does not fit after them; the SEI and the PPS go with B (71 octets).
+    let payloads = HevcPayloader::default()
+        .payload(100, &annex_b(&[&slice_a, &prefix_sei, &pps, &slice_b]))?;
+    assert_eq!(
+        vec![
+            vec![slice_a.clone()],
+            vec![prefix_sei.clone(), pps.clone(), slice_b.clone()]
+        ],
+        units_per_packet(&payloads)
+    );
+
+    // A, suffix SEI, B: the suffix SEI belongs to A.
+    let payloads =
+        HevcPayloader::default().payload(100, &annex_b(&[&slice_a, &suffix_sei, &slice_b]))?;
+    assert_eq!(
+        vec![
+            vec![slice_a.clone(), suffix_sei.clone()],
+            vec![slice_b.clone()]
+        ],
+        units_per_packet(&payloads)
+    );
+
+    // A, prefix SEI, a slice of 90 octets: the SEI and that slice do not fit 100 together,
+    // so the SEI is not moved.
+    let slice_c = nal_unit([0x02, 0x01], 90, 0xC0);
+    let payloads =
+        HevcPayloader::default().payload(100, &annex_b(&[&slice_a, &prefix_sei, &slice_c]))?;
+    assert_eq!(
+        vec![
+            vec![slice_a.clone(), prefix_sei.clone()],
+            vec![slice_c.clone()]
+        ],
+        units_per_packet(&payloads)
+    );
+
+    // With decoding order numbers (`sprop-max-don-diff` > 0) the same: A alone with DONL 0,
+    // then an aggregation packet whose first unit is the SEI (DONL 1), then the PPS and B.
+    let payloads = HevcPayloader::with_donl(0)
+        .payload(100, &annex_b(&[&slice_a, &prefix_sei, &pps, &slice_b]))?;
+    assert_eq!(2, payloads.len(), "{payloads:?}");
+    assert_eq!(&[0x02, 0x01, 0x00, 0x00, 0xA0][..], &payloads[0][..5]);
+    assert_eq!(
+        &[0x60, 0x01, 0x00, 0x01, 0x00, 0x0A, 0x4E, 0x01][..],
+        &payloads[1][..8]
+    );
+    assert_eq!(2 + 2 + 12 + 6 + 53, payloads[1].len());
+
+    // Parameter sets alone ahead of an IDR that does not fit with them stay together.
+    let idr = nal_unit([0x26, 0x01], 90, 0xD0);
+    let payloads = HevcPayloader::default().payload(100, &annex_b(&[VPS, SPS, PPS, &idr]))?;
+    assert_eq!(
+        vec![vec![VPS.to_vec(), SPS.to_vec(), PPS.to_vec()], vec![idr]],
+        units_per_packet(&payloads)
+    );
+    Ok(())
+}
