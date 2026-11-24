@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   advisories:
+    timeout-minutes: 15
     name: Dependency advisories
     runs-on: ubuntu-latest
     steps:
