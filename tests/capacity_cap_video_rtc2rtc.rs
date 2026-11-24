@@ -1795,9 +1795,15 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
 /// and the retransmissions, held here to what was measured so that they do not grow.
 ///
-/// Measured (hosted run 45334499296, six seeds): freeze 1.28 to 1.32 s, the oldest picture
-/// 4.40 to 4.51 s, 92 to 101 retransmissions (23 to 32 dropped at the link's queue), 246 to
-/// 254 kbit/s under the cap, 1086 to 1361 kbit/s twenty seconds after it. Some sixty video
+/// Measured (hosted run 45409358750, six seeds on three wall clocks, rtci 0.1.0's wire
+/// sizes): freeze 0.74 to 1.08 s, the oldest picture 2.88 to 3.12 s, 43 to 48
+/// retransmissions (1 to 4 dropped at the link's queue), 231 to 237 kbit/s under the cap,
+/// 1118 to 1263 kbit/s on average 15 to 25 s after it; the bounds below are the most measured
+/// and some 15 % (3.6 s, 55). With the retransmissions released a window at a time (run
+/// 45408404348): 1.28 to 1.29 s, 2.90 to 3.15 s, 57 to 64 (21 to 25 dropped), 242 to 250 and
+/// 1089 to 1230 kbit/s. Before a repair the feedback reports received was no longer
+/// sent again (rtci 0.1.0, run 45407054812): 1.28 to 1.32 s, 4.35 to 4.51 s, 89 to 97
+/// retransmissions (23 to 29 dropped), 246 to 252 and 1060 to 1363 kbit/s. Some sixty video
 /// packets are lost before the first feedback about the capped link can arrive and while
 /// the received rate's 500 ms window still holds what arrived before the cap (about forty
 /// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
@@ -1806,16 +1812,17 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// after the first NACKs, into the link's queue still full of media sent at the old rate;
 /// and 24 to 28 of the retransmissions repeat a packet whose first repair was still in the
 /// queue when the receiver asked again, sent after that repair arrived and, oldest packet
-/// first, ahead of first repairs of newer gaps. The release before (v0.22.0+brainwires.6, whose estimator met the cap at
+/// first, ahead of first repairs of newer gaps; the feedback on each retransmission now
+/// stops those (`RetransmissionsReported`). The release before (v0.22.0+brainwires.6, whose
+/// estimator met the cap at
 /// 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest picture
 /// 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s under the
-/// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.1 to
-/// 0.3 s longer than it was, the picture up to 0.3 s older and the retransmissions half
-/// again as many, while the capped link carries 45 to 50 kbit/s more and the recovery has
-/// no slow seed (473 and 737 kbit/s on two of six before). What shortens it is not in the
-/// estimator: no repeat repair of a packet whose first repair transport-wide feedback
-/// reports received (planned), and a delay-based detector that reads a queue filling within
-/// a feedback interval (a known limit). Giving up repairs older than 1 s and asking for a key
+/// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.05 to
+/// 0.3 s longer than it was and twice as many retransmissions are dropped at the queue,
+/// while the picture is 1.0 to 1.5 s younger, the capped link carries some 40 kbit/s more
+/// and the recovery has no slow seed (473 and 737 kbit/s on two of six before). The drops
+/// are the fresh repairs sent into the full queue: what shortens that is a delay-based
+/// detector that reads a queue filling within a feedback interval (a known limit). Giving up repairs older than 1 s and asking for a key
 /// frame instead was measured (hosted run 45342372315): frozen 8.36 to 8.49 s, the oldest
 /// picture 7.55 to 7.77 s, because this receiver (the sample builder without a time bound)
 /// holds the gap for its whole packet window and the key frame waits behind it.
@@ -1835,12 +1842,12 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             outcome.freeze
         );
         assert!(
-            outcome.lag <= Duration::from_millis(5_500),
+            outcome.lag <= Duration::from_millis(3_600),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 130,
+            outcome.rtx_sent <= 55,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -2033,28 +2040,29 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // repairs to the estimate; without one they leave in a burst while the estimate is
         // still falling), and 35 to 41 of the repairs repeat a packet whose first repair was
         // still in flight when the receiver asked again (hosted traces 45341865225,
-        // 45342290711). It is a documented known limit (CHANGELOG, "Known limits"), and the
-        // bound here guards it against gross regression only: on six seeds and three wall
-        // clocks the oldest picture was 5.56 to 9.84 s with the ICE agent's 27-byte SOFTWARE
-        // text and 5.56 to 10.23 s with its 14-byte one (hosted runs 45370399055 and
-        // 45370404660: the seeded figures follow the wire's packet sizes, so one text length
-        // moves a seed by some hundreds of milliseconds). The bound is that maximum, 10.23 s,
-        // and some 15 % (11.75 s). The freeze, the retransmissions and the recovery are held
-        // more tightly by the other assertions here. Not repeating a repair whose first copy
-        // is still in flight (`conf/rtx-1-duplicate-repairs`) brings it to 4.14 to 6.58 s,
-        // and the bound down with it.
+        // 45342290711). With the RFC 8888 feedback on each retransmission those are no longer
+        // sent. The seeded figures follow the wire's packet sizes (one SOFTWARE text length
+        // moves a seed by some hundreds of milliseconds: hosted runs 45370399055 and
+        // 45370404660), so the bound is set from six seeds on three wall clocks: rtci 0.1.0
+        // gave freeze 0.97 to 1.91 s and the oldest picture 5.56 to 10.23 s (hosted run
+        // 45407054812), with the repeat repairs gone 0.75 to 1.13 s and 4.14 to 7.13 s (run
+        // 45408404348), with the retransmissions also released at the limit's rate rather than
+        // a window at a time 0.81 to 1.05 s and 3.97 to 5.91 s (run 45409358750). The bound is
+        // that last most and some 15 % (6.8 s).
         assert!(
-            outcome.lag <= Duration::from_millis(11_750),
+            outcome.lag <= Duration::from_millis(6_800),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         // The retransmissions, apart from the probe clusters' padding on the RTX stream
         // (154 to 330 packets, which this test counted with them until it told them apart):
-        // 90 to 103 on six seeds, none dropped at the link (hosted run 45343885944). The bound
-        // (as the cap after 20 s without a pacer: some 30 % over the most measured) guards
-        // them from growing, and fails if the padding is counted with them again.
+        // 55 to 63 on six seeds and three wall clocks, none dropped at the link (hosted run
+        // 45409358750; 59 to 80 with the retransmissions released a window at a time, run
+        // 45408404348; 90 to 104 while repairs the feedback reported received were sent again,
+        // run 45407054812). The bound (the most measured and some 15 %) guards them from
+        // growing, and fails if the padding is counted with them again.
         assert!(
-            outcome.rtx_sent <= 130,
+            outcome.rtx_sent <= 72,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -2141,6 +2149,13 @@ struct PathChangeOutcome {
     lowest_before: Option<u32>,
     /// Each peer's estimate, every time it moved, in the ten seconds from the switch on.
     estimates: [Vec<(Duration, u32)>; 2],
+    /// The callee's longest time without a usable frame from one second after the switch to
+    /// the end (ten seconds after it), and when it began: how long the repair of what was sent
+    /// into the dead path holds the picture (ParolNet's "freeze after restore + 1 s").
+    freeze_after: Duration,
+    freeze_after_at: Duration,
+    /// Retransmissions the caller sent from the switch on.
+    rtx_after: u64,
 }
 
 /// The call of ParolNet's `an_ice_restart_follows_a_machine_to_another_network`: ten seconds
@@ -2174,6 +2189,7 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     }
     world.stun_only = false;
     let (switched_at, at_switch) = world.peers[0].pair_changes[0];
+    let rtx_at_switch = world.uplinks[0].rtx_sent;
     world.sampling = true;
     let t = world.now + Duration::from_secs(3);
     world.advance(t)?;
@@ -2188,7 +2204,15 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     let t = world.now + Duration::from_secs(7);
     world.advance(t)?;
     world.print_trace("path change", setup);
+    let (freeze_after, freeze_after_at) = longest_gap(
+        &world.peers[1].usable_at,
+        switched_at + Duration::from_secs(1),
+        world.elapsed(),
+    );
     Ok(PathChangeOutcome {
+        freeze_after,
+        freeze_after_at,
+        rtx_after: world.uplinks[0].rtx_sent - rtx_at_switch,
         before,
         lowest_before: world.peers[0]
             .targets
@@ -2210,6 +2234,45 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
             .fold(0.0, f64::max),
         estimate_after,
     })
+}
+
+/// The ICE restart after a 4 s outage, measured: one `RESTART` line per run; asserts nothing.
+/// `RTC_CAP_CHAINS` (`parolnet`, `default`; both by default) and `RTC_CAP_SEEDS` (1 to 6).
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_the_ice_restart() -> Result<()> {
+    let list = |name: &str, default: &str| -> Vec<String> {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .map(|item| item.trim().to_owned())
+            .filter(|item| !item.is_empty())
+            .collect()
+    };
+    for chain in list("RTC_CAP_CHAINS", "parolnet,default") {
+        for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
+            let setup = Setup::new(seed.parse()?, None)
+                .chain(match chain.as_str() {
+                    "parolnet" => Chain::ParolNet,
+                    "default" => Chain::Default,
+                    other => bail!("unknown chain {other}"),
+                })
+                .anchor(ANCHORS[0]);
+            match path_change_run(&setup) {
+                Ok(o) => println!(
+                    "RESTART chain {chain} seed {seed} | switched at {:.2} | freeze after switch+1 s {:.3} at {:.2} | rtx after {} | lowest after {} | estimate after {:?}",
+                    o.switched_at.as_secs_f64(),
+                    o.freeze_after.as_secs_f64(),
+                    o.freeze_after_at.as_secs_f64(),
+                    o.rtx_after,
+                    o.lowest_after / 1000,
+                    o.estimate_after.map(|bps| bps / 1000),
+                ),
+                Err(error) => println!("RESTART chain {chain} seed {seed} | failed: {error}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A new selected pair is a new path for the congestion controller also when the datagrams

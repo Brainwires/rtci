@@ -53,8 +53,9 @@ impl Default for NackResponderBuilder {
 /// leg. Until a target has passed, and in a chain without a congestion controller, nothing is
 /// held back.
 ///
-/// The rate is counted over the last [`RETRANSMISSION_RATE_WINDOW`]. A NACKed packet that
-/// does not fit now waits, oldest request first, and leaves when the window has room for it
+/// The rate is counted over the last [`RETRANSMISSION_RATE_WINDOW`], and what the window
+/// allows leaves at its rate, not at once (a token bucket holding a tenth of it). A
+/// NACKed packet that does not fit now waits, oldest request first, and leaves when the window has room for it
 /// ([`poll_timeout`](sansio::Protocol::poll_timeout) is that instant), for as long as the
 /// receiver keeps asking for it ([`PENDING_REQUEST_LIFETIME`]). Section 7 lets the sender
 /// "selectively retransmit only the packets that it deems important and ignore NACK messages
@@ -130,6 +131,16 @@ pub enum RetransmissionRateLimit {
 /// The window [`RetransmissionRateLimit`] measures the rates over (libwebrtc's
 /// `kRetransmitWindowSizeMs`).
 pub const RETRANSMISSION_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// The retransmissions leave at the rate the window allows them, not as one burst a window
+/// apart: a token bucket filled at the window's allowance per [`RETRANSMISSION_RATE_WINDOW`]
+/// holds at most what this much of the window allows (and at least one full-sized packet), and
+/// each retransmission takes its size from it. What the window allows over the window is
+/// unchanged; only its release is spread.
+const SMOOTHING_WINDOW: Duration = Duration::from_millis(100);
+
+/// The least the bucket holds when full: one full-sized packet.
+const SMOOTHING_MIN_OCTETS: usize = 1_500;
 
 /// The most of the congestion controller's target the retransmission reserve of
 /// [`RetransmissionRateLimit::WithinTarget`] takes, by default: half.
@@ -344,6 +355,11 @@ struct LocalStream {
     /// When each buffered packet was sent, by its place in the send buffer (the sequence
     /// number modulo the buffer size), with the sequence number the entry is for.
     sent_at: Vec<Option<(u16, Instant)>>,
+    /// The sequence number each recent RTX packet of this stream was given → the packet it
+    /// repairs, oldest first in `repairs_order`: how RFC 8888 feedback, which reports the RTX
+    /// stream under its own sequence numbers, names a retransmission.
+    repairs_by_rtx: HashMap<u16, u16>,
+    repairs_order: VecDeque<u16>,
 }
 
 /// The most octets one probe cluster is filled with.
@@ -372,6 +388,27 @@ pub const MIN_RETRANSMIT_INTERVAL: std::time::Duration = std::time::Duration::fr
 fn resend_interval(round_trip_time: Option<Duration>) -> Duration {
     let _ = round_trip_time;
     MIN_RETRANSMIT_INTERVAL
+}
+
+/// How long after a retransmission left the transport-wide feedback on it is waited for, beyond
+/// two round trips, before a request for the same packet is answered without it: the receiver's
+/// feedback interval (100 ms by default, `TwccReceiverBuilder`).
+pub const REPAIR_REPORT_MARGIN: Duration = Duration::from_millis(100);
+
+/// How long a retransmission the feedback reported received is remembered: a request for its
+/// packet within this long crossed it and is not answered.
+const DELIVERED_MEMORY: Duration = Duration::from_secs(4);
+
+/// What a request for a packet that was retransmitted before gets
+/// ([`RetransmissionsReported`](crate::RetransmissionsReported)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// Answered as any request.
+    Answer,
+    /// Kept waiting until the feedback on the earlier retransmission comes, at most until then.
+    Hold(Instant),
+    /// Not answered: the earlier retransmission arrived.
+    Decline,
 }
 
 /// How long a retransmission is taken to wait in the pacer at most: longer than the pacer's
@@ -430,6 +467,10 @@ pub struct NackResponderInterceptor {
     /// The original packets of the local streams, and the retransmissions, sent lately.
     originals: RateWindow,
     retransmitted: RateWindow,
+    /// The token bucket that spreads the retransmissions ([`SMOOTHING_WINDOW`]): its octets
+    /// (below zero after a packet larger than what was left) and when it was last filled.
+    smoothing_tokens: f64,
+    smoothing_at: Option<Instant>,
     /// See [`NackResponderBuilder::with_max_reserve_fraction`].
     max_reserve_fraction: f64,
     /// The round trip the RTCP session measured last.
@@ -454,6 +495,14 @@ pub struct NackResponderInterceptor {
     /// Whether the pacer tells the source to pause ([`PacerPause`](crate::PacerPause)): the
     /// target the application reads is zero.
     paused: bool,
+    /// Whether transport-wide feedback reports on the retransmissions
+    /// ([`RetransmissionsReported`](crate::RetransmissionsReported)): it has once.
+    repairs_reported: bool,
+    /// Retransmissions on their way to the receiver with no report yet, by (media SSRC,
+    /// sequence number), with when they left.
+    unreported: HashMap<(u32, u16), Instant>,
+    /// Retransmissions the feedback reported received, with when.
+    delivered: HashMap<(u32, u16), Instant>,
 }
 
 impl NackResponderInterceptor {
@@ -473,6 +522,8 @@ impl NackResponderInterceptor {
             minimum_bps: None,
             originals: RateWindow::default(),
             retransmitted: RateWindow::default(),
+            smoothing_tokens: 0.0,
+            smoothing_at: None,
             max_reserve_fraction: MAX_RETRANSMISSION_RESERVE,
             round_trip_time: None,
             pending: VecDeque::new(),
@@ -483,6 +534,9 @@ impl NackResponderInterceptor {
             in_pacer: HashMap::new(),
             pacer_reports: false,
             paused: false,
+            repairs_reported: false,
+            unreported: HashMap::new(),
+            delivered: HashMap::new(),
         }
     }
 
@@ -513,7 +567,30 @@ impl NackResponderInterceptor {
             RetransmissionRateLimit::UpToTarget => target,
             RetransmissionRateLimit::Unlimited => return None,
         };
-        Some(limit.saturating_sub(self.retransmitted.octets))
+        let smooth = self.fill_bucket(now, limit);
+        Some(limit.saturating_sub(self.retransmitted.octets).min(smooth))
+    }
+
+    /// The most the smoothing bucket holds when the window allows `limit` octets.
+    fn bucket_depth(limit: usize) -> f64 {
+        let share = SMOOTHING_WINDOW.as_secs_f64() / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
+        (limit as f64 * share).max(SMOOTHING_MIN_OCTETS as f64)
+    }
+
+    /// Fills the smoothing bucket up to `now` at `limit` octets per window; the whole octets it
+    /// holds. Full at the first use.
+    fn fill_bucket(&mut self, now: Instant, limit: usize) -> usize {
+        let depth = Self::bucket_depth(limit);
+        self.smoothing_tokens = match self.smoothing_at {
+            None => depth,
+            Some(at) => {
+                let rate = limit as f64 / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
+                (self.smoothing_tokens + rate * now.saturating_duration_since(at).as_secs_f64())
+                    .min(depth)
+            }
+        };
+        self.smoothing_at = Some(now);
+        self.smoothing_tokens.max(0.0) as usize
     }
 
     /// Whether lowering the original media by the reserve would take it under the
@@ -617,11 +694,28 @@ impl NackResponderInterceptor {
     fn release(&mut self, now: Instant) {
         let mut allowance = self.retransmission_allowance(now);
         let resend_interval = resend_interval(self.round_trip_time);
-        while let Some(entry) = self.pending.front() {
+        // Waits for the feedback that ended are over, reached below or not.
+        let wait = self.report_wait();
+        self.unreported.retain(|_, left| now < *left + wait);
+        // A request held for the feedback on an earlier retransmission keeps its place; the
+        // ones behind it are served meanwhile.
+        let mut index = 0;
+        while let Some(entry) = self.pending.get(index) {
             if self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
                 break;
             }
             let (ssrc, seq) = (entry.ssrc, entry.sequence_number);
+            match self.repeat_state((ssrc, seq), now) {
+                Repeat::Hold(_) => {
+                    index += 1;
+                    continue;
+                }
+                Repeat::Decline => {
+                    self.remove_pending(index);
+                    continue;
+                }
+                Repeat::Answer => {}
+            }
             let current = self.streams.get(&ssrc).and_then(|stream| {
                 let recently = stream
                     .last_retransmit
@@ -637,7 +731,7 @@ impl NackResponderInterceptor {
             });
             let Some((size, budget)) = current else {
                 // Gone from the buffer, too old, its stream unbound, or just sent.
-                self.pop_pending();
+                self.remove_pending(index);
                 continue;
             };
             if budget == 0 {
@@ -650,13 +744,13 @@ impl NackResponderInterceptor {
                 }
                 *left -= size;
             }
-            self.pop_pending();
+            self.remove_pending(index);
             self.retransmit(now, ssrc, seq, size);
         }
     }
 
-    fn pop_pending(&mut self) {
-        if let Some(entry) = self.pending.pop_front() {
+    fn remove_pending(&mut self, index: usize) {
+        if let Some(entry) = self.pending.remove(index) {
             self.pending_asked
                 .remove(&(entry.ssrc, entry.sequence_number));
             self.pending_octets -= entry.octets;
@@ -675,12 +769,25 @@ impl NackResponderInterceptor {
         stream.last_retransmit.insert(seq, now);
         if self.pacer_reports {
             self.in_pacer.insert((ssrc, seq), now);
+        } else {
+            // Without a pacer it leaves now.
+            self.unreported.insert((ssrc, seq), now);
         }
+        self.delivered.remove(&(ssrc, seq));
         stream.retransmit_budget -= 1;
         self.retransmissions_queued += 1;
 
         let packet =
             if let (Some(ssrc_rtx), Some(pt_rtx)) = (stream.ssrc_rtx, stream.payload_type_rtx) {
+                if stream.repairs_order.len() >= usize::from(self.size).max(1)
+                    && let Some(oldest) = stream.repairs_order.pop_front()
+                {
+                    stream.repairs_by_rtx.remove(&oldest);
+                }
+                stream
+                    .repairs_by_rtx
+                    .insert(stream.rtx_sequence_number, seq);
+                stream.repairs_order.push_back(stream.rtx_sequence_number);
                 rtx_packet(
                     &mut stream.rtx_sequence_number,
                     (stream.rid_extension_id, stream.repaired_rid_extension_id),
@@ -693,6 +800,9 @@ impl NackResponderInterceptor {
                 original_packet.clone()
             };
         self.retransmitted.add(now, size);
+        if self.smoothing_at.is_some() {
+            self.smoothing_tokens -= size as f64;
+        }
         self.release_at = None;
 
         // Tagged so a send history downstream counts it as new bytes on the wire rather
@@ -720,15 +830,28 @@ impl NackResponderInterceptor {
     }
 
     fn work_out_release(&self) -> Option<Instant> {
-        let target_bps = self.target_bps?;
+        // A request held for the feedback on an earlier retransmission is due when its wait
+        // ends (the feedback itself comes on the read leg); the first one not held is the
+        // head. `release` forgets the waits that ended, so these are all ahead.
+        let wait = self.report_wait();
+        let held = |entry: &PendingRetransmission| {
+            self.repairs_reported
+                .then(|| self.unreported.get(&(entry.ssrc, entry.sequence_number)))
+                .flatten()
+                .map(|left| *left + wait)
+        };
+        let hold_ends = self.pending.iter().filter_map(held).min();
+        let Some(target_bps) = self.target_bps else {
+            return hold_ends;
+        };
         // With nothing waiting, the reserve falls to zero when the last retransmission leaves
         // the window.
-        let Some(entry) = self.pending.front() else {
+        if self.pending.is_empty() {
             return (self.announced_reserve > 0.0)
                 .then(|| self.retransmitted.sent.back())
                 .flatten()
                 .map(|(at, _)| *at + RETRANSMISSION_RATE_WINDOW);
-        };
+        }
         // The lifetime of the oldest request ends: due then, to drop it.
         let lifetime = self.pending_lifetime();
         let stale = self
@@ -737,6 +860,10 @@ impl NackResponderInterceptor {
             .filter_map(|entry| self.pending_asked.get(&(entry.ssrc, entry.sequence_number)))
             .min()
             .map(|asked| *asked + lifetime + Duration::from_micros(1));
+        let stale = stale.into_iter().chain(hold_ends).min();
+        let Some(entry) = self.pending.iter().find(|entry| held(entry).is_none()) else {
+            return stale;
+        };
         if self
             .streams
             .get(&entry.ssrc)
@@ -776,6 +903,33 @@ impl NackResponderInterceptor {
             }
             RetransmissionRateLimit::Unlimited => None,
         };
+        // And not before the smoothing bucket holds it: when the window has room for it now,
+        // the bucket alone decides; otherwise the later of the two.
+        if self.rate_limit != RetransmissionRateLimit::Unlimited
+            && let Some(filled) = self.smoothing_at
+        {
+            let limit = match self.rate_limit {
+                RetransmissionRateLimit::WithinTarget if !self.at_floor() => target
+                    .saturating_sub(originals)
+                    .max(Self::window_octets(self.announced_reserve)),
+                _ => target,
+            };
+            let bucket = (self.smoothing_tokens < size as f64 && limit > 0).then(|| {
+                let rate = limit as f64 / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
+                let wait = (size as f64 - self.smoothing_tokens) / rate;
+                // Rounded up, so the bucket holds the packet at that instant.
+                filled + Duration::from_secs_f64(wait) + Duration::from_micros(1)
+            });
+            let fits = if limit.saturating_sub(retransmitted) >= size {
+                bucket.or(fits)
+            } else {
+                match (fits, bucket) {
+                    (Some(window), Some(bucket)) => Some(window.max(bucket)),
+                    (window, _) => window,
+                }
+            };
+            return fits.into_iter().chain(stale).min();
+        }
         fits.into_iter().chain(stale).min()
     }
 
@@ -951,28 +1105,19 @@ impl NackResponderInterceptor {
     /// it); one that was dropped may be asked for again.
     fn retransmissions_left(&mut self, now: Instant, notice: &crate::RetransmissionsLeft) {
         self.pacer_reports = true;
-        let media_ssrc = |streams: &HashMap<u32, LocalStream>, ssrc: u32| {
-            if streams.contains_key(&ssrc) {
-                Some(ssrc)
-            } else {
-                streams
-                    .iter()
-                    .find(|(_, stream)| stream.ssrc_rtx == Some(ssrc))
-                    .map(|(media, _)| *media)
-            }
-        };
         for &(ssrc, seq) in &notice.departed {
-            let Some(media) = media_ssrc(&self.streams, ssrc) else {
+            let Some(media) = self.media_ssrc(ssrc) else {
                 continue;
             };
             if self.in_pacer.remove(&(media, seq)).is_some()
                 && let Some(stream) = self.streams.get_mut(&media)
             {
                 stream.last_retransmit.insert(seq, now);
+                self.unreported.insert((media, seq), now);
             }
         }
         for &(ssrc, seq) in &notice.dropped {
-            if let Some(media) = media_ssrc(&self.streams, ssrc) {
+            if let Some(media) = self.media_ssrc(ssrc) {
                 self.in_pacer.remove(&(media, seq));
             }
         }
@@ -981,6 +1126,127 @@ impl NackResponderInterceptor {
         self.in_pacer
             .retain(|_, made| now.saturating_duration_since(*made) < IN_PACER_LIFETIME);
         self.release_at = None;
+    }
+
+    /// How long a request waits for the feedback on an earlier retransmission of its packet:
+    /// two round trips and [`REPAIR_REPORT_MARGIN`], or [`PENDING_REQUEST_LIFETIME`] before a
+    /// round trip is known.
+    fn report_wait(&self) -> Duration {
+        self.round_trip_time
+            .map_or(PENDING_REQUEST_LIFETIME, |rtt| {
+                rtt * 2 + REPAIR_REPORT_MARGIN
+            })
+    }
+
+    /// What a request for `key` gets at `now`, given what the feedback reported on its earlier
+    /// retransmission (see [`RetransmissionsReported`](crate::RetransmissionsReported)). Without
+    /// such reports every request is answered as before. A wait that ran out is forgotten.
+    fn repeat_state(&mut self, key: (u32, u16), now: Instant) -> Repeat {
+        if !self.repairs_reported {
+            return Repeat::Answer;
+        }
+        if self.delivered.contains_key(&key) {
+            return Repeat::Decline;
+        }
+        if let Some(left) = self.unreported.get(&key).copied() {
+            let until = left + self.report_wait();
+            if now < until {
+                return Repeat::Hold(until);
+            }
+            self.unreported.remove(&key);
+        }
+        Repeat::Answer
+    }
+
+    /// The media SSRC of `ssrc`: itself, or the stream whose retransmission SSRC it is.
+    fn media_ssrc(&self, ssrc: u32) -> Option<u32> {
+        if self.streams.contains_key(&ssrc) {
+            Some(ssrc)
+        } else {
+            self.streams
+                .iter()
+                .find(|(_, stream)| stream.ssrc_rtx == Some(ssrc))
+                .map(|(media, _)| *media)
+        }
+    }
+
+    /// The transport-wide feedback on retransmissions
+    /// ([`RetransmissionsReported`](crate::RetransmissionsReported)). RFC 4588 section 7: the
+    /// sender "MAY selectively retransmit only the packets that it deems important and ignore
+    /// NACK messages for other packets"; RFC 8834 section 6.1: "It is not appropriate to blindly
+    /// retransmit RTP packets in response to a NACK." A request for a packet whose
+    /// retransmission the receiver got crossed that retransmission on the way (the receiver
+    /// asks again while the packet is missing, and it waited in the path's queue): it is not
+    /// answered. One whose retransmission was lost is answered at once.
+    fn repairs_reported(&mut self, now: Instant, report: &crate::RetransmissionsReported) {
+        self.repairs_reported = true;
+        for &(ssrc, seq) in &report.received {
+            if let Some(media) = self.media_ssrc(ssrc) {
+                self.unreported.remove(&(media, seq));
+                self.delivered.insert((media, seq), now);
+            }
+        }
+        for &(ssrc, seq) in &report.lost {
+            if let Some(media) = self.media_ssrc(ssrc) {
+                self.unreported.remove(&(media, seq));
+                self.delivered.remove(&(media, seq));
+            }
+        }
+        self.delivered
+            .retain(|_, at| now.saturating_duration_since(*at) < DELIVERED_MEMORY);
+        let delivered = &self.delivered;
+        let asked = &mut self.pending_asked;
+        let octets = &mut self.pending_octets;
+        self.pending.retain(|entry| {
+            let key = (entry.ssrc, entry.sequence_number);
+            let keep = !delivered.contains_key(&key);
+            if !keep {
+                asked.remove(&key);
+                *octets -= entry.octets;
+            }
+            keep
+        });
+        self.release_at = None;
+    }
+
+    /// What RFC 8888 congestion control feedback (`CcFeedbackReport`) in `rtcp_packets` says
+    /// of the retransmissions: it reports the packets of the RTX stream under their own
+    /// sequence numbers, each mapped back to the packet it repaired. The counterpart of the
+    /// TWCC sender's [`RetransmissionsReported`](crate::RetransmissionsReported) for streams
+    /// whose feedback is RFC 8888.
+    fn ccfb_report(
+        &self,
+        rtcp_packets: &[Box<dyn rtcp::Packet>],
+    ) -> crate::RetransmissionsReported {
+        let mut report = crate::RetransmissionsReported::default();
+        for feedback in rtcp_packets.iter().filter_map(|packet| {
+            packet
+                .as_any()
+                .downcast_ref::<rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport>()
+        }) {
+            let (_, per_stream) = crate::rtpfb::convert::convert_ccfb(feedback);
+            for (ssrc, acknowledgements) in per_stream {
+                let Some(stream) = self
+                    .streams
+                    .values()
+                    .find(|stream| stream.ssrc_rtx == Some(ssrc))
+                else {
+                    continue;
+                };
+                for acknowledgement in acknowledgements {
+                    if let Some(&repaired) =
+                        stream.repairs_by_rtx.get(&acknowledgement.sequence_number)
+                    {
+                        if acknowledgement.arrived {
+                            report.received.push((ssrc, repaired));
+                        } else {
+                            report.lost.push((ssrc, repaired));
+                        }
+                    }
+                }
+            }
+        }
+        report
     }
 
     /// Handle a NACK request by queuing retransmissions.
@@ -1032,6 +1298,12 @@ impl NackResponderInterceptor {
             }
             let Some(octets) = self.retransmittable(stream, seq, now) else {
                 continue;
+            };
+            if self.repeat_state((ssrc, seq), now) == Repeat::Decline {
+                continue;
+            }
+            let Some(stream) = self.streams.get(&ssrc) else {
+                return;
             };
             let budget = stream.retransmit_budget;
             match self.pending_asked.get_mut(&(ssrc, seq)) {
@@ -1203,6 +1475,24 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         if let Some(notice) = msg.message.custom::<crate::RetransmissionsLeft>() {
             let notice = notice.clone();
             self.retransmissions_left(now, &notice);
+        }
+
+        // What RFC 8888 feedback reports on the RTX streams: read here, where the sequence
+        // number each RTX packet was given is known.
+        if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
+            let report = self.ccfb_report(rtcp_packets);
+            if !report.received.is_empty() || !report.lost.is_empty() {
+                self.repairs_reported(now, &report);
+                self.release(now);
+            }
+        }
+
+        // What transport-wide feedback reported on the retransmissions.
+        if let Some(report) = msg.message.custom::<crate::RetransmissionsReported>() {
+            let report = report.clone();
+            self.repairs_reported(now, &report);
+            // A request held for a retransmission now reported lost leaves at once.
+            self.release(now);
         }
 
         // Packets the pacer (wire-ward of here) discarded: never resent.
@@ -1380,6 +1670,8 @@ impl Interceptor for NackResponderInterceptor {
                     retransmit_budget: usize::from(self.size),
                     retransmit_budget_max: usize::from(self.size),
                     sent_at: vec![None; usize::from(self.size).max(1)],
+                    repairs_by_rtx: HashMap::new(),
+                    repairs_order: VecDeque::new(),
                 },
             );
         }

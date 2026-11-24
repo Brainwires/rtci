@@ -44,6 +44,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rate-limited link 574 / 539 / 535 kbit/s (574 / 538 / 535). Audit row GCC-5.4-4 is
   `tested`.
 
+- **interceptors (NACK responder), retransmissions leave at the limit's rate**
+  (`conf/rtx-2r-smooth-limiter`): the retransmission rate limit counts octets over a sliding
+  1 s window, and what the window allowed left at once, so repairs left in bursts a window
+  apart (after an ICE restart that followed a 4 s outage: 22 at 14.3 s, 44 at 15.3 s, 72 at
+  16.3 s, the receiver's frames in the same steps), and a burst sent into a path's full
+  queue was dropped there. A token bucket now spreads them: filled at the window's allowance
+  per window, holding at most a tenth of it (at least 1500 octets), each retransmission
+  taking its size. The window and its allowance are unchanged, so what may be retransmitted
+  over any window is what it was (RFC 4588 section 7); only the release is spread. No
+  setting keeps the burst. Measured in `tests/capacity_cap_video_rtc2rtc.rs` (cap after 20 s,
+  six seeds on three wall clocks, hosted run 45409358750, against the release of the repairs a
+  window at a time, run 45408404348): without a pacer longest freeze 0.74 to 1.08 s (1.28 to
+  1.29), 43 to 48 retransmissions of which 1 to 4 dropped at the path's queue (57 to 64, 21 to
+  25), oldest picture 2.88 to 3.12 s (2.90 to 3.15), the recovery's mean 15 to 25 s after the
+  cap 1118 to 1263 kbit/s (1089 to 1230); the default chain 0.81 to 1.05 s (0.75 to 1.13), 55
+  to 63 retransmissions (59 to 80), 3.97 to 5.91 s (4.14 to 7.13), recovery 1048 to 2500
+  kbit/s (898 to 2500). After a 4 s outage and an ICE restart (six seeds) the chain without a
+  pacer is frozen 0.09 to 0.14 s from one second after the switch (0.33 to 0.92). Costs: the
+  median target under the cap without a pacer is 231 to 237 kbit/s (242 to 250), some
+  10 kbit/s lower; the default chain after the outage still shows no usable frame to the end
+  of the run (7.95 to 8.02 s against 7.76 to 7.79 s of the measured window: a known limit of
+  0.1.0). The tests' bounds are tightened to these figures (3.6 s and 55 retransmissions
+  without a pacer, 6.8 s and 72 with it).
+
+- **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
+  (`conf/rtx-1r-duplicate-repairs`): a request for a packet whose retransmission per-packet
+  feedback reported received is no longer answered, and one whose retransmission left
+  without a report yet waits for it: answered at once when the retransmission is reported
+  lost, or when two round trips and the feedback interval (`REPAIR_REPORT_MARGIN`, 100 ms;
+  1 s before a round trip is known) pass without a report; held requests keep their place
+  and those behind them are served meanwhile. The receiver asks again every round trip while
+  a packet is missing, and a retransmission can wait longer than that in the path's queue:
+  after a sudden capacity drop 24 to 28 of 92 to 101 retransmissions (a chain without a
+  pacer) and 35 to 41 of 90 to 103 (the default chain) repeated a packet whose first repair
+  then arrived first (hosted traces 45341865225, 45342290711). The TWCC sender reports what
+  transport-wide feedback says of each retransmission it numbered (`RetransmissionsReported`,
+  new, on an empty RTCP carrier application-ward; keyed as `RetransmissionsLeft`); with RFC
+  8888 feedback (the default between two endpoints of this engine) the responder reads the
+  report on the RTX stream itself. Without per-packet feedback of either kind every request
+  is answered as before. RFC 4588 section 7: the sender "MAY selectively retransmit only the
+  packets that it deems important and ignore NACK messages for other packets"; RFC 8834
+  section 6.1: "It is not appropriate to blindly retransmit RTP packets in response to a
+  NACK": the sender's choice, bounded. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
+  (cap after 20 s, six seeds on three wall clocks, hosted run 45408404348; 0.1.0: run
+  45407054812): without a pacer the oldest picture 2.90 to 3.15 s (4.35 to 4.51), 57 to 64
+  retransmissions (89 to 97), longest freeze 1.28 to 1.29 s (1.28 to 1.32); the default chain
+  4.14 to 7.13 s (5.56 to 10.23), 59 to 80 (90 to 104), 0.75 to 1.13 s (0.97 to 1.91), and the
+  recovery's mean 15 to 25 s after the cap 898 to 2500 kbit/s (646 to 2500). After a 4 s
+  outage and an ICE restart (six seeds) the chain without a pacer is frozen 0.33 to 0.92 s
+  from one second after the switch (0.70 to 0.99), the default chain still shows no usable
+  frame to the end of the run (a known limit of 0.1.0). The tests' bounds on the picture's
+  age and the retransmissions are tightened to these figures (3.6 s and 74 without a pacer,
+  8.2 s and 92 with it). Not offered: libwebrtc's
+  form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
+  (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
+  every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
+  (measured, run 45349364771: freezes of 1.62 to 2.39 s without a pacer, against 1.28 to
+  1.29 s; the repeats left are repairs of lost repairs, which a receiver that plays in order
+  waits for first). This narrows two known limits of 0.1.0 (the 1.4 Mbit/s cliff's cause (2),
+  and the picture's age after a sudden drop with the pacer). Tests:
+  `rtci-interceptor/tests/nack_repeat_repairs.rs`.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
