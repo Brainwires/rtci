@@ -201,6 +201,7 @@ test("ULPFEC in RED to the browser: Rust's FEC reaches the browser's decoder thr
   expect(sent[0].fecPacketsSent, JSON.stringify(sent)).toBeGreaterThan(0);
   // webrtc-stats 8.5: the browser received the FEC, and used some of it (received minus
   // discarded) where it reports both.
+  console.log(`[ulpfec to the browser] inbound-rtp: ${JSON.stringify(r.inbound)}; Rust sent: ${JSON.stringify(sent)}; wire: ${JSON.stringify(r.report.wireRtp?.sent)}`);
   expect(r.inbound?.fecPacketsReceived, JSON.stringify(r.inbound)).toBeGreaterThan(0);
   if (r.inbound?.fecPacketsDiscarded !== undefined) {
     expect(r.inbound.fecPacketsReceived - r.inbound.fecPacketsDiscarded, JSON.stringify(r.inbound)).toBeGreaterThan(0);
