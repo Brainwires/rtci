@@ -15,7 +15,7 @@ Totals (rows; MUST includes MUST NOT, SHOULD includes SHOULD NOT):
 
 - MUST: tested 11 / untested 0 / partial 1 / missing 0 / violated 0 / n/a 0 (rows: 12)
 - SHOULD: tested 9 / untested 0 / partial 1 / missing 0 / violated 0 / n/a 5 (rows: 15)
-- MAY: tested 1 / untested 1 / partial 0 / missing 2 / violated 0 / n/a 1 (rows: 5)
+- MAY: tested 2 / untested 0 / partial 0 / missing 2 / violated 0 / n/a 1 (rows: 5)
 - Procedure steps (no keyword): tested 10 / untested 0 / partial 0 / missing 0 / violated 0 / n/a 0 (rows: 10)
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
@@ -53,7 +53,7 @@ Totals (rows; MUST includes MUST NOT, SHOULD includes SHOULD NOT):
 | MDNSICE-3.3.1-4 | 3.3.1 | SHOULD | An `RTCIceCandidateStats` exists for every submitted remote mDNS candidate, ignored or not | tested | same | `tests/ice_mdns_candidate_stats.rs` | Also for a candidate the agent ignores (mDNS disabled, relay-only policy, not a UUID name). At most 320 remote candidate objects are kept that way |
 | MDNSICE-3.3.1-5 | 3.3.1 | MUST NOT | No peer-reflexive candidate IP in statistics unless that IP was already signalled | tested | `rtci-ice/src/agent/mod.rs` (`is_signalled_remote_ip`), `rtci-ice/src/agent/agent_stats.rs`, `src/peer_connection/internal.rs` (`update_ice_agent_stats`) | `agent_rfc6544_mdns_test.rs::test_peer_reflexive_address_is_not_in_statistics_unless_signalled` | The agent's statistics are tested; the peer connection's registration applies the same rule (no test at that level) |
 | MDNSICE-3.3.2-1 | 3.3.2 | MUST NOT | No candidate pair between a local relay candidate and a remote mDNS candidate | tested | `rtci-ice/src/agent/agent_selector.rs` (`add_pair`) | `agent_rfc6544_mdns_test.rs::test_relay_candidate_is_not_paired_with_a_remote_mdns_candidate` |  |
-| MDNSICE-3.3.2-2 | 3.3.2 | MAY | Pair local mDNS candidates with remote relay candidates | untested | no restriction | — |  |
+| MDNSICE-3.3.2-2 | 3.3.2 | MAY | Pair local mDNS candidates with remote relay candidates | tested | `rtci-ice/src/agent/agent_selector.rs` (`add_pair`: only a local relay candidate with a remote mDNS candidate is refused) | `agent_rfc6544_mdns_test.rs::test_mdns_host_candidate_is_paired_with_a_remote_relay_candidate` | transport3: a host candidate hidden behind its mDNS name (`QueryAndGather`) pairs with a remote relay candidate. Mutation-checked (the restriction extended to this direction: no pair, the test fails) |
 | MDNSICE-3.3.3-1 | 3.3.3 | SHOULD | Registered names are scoped to the web application origin | n/a | — | — | Browser concept; names are per agent |
 | MDNSICE-3.3.3-2 | 3.3.3 | SHOULD | Registered names live no longer than the page | n/a | — | — | Per agent: gone at `close()`, now with a goodbye (RFC6762-10.1-1) |
 | MDNSICE-3.3.4-1 | 3.3.4 | SHOULD NOT | No names registered in third-party or private browsing contexts | n/a | — | — | Browser concept |
