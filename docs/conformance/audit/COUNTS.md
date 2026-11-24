@@ -14,10 +14,10 @@ API is the default and tested too (`RULES.md`).
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
 | MUST | 5033 | 25 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
-| SHOULD | 865 | 0 | 0 | 7 | 51 | 41 | 4 | 326 | 1294 |
-| MAY | 446 | 0 | 0 | 20 | 34 | 107 | 0 | 171 | 778 |
+| SHOULD | 869 | 0 | 0 | 4 | 52 | 39 | 4 | 326 | 1294 |
+| MAY | 447 | 0 | 0 | 20 | 34 | 106 | 0 | 171 | 778 |
 | PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
-| all | 6413 | 25 | 7 | 29 | 99 | 154 | 4 | 1164 | 7895 |
+| all | 6418 | 25 | 7 | 26 | 100 | 151 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
 
@@ -27,8 +27,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
 | MUST | 5080 | 5065 | 99.7 | 5033 | 99.1 |
-| SHOULD | 968 | 865 | 89.4 | 865 | 89.4 |
-| MAY | 607 | 446 | 73.5 | 446 | 73.5 |
+| SHOULD | 968 | 869 | 89.8 | 869 | 89.8 |
+| MAY | 607 | 447 | 73.6 | 447 | 73.6 |
 | PROC | 76 | 69 | 90.8 | 69 | 90.8 |
 
 ## Per file
@@ -267,10 +267,10 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8834.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 2 | 0 | 4 | 16 |
 | `rfc8834.md` | MAY | 10 | 0 | 0 | 0 | 1 | 5 | 0 | 0 | 16 |
 | `rfc8835.md` | MUST | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 25 |
-| `rfc8835.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 2 | 0 | 2 | 6 |
-| `rfc8835.md` | MAY | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 2 | 5 |
+| `rfc8835.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 6 |
+| `rfc8835.md` | MAY | 1 | 0 | 0 | 0 | 0 | 2 | 0 | 2 | 5 |
 | `rfc8836.md` | MUST | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 |
-| `rfc8836.md` | SHOULD | 18 | 0 | 0 | 3 | 1 | 2 | 0 | 0 | 24 |
+| `rfc8836.md` | SHOULD | 21 | 0 | 0 | 0 | 2 | 1 | 0 | 0 | 24 |
 | `rfc8837.md` | MUST | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 4 |
 | `rfc8837.md` | SHOULD | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 7 |
 | `rfc8837.md` | MAY | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
