@@ -77,8 +77,8 @@ impl From<&str> for ConnectionRole {
 /// quantity with the highest bit set to zero and the remaining 63-bits
 /// being cryptographically random.
 pub(crate) fn new_session_id() -> u64 {
-    let c = u64::MAX ^ (1u64 << 63);
-    rand::random::<u64>() & c
+    // RFC 9429 section 5.2.1: "the value MUST be less than (2^63)-1".
+    rand::random::<u64>() % (u64::MAX >> 1)
 }
 
 // Codec represents a codec

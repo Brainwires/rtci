@@ -414,6 +414,9 @@ pub struct SettingEngine {
     /// settings changed after it keep their own values.
     pub(crate) behaviour_profile: BehaviourProfile,
     pub(crate) crypto_provider: Option<Arc<dyn RTCCryptoProvider>>,
+    /// The wall clock paired with the engine's clock ([`SettingEngineBuilder::with_wall_clock`]);
+    /// `None`: read once when the peer connection is built.
+    pub(crate) wall_clock: Option<shared::time::SystemInstant>,
     pub(crate) timeout: Timeout,
     pub(crate) data_channel: DataChannel,
     pub(crate) turn_allocation_refresh_interval_cap: Option<Duration>,
@@ -462,6 +465,8 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     /// Inverted so that the derived default is "honoured".
     pub(crate) max_bundle_ignored: bool,
+    /// `with_rtcp_mux_only_in_subsequent_offers`.
+    pub(crate) rtcp_mux_only_in_subsequent_offers: bool,
     /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
     /// connection gets ICE credentials of its own. The derived default `false` shares the first
     /// transport's.
@@ -636,6 +641,7 @@ impl SettingEngine {
         Self {
             behaviour_profile: BehaviourProfile::Rfc,
             crypto_provider: Default::default(),
+            wall_clock: None,
             timeout: Default::default(),
             data_channel: Default::default(),
             turn_allocation_refresh_interval_cap: Default::default(),
@@ -652,6 +658,7 @@ impl SettingEngine {
             accept_lowercase_fingerprints: Default::default(),
             bundle_attributes_tagged_only: Default::default(),
             max_bundle_ignored: Default::default(),
+            rtcp_mux_only_in_subsequent_offers: false,
             unique_transport_credentials: Default::default(),
             explicit_rollback_only: Default::default(),
             answering_dtls_role: Default::default(),
@@ -891,6 +898,25 @@ impl SettingEngineBuilder {
     /// different providers in the same process.
     pub fn with_crypto_provider(mut self, provider: Arc<dyn RTCCryptoProvider>) -> Self {
         self.0.crypto_provider = Some(provider);
+        self
+    }
+
+    /// The wall-clock time the peer connection pairs with the instant it is built at, for the
+    /// wall-clock values it writes itself: the `o=` session version of its descriptions (RFC
+    /// 8866 section 5.2: "it is RECOMMENDED that a timestamp be used", seconds since 1900),
+    /// the timestamps of its receivers' synchronization and contributing sources, and the NTP
+    /// times of the RTCP session the peer connection installs when its interceptor registry
+    /// has none.
+    ///
+    /// Without it the system clock is read: once when the peer connection is built (for the
+    /// session version), at the first packet received (for the source timestamps), and the
+    /// RTCP session takes the process-wide anchor
+    /// ([`SystemInstant::shared`](shared::time::SystemInstant::shared)). Give one
+    /// for a run under virtual time that is the same every time; with a seeded crypto provider
+    /// ([`with_crypto_provider`](Self::with_crypto_provider), whose `random()` gives the
+    /// `o=` session id) the `o=` line is then the same in every run.
+    pub fn with_wall_clock(mut self, wall_clock: shared::time::SystemInstant) -> Self {
+        self.0.wall_clock = Some(wall_clock);
         self
     }
 
@@ -2254,6 +2280,24 @@ impl SettingEngineBuilder {
     /// `RTCBundlePolicy::MaxBundle` then behaves as the default policy, `balanced`.
     pub fn with_max_bundle_as_must_bundle(mut self, honoured: bool) -> Self {
         self.0.max_bundle_ignored = !honoured;
+        self
+    }
+
+    /// Whether a subsequent offer says `a=rtcp-mux-only` again in the m= sections it carries
+    /// over from the last exchange, under the RTCP mux policy `require`. The default is
+    /// `false`.
+    ///
+    /// Two specifications disagree here. RFC 9429 section 5.2.2, which governs a JSEP
+    /// endpoint, says of such a section "The 'a=rtcp-mux-only' line MUST NOT be added", and
+    /// that is the default. RFC 8858 section 4.5 says "if the offerer and answerer have
+    /// previously negotiated usage of exclusive RTP/RTCP multiplexing ... the offerer SHOULD
+    /// associate an SDP 'rtcp-mux-only' with the corresponding SDP media description"; `true`
+    /// does that. In a BUNDLE group the attribute (IDENTICAL category, RFC 8858 section 6)
+    /// is then in the tagged section, and in every bundled one when the bundle attributes
+    /// are repeated ([`with_bundle_attributes_repeated`](Self::with_bundle_attributes_repeated)).
+    /// New sections of an offer say it either way (RFC 9429 section 4.1.1).
+    pub fn with_rtcp_mux_only_in_subsequent_offers(mut self, repeated: bool) -> Self {
+        self.0.rtcp_mux_only_in_subsequent_offers = repeated;
         self
     }
 

@@ -144,7 +144,11 @@ fn h264_answer_fmtp(local: &str, offered: &str) -> String {
 /// `profile-level-id` is always there ("Implementations MUST include this parameter within
 /// SDP"; a format registered without one is the RFC 6184 section 8.1 default, `42000a`, stated
 /// explicitly), and `sprop-parameter-sets` never is (parameter sets travel in-band: "WebRTC
-/// implementations MUST NOT include this parameter in the SDP they generate").
+/// implementations MUST NOT include this parameter in the SDP they generate"). An interleaved
+/// format (`packetization-mode=2`) states this endpoint's de-interleaving buffer, in bytes, as
+/// `deint-buf-cap` unless the application gave one (RFC 6184 section 8.2.2: "both parties are
+/// RECOMMENDED to include deint-buf-cap"; the buffer holds
+/// [`MAX_DEINTERLEAVING_BYTES`](rtp::codec::h264::MAX_DEINTERLEAVING_BYTES)).
 fn h264_generated_fmtp(line: &str) -> String {
     let mut parameters: Vec<String> = line
         .split(';')
@@ -164,6 +168,18 @@ fn h264_generated_fmtp(line: &str) -> String {
         parameters.push(format!(
             "profile-level-id={}",
             crate::rtp_transceiver::fmtp::h264::DEFAULT_PROFILE_LEVEL_ID
+        ));
+    }
+    let value = |key: &str| {
+        parameters.iter().find_map(|p| {
+            let (k, v) = p.split_once('=')?;
+            k.trim().eq_ignore_ascii_case(key).then(|| v.trim())
+        })
+    };
+    if value("packetization-mode") == Some("2") && value("deint-buf-cap").is_none() {
+        parameters.push(format!(
+            "deint-buf-cap={}",
+            rtp::codec::h264::MAX_DEINTERLEAVING_BYTES
         ));
     }
     parameters.join(";")

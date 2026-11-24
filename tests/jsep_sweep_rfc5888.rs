@@ -37,3 +37,69 @@ fn a_group_naming_an_unknown_mid_is_ignored() -> TestResult {
     }
     Ok(())
 }
+
+/// Section 9.3: "If a server receives an offer that contains empty "a=group" lines, it SHOULD
+/// add its capabilities also in the form of empty "a=group" lines to its answer." This
+/// endpoint understands BUNDLE, LS and DDP: each that the answer does not use is answered as
+/// an empty line, beside the groups the answer uses; a semantics it does not understand (FID
+/// as a group of m= lines) is not. An offer without empty lines gets none, and an answer with
+/// them is applied.
+#[test]
+fn empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities() -> TestResult {
+    let empty_lines = |sdp: &str| -> Vec<String> {
+        sdp.lines()
+            .filter(|l| l.starts_with("a=group:") && !l.trim_end().contains(' '))
+            .map(|l| l.trim_end().to_owned())
+            .collect()
+    };
+
+    // BUNDLE used, LS and FID offered empty.
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(offer("a=group:LS\na=group:FID\n"))?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    assert!(
+        answer.sdp.contains("a=group:BUNDLE 0 1\r\n"),
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        empty_lines(&answer.sdp),
+        ["a=group:LS", "a=group:DDP"],
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(Instant::now(), answer)?;
+
+    // No group used: an empty BUNDLE line only.
+    let unbundled = offer("").replace("a=group:BUNDLE 0 1\r\n", "a=group:BUNDLE\r\n");
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(unbundled)?)?;
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        empty_lines(&answer.sdp),
+        ["a=group:BUNDLE", "a=group:LS", "a=group:DDP"],
+        "{}",
+        answer.sdp
+    );
+    assert!(!answer.sdp.contains("a=group:BUNDLE 0"), "{}", answer.sdp);
+    assert!(
+        answer
+            .sdp
+            .lines()
+            .filter(|l| l.starts_with("m="))
+            .all(|l| !l.contains(" 0 UDP")),
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(Instant::now(), answer)?;
+
+    // No empty line offered: none answered.
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer(""))?)?;
+    let answer = pc.create_answer(None)?;
+    assert!(empty_lines(&answer.sdp).is_empty(), "{}", answer.sdp);
+    Ok(())
+}
