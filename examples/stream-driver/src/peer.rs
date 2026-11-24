@@ -32,6 +32,14 @@
 //! queries, probes and answers there and hands what arrives back to the connection. A
 //! connection without mDNS writes none, and the driver binds nothing.
 //!
+//! With `QueryAndGather` the driver binds the mDNS sockets before it adds the first host
+//! candidates and tells the connection for which address families it has one
+//! (`RTCPeerConnection::set_multicast_dns_publishing`): a host address of a family without one
+//! cannot have its name published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1 step
+//! 4), and its candidates go out under a `.local` name that is not published, or not at all
+//! when the connection fails closed (`SettingEngineBuilder::with_multicast_dns_fail_closed`).
+//! [`PeerDriverConfig::mdns_sockets`] `false` binds none.
+//!
 //! Every mDNS datagram takes one message from a budget shared by every driver of the process
 //! ([`process_mdns_rate_limit`], unless [`PeerDriverConfig::mdns_rate_limit`] names another):
 //! draft-ietf-mmusic-mdns-ice-candidates section 7.1 requires "an implementation-wide rate
@@ -58,6 +66,7 @@ pub use crate::mdns_io::{MDNS_MULTICAST_IPV6, process_mdns_rate_limit};
 use crate::sockets::{self, PortRange};
 use crate::{DriverConfig, DriverInput, StreamDriver};
 use bytes::BytesMut;
+use rtci::ice::mdns::{MulticastDnsMode, MulticastDnsPublishing};
 use rtci::mdns::{MDNS_PORT, MdnsRateLimit};
 use rtci::peer_connection::RTCPeerConnection;
 use rtci::peer_connection::event::{
@@ -103,6 +112,11 @@ pub struct PeerDriverConfig {
     /// the process, [`process_mdns_rate_limit`], shared by every driver that has none named.
     /// A limit given here is shared by the drivers given clones of it.
     pub mdns_rate_limit: Option<MdnsRateLimit>,
+    /// Whether the driver binds the host's mDNS sockets (`true` by default). `false`: it
+    /// binds none, its connection's mDNS datagrams are unsent, and the connection is told it
+    /// can publish no name (`RTCPeerConnection::set_multicast_dns_publishing`), as when the
+    /// host refuses the sockets.
+    pub mdns_sockets: bool,
 }
 
 impl PeerDriverConfig {
@@ -114,6 +128,7 @@ impl PeerDriverConfig {
             streams: DriverConfig::default(),
             retired_socket_linger: Duration::from_secs(5),
             mdns_rate_limit: None,
+            mdns_sockets: true,
         }
     }
 
@@ -177,8 +192,11 @@ pub struct PeerDriver {
     unsent: u64,
     /// The connection's mDNS datagrams, held to the budget.
     mdns_egress: MdnsEgress,
-    /// `None` until the connection writes its first mDNS datagram.
+    /// `None` until the connection writes its first mDNS datagram, or, with
+    /// `QueryAndGather`, until it gathers.
     mdns_sockets: Option<MdnsSockets>,
+    /// The connection was told for which families its names can be published.
+    mdns_publishing_told: bool,
     /// mDNS datagrams sent ([`Self::mdns_datagrams_sent`]).
     mdns_sent: u64,
     /// mDNS datagrams received ([`Self::mdns_datagrams_received`]).
@@ -201,6 +219,7 @@ impl PeerDriver {
             unsent: 0,
             mdns_egress: MdnsEgress::new(config.mdns_rate_limit()),
             mdns_sockets: None,
+            mdns_publishing_told: false,
             mdns_sent: 0,
             mdns_received: 0,
             config,
@@ -394,24 +413,7 @@ impl PeerDriver {
     /// the first. A datagram for a family the host has no mDNS socket for is unsent.
     fn send_mdns(&mut self, now: Instant) {
         while let Some(datagram) = self.mdns_egress.pop_ready(now) {
-            let sockets = self.mdns_sockets.get_or_insert_with(|| {
-                let mut readers = Vec::new();
-                let mut open = |bound: io::Result<std::net::UdpSocket>| {
-                    let socket = UdpSocket::from_std(bound.ok()?).ok()?;
-                    let local = socket.local_addr().ok()?;
-                    let socket = Arc::new(socket);
-                    readers.push(tokio::spawn(read_loop(
-                        socket.clone(),
-                        local,
-                        self.datagrams_tx.clone(),
-                        MDNS_MAX_DATAGRAM,
-                    )));
-                    Some((socket, local))
-                };
-                let v4 = open(bind_mdns_v4());
-                let v6 = open(bind_mdns_v6());
-                MdnsSockets { v4, v6, readers }
-            });
+            let sockets = self.mdns_sockets();
             let socket = match datagram.transport.peer_addr {
                 SocketAddr::V4(_) => &sockets.v4,
                 SocketAddr::V6(_) => &sockets.v6,
@@ -427,6 +429,52 @@ impl PeerDriver {
                 self.unsent += 1;
             }
         }
+    }
+
+    /// The host's mDNS sockets, bound at the first call (none with
+    /// [`PeerDriverConfig::mdns_sockets`] off, or where the host refuses them).
+    fn mdns_sockets(&mut self) -> &MdnsSockets {
+        let bind = self.config.mdns_sockets;
+        let datagrams_tx = &self.datagrams_tx;
+        self.mdns_sockets.get_or_insert_with(|| {
+            let mut readers = Vec::new();
+            let mut open = |bound: io::Result<std::net::UdpSocket>| {
+                if !bind {
+                    return None;
+                }
+                let socket = UdpSocket::from_std(bound.ok()?).ok()?;
+                let local = socket.local_addr().ok()?;
+                let socket = Arc::new(socket);
+                readers.push(tokio::spawn(read_loop(
+                    socket.clone(),
+                    local,
+                    datagrams_tx.clone(),
+                    MDNS_MAX_DATAGRAM,
+                )));
+                Some((socket, local))
+            };
+            let v4 = open(bind_mdns_v4());
+            let v6 = open(bind_mdns_v6());
+            MdnsSockets { v4, v6, readers }
+        })
+    }
+
+    /// Before the connection's first host candidates, with `QueryAndGather`: binds the mDNS
+    /// sockets and tells the connection for which address families its names can be
+    /// published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1 step 4).
+    fn prepare_mdns_publishing(&mut self) {
+        if self.mdns_publishing_told
+            || self.pc.multicast_dns_mode() != MulticastDnsMode::QueryAndGather
+        {
+            return;
+        }
+        self.mdns_publishing_told = true;
+        let sockets = self.mdns_sockets();
+        let publishing = MulticastDnsPublishing {
+            ipv4: sockets.v4.is_some(),
+            ipv6: sockets.v6.is_some(),
+        };
+        self.pc.set_multicast_dns_publishing(publishing);
     }
 
     fn on_event(&mut self, event: &RTCPeerConnectionEvent) -> Result<()> {
@@ -593,6 +641,7 @@ impl PeerDriver {
     /// New sockets, one per configured address, for the transport of section `mid`: their
     /// host candidates, then the end of the generation.
     fn gather_section(&mut self, mid: &str, index: Option<u16>) -> Result<()> {
+        self.prepare_mdns_publishing();
         for ip in self.config.addresses.clone() {
             let socket = match self.config.udp_port_range {
                 Some(range) => sockets::bind_udp_in_range(ip, range),

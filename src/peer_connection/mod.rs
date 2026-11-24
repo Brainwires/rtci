@@ -887,6 +887,10 @@ pub struct RTCPeerConnection {
     /// descriptions `restart_ice` was called with. Offers restart ICE while the current local
     /// description still has one of them (`ice_restart_pending`).
     pub(crate) ice_credentials_to_replace: Vec<String>,
+    /// For which address families the application can send mDNS
+    /// ([`Self::set_multicast_dns_publishing`]); given to every transport's agent, those made
+    /// later included.
+    pub(crate) mdns_publishing: ice::mdns::MulticastDnsPublishing,
     /// Every SSRC a local description of this connection has described for a local stream
     /// (RFC 5576 section 5: an SSRC is not reused for another source, "SHOULD NOT" ever; and
     /// section 8: an updated offer's new SSRCs differ from any used before): new SSRCs are

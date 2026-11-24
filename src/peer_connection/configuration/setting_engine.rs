@@ -206,6 +206,8 @@ pub struct MulticastDNS {
     pub unicast_response: bool,
     /// See [`SettingEngineBuilder::with_multicast_dns_rate_limit`].
     pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_fail_closed`].
+    pub fail_closed: bool,
 }
 
 impl Default for MulticastDNS {
@@ -226,6 +228,7 @@ impl Default for MulticastDNS {
             destination_reported: false,
             unicast_response: false,
             rate_limit: None,
+            fail_closed: false,
         }
     }
 }
@@ -1703,6 +1706,26 @@ impl SettingEngineBuilder {
     /// each peer connection has a limit of its own.
     pub fn with_multicast_dns_rate_limit(mut self, limit: ice::mdns::MdnsRateLimit) -> Self {
         self.0.multicast_dns.rate_limit = Some(limit);
+        self
+    }
+
+    /// With mDNS `QueryAndGather`: what a host candidate becomes when the name of its address
+    /// cannot be registered, because the application can send no mDNS for the address's
+    /// family (`RTCPeerConnection::set_multicast_dns_publishing`) or the agent holds the most
+    /// names it can (64).
+    ///
+    /// Off, the default, is draft-ietf-mmusic-mdns-ice-candidates section 3.1.1: "the ICE
+    /// agent SHOULD still provide mDNS candidates in step 6 even if the local network does not
+    /// support mDNS or mDNS registration fails in step 4". The candidate goes out under a
+    /// `<uuid>.local` name that is never published: its address is not written, and a page
+    /// cannot tell from the candidates whether mDNS works on the host.
+    ///
+    /// On, the connection fails closed: no host candidate for that address at all (UDP or
+    /// TCP), so nothing the peer cannot resolve is offered; the server-reflexive and relayed
+    /// candidates of the address are still gathered. The literal address is written in
+    /// neither case.
+    pub fn with_multicast_dns_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.0.multicast_dns.fail_closed = fail_closed;
         self
     }
 

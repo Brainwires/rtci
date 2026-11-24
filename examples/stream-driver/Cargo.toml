@@ -49,3 +49,7 @@ required-features = ["peer"]
 [[test]]
 name = "mdns"
 required-features = ["peer"]
+
+[[test]]
+name = "mdns_fail_closed"
+required-features = ["peer"]

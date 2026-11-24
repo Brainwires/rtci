@@ -202,7 +202,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `DefaultInterceptorOptions::circuit_breaker_packet_size` | RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: "circuit" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556) |
 | `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` | the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow |
 
-## Examined: the default is libwebrtc's too, or already the RFC's (39)
+## Examined: the default is libwebrtc's too, or already the RFC's (40)
 
 | Setting | Note |
 |---|---|
@@ -212,6 +212,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_ice_timeouts` | consent every 4 to 6 s and expiry at 30 s (RFC 7675). libwebrtc pings a strong, stable connection every kStrongAndStableWritableConnectionPingInterval 2.5 s (900 ms while stabilising) and declares it dead after kDeadConnectionReceiveTimeout 30 s (p2p/base/p2p_constants.h @ a222406d); a period under 4 s is what RFC 7675 5.1 forbids ("MUST NOT ... less than 4 seconds"): not expressible, see below |
 | `SettingEngineBuilder::with_ice_connection_attempts` | Rc 7 / RTO doubling (RFC 8489 6.2.1). libwebrtc does not retransmit a connectivity check at all: each is sent once (p2p/base/connection.cc::ConnectionRequest::OnSent, response timeout kConnectionResponseTimeout 60 s) and the pair is pinged again on the channel's schedule (see "not expressible") |
 | `SettingEngineBuilder::with_multicast_dns_mode` | QueryOnly: remote .local candidates resolved, host addresses written as they are. Chrome hides them behind mDNS names only for a page without media permission; with it (what an application is) it writes them |
+| `SettingEngineBuilder::with_multicast_dns_fail_closed` | off: the draft form already (draft-ietf-mmusic-mdns-ice-candidates 3.1.1: a host candidate whose name cannot be registered still goes out under a .local name, unpublished). On (no host candidate at all) departs from that SHOULD and is an embedder's choice in every profile; only with QueryAndGather, which no profile turns on |
 | `SettingEngineBuilder::with_sdp_media_level_fingerprints` | media level, as Chromium writes them (fixtures) |
 | `SettingEngineBuilder::with_implicit_rollback` | on, as browsers (perfect negotiation); RFC 9429 does not forbid it |
 | `SettingEngineBuilder::with_msid_removal_ends_track` | off: W3C process remote tracks, what Chrome does; RFC 8830 3 is a "can" |

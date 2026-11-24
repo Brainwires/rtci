@@ -393,12 +393,16 @@ impl RTCPeerConnection {
         }
         let on = self.pipeline_context.transports.active_id();
         let base = candidate.addr();
-        let accepted = self
-            .ice_transport()
-            .agent
-            .get_local_candidates()
-            .iter()
-            .any(|c| c.addr() == base && !c.network_type().is_tcp());
+        // A base whose host candidate the agent withheld (mDNS fails closed,
+        // `with_multicast_dns_fail_closed`) still gets its server-reflexive candidates: they
+        // carry the public address only (draft-ietf-mmusic-mdns-ice-candidates section
+        // 3.1.2.2).
+        let agent = &self.ice_transport().agent;
+        let accepted = agent.multicast_dns_withholds(base.ip())
+            || agent
+                .get_local_candidates()
+                .iter()
+                .any(|c| c.addr() == base && !c.network_type().is_tcp());
         if accepted {
             let ufrag = self.ice_username_fragment_of(on);
             for (mapped, url) in self.streams.srflx.add(on, base, Base::Udp, &ufrag) {
