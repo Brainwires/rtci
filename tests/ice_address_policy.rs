@@ -322,8 +322,9 @@ fn exchange(
 }
 
 /// The seeds the two-peer runs are made with. With the loop that moved time on before a
-/// peer's answer had left (see [`exchange`]), seeds 4, 6, 9 and 10 of these left the answerer
-/// disconnected (54 of the seeds 0 to 199 did, the same ones in every run).
+/// peer's answer had left (see [`exchange`]), seed 7 of these leaves the answerer
+/// disconnected; about a quarter of all seeds do (54 of 200 in a scan), the same ones in
+/// every run.
 const SEEDS: std::ops::Range<u64> = 0..12;
 
 const NAT: &str = "198.51.100.7:40000";
