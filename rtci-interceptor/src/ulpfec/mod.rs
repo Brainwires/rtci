@@ -36,6 +36,14 @@
 //! [`UlpfecStreamPacketizer`] builds the RFC's own form, FEC packets on the media SSRC, for an
 //! application that does carry them to a separate session.
 //!
+//! **Separate RTP session (14.1), the RFC's own form.** A stream bound with
+//! [`StreamInfo::fec_session`](crate::StreamInfo::fec_session) has its FEC in a second RTP
+//! session, on a transport of its own, whatever carriage the builder names. Inside the chain
+//! that FEC stream has the SSRC the field gives; on the FEC session's transport it has the
+//! media stream's SSRC (section 7.2), which whoever drives the chain puts there with
+//! [`FecSessionSsrcMap`](crate::FecSessionSsrcMap). `rtci`'s peer connection does both for a
+//! FEC m= section grouped with the media's.
+//!
 //! # RED
 //!
 //! The RED block reader and writer in this module are the part of RFC 2198 the FEC carriage

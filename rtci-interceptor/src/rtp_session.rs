@@ -731,6 +731,58 @@ mod tests {
         );
     }
 
+    /// RFC 5109 section 14.1: a stream's FEC in an RTP session of its own. The media stream
+    /// names the FEC stream ([`StreamInfo::fec_session`]) and stays in its own session; the
+    /// FEC stream is a stream of the other one.
+    #[test]
+    fn a_stream_stays_in_its_session_when_its_fec_runs_in_another() {
+        let log = Log::default();
+        let mut wrapper = recorders(&log);
+        let now = Instant::now();
+        let (media, fec) = (1, 0x0FEC_0001);
+        let mut info = stream(media);
+        info.fec_session = Some(crate::FecSessionStream {
+            ssrc: fec,
+            payload_type: 127,
+            one_level_only: false,
+        });
+        wrapper.bind_local_stream(&info);
+        wrapper.bind_local_stream(&stream(fec));
+        for (session, ssrc) in [(0, media), (1, fec)] {
+            wrapper
+                .handle_write(
+                    RtpSessionAssignment {
+                        session,
+                        ssrcs: vec![ssrc],
+                    }
+                    .into_packet(now),
+                )
+                .unwrap();
+        }
+        wrapper.handle_write(rtp(now, media, 1)).unwrap();
+        wrapper.handle_write(rtp(now, fec, 1)).unwrap();
+        // A read of the FEC stream on its transport does not move the media stream either.
+        let mut read = rtp(now, fec, 2);
+        read.message.add(RtpSession(1).attribute());
+        wrapper.handle_read(read).unwrap();
+        wrapper.handle_write(rtp(now, media, 2)).unwrap();
+
+        assert_eq!(wrapper.streams[&(true, media)].1, 0);
+        assert_eq!(wrapper.streams[&(true, fec)].1, 1);
+        let got: Vec<_> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, ssrc)| ssrc.is_some())
+            .cloned()
+            .collect();
+        assert_eq!(
+            got,
+            vec![(1, Some(media)), (2, Some(fec)), (1, Some(media))],
+            "the media stream's packets stay with the first session's instance"
+        );
+    }
+
     #[test]
     fn a_control_message_reaches_every_session_and_leaves_once() {
         let log = Log::default();

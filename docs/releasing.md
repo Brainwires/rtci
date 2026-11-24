@@ -49,6 +49,21 @@ The order is what `cargo metadata` gives (`python3 scripts/rename-to-rtci.py --d
 prints it). When a crate gains or loses a dependency on another crate of the workspace,
 regenerate the list and update this file and release.yml.
 
+## The version on master between releases
+
+After a release, `master` carries the next release's version with a `-dev` pre-release suffix
+as soon as it takes its first change that the released line cannot take: after 0.1.0 and the
+first breaking change, `0.2.0-dev` in `[workspace.package]` and in every
+`[workspace.dependencies]` requirement on a workspace crate (and in the layers peer's
+`Cargo.lock`). That says to git dependents that `master` is no longer 0.1-compatible, and it is
+what lets the required "Check SemVer" job pass breaking changes: cargo-semver-checks reads
+`0.1.0 -> 0.2.0-dev` as a new 0.x minor line, where they are allowed. The same job's report-only
+step compares with the release type forced to minor and lists every breaking change since the
+last release in the run's summary ("Breaking since v0.1.0"); each one listed must have an entry
+in `CHANGELOG.md` under `### Breaking changes`. The release commit sets the plain version
+(`0.2.0`), nothing else about the version changes then. A crates.io package is never made from
+a `-dev` version.
+
 ## 0.1.0: order of operations
 
 The first crates.io release is also the rename of every crate to its `rtci` name and the reset

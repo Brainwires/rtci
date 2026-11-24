@@ -24,7 +24,7 @@ resolver = "2"
 opt-level = 0
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-dev"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
 # The lowest toolchain the workspace builds on (checked by the MSRV job of cargo.yml).
@@ -33,23 +33,23 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Brainwires/rtci"
 
 [workspace.dependencies]
-crypto = { version = "0.1.0", path = "rtci-crypto", package = "rtci-crypto", default-features = false }
-datachannel = { version = "0.1.0", path = "rtci-datachannel", package = "rtci-datachannel" }
-dtls = { version = "0.1.0", path = "rtci-dtls", package = "rtci-dtls", default-features = false }
-ice = { version = "0.1.0", path = "rtci-ice", package = "rtci-ice", default-features = false }
-interceptor = { version = "0.1.0", path = "rtci-interceptor", package = "rtci-interceptor" }
-interceptor-derive = { version = "0.1.0", path = "rtci-interceptor-derive", package = "rtci-interceptor-derive" }
-mdns = { version = "0.1.0", path = "rtci-mdns", package = "rtci-mdns" }
-media = { version = "0.1.0", path = "rtci-media", package = "rtci-media" }
-rtcp = { version = "0.1.0", path = "rtci-rtcp", package = "rtci-rtcp" }
-rtp = { version = "0.1.0", path = "rtci-rtp", package = "rtci-rtp" }
-sctp = { version = "0.1.0", path = "rtci-sctp", package = "rtci-sctp" }
-sdp = { version = "0.1.0", path = "rtci-sdp", package = "rtci-sdp" }
-sframe = { version = "0.1.0", path = "rtci-sframe", package = "rtci-sframe", default-features = false }
-shared = { version = "0.1.0", path = "rtci-shared", package = "rtci-shared", default-features = false }
-srtp = { version = "0.1.0", path = "rtci-srtp", package = "rtci-srtp", default-features = false }
-stun = { version = "0.1.0", path = "rtci-stun", package = "rtci-stun", default-features = false }
-turn = { version = "0.1.0", path = "rtci-turn", package = "rtci-turn", default-features = false }
+crypto = { version = "0.2.0-dev", path = "rtci-crypto", package = "rtci-crypto", default-features = false }
+datachannel = { version = "0.2.0-dev", path = "rtci-datachannel", package = "rtci-datachannel" }
+dtls = { version = "0.2.0-dev", path = "rtci-dtls", package = "rtci-dtls", default-features = false }
+ice = { version = "0.2.0-dev", path = "rtci-ice", package = "rtci-ice", default-features = false }
+interceptor = { version = "0.2.0-dev", path = "rtci-interceptor", package = "rtci-interceptor" }
+interceptor-derive = { version = "0.2.0-dev", path = "rtci-interceptor-derive", package = "rtci-interceptor-derive" }
+mdns = { version = "0.2.0-dev", path = "rtci-mdns", package = "rtci-mdns" }
+media = { version = "0.2.0-dev", path = "rtci-media", package = "rtci-media" }
+rtcp = { version = "0.2.0-dev", path = "rtci-rtcp", package = "rtci-rtcp" }
+rtp = { version = "0.2.0-dev", path = "rtci-rtp", package = "rtci-rtp" }
+sctp = { version = "0.2.0-dev", path = "rtci-sctp", package = "rtci-sctp" }
+sdp = { version = "0.2.0-dev", path = "rtci-sdp", package = "rtci-sdp" }
+sframe = { version = "0.2.0-dev", path = "rtci-sframe", package = "rtci-sframe", default-features = false }
+shared = { version = "0.2.0-dev", path = "rtci-shared", package = "rtci-shared", default-features = false }
+srtp = { version = "0.2.0-dev", path = "rtci-srtp", package = "rtci-srtp", default-features = false }
+stun = { version = "0.2.0-dev", path = "rtci-stun", package = "rtci-stun", default-features = false }
+turn = { version = "0.2.0-dev", path = "rtci-turn", package = "rtci-turn", default-features = false }
 # The examples' signalling helper is not published: path only, so `cargo publish` drops the
 # root crate's dev-dependency on it.
 signal = { path = "examples/signal", package = "rtci-signal" }
