@@ -231,9 +231,11 @@ fn audio_plays_through_the_pipeline_at_every_loss_rate() -> Result<()> {
 
 /// The congestion controller's target is an upper bound for audio, never a target: in a call
 /// with an audio and a video sender, the audio encoding's share stops at what its encoder can
-/// use (RFC 7587 section 6.1's default ceiling for full-band speech, 40 kbit/s, and its
-/// packets' overhead), and the video encoding gets the rest of the target (libwebrtc clamps an
-/// audio stream's allocation to its encoder's range the same way).
+/// use (its ceiling, here the application's 16 kbit/s, and its packets' overhead), and the
+/// video encoding gets the rest of the target (libwebrtc clamps an audio stream's allocation
+/// to its encoder's range the same way). The congestion controller stays at its starting
+/// 100 kbit/s in this call (nothing sends more than audio), so a ceiling under half of it is
+/// what shows the split; RFC 7587's default ceilings are the `fmtp` tests'.
 #[test]
 fn audio_takes_its_ceiling_of_the_target_and_video_the_rest() -> Result<()> {
     let link = Link {
@@ -249,12 +251,13 @@ fn audio_takes_its_ceiling_of_the_target_and_video_the_rest() -> Result<()> {
         t0,
         AudioSenderOptions {
             processing: ProcessingConfig::OFF,
+            max_bitrate: Some(16_000),
             ..Default::default()
         },
     )?;
-    // 40 kbit/s of Opus and 58 bytes of overhead on each of 50 packets a second.
+    // 16 kbit/s of Opus and 58 bytes of overhead on each of 50 packets a second.
     let cap = sender.pipeline().max_allocation_bps();
-    assert_eq!(cap, 40_000.0 + 58.0 * 8.0 * 50.0);
+    assert_eq!(cap, 16_000.0 + 58.0 * 8.0 * 50.0);
     let mut tone = rtc_audio::signal::Tone::new(48_000, 440.0, 0.25);
     let mut frame = vec![0.0f32; 480];
     for tick in 0..300u64 {
@@ -301,6 +304,6 @@ fn audio_takes_its_ceiling_of_the_target_and_video_the_rest() -> Result<()> {
         "video gets the rest: {video} of {total}"
     );
     // The encoder runs at its ceiling, not at its share.
-    assert_eq!(sender.pipeline().stats().target_bitrate, Some(40_000));
+    assert_eq!(sender.pipeline().stats().target_bitrate, Some(16_000));
     Ok(())
 }

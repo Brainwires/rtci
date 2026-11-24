@@ -208,7 +208,9 @@ skips the time and the next packet starts a talkspurt).
   an audio stream's allocation to its encoder's range
   (`audio/audio_send_stream.cc::OnBitrateUpdated` at a222406d). Measured in a call with an
   audio and a video sender (`audio_takes_its_ceiling_of_the_target_and_video_the_rest`):
-  audio's share stops at 40 kbit/s plus 23.2 kbit/s of overhead, video gets the rest.
+  with the congestion controller at its starting 100 kbit/s and an application ceiling of 16
+  kbit/s, audio's share stops at 39.2 kbit/s (16 plus 23.2 of overhead) and video gets the
+  other 60.8.
 - **FEC**: `on_packet_loss(fraction)` (RTCP reception reports, smoothed) turns Opus in-band
   FEC on above 1 % and off below 0.5 %, only when the receiver said `useinbandfec=1`, and tells
   the encoder the loss rate.
