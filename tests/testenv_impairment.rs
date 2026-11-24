@@ -355,24 +355,39 @@ fn unreliable_channel_loses_without_retransmitting() {
         at_end.get_num_forward_tsns() >= 1,
         "messages were abandoned and no FORWARD TSN was sent"
     );
-    // The drain is paced by the congestion window, not by the 2 ms between sends: with 10%
-    // loss each way the window stays near four packets, too few for three miss indications on
-    // many losses, which can then only be found by the T3-rtx timer, at RFC 9260's RTO.Min of
-    // 1 s (section 16), doubled for each expiry in a row (6.3.3 E2), with the window back to
-    // one packet (7.2.3). The figure is mostly a sum of those waits, which is noisy (22 to 77 s
-    // in CI). What the timer does not account for is bounded on its own: a stalled queue, or a
-    // sender that waits on something other than its timer, grows it.
+    // Most losses are found by Fast Retransmit (RFC 9260 7.2.4: three miss indications), and
+    // since no retransmission is allowed the message is abandoned there and skipped with
+    // FORWARD TSN at once (RFC 3758 3.5 A2, C3), without waiting for the timer. 36 runs on
+    // GitHub-hosted runners: 55 to 86 of 82 to 112 lost messages. Fewer means losses that
+    // gap reports show went to the timer instead.
+    let by_fast_retransmit = at_end.get_num_fast_retrans_abandoned();
     assert!(
-        rest < Duration::from_secs(REST_LIMIT_S),
+        by_fast_retransmit * 4 >= lost,
+        "Fast Retransmit found {by_fast_retransmit} of {lost} losses"
+    );
+    // The rest is found by T3-rtx: a lost DATA chunk with too few chunks after it for three
+    // miss indications (the window is about four packets here, one after an expiry), a lost
+    // FORWARD TSN or SACK. Each expiry waits an RTO, RFC 9260's RTO.Min of 1 s (section 16)
+    // here, doubled for an expiry that follows another before a new round trip is measured
+    // (6.3.3 E2), and each one abandons every message outstanding at once. The same runs:
+    // 8 to 36 expiries, 0.37 per lost message at most, waiting 1.0 to 1.44 s on average.
+    assert!(
+        t3 * 4 <= lost * 3,
+        "{t3} T3-rtx expiries for {lost} lost messages"
+    );
+    assert!(
+        t3_wait <= Duration::from_secs(3) * t3 as u32,
+        "{t3} T3-rtx expiries waited {t3_wait:?}: the RTO stays backed off (RFC 9260 6.3.3: \
+         a new round-trip measurement brings it back)"
+    );
+    // The drain is mostly the sum of those waits, which is what makes it noisy (22 to 77 s in
+    // CI). What the timer does not account for (sending a megabyte at the window's pace, round
+    // trips, the host) was 6 to 15 s in the same runs, and is bounded on its own: a stalled
+    // queue, or a sender waiting on something other than its timer, grows it.
+    assert!(
+        rest < Duration::from_secs(40),
         "the drain took {drained_after:?}, {rest:?} of it not waiting for T3-rtx ({t3} expiries, \
          {t3_wait:?})"
-    );
-    // Each expiry waits one RTO, at least RTO.Min, and the expiries are what the figure is
-    // made of: about one per 10 to 20 messages lost here. Far more means losses that Fast
-    // Retransmit should find went to the timer, or the RTO stayed backed off.
-    assert!(
-        t3 <= T3_LIMIT,
-        "{t3} T3-rtx expiries for {lost} lost messages"
     );
     // A generous ceiling on the wall time only, for a stall the counters do not show.
     assert!(
@@ -380,10 +395,6 @@ fn unreliable_channel_loses_without_retransmitting() {
         "the send queue took {drained_after:?} to drain"
     );
 }
-
-/// Calibrated on GitHub-hosted runners (see `unreliable_channel_loses_without_retransmitting`).
-const REST_LIMIT_S: u64 = 60;
-const T3_LIMIT: u64 = 1000;
 
 const VP8_PT: u8 = 96;
 

@@ -441,3 +441,46 @@ fn a_t3_expiry_is_counted_with_what_it_abandoned_or_sent_again() -> Result<()> {
     }
     Ok(())
 }
+
+/// A loss that three miss indications reveal (RFC 9260 7.2.4) in a message whose retransmission
+/// budget is spent is abandoned there and skipped with FORWARD TSN (RFC 3758 3.5 A2, C3), and
+/// counted as such, not as a Fast Retransmit or a T3-rtx expiry.
+#[test]
+fn a_loss_found_by_fast_retransmit_in_a_spent_message_is_counted_as_abandoned() -> Result<()> {
+    let mut a = timed_test_association();
+    let now = Instant::now();
+    {
+        let mut s = a.open_stream(1, PPI)?;
+        s.set_reliability_params(true, ReliabilityType::Rexmit, 0)?;
+        for i in 0..5u8 {
+            s.write_sctp(now, &Bytes::from(vec![i; 100]), PPI)?;
+        }
+    }
+    let sent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(5, sent.len());
+    let first = sent[0].tsn;
+    // The first is lost; the next ones arrive, each reported by a SACK.
+    for end in 2..=4u16 {
+        a.handle_sack(
+            &ChunkSelectiveAck {
+                cumulative_tsn_ack: first.wrapping_sub(1),
+                advertised_receiver_window_credit: 1 << 20,
+                gap_ack_blocks: vec![crate::chunk::chunk_selective_ack::GapAckBlock {
+                    start: 2,
+                    end,
+                }],
+                duplicate_tsn: vec![],
+            },
+            now,
+        )?;
+    }
+    let out = a.gather_outbound(now).0;
+    assert!(transmitted_data(&out).is_empty(), "nothing is sent again");
+    let mut stats = a.stats();
+    assert_eq!(1, stats.get_num_fast_retrans_abandoned());
+    assert_eq!(1, stats.get_num_abandoned_messages());
+    assert_eq!(0, stats.get_num_fast_retrans());
+    assert_eq!(0, stats.get_num_t3timeouts());
+    assert_eq!(1, stats.get_num_forward_tsns());
+    Ok(())
+}

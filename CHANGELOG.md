@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
+  (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
+  Retransmit found in messages whose retransmission budget was spent and abandoned instead
+  (`get_num_fast_retrans_abandoned`), FORWARD TSN chunks sent (`get_num_forward_tsns`) and the
+  time T3-rtx expiries waited (`get_t3_wait`, the RTO at each expiry); `RTCSctpTransport::
+  association_stats` gives them for the live association (a diagnostic, not a W3C member). The
+  documentation of `get_num_datas` said "sent"; it counts DATA chunks received.
+- **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
+  (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
+  protocol events: no DATA of the channel sent twice, every lost message abandoned and
+  skipped with FORWARD TSN, at least a quarter of the losses found by Fast Retransmit, T3-rtx
+  expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
+  waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
+  90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
+  behaviour change: no (counters only).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
