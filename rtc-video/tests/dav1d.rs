@@ -111,6 +111,7 @@ fn hostile_av1_frames_do_not_crash_dav1d() {
 
     let mut rng = Rng(0x5eed_f00d);
     let (mut cases, mut errors) = (0, 0);
+    let mut not_recovered = Vec::new();
     for _ in 0..1500 {
         let at = rng.below(units.len());
         let mut f = units[at].clone();
@@ -140,10 +141,16 @@ fn hostile_av1_frames_do_not_crash_dav1d() {
         }
         cases += 1;
         errors += usize::from(d.decode_bytes(&f, at == 0).is_err());
-        d.decode_bytes(&units[0], true)
-            .expect("the key frame after a hostile one");
+        if let Err(e) = d.decode_bytes(&units[0], true) {
+            not_recovered.push(format!("case {cases} (unit {at}): {e}"));
+        }
     }
-    println!("MEASURE dav1d seeded mutations: {cases} cases, {errors} refused, 0 crashes");
+    println!(
+        "MEASURE dav1d seeded mutations: {cases} cases, {errors} refused, 0 crashes, {} key frames not decoded after a hostile frame {:?}",
+        not_recovered.len(),
+        not_recovered.iter().take(3).collect::<Vec<_>>()
+    );
+    assert!(not_recovered.is_empty(), "{not_recovered:?}");
 }
 
 /// A decoder as a closure: temporal unit and key-frame flag in.

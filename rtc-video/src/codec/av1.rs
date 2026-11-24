@@ -164,8 +164,13 @@ impl Av1Decoder {
             if status == 0 || status != eagain() {
                 break;
             }
-            if let Some(p) = self.take_picture(ctx)? {
-                picture = Some(p);
+            // A picture waiting here belongs to an earlier temporal unit; if it fails to
+            // decode (dav1d reports a frame's error when it is taken out), that is the earlier
+            // unit's error, not this one's: keep sending this unit.
+            match self.take_picture(ctx) {
+                Ok(Some(p)) => picture = Some(p),
+                Ok(None) => {}
+                Err(e) => log::debug!("an earlier temporal unit did not decode: {e}"),
             }
         }
         drop(buf);
