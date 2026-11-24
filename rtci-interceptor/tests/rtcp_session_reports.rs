@@ -335,6 +335,108 @@ fn a_stream_bound_again_says_no_bye_and_keeps_its_counts() {
     assert_eq!(2, report.packet_count);
 }
 
+/// RFC 8108 6.1: "An endpoint that has never sent an RTP stream will have an SSRC that it
+/// uses for RTCP reporting. If that endpoint wants to start sending an RTP stream, it is
+/// RECOMMENDED that it use its existing SSRC for that stream". The session reports from the
+/// SSRC it was given for the first stream; when that stream is bound and sends, the SSRC
+/// goes on as the same participant: no BYE, no second SSRC, and its reports become sender
+/// reports.
+#[test]
+fn the_first_stream_takes_over_the_reporting_ssrc() {
+    const FIRST_STREAM: u32 = 0x0bad_cafe;
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    chain.bind_remote_stream(&video(200));
+    control(
+        &mut chain,
+        base,
+        RtcpSessionControl::ReportingSsrc(FIRST_STREAM),
+    );
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_read(rtp(base, 200, 1, 0)).unwrap();
+    read(&mut chain);
+    let sent = run(&mut chain, base + secs(3.0));
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|sent| sent.leader() == Some(FIRST_STREAM)));
+    assert!(sent.iter().all(|sent| sent.has::<ReceiverReport>()));
+
+    chain.bind_local_stream(&video(FIRST_STREAM));
+    for n in 0..50u16 {
+        let at = base + secs(3.0) + Duration::from_millis(20 * u64::from(n));
+        chain
+            .handle_write(rtp(at, FIRST_STREAM, n, 3000 * u32::from(n)))
+            .unwrap();
+    }
+    let sent = run(&mut chain, base + secs(8.0));
+    assert!(
+        sent.iter().all(|sent| sent.goodbye().is_none()),
+        "the reporting SSRC said BYE"
+    );
+    assert!(sent.iter().all(|sent| sent.leader() == Some(FIRST_STREAM)));
+    let report = sent
+        .iter()
+        .find_map(|sent| sent.get::<SenderReport>().first().copied())
+        .expect("a sender report from the stream");
+    assert_eq!(FIRST_STREAM, report.ssrc);
+
+    // A second stream gets an SSRC of its own; the first one stays a sender (it was a
+    // reporting SSRC once, it is a stream now) and says no BYE.
+    const SECOND_STREAM: u32 = 0x0bad_caff;
+    chain.bind_local_stream(&video(SECOND_STREAM));
+    for n in 50..100u16 {
+        let at = base + secs(8.0) + Duration::from_millis(20 * u64::from(n - 50));
+        for ssrc in [FIRST_STREAM, SECOND_STREAM] {
+            chain
+                .handle_write(rtp(at, ssrc, n, 3000 * u32::from(n)))
+                .unwrap();
+        }
+    }
+    let sent = run(&mut chain, base + secs(12.0));
+    assert!(
+        sent.iter().all(|sent| sent.goodbye().is_none()),
+        "the first stream said BYE when the second came"
+    );
+    assert!(sent.iter().any(|sent| {
+        sent.get::<SenderReport>()
+            .iter()
+            .any(|sr| sr.ssrc == FIRST_STREAM)
+    }));
+}
+
+/// RFC 8108 6.2: an SSRC that said BYE is not used again. The reporting SSRC the session was
+/// given is for its first join: after it left (BYE from that SSRC) and joins again, it
+/// reports from a new SSRC even when given the same one.
+#[test]
+fn the_given_reporting_ssrc_is_not_used_again_after_a_bye() {
+    const FIRST_STREAM: u32 = 0x0bad_cafe;
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    control(
+        &mut chain,
+        base,
+        RtcpSessionControl::ReportingSsrc(FIRST_STREAM),
+    );
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let sent = run(&mut chain, base + secs(1.0));
+    assert_eq!(Some(FIRST_STREAM), sent[0].leader());
+    control(&mut chain, base + secs(1.0), RtcpSessionControl::Leave);
+    let sent = written(&mut chain);
+    assert_eq!(
+        vec![FIRST_STREAM],
+        sent[0].goodbye().expect("a BYE").sources
+    );
+
+    control(
+        &mut chain,
+        base + secs(2.0),
+        RtcpSessionControl::ReportingSsrc(FIRST_STREAM),
+    );
+    control(&mut chain, base + secs(2.0), RtcpSessionControl::Start);
+    let sent = run(&mut chain, base + secs(5.0));
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|sent| sent.leader() != Some(FIRST_STREAM)));
+}
+
 /// RFC 3550 6.6: when the endpoint leaves, every SSRC it used says BYE, the reporting SSRC of
 /// a receive-only endpoint included, and nothing follows the BYE.
 #[test]

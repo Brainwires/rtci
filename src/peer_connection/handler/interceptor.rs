@@ -119,6 +119,11 @@ pub(crate) struct InterceptorHandlerContext {
     /// `source_departure_ends_track`: a track ends when every one of its SSRCs is here.
     /// Bounded by `MAX_REMOTE_CNAMES`.
     departed_sources: HashSet<SSRC>,
+    /// The SSRC the RTCP sessions report from while the connection sends no media, drawn
+    /// with the connection; the first media SSRC the connection mints is this one (RFC 8108
+    /// section 6.1, `RTCPeerConnection::unused_media_ssrc`). Follows the session's reporting
+    /// SSRC when a collision moves it.
+    pub(crate) reporting_ssrc: SSRC,
 }
 
 impl InterceptorHandlerContext {
@@ -165,6 +170,12 @@ impl Default for InterceptorHandlerContext {
             source_departure_ends_track: false,
             mid_moves: Default::default(),
             departed_sources: Default::default(),
+            reporting_ssrc: loop {
+                let ssrc = rand::random::<SSRC>();
+                if ssrc != 0 {
+                    break ssrc;
+                }
+            },
         }
     }
 }
@@ -893,6 +904,9 @@ impl<'a> InterceptorHandler<'a> {
                     })
                 });
                 log::warn!("ssrc collision: a remote source uses the local ssrc {ssrc}");
+                if *ssrc == self.ctx.reporting_ssrc {
+                    self.ctx.reporting_ssrc = *replacement;
+                }
                 if is_sender && self.ctx.ssrc_collisions.insert(*ssrc) {
                     for transceiver in self.rtp_transceivers.iter_mut() {
                         let Some(sender) = transceiver.sender_mut() else {
@@ -933,6 +947,8 @@ impl<'a> InterceptorHandler<'a> {
     ) -> Result<()> {
         for control in [
             RtcpSessionControl::Cname(self.ctx.cname.clone()),
+            // RFC 8108 6.1: report from the SSRC the first stream will be sent on.
+            RtcpSessionControl::ReportingSsrc(self.ctx.reporting_ssrc),
             RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
             RtcpSessionControl::Start,
         ] {
