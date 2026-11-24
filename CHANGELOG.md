@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
+  (`conf/rtx-1r-duplicate-repairs`): a request for a packet whose retransmission per-packet
+  feedback reported received is no longer answered, and one whose retransmission left
+  without a report yet waits for it: answered at once when the retransmission is reported
+  lost, or when two round trips and the feedback interval (`REPAIR_REPORT_MARGIN`, 100 ms;
+  1 s before a round trip is known) pass without a report; held requests keep their place
+  and those behind them are served meanwhile. The receiver asks again every round trip while
+  a packet is missing, and a retransmission can wait longer than that in the path's queue:
+  after a sudden capacity drop 24 to 28 of 92 to 101 retransmissions (a chain without a
+  pacer) and 35 to 41 of 90 to 103 (the default chain) repeated a packet whose first repair
+  then arrived first (hosted traces 45341865225, 45342290711). The TWCC sender reports what
+  transport-wide feedback says of each retransmission it numbered (`RetransmissionsReported`,
+  new, on an empty RTCP carrier application-ward; keyed as `RetransmissionsLeft`); with RFC
+  8888 feedback (the default between two endpoints of this engine) the responder reads the
+  report on the RTX stream itself. Without per-packet feedback of either kind every request
+  is answered as before. RFC 4588 section 7: the sender "MAY selectively retransmit only the
+  packets that it deems important and ignore NACK messages for other packets"; RFC 8834
+  section 6.1: "It is not appropriate to blindly retransmit RTP packets in response to a
+  NACK": the sender's choice, bounded. RTX_1R_MEASURED Not offered: libwebrtc's
+  form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
+  (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
+  every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
+  (measured, run 45349364771: freezes of 1.62 to 2.39 s without a pacer, against 1.28 to
+  1.29 s; the repeats left are repairs of lost repairs, which a receiver that plays in order
+  waits for first). This narrows two known limits of 0.1.0 (the 1.4 Mbit/s cliff's cause (2),
+  and the picture's age after a sudden drop with the pacer). Tests:
+  `rtci-interceptor/tests/nack_repeat_repairs.rs`.
+
+## [0.1.0] - 2026-11-24
+
+The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
+`rtci-*` (see "Crate rename" below and `docs/rename.md`), the repository is `Brainwires/rtci`,
+and the version line restarts at 0.1.0 (crates.io ignores the `+brainwires.N` build metadata of
+the `0.22.0+brainwires.N` line, whose tags stay). Since 0.22.0+brainwires.6: trains 11 to 19 of
+the clause-by-clause conformance work (the audit's open MUST rows down to 16, every one
+classified), behaviour profiles (`Rfc`, `StrictRfc`, `Chrome`, `Performance`) that govern 49
+settings, one draft-conforming congestion estimator with the RFC 4588 section 7 retransmission
+rule as the default, a pacer whose queue time is bounded and which pauses a source that follows
+the target, SRTP re-keying that keeps the call when both sides' offers cross and loses no
+packet, and data channels reopened on a just-closed stream that deliver every message.
+
+- **Breaking changes**: the crate rename, and the API changes listed below by area (the GCC
+  interceptor runs the default estimator behind the same `GccHandle`, retransmissions are held
+  within the target by default, and more).
+- **Known limits** (below): the cost of a capacity drop that meets the estimate at a higher rate
+  (about 1.4 Mbit/s), the picture's age after a sudden drop with the pacer, the delay-side
+  detector's blind interval after a sudden drop, and the margin a short SRTP key lifetime leaves
+  for a re-keying.
+- Fixed since brainwires.6's known issues: the pacer's unbounded queue, the circuit breaker's
+  missing verdict for video flows, simulcast packets without RID or MID on SSRCs declared in a
+  section with `a=rid`, video freezing for seconds after a capacity drop, STUN SOFTWARE that
+  could not be turned off, and sender reports after a clock-rate switch on one SSRC.
+
 ### Crate rename
 
 <!-- rtci-rename:start -->
@@ -737,13 +792,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a time bound): measured with repairs older than 1 s declined and a key frame asked for
   (hosted run 45342372315), the video froze for 8.36 to 8.49 s and the oldest picture was
   7.55 to 7.77 s old, because the receiver holds the gap for its whole packet window and the
-  key frame waits behind it. Cause (2) is gone since repeat repairs follow the feedback
-  (behaviour change below, `conf/rtx-1-duplicate-repairs`): 1.28 to 1.29 s, oldest picture
-  2.90 to 3.20 s, 58 to 64 retransmissions of which 20 to 25 are dropped (hosted run
-  45348355656); cause (1) remains.
+  key frame waits behind it. Planned after this release: no repeat repair of a packet whose
+  first repair transport-wide feedback reports received, and first repairs ahead of repeats.
 - **interceptors (pacer), a sudden drop of the path's capacity**: with the default
-  interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
-  after a sudden drop, though it never stops for more than 2 s. Measured in
+  interceptors (the pacer) the receiver's picture can be 5.6 to 10.2 s old for a few seconds
+  after a sudden drop, though it never stops for more than 2 s (the repair work planned for
+  0.1.x, `conf/rtx-1-duplicate-repairs`, brings it to about 4.1 to 6.6 s). Measured in
   `tests/capacity_cap_video_rtc2rtc.rs` (a call at 2.5 Mbit/s whose path drops to 300 kbit/s;
   six seeds on three wall clocks): longest time without a usable frame 1.38 to 1.90 s, oldest
   picture shown 5.95 to 8.56 s (without a pacer: 0.83 to 1.24 s and 2.26 to 3.21 s). Cause:
@@ -764,41 +818,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts the two apart. Giving up old repairs and asking for a key frame instead makes it
   worse for a receiver that plays in order (measured, hosted run 45342372315: frozen 8.03 to
   8.53 s, oldest picture 7.15 to 7.53 s; the receiver holds the gap for its whole packet
-  window). Since repeat repairs follow the feedback (behaviour change below): longest time
-  without a usable frame 0.75 to 1.13 s, oldest picture 4.14 to 6.58 s, 59 to 80
-  retransmissions (hosted run 45348355656).
+  window). Planned after this release: no repeat repair of a packet whose first repair
+  transport-wide feedback reports received, and first repairs ahead of repeats.
+
+- **interceptors (congestion control), delay-side detection after a sudden drop**: the
+  delay-based over-use detector sees queue growth only through transport-wide feedback, so for
+  some 0.45 s after a sudden capacity drop (the path's queue, its delay and one feedback
+  interval) nothing tells the sender, and the first cuts follow the received rate, whose 500 ms
+  window still holds the old rate. Fresh repairs sent in that time meet a full queue (20 to 22 of
+  the 23 to 32 retransmissions dropped at the path in
+  `a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`). On a reordering,
+  lossless path the delay side still settles below capacity (the loss side no longer takes a
+  packet that is only overtaken for a loss; the delay-based grouping is a proposal,
+  `docs/gcc-reordering.md`).
+- **peer connection (SRTP re-keying), the margin a short key lifetime leaves**: the re-keying has
+  the last sixteenth of an SRTP key's lifetime to complete (an offer and its answer through the
+  application's signalling, ICE checks on new candidates and a DTLS handshake), and the margin is
+  counted in packets: a lifetime short enough that a sixteenth of it lasts less than the
+  re-keying at the stream's packet rate ends the session instead. Size a lifetime as at least
+  `16 x packet rate x re-keying time` (a 9600-packet lifetime at 188 packets a second leaves
+  3.2 s, and a re-keying through TURN takes about 2 s); the connection logs a warning when the
+  margin it has is under 2 s. The profiles' lifetimes are far longer; shorter ones are for tests
+  and constrained deployments (`conf/rekey-3-server-margin`).
 
 ### Behaviour changes
-
-- **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
-  (`conf/rtx-1-duplicate-repairs`): a request for a packet whose retransmission per-packet
-  feedback reported received is no longer answered, and one whose retransmission left
-  without a report yet waits for it: answered at once when the retransmission is reported
-  lost, or when two round trips and the feedback interval (`REPAIR_REPORT_MARGIN`, 100 ms;
-  1 s before a round trip is known) pass without a report; held requests keep their place
-  and those behind them are served meanwhile. The receiver asks again every round trip while
-  a packet is missing, and a retransmission can wait longer than that in the path's queue:
-  after a sudden capacity drop 24 to 28 of 92 to 101 retransmissions (a chain without a
-  pacer) and 35 to 41 of 90 to 103 (the default chain) repeated a packet whose first repair
-  then arrived first (hosted traces 45341865225, 45342290711). The TWCC sender reports what
-  transport-wide feedback says of each retransmission it numbered (`RetransmissionsReported`,
-  new, on an empty RTCP carrier application-ward; keyed as `RetransmissionsLeft`); with RFC
-  8888 feedback (the default between two endpoints of this engine) the responder reads the
-  report on the RTX stream itself. Without per-packet feedback of either kind every request
-  is answered as before. RFC 4588 section 7: the sender "MAY selectively retransmit only the
-  packets that it deems important and ignore NACK messages for other packets"; RFC 8834
-  section 6.1: "It is not appropriate to blindly retransmit RTP packets in response to a
-  NACK": the sender's choice, bounded. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
-  (cap after 20 s, six seeds, hosted run 45348355656; before: run 45340678499): without a
-  pacer the oldest picture 2.90 to 3.20 s (4.40 to 4.51), 58 to 64 retransmissions (92 to
-  101), longest freeze 1.28 to 1.29 s (1.28 to 1.32); the default chain 4.14 to 6.58 s (5.59
-  to 9.84), 59 to 80 (90 to 103), 0.75 to 1.13 s (0.97 to 1.91). Not offered: libwebrtc's
-  form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
-  (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
-  every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
-  (measured, run 45349364771: freezes of 1.62 to 2.39 s without a pacer, against 1.28 to
-  1.29 s; the repeats left are repairs of lost repairs, which a receiver that plays in order
-  waits for first). Tests: `rtci-interceptor/tests/nack_repeat_repairs.rs`.
 
 - **peer connection**: automatic SRTP re-keying has a tie-break (`conf/rekey-1-glare`). Two
   peers with the same key lifetime reached the lifetime warning on the same packet and both
@@ -1311,6 +1354,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reported_loss_of_sequence_numbers_never_sent_does_not_trip_the_congestion_breaker`,
   `reported_loss_of_sequence_numbers_never_sent_across_the_wrap_does_not_trip_the_congestion_breaker`,
   and the `never_sent` unit tests).
+- **interceptors** (RFC 8083 section 4.4, `conf/gcc-4-release`): the media-usability circuit
+  breaker judged a flow by the loss its receiver reports, which counts the sequence numbers the
+  pacer discarded before they left (RFC 3550 section 6.4.1), so a sender above the target could
+  be ceased as unusable for its own discards. It now reads the same corrected loss as the
+  congestion breaker (the loss of the interval a report covers, less the numbers never sent).
+  Loss on the path ceases an unusable flow as before
+  (`reported_loss_of_sequence_numbers_never_sent_does_not_make_the_media_unusable`).
 - **sctp, data channels** (RFC 6525 5.1.2 A3, 5.2.2 E2/E4; RFC 8831 6.7;
   `conf/sctp-16-delivery-stall`): a data channel opened right after another one was closed in
   the middle of a transfer stalled: its messages up to one Stream Sequence Number arrived and
