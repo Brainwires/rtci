@@ -263,6 +263,9 @@ pub struct NackGeneratorInterceptor {
     reorder_delay: Duration,
     /// The round-trip time to the senders, measured by the RTCP session when there is one.
     round_trip_time: Option<Duration>,
+    /// The oldest sequence number the application can still use, per SSRC
+    /// ([`NackControl::Horizon`](super::NackControl::Horizon)).
+    horizons: HashMap<u32, u16>,
 
     /// What has been asked for, per SSRC and missing sequence number.
     requests: HashMap<u32, HashMap<u16, Request>>,
@@ -291,6 +294,7 @@ impl NackGeneratorInterceptor {
             remote_rtx_times: HashMap::new(),
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
+            horizons: HashMap::new(),
             requests: HashMap::new(),
             reordering: HashMap::new(),
             write_queue: VecDeque::new(),
@@ -300,7 +304,12 @@ impl NackGeneratorInterceptor {
     /// Generate NACKs for all streams with missing packets.
     fn generate_nacks(&mut self, now: Instant) {
         for (&ssrc, receive_log) in &self.receive_logs {
-            let missing = receive_log.missing_seq_numbers(self.skip_last_n);
+            let mut missing = receive_log.missing_seq_numbers(self.skip_last_n);
+            // RFC 4588 6.3: a packet older than what the application can still use is not
+            // asked for (and its request is forgotten below).
+            if let Some(&horizon) = self.horizons.get(&ssrc) {
+                missing.retain(|&sequence_number| !older_than(sequence_number, horizon));
+            }
             if missing.is_empty() {
                 self.requests.remove(&ssrc);
                 continue;
@@ -382,6 +391,12 @@ impl NackGeneratorInterceptor {
     }
 }
 
+/// Whether `sequence_number` comes before `horizon` (RFC 3550 A.1 wrap-around: up to 32767
+/// behind it).
+fn older_than(sequence_number: u16, horizon: u16) -> bool {
+    (1..0x8000).contains(&horizon.wrapping_sub(sequence_number))
+}
+
 /// A missing packet and what has been done about it.
 struct Request {
     /// When the generator first found it missing.
@@ -411,6 +426,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
                 {
                     for source in &goodbye.sources {
                         self.receive_logs.remove(source);
+                        self.horizons.remove(source);
                         self.requests.remove(source);
                         self.reordering.remove(source);
                     }
@@ -469,6 +485,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
                 None => self.remote_rtx_times.remove(payload_type_rtx),
             };
         }
+        if let Some(super::NackControl::Horizon {
+            media_ssrc,
+            oldest_useful,
+        }) = msg.message.custom::<super::NackControl>()
+        {
+            match oldest_useful {
+                Some(oldest_useful) => self.horizons.insert(*media_ssrc, *oldest_useful),
+                None => self.horizons.remove(media_ssrc),
+            };
+        }
         self.write_queue.push_back(msg);
         Ok(())
     }
@@ -516,6 +542,7 @@ impl Interceptor for NackGeneratorInterceptor {
         self.requests.remove(&info.ssrc);
         self.reordering.remove(&info.ssrc);
         self.rtx_payload_types.remove(&info.ssrc);
+        self.horizons.remove(&info.ssrc);
     }
 
     fn bind_local_stream(&mut self, _info: &StreamInfo) {}

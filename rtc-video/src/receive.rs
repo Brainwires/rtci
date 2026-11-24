@@ -51,6 +51,12 @@ pub struct ReceiveConfig {
     /// turns into a stream of key frames, each bigger and lost more often). `None`: libwebrtc's
     /// behaviour, only the decode timeout (3 s, or three times `rtx-time`).
     pub repair_window_rtts: Option<f64>,
+    /// Tell the engine's NACK generator, after each released picture, the oldest sequence
+    /// number still useful ([`ReceivePipeline::nack_horizon`], through
+    /// `RTCRtpReceiver::set_nack_horizon`), so that it stops asking for packets of pictures
+    /// already released or given up (RFC 4588 6.3; libwebrtc does the same through
+    /// `NackRequester::ClearUpTo`). `false`: the generator's own limits only.
+    pub nack_horizon: bool,
 }
 
 /// The shortest repair window.
@@ -66,6 +72,7 @@ impl Default for ReceiveConfig {
             min_freeze_samples: 1,
             retransmission_lateness: Some(Duration::from_millis(50)),
             repair_window_rtts: Some(5.0),
+            nack_horizon: true,
         }
     }
 }

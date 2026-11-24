@@ -28,7 +28,7 @@ use rtc::rtp::codec::dependency_descriptor::{
     DEPENDENCY_DESCRIPTOR_URI, DependencyDescriptorReader,
 };
 use rtc::rtp_transceiver::RTCRtpReceiverId;
-use rtc::statistics::{AudioReceiverStatsUpdate, DecoderStatsUpdate};
+use rtc::statistics::DecoderStatsUpdate;
 
 use crate::frame::{Codec, VideoPacket};
 use crate::keyframe::KeyFrameReason;
@@ -52,6 +52,8 @@ pub enum Error {
 struct Stream {
     pipeline: ReceivePipeline,
     descriptors: DependencyDescriptorReader,
+    /// The NACK horizon last given to the engine.
+    horizon_sent: Option<u16>,
 }
 
 /// The receive pipelines of one video `RTCRtpReceiver`: one per SSRC it receives.
@@ -153,6 +155,7 @@ impl VideoReceiver {
             Stream {
                 pipeline,
                 descriptors: DependencyDescriptorReader::new(),
+                horizon_sent: None,
             }
         });
         let mut dependency_descriptor = None;
@@ -190,12 +193,19 @@ impl VideoReceiver {
         });
     }
 
-    /// Runs the timers due at `now` and sends the key-frame requests due (PLI, when `nack pli`
-    /// was negotiated). Returns the reasons of the requests made.
+    /// The NACK horizon last given to the engine for `ssrc` (see [`poll`](Self::poll)).
+    pub fn nack_horizon(&self, ssrc: u32) -> Option<u16> {
+        self.streams.get(&ssrc).and_then(|s| s.horizon_sent)
+    }
+
+    /// Runs the timers due at `now`, sends the key-frame requests due (PLI, when `nack pli`
+    /// was negotiated) and, with [`ReceiveConfig::nack_horizon`], moves each stream's NACK
+    /// horizon on to the oldest packet still useful (`RTCRtpReceiver::set_nack_horizon`).
+    /// Returns the reasons of the requests made.
     ///
     /// # Errors
     ///
-    /// [`Error::Engine`] when the engine refuses the RTCP.
+    /// [`Error::Engine`] when the engine refuses the RTCP or the horizon.
     pub fn poll(
         &mut self,
         pc: &mut RTCPeerConnection,
@@ -220,6 +230,24 @@ impl VideoReceiver {
             let mut r = pc.rtp_receiver(self.receiver).ok_or(Error::NoReceiver)?;
             r.write_rtcp(now, packets)
                 .map_err(|e| Error::Engine(e.to_string()))?;
+        }
+        if self.config.nack_horizon {
+            let mut moved = Vec::new();
+            for (&ssrc, s) in &mut self.streams {
+                // The pipeline's extended sequence number, back to the 16 bits on the wire.
+                let horizon = s.pipeline.nack_horizon().map(|seq| seq as u16);
+                if horizon.is_some() && horizon != s.horizon_sent {
+                    s.horizon_sent = horizon;
+                    moved.push((ssrc, horizon));
+                }
+            }
+            if !moved.is_empty() {
+                let mut r = pc.rtp_receiver(self.receiver).ok_or(Error::NoReceiver)?;
+                for (ssrc, horizon) in moved {
+                    r.set_nack_horizon(now, ssrc, horizon)
+                        .map_err(|e| Error::Engine(e.to_string()))?;
+                }
+            }
         }
         Ok(reasons)
     }
@@ -313,15 +341,6 @@ impl VideoReceiver {
                     freeze_count: Some(st.freeze_count),
                     total_freezes_duration: Some(st.total_freezes_duration),
                     packets_discarded: Some(st.packets_discarded),
-                    ..Default::default()
-                },
-            );
-            // The jitter buffer members are carried by the audio update today (the inbound
-            // stream reports them for either kind); docs/video-pipeline.md phase 1b moves them
-            // into DecoderStatsUpdate.
-            pc.update_audio_receiver_stats(
-                ssrc,
-                AudioReceiverStatsUpdate {
                     jitter_buffer_delay: Some(st.jitter_buffer_delay),
                     jitter_buffer_target_delay: Some(st.jitter_buffer_target_delay),
                     jitter_buffer_minimum_delay: Some(st.jitter_buffer_minimum_delay),

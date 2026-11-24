@@ -13,7 +13,7 @@
 //! in an order its references allow). The acceptance figures are `docs/video-pipeline.md`
 //! section 6, phase 1.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -42,6 +42,7 @@ use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use rtc::rtp::packetizer::Packetizer;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
@@ -113,6 +114,99 @@ const RTX_PT: u8 = 97;
 const RTP_MTU: usize = 1200;
 const FPS: u32 = 30;
 const FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+const MEDIA_SSRC: u32 = 1001;
+const RTX_SSRC: u32 = 1002;
+/// The longest one-way delay of the downlink (receiver to sender) in any scenario here.
+const MAX_DOWNLINK_DELAY: Duration = Duration::from_millis(30);
+
+/// The SSRC and sequence number of an SRTP packet (its header is in the clear).
+fn rtp_header(data: &[u8]) -> Option<(u32, u16)> {
+    if data.len() < 12 || !is_rtp(data) || (192..=223).contains(&data[1]) {
+        return None;
+    }
+    let seq = u16::from_be_bytes([data[2], data[3]]);
+    let ssrc = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    Some((ssrc, seq))
+}
+
+/// Whether `a` comes before `b` (RFC 3550 A.1 wrap-around).
+fn before(a: u16, b: u16) -> bool {
+    (1..0x8000).contains(&b.wrapping_sub(a))
+}
+
+/// What happened to one media packet the uplink lost, for the repair-latency trace.
+#[derive(Debug, Default, Clone)]
+struct Repair {
+    /// When the uplink dropped it.
+    dropped: Option<Instant>,
+    /// When the first packet after it reached the receiver (the gap became visible).
+    gap_seen: Option<Instant>,
+    /// When the first NACK asking for it reached the sender, and how many did.
+    first_nack_arrived: Option<Instant>,
+    nacks: u32,
+    /// The retransmission that repaired it: when the sender sent it and when it arrived.
+    rtx_sent: Option<Instant>,
+    rtx_arrived: Option<Instant>,
+}
+
+/// The per-packet repair trace, and the NACKs for packets behind the receiver's NACK horizon.
+#[derive(Debug, Default)]
+struct RepairTrace {
+    lost: BTreeMap<u16, Repair>,
+    /// When each RTX packet (by its own sequence number) left the sender.
+    rtx_sent: HashMap<u16, Instant>,
+    /// The send times of the RTX packets delivered in the current step, in delivery order.
+    rtx_delivered: VecDeque<Instant>,
+    /// The highest media sequence number the receiver got.
+    highest: Option<u16>,
+    /// The receiver's NACK horizon over time.
+    horizons: Vec<(Instant, u16)>,
+    /// Sequence numbers NACKs asked for (as the sender received them), all together.
+    nacked: u64,
+    /// Of those, the ones behind the horizon the receiver had set before the NACK could have
+    /// left it.
+    nacked_behind_horizon: u64,
+    /// Retransmissions that reached the receiver for packets behind its horizon.
+    repaired_behind_horizon: u64,
+}
+
+impl RepairTrace {
+    fn horizon_at(&self, at: Instant) -> Option<u16> {
+        self.horizons
+            .iter()
+            .rev()
+            .find(|(t, _)| *t <= at)
+            .map(|(_, h)| *h)
+    }
+
+    fn print(&self, name: &str, start: Instant, downlink_delay: Duration) {
+        let ms = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
+            (Some(a), Some(b)) => format!(
+                "{:.0}",
+                b.saturating_duration_since(a).as_secs_f64() * 1000.0
+            ),
+            _ => "-".to_owned(),
+        };
+        println!(
+            "MEASURE TRACE {name}: seq, dropped at (ms into the call); then ms after the gap was \
+             seen: first NACK sent (arrival - {} ms), first NACK arrived, RTX sent, RTX arrived; \
+             NACKs that asked for it",
+            downlink_delay.as_millis()
+        );
+        for (seq, r) in &self.lost {
+            let first_sent = r.first_nack_arrived.map(|t| t - downlink_delay);
+            println!(
+                "MEASURE TRACE {name}: {seq} {} {} {} {} {} {}",
+                ms(Some(start), r.dropped),
+                ms(r.gap_seen, first_sent),
+                ms(r.gap_seen, r.first_nack_arrived),
+                ms(r.gap_seen, r.rtx_sent),
+                ms(r.gap_seen, r.rtx_arrived),
+                r.nacks,
+            );
+        }
+    }
+}
 
 fn video_codec() -> RTCRtpCodec {
     RTCRtpCodec {
@@ -327,6 +421,7 @@ struct Call {
     fixed_bitrate: Option<u32>,
     next_frame: Instant,
     connected: [bool; 2],
+    trace: RepairTrace,
 }
 
 fn is_rtp(data: &[u8]) -> bool {
@@ -384,6 +479,7 @@ impl Call {
             fixed_bitrate,
             next_frame: now,
             connected: [false; 2],
+            trace: RepairTrace::default(),
         };
         let offer = call.sender.pc.create_offer(None)?;
         call.sender.pc.set_local_description(now, offer.clone())?;
@@ -492,11 +588,23 @@ impl Call {
         }
         // Sender to receiver: the impaired uplink for media.
         while let Some(msg) = self.sender.pc.poll_write() {
+            let header = rtp_header(&msg.message);
             let at = if is_rtp(&msg.message) {
                 self.uplink(msg.message.len())
             } else {
                 Some(now + self.link.delay)
             };
+            if self.impaired {
+                match header {
+                    Some((MEDIA_SSRC, seq)) if at.is_none() => {
+                        self.trace.lost.entry(seq).or_default().dropped = Some(now);
+                    }
+                    Some((RTX_SSRC, seq)) => {
+                        self.trace.rtx_sent.insert(seq, now);
+                    }
+                    _ => {}
+                }
+            }
             if let Some(at) = at {
                 self.in_flight.push((at, true, msg.message));
             }
@@ -507,7 +615,31 @@ impl Call {
         }
         self.in_flight.sort_by_key(|d| d.0);
         let due = self.in_flight.iter().take_while(|d| d.0 <= now).count();
+        self.trace.rtx_delivered.clear();
         for (_, to_receiver, data) in self.in_flight.drain(..due).collect::<Vec<_>>() {
+            if to_receiver {
+                match rtp_header(&data) {
+                    Some((MEDIA_SSRC, seq)) => {
+                        if self.trace.highest.is_none_or(|h| before(h, seq)) {
+                            self.trace.highest = Some(seq);
+                        }
+                        for (_, r) in self
+                            .trace
+                            .lost
+                            .iter_mut()
+                            .filter(|(lost, r)| r.gap_seen.is_none() && before(**lost, seq))
+                        {
+                            r.gap_seen = Some(now);
+                        }
+                    }
+                    Some((RTX_SSRC, seq)) => {
+                        if let Some(sent) = self.trace.rtx_sent.remove(&seq) {
+                            self.trace.rtx_delivered.push_back(sent);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let (pc, from, to) = if to_receiver {
                 (&mut self.receiver.pc, self.sender.addr, self.receiver.addr)
             } else {
@@ -556,15 +688,65 @@ impl Call {
             v.set_rtt(2 * self.link.delay + self.link.jitter / 2);
             self.receiver.video = Some(v);
         }
-        while self.sender.pc.poll_read().is_some() {}
+        // The NACKs as the sender receives them: a NACK that arrives now left the receiver at
+        // most MAX_DOWNLINK_DELAY ago, after any horizon set before that.
+        let horizon = self
+            .trace
+            .horizon_at(now - MAX_DOWNLINK_DELAY - Duration::from_millis(1));
+        while let Some(message) = self.sender.pc.poll_read() {
+            if let RTCMessage::RtcpPacket(_, packets) = message.message {
+                for packet in packets {
+                    let Some(nack) = packet.as_any().downcast_ref::<TransportLayerNack>() else {
+                        continue;
+                    };
+                    for seq in nack.nacks.iter().flat_map(|p| p.packet_list()) {
+                        self.trace.nacked += 1;
+                        if horizon.is_some_and(|h| before(seq, h)) {
+                            self.trace.nacked_behind_horizon += 1;
+                        }
+                        if let Some(r) = self.trace.lost.get_mut(&seq) {
+                            r.first_nack_arrived.get_or_insert(now);
+                            r.nacks += 1;
+                        }
+                    }
+                }
+            }
+        }
         while let Some(message) = self.receiver.pc.poll_read() {
             if let RTCMessage::RtpPacket(_, packet) = message.message
                 && let Some(v) = &mut self.receiver.video
             {
+                let seq = packet.header.sequence_number;
+                if packet.header.ssrc == MEDIA_SSRC
+                    && let Some(r) = self.trace.lost.get_mut(&seq)
+                    && r.rtx_arrived.is_none()
+                {
+                    // The original was dropped: this is its retransmission, paired with the
+                    // RTX packets delivered in this step in their order.
+                    r.rtx_arrived = Some(now);
+                    r.rtx_sent = self.trace.rtx_delivered.pop_front();
+                    if v.nack_horizon(MEDIA_SSRC).is_some_and(|h| before(seq, h)) {
+                        self.trace.repaired_behind_horizon += 1;
+                    }
+                }
                 v.handle_rtp(now, &packet);
             }
         }
-        self.receive(now)
+        self.receive(now)?;
+        if let Some(h) = self
+            .receiver
+            .video
+            .as_ref()
+            .and_then(|v| v.nack_horizon(MEDIA_SSRC))
+            && self
+                .trace
+                .horizons
+                .last()
+                .is_none_or(|(_, last)| *last != h)
+        {
+            self.trace.horizons.push((now, h));
+        }
+        Ok(())
     }
 
     fn receive(&mut self, now: Instant) -> Result<()> {
@@ -690,6 +872,11 @@ fn two_percent_loss_with_reordering_waits_only_for_repairs() -> Result<()> {
     let mut call = Call::new(Link::lossy(0.02, 40), 11, Some(500_000))?;
     call.run_for(Duration::from_secs(30))?;
     let s = report("2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s", &mut call);
+    call.trace.print("2% loss", call.start, call.link.delay);
+    assert!(
+        call.trace.nacked > 0,
+        "the trace sees the NACKs at the sender"
+    );
     assert_eq!(call.receiver.corrupt, 0, "every picture decoded as sent");
     assert_eq!(
         call.receiver.decoder.errors, 0,
@@ -731,6 +918,25 @@ fn a_capacity_drop_and_recovery_leaves_no_long_freeze() -> Result<()> {
     call.busy_until = None;
     call.run_for(Duration::from_secs(20))?;
     let s = report("300 kbit/s for 20 s, then open", &mut call);
+    println!(
+        "MEASURE horizon, capacity: sequence numbers asked for {}, behind the horizon {}, \
+         retransmissions arriving behind the horizon {}, horizon moves {}",
+        call.trace.nacked,
+        call.trace.nacked_behind_horizon,
+        call.trace.repaired_behind_horizon,
+        call.trace.horizons.len()
+    );
+    // Phase 1b acceptance (docs/video-pipeline.md): the receiver's NACK generator asks for no
+    // packet of a picture the pipeline already released or gave up.
+    assert!(
+        call.trace.nacked > 0,
+        "the trace sees the NACKs at the sender"
+    );
+    assert!(!call.trace.horizons.is_empty(), "the horizon moves");
+    assert_eq!(
+        call.trace.nacked_behind_horizon, 0,
+        "NACKs for packets behind the horizon"
+    );
     assert_eq!(call.receiver.corrupt, 0);
     assert_eq!(call.receiver.decoder.errors, 0);
     assert_eq!(call.receiver.broken_chain, 0);

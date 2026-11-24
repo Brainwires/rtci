@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **statistics** (`conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
+  fields, `jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay` and
+  `jitter_buffer_emitted_count`: a struct literal without `..Default::default()` needs them.
+
 - **peer connection, interceptors**: the `Performance` behaviour profile and the
   `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
   RFC values); `Performance` takes, for each governed behaviour, the cheaper form an RFC itself
@@ -866,6 +870,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+
+- **video pipeline, phase 1b: the engine boundary** (`conf/vp-4-engine-boundary`,
+  `docs/video-pipeline.md` 2.6, 2.9):
+  - `RTCRtpReceiver::set_nack_horizon(now, ssrc, oldest_useful)` and
+    `interceptor::NackControl::Horizon`: the receiving application tells the NACK generator the
+    oldest sequence number it can still use (RFC 4588 6.3: a retransmission is asked for only
+    while it "would still be useful"); the generator asks for no older missing packet and
+    forgets its requests for them (wrap-aware; `None` removes the horizon)
+    (`packets_older_than_the_horizon_are_not_asked_for`,
+    `a_receiver_stops_asking_for_packets_behind_its_nack_horizon`). `rtc_video::engine::
+    VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
+    nack_horizon`, on by default, as libwebrtc's `NackRequester::ClearUpTo`).
+  - The jitter buffer members (`jitterBufferDelay`, `jitterBufferTargetDelay`,
+    `jitterBufferMinimumDelay`, `jitterBufferEmittedCount`) in `DecoderStatsUpdate`, winning over
+    the audio update's (`the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`);
+    `rtc-video` no longer goes through `update_audio_receiver_stats`.
+  - `rtc-video`'s two-peer tests trace every lost packet (gap seen, first NACK, RTX sent and
+    arrived) and count NACKs for packets behind the horizon (none, asserted in the capacity
+    scenario); `docs/video-repair-latency.md` holds the trace.
 
 - **video pipeline, phase one: the receive side** (`conf/vp-2-receive`, design on
   `conf/vp-1-design`, `docs/video-pipeline.md`; on master by `conf/vp-3-on-master`). A new
