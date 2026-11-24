@@ -282,8 +282,8 @@ pub use cc::probe::{
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
 pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};
 pub use circuit_breaker::{
-    CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
-    CircuitBreakerState,
+    CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerNotice,
+    CircuitBreakerReason, CircuitBreakerState,
     DEFAULT_NON_REPORTING_THRESHOLD as CIRCUIT_BREAKER_NON_REPORTING_THRESHOLD,
     DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
     PacketSize as CircuitBreakerPacketSize,

@@ -4,9 +4,9 @@
 //! read on the way in, and the clock advanced through `handle_timeout`.
 
 use rtci_interceptor::{
-    AttributedPacket, CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerPacketSize,
-    CircuitBreakerReason, CircuitBreakerState, Interceptor, MediaUsability, Packet, Registry, Slot,
-    StreamInfo, TaggedPacket,
+    AttributedPacket, CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerNotice,
+    CircuitBreakerPacketSize, CircuitBreakerReason, CircuitBreakerState, Interceptor,
+    MediaUsability, Packet, Registry, Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
@@ -32,6 +32,8 @@ struct Harness {
     /// What the receiver last reported on each SSRC: the extended highest sequence number and
     /// the cumulative number lost, which follows the fraction lost it reports (RFC 3550 A.3).
     reported: std::collections::HashMap<u32, (u32, i32)>,
+    /// What the breaker told the chain application-ward.
+    notices: Vec<CircuitBreakerNotice>,
 }
 
 fn ms(milliseconds: u64) -> Duration {
@@ -50,6 +52,7 @@ impl Harness {
             });
         }
         Self {
+            notices: Vec::new(),
             chain: Box::new(chain),
             handle,
             epoch: Instant::now(),
@@ -66,7 +69,11 @@ impl Harness {
                 self.left += 1;
             }
         }
-        while self.chain.poll_read().is_some() {}
+        while let Some(read) = self.chain.poll_read() {
+            if let Some(notice) = read.message.custom::<CircuitBreakerNotice>() {
+                self.notices.push(*notice);
+            }
+        }
     }
 
     fn tagged(&self, at: Duration, packet: Packet) -> TaggedPacket {
@@ -972,6 +979,56 @@ fn reported_loss_of_sequence_numbers_never_sent_does_not_make_the_media_unusable
         ),
         "the same reports for a stream that left whole"
     );
+}
+
+/// RFC 8083 section 4.5 leaves the restart of a ceased flow to the application ("SHOULD NOT
+/// be restarted automatically"; "Ideally, a human user will be involved"), so the
+/// application has to hear that a flow ceased: the breaker says so application-ward at the
+/// instant it happens, once per flow, and again when a restart takes effect.
+#[test]
+fn a_ceased_flow_and_its_restart_are_announced_application_ward() {
+    let mut harness = Harness::new(CircuitBreakerBuilder::new());
+    harness.send_for(ms(0), ms(1000), VIDEO, 10);
+    harness.send_for(ms(0), ms(1000), AUDIO, 10);
+    assert!(harness.notices.is_empty());
+    harness.tick(ms(15_000));
+    // Both flows ceased (the RTCP timeout is the session's): one notice each, with the
+    // breaker that tripped and the triggering interval a restart has to wait.
+    let mut ceased = harness.notices.clone();
+    ceased.sort_by_key(|notice| notice.ssrc);
+    assert_eq!(
+        vec![
+            CircuitBreakerNotice {
+                ssrc: VIDEO,
+                ceased: Some(CircuitBreakerReason::RtcpTimeout),
+                restart_after: ms(15_000),
+            },
+            CircuitBreakerNotice {
+                ssrc: AUDIO,
+                ceased: Some(CircuitBreakerReason::RtcpTimeout),
+                restart_after: ms(15_000),
+            },
+        ],
+        ceased
+    );
+
+    // Said once: packets written into the ceased flow say nothing more.
+    harness.send(ms(16_000), VIDEO);
+    assert_eq!(2, harness.notices.len());
+
+    // The restart the application asks for is announced when it takes effect.
+    let epoch = harness.epoch;
+    assert!(harness.handle.restart(VIDEO, epoch + ms(30_000)));
+    harness.send(ms(30_001), VIDEO);
+    assert_eq!(
+        Some(&CircuitBreakerNotice {
+            ssrc: VIDEO,
+            ceased: None,
+            restart_after: Duration::ZERO,
+        }),
+        harness.notices.last()
+    );
+    assert_eq!(3, harness.notices.len());
 }
 
 /// Section 4.5: a halted flow is not restarted automatically, and a restart is refused until

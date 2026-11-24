@@ -394,6 +394,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **rtci, interceptor** (collapse-3): `RTCPeerConnectionEvent::OnCircuitBreaker` and
+  `CircuitBreakerNotice` (see "Fixed"). An application that sends media should handle the
+  event: a flow the circuit breaker ceased stays silent until the application restarts it
+  (`DefaultInterceptorHandles::circuit_breaker`, `CircuitBreakerHandle::restart`).
+
 - **mDNS may leave two kinds of host address unwrapped, each an opt-in setting, off by default
   (mdns-5; MDNSICE-3.1.2.2-4, -3.1.2.2-5, -3.1.2.3-1).** Only in `QueryAndGather`; in every
   behaviour profile off; neither ever unwraps an address `ice::mdns::is_global_unicast`
@@ -580,6 +585,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet on.
 
 ### Fixed
+
+- **rtci, interceptor / RTP circuit breaker** (collapse-3): the application is told when the
+  circuit breaker (RFC 8083, in the default interceptor set) ceases one of its flows. A ceased
+  flow's packets are dropped until the application restarts it (section 4.5: "SHOULD NOT be
+  restarted automatically"), and nothing said so: the state could only be polled
+  (`CircuitBreakerHandle::ceased`). With a peer that sends a receiver report with every
+  congestion feedback packet (this engine does, every 25 to 50 ms) a breaker trips within a
+  fraction of a second of a sudden capacity drop (the media timeout after five reports without
+  a new packet of the flow: 145 ms after a 2.5 Mbit/s path fell to 300 kbit/s in
+  `tests/capacity_cap_video_rtc2rtc.rs`'s scenario; the congestion breaker over ten round
+  trips: 2 to 3.4 s), and the call lost its audio or its video for good, silently: the
+  audio in 17 of 100 runs of that scenario, the video in the runs "that never show video
+  again" of the capacity review (both directions capped; a 1000 ms queue). Now the breaker
+  sends `CircuitBreakerNotice` application-ward when a flow ceases and when a restart takes
+  effect, and the peer connection raises `RTCPeerConnectionEvent::OnCircuitBreaker` (sender,
+  RID, SSRC, the breaker that tripped, how long until a restart is accepted). The pacer reads
+  the notice too and no longer charges a ceased flow's packets to its budget: a voice the
+  application kept writing took 76 of a 100 kbit/s target for packets that never left, and
+  the estimate, bound by one and a half times what arrives, could not climb.
+  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`,
+  `pacing.rs::a_flow_the_circuit_breaker_ceased_is_not_charged_to_the_budget`.
 
 - **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
   checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length

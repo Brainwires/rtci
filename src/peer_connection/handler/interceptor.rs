@@ -1917,6 +1917,53 @@ impl<'a> InterceptorHandler<'a> {
         }
     }
 
+    /// A flow the RTP circuit breaker ceased or restarted (`CircuitBreakerNotice`):
+    /// `OnCircuitBreaker` for the sender that sends it (the flow is its encoding's media,
+    /// RTX or FEC SSRC), with the encoding's RID.
+    fn announce_circuit_breaker(
+        &mut self,
+        now: Instant,
+        notice: &interceptor::CircuitBreakerNotice,
+    ) {
+        let found = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .find_map(|(id, t)| {
+                let sender = t.sender().as_ref()?;
+                sender
+                    .send_encodings()
+                    .iter()
+                    .find(|e| {
+                        let coding = &e.rtp_coding_parameters;
+                        coding.ssrc == Some(notice.ssrc)
+                            || coding
+                                .rtx
+                                .as_ref()
+                                .is_some_and(|rtx| rtx.ssrc == notice.ssrc)
+                            || coding
+                                .fec
+                                .as_ref()
+                                .is_some_and(|fec| fec.ssrc == notice.ssrc)
+                    })
+                    .map(|e| (id, e.rtp_coding_parameters.rid.clone()))
+            });
+        if let Some((id, rid)) = found {
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnCircuitBreaker {
+                        sender: crate::rtp_transceiver::RTCRtpSenderId::from(id),
+                        rid: (!rid.is_empty()).then_some(rid),
+                        ssrc: notice.ssrc,
+                        ceased: notice.ceased,
+                        restart_after: notice.restart_after,
+                    },
+                ),
+            });
+        }
+    }
+
     /// Records the SSRC and CSRCs of a packet the chain released, on the receiver that owns
     /// the SSRC (`RTCRtpReceiver::get_synchronization_sources`, `get_contributing_sources`).
     fn record_sources(&mut self, now: Instant, header: &rtp::Header) {
@@ -2452,6 +2499,11 @@ impl<'a>
                                 value.downcast_ref::<interceptor::PacerDiscard>()
                             {
                                 self.announce_pacer_discard(packet.now, discard);
+                            } else if let Some(notice) =
+                                value.downcast_ref::<interceptor::CircuitBreakerNotice>()
+                            {
+                                let notice = *notice;
+                                self.announce_circuit_breaker(packet.now, &notice);
                             } else if let Some(fec) =
                                 value.downcast_ref::<interceptor::UlpfecReceiveStats>()
                             {

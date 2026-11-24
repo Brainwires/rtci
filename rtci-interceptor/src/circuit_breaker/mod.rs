@@ -63,6 +63,29 @@ pub enum CircuitBreakerReason {
     MediaUnusable,
 }
 
+/// The circuit breaker ceased or restarted a flow (RFC 8083 section 4.5).
+///
+/// The breaker sends it application-ward, on an empty RTCP carrier on its read leg, at the
+/// instant a flow ceases and when a restart the application asked for
+/// ([`CircuitBreakerHandle::restart`]) takes effect. A ceased flow's RTP is dropped at the
+/// breaker until it is restarted, and nothing restarts it but the application ("RTP flows
+/// halted by the circuit breaker SHOULD NOT be restarted automatically unless the sender has
+/// received information that the congestion has dissipated or can reasonably be expected to
+/// have dissipated"), which therefore has to hear of it: the peer connection hands this to
+/// the application as `RTCPeerConnectionEvent::OnCircuitBreaker`. The pacer reads it on its
+/// way past and stops charging the flow's packets to its budget (they do not leave). Read
+/// with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CircuitBreakerNotice {
+    /// The flow (a media, RTX or FEC SSRC this endpoint sends).
+    pub ssrc: u32,
+    /// The breaker that tripped, `None` for a flow that was restarted.
+    pub ceased: Option<CircuitBreakerReason>,
+    /// For a ceased flow: how long from now until a restart is accepted (section 4.5: "the
+    /// reaction to a triggered circuit breaker lasts for at least the triggering interval").
+    pub restart_after: Duration,
+}
+
 /// What the circuit breaker is doing with one flow.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
@@ -620,15 +643,42 @@ impl CircuitBreakerInterceptor {
     }
 
     /// Apply the restarts the application asked for through the handle.
-    fn apply_restarts(&mut self) {
+    fn apply_restarts(&mut self, now: Instant) {
         let restarts = std::mem::take(&mut lock(&self.shared).restarts);
         for ssrc in restarts {
-            if self.flows.contains_key(&ssrc) {
-                // A restarted flow starts from nothing: what was measured before describes
-                // the path that tripped the breaker.
-                self.flows.insert(ssrc, Flow::new());
+            // A restarted flow starts from nothing: what was measured before describes the
+            // path that tripped the breaker.
+            let restarted = self
+                .flows
+                .get_mut(&ssrc)
+                .map(|flow| *flow = Flow::new())
+                .is_some();
+            if restarted {
+                self.notify(now, ssrc, None, Duration::ZERO);
             }
         }
+    }
+
+    /// Tells the chain application-ward, and through it the application, that a flow ceased
+    /// or was restarted ([`CircuitBreakerNotice`]).
+    fn notify(
+        &mut self,
+        now: Instant,
+        ssrc: u32,
+        ceased: Option<CircuitBreakerReason>,
+        restart_after: Duration,
+    ) {
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport: shared::TransportContext::default(),
+            message: crate::AttributedPacket::new(Packet::Rtcp(vec![])).with(
+                crate::Attribute::Custom(Arc::new(CircuitBreakerNotice {
+                    ssrc,
+                    ceased,
+                    restart_after,
+                })),
+            ),
+        });
     }
 
     /// Cease transmission of `ssrc`, or of every flow when flows are grouped.
@@ -651,6 +701,7 @@ impl CircuitBreakerInterceptor {
                 flow.stalled_reports = 0;
                 log::warn!("RTP circuit breaker: SSRC {ssrc:#x} ceased transmission ({reason:?})");
                 self.publish(ssrc);
+                self.notify(now, ssrc, Some(reason), hold);
             }
         }
     }
@@ -949,7 +1000,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        self.apply_restarts();
+        self.apply_restarts(msg.now);
         if let Packet::Rtcp(packets) = &msg.message.packet {
             let packets: Vec<_> = packets.to_vec();
             self.on_rtcp(msg.now, &packets);
@@ -963,7 +1014,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        self.apply_restarts();
+        self.apply_restarts(msg.now);
         match &msg.message.packet {
             Packet::Rtp(rtp_packet) => {
                 let frames_kept = 4 * self.config.frame_group_size as usize;
@@ -1009,7 +1060,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
-        self.apply_restarts();
+        self.apply_restarts(now);
         if let Some(since) = self.awaiting_rtcp_since
             && now.saturating_duration_since(since) >= self.rtcp_timeout()
         {

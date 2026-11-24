@@ -634,6 +634,42 @@ pub enum RTCPeerConnectionEvent {
         target_bitrate: f64,
     },
 
+    /// The RTP circuit breaker (RFC 8083, in the default interceptor set) **ceased a flow of
+    /// this sender**, or a restart the application asked for took effect. While a flow is
+    /// ceased every RTP packet written for it is dropped: the stream is silent at the far end
+    /// until the application restarts it.
+    ///
+    /// RFC 8083 section 4.5: "RTP flows halted by the circuit breaker SHOULD NOT be restarted
+    /// automatically unless the sender has received information that the congestion has
+    /// dissipated or can reasonably be expected to have dissipated. [...] Ideally, a human
+    /// user will be involved in the decision to try to restart the flow", and restarts are
+    /// rate limited "so that the reaction to a triggered circuit breaker lasts for at least
+    /// the triggering interval". The engine does not restart a flow by itself. The
+    /// application decides: stop writing (and tell the user), or, once `restart_after` has
+    /// passed and it has reason to think the path carries the flow again (the congestion
+    /// controller's target, `RTCRtpSender::target_bitrates`, has room for it), call
+    /// `DefaultInterceptorHandles::circuit_breaker` `.restart(ssrc, now)`, which is refused
+    /// before `restart_after`.
+    ///
+    /// A breaker can trip within a fraction of a second when the receiver reports many times
+    /// a second (a peer built on this engine sends a receiver report with each congestion
+    /// feedback packet): the media timeout after five reports that show no new packet of the
+    /// flow (section 4.2), the congestion breaker over ten round trips (section 4.3). A
+    /// sudden drop of the path's capacity is enough.
+    OnCircuitBreaker {
+        /// The sender whose flow it is.
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+        /// The RID of the encoding, `None` when it has none.
+        rid: Option<String>,
+        /// The flow: the encoding's media, RTX or FEC SSRC. What
+        /// `CircuitBreakerHandle::restart` takes.
+        ssrc: crate::rtp_transceiver::SSRC,
+        /// The breaker that tripped; `None` when the flow was restarted.
+        ceased: Option<interceptor::CircuitBreakerReason>,
+        /// For a ceased flow: how long until a restart is accepted.
+        restart_after: std::time::Duration,
+    },
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),
