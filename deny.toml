@@ -36,6 +36,12 @@ allow = [
     # webpki-roots (optional feature `turn-tls-webpki-roots`): the Mozilla root list.
     "CDLA-Permissive-2.0",
 ]
+# libfuzzer-sys is "(MIT OR Apache-2.0) AND NCSA" (NCSA: the University of Illinois licence, a
+# permissive BSD-style licence, OSI approved). It reaches the graph only as a `cfg(fuzzing)`
+# dependency of rav1e (rtci-video feature `av1`): no build outside a fuzzing build compiles it.
+exceptions = [
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 [bans]
 multiple-versions = "allow"
