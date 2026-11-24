@@ -4,7 +4,7 @@ use super::loss::LossController;
 use super::overuse::{OveruseDetector, Usage};
 use super::queue_limit::QueueLimitDetector;
 use super::rate_calc::RateCalculator;
-use super::rate_control::RateController;
+use super::rate_control::{RateController, ReceivedRateBound};
 use super::slope::SlopeEstimator;
 use super::threshold::ThresholdTimeBase;
 use crate::cc::estimator::{BandwidthEstimator, EstimatorStats};
@@ -117,6 +117,8 @@ pub struct Gcc {
     last_feedback: Option<Instant>,
     /// When a packet was last sent.
     last_sent: Option<Instant>,
+    /// When a packet that per-packet feedback will report was last sent.
+    last_reported_sent: Option<Instant>,
     /// When the missing-feedback cut next applies: set while packets sent after the last
     /// feedback are waiting for theirs.
     feedback_deadline: Option<Instant>,
@@ -185,6 +187,7 @@ impl Gcc {
             initial,
             last_feedback: None,
             last_sent: None,
+            last_reported_sent: None,
             feedback_deadline: None,
             feedback_timeout: DEFAULT_FEEDBACK_TIMEOUT,
             loss_capped_by_delay: true,
@@ -219,11 +222,28 @@ impl Gcc {
         self
     }
 
-    /// Whether over-use lowers the estimate at most once per round trip (the default) or on
-    /// every update while it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it. See
+    /// Whether over-use lowers the estimate at most once per round trip (libwebrtc's form) or
+    /// on every update while it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it (the
+    /// default). See
     /// [`RateController::with_one_decrease_per_round_trip`].
     pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
         self.delay_control = self.delay_control.with_one_decrease_per_round_trip(enabled);
+        self
+    }
+
+    /// What the bound of the estimate by the received rate (draft-ietf-rmcat-gcc-02 section
+    /// 5.5, `A_hat(i) < 1.5 * R_hat(i)`) does to an estimate above it: nothing but stop its
+    /// increase ([`ReceivedRateBound::LimitsIncrease`], the default), or bring it down to
+    /// the bound ([`ReceivedRateBound::Clamps`]). See [`ReceivedRateBound`].
+    ///
+    /// With the default an application that sends less than the estimate (audio alone, a
+    /// camera turned off, the first moments of a call) keeps the estimate it had: it is
+    /// lowered by over-use, by loss, and by feedback that stops while packets it covers are
+    /// sent, and by nothing else.
+    pub fn with_received_rate_bound(mut self, received_rate_bound: ReceivedRateBound) -> Self {
+        self.delay_control = self
+            .delay_control
+            .with_received_rate_bound(received_rate_bound);
         self
     }
 
@@ -405,11 +425,18 @@ impl BandwidthEstimator for Gcc {
         self.feedback_deadline = None;
     }
 
-    fn on_packet_sent(&mut self, now: Instant, _size: usize) {
+    /// A packet that no per-packet feedback will report: the flow is not paused, and its
+    /// feedback is not awaited.
+    fn on_unreported_packet_sent(&mut self, now: Instant, _size: usize) {
         if let Some(last) = self.last_sent {
             self.resume_after(now.saturating_duration_since(last));
         }
         self.last_sent = Some(now);
+    }
+
+    fn on_packet_sent(&mut self, now: Instant, size: usize) {
+        self.on_unreported_packet_sent(now, size);
+        self.last_reported_sent = Some(now);
         // Only once feedback has a rhythm (two reports) is its absence unexpected: a receiver
         // that never sends any is handled by the receiver-report fallback, and one that has
         // sent a single report has not yet shown how often it reports.
@@ -421,6 +448,10 @@ impl BandwidthEstimator for Gcc {
     fn on_round_trip_time(&mut self, _now: Instant, round_trip_time: Duration) {
         self.round_trip_time = Some(round_trip_time);
         self.delay_control.set_round_trip_time(round_trip_time);
+    }
+
+    fn min_bitrate(&self) -> Option<f64> {
+        Some(self.min)
     }
 
     fn set_external_bounds(&mut self, min: Option<f64>, max: Option<f64>) {
@@ -472,9 +503,19 @@ impl BandwidthEstimator for Gcc {
             .clamp(self.min, self.max);
     }
 
+    /// A new path (another candidate pair selected) starts the estimate over from the starting
+    /// estimate. The estimate describes the path it was measured on (RFC 8836 section 2,
+    /// requirement 1d: the flow reacts to a change of the path; draft-ietf-rmcat-gcc-02 says
+    /// nothing of it). Kept, it is right for a change between like paths and wrong in either
+    /// direction otherwise: too high for a slower network, and, after an outage that the
+    /// missing feedback halved it through, far too low for the network the connection came
+    /// back on. libwebrtc starts over as well
+    /// (`call/rtp_transport_controller_send.cc:356-357`, `OnNetworkRouteChanged`: "If it is,
+    /// restart BWE.", `restart_bwe = IsRelevantRouteChange(old_route, network_route)`, sent
+    /// to the controller at line 393 as `msg.restart_bwe`).
     fn on_path_change(&mut self, _now: Instant) {
         // Delay measurements across two paths mean nothing, and neither does where the old
-        // path converged: start the delay side over, at the current target.
+        // path converged.
         self.slope = SlopeEstimator::new();
         self.detector = OveruseDetector::new().with_threshold_time_base(self.threshold_time_base);
         self.rate = RateCalculator::default();
@@ -484,6 +525,14 @@ impl BandwidthEstimator for Gcc {
         self.queue_limit = QueueLimitDetector::new();
         self.delay_control.reset_convergence();
         self.feedback_deadline = None;
+        self.target = self.initial.clamp(self.min, self.max);
+        self.delay_control.set_target(self.target);
+        self.delay_control.set_measured_rate(None);
+        self.probed_at = None;
+        self.loss_control.cap(self.target);
+        self.loss_control.raise(self.target);
+        self.last_sent = None;
+        self.last_reported_sent = None;
     }
 
     fn handle_timeout(&mut self, now: Instant) {
@@ -498,7 +547,7 @@ impl BandwidthEstimator for Gcc {
             // Keep counting only while packets are still going out.
             let timeout = self.effective_feedback_timeout();
             self.feedback_deadline = self
-                .last_sent
+                .last_reported_sent
                 .is_some_and(|sent| sent + timeout > deadline)
                 .then(|| deadline + timeout);
         }

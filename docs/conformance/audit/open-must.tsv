@@ -16,6 +16,7 @@ MDNSICE-7.1-1	E	S	ice	Stays partial (audit-5): a process-wide bucket by default 
 FLEXFEC03-4.2-17	D	S	media (running)	A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it
 FLEXFEC03-5.1-5	E	S	media (running)	`flexfec` is registered to the RFC 8627 coder (IANA); the draft-03 coder cannot also take the name. Proposed n/a: superseded by RFC 8627
 GCC-5.4-4	A	S	media (running)	`setting` (measured, audit-5): `Gcc::with_threshold_time_base(ThresholdTimeBase::Arrival)`, RFC test mutation-checked; worse queueing delay and fairness on `rfc8836_multi_flow.rs`
+GCC-5.5-11	A	S	media (running)	`setting` (measured): `Gcc::with_received_rate_bound(ReceivedRateBound::Clamps)`, RFC test mutation-checked; as a clamp the estimate of an application that sends less than it falls to 1.5 x what is sent with no congestion signal (`capacity_cap_video_rtc2rtc.rs`)
 RFC2198-5-4	E	S	media (running)	RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream
 RFC3550-6.1-13	A	S	media (running)	`setting`: strict RTCP validity
 RFC3550-A.2-1	A	S	media (running)	`setting`: strict RTCP validity

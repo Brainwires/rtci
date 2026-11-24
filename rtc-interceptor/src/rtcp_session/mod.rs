@@ -318,6 +318,7 @@ pub struct RtcpSessionBuilder {
     joins_on_start: bool,
     first_report_at_join: bool,
     random: Box<dyn RtcpRandom>,
+    wall_clock: Option<SystemInstant>,
 }
 
 impl Default for RtcpSessionBuilder {
@@ -339,6 +340,7 @@ impl Default for RtcpSessionBuilder {
             joins_on_start: false,
             first_report_at_join: false,
             random: Box::new(ThreadRandom),
+            wall_clock: None,
         }
     }
 }
@@ -506,6 +508,15 @@ impl RtcpSessionBuilder {
         self
     }
 
+    /// The wall-clock anchor the session's NTP times (sender reports, XR receiver reference
+    /// times) derive from. Default: the process-wide [`SystemInstant::shared`]. Give one per
+    /// peer connection for reproducible virtual-time runs: two runs in one process otherwise
+    /// map the same instants to NTP times as far apart as the real time between them.
+    pub fn with_wall_clock(mut self, anchor: SystemInstant) -> Self {
+        self.wall_clock = Some(anchor);
+        self
+    }
+
     /// Builds an RTCP session per RTP session ([`crate::PerRtpSession`]): a peer connection
     /// with sections on several transports runs an RTCP session on each (RFC 3550 section 6,
     /// RFC 8834 section 4.4), every one with these settings, the same CNAME (RFC 7022
@@ -541,6 +552,7 @@ impl RtcpSessionBuilder {
             joins_on_start: template.joins_on_start,
             first_report_at_join: template.first_report_at_join,
             random: Box::new(random.clone()),
+            wall_clock: template.wall_clock,
         };
         let first = make(&template).build();
         crate::PerRtpSession::with_first(first, move || make(&template).build())
@@ -597,7 +609,7 @@ impl RtcpSessionBuilder {
             compound_sent: false,
             reference_times: HashMap::new(),
             dlrr_limits: HashMap::new(),
-            wall_clock: None,
+            wall_clock: self.wall_clock,
             reduced_size_failed: false,
             unanswered_reduced_nacks: 0,
             awaited: None,
@@ -658,12 +670,18 @@ struct Local {
 }
 
 impl Local {
-    fn new(ssrc: u32, kind: Kind, role: Role, clock_rate: u32) -> Self {
+    fn new(
+        ssrc: u32,
+        kind: Kind,
+        role: Role,
+        clock_rate: u32,
+        wall_clock: Option<SystemInstant>,
+    ) -> Self {
         Self {
             ssrc,
             kind,
             role,
-            stream: SenderStream::new(ssrc, clock_rate, false),
+            stream: SenderStream::new(ssrc, clock_rate, false).with_wall_clock(wall_clock),
             timing: None,
             last_rtp: None,
             rtp_sent: false,
@@ -1133,8 +1151,13 @@ impl RtcpSessionInterceptor {
                 let mut random = std::mem::replace(&mut self.random, Box::new(ThreadRandom));
                 let ssrc = choose_ssrc(random.as_mut(), |ssrc| self.ssrc_in_use(ssrc));
                 self.random = random;
-                self.locals
-                    .push(Local::new(ssrc, Kind::Other, Role::Reporter, 90_000));
+                self.locals.push(Local::new(
+                    ssrc,
+                    Kind::Other,
+                    Role::Reporter,
+                    90_000,
+                    self.wall_clock,
+                ));
             }
             _ => {}
         }
@@ -1515,8 +1538,13 @@ impl RtcpSessionInterceptor {
             // The session's own SSRC: say BYE with the old identifier and take the new one.
             let old = self.locals.remove(index);
             self.departing.push(old);
-            self.locals
-                .push(Local::new(replacement, Kind::Other, Role::Reporter, 90_000));
+            self.locals.push(Local::new(
+                replacement,
+                Kind::Other,
+                Role::Reporter,
+                90_000,
+                self.wall_clock,
+            ));
             self.emit(now, RtcpSessionEvent::SsrcCollision { ssrc, replacement });
             self.sync(now);
         } else if self.collided.insert(ssrc) {
@@ -2954,7 +2982,7 @@ impl Interceptor for RtcpSessionInterceptor {
                     local.role = role;
                     local
                 }
-                None => Local::new(ssrc, kind, role, info.clock_rate),
+                None => Local::new(ssrc, kind, role, info.clock_rate, self.wall_clock),
             };
             local.stream.set_payload_clock_rates(rates);
             self.locals.push(local);

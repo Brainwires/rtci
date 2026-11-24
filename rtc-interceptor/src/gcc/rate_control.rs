@@ -20,6 +20,40 @@ pub const DEFAULT_ROUND_TRIP_TIME: Duration = Duration::from_millis(200);
 /// How far the estimate may be above the received rate: `A_hat(i) < 1.5 * R_hat(i)`.
 pub const MAX_ESTIMATE_TO_RECEIVED_RATIO: f64 = 1.5;
 
+/// What the bound of the estimate by the received rate (`A_hat(i) < 1.5 * R_hat(i)`,
+/// draft-ietf-rmcat-gcc-02 section 5.5) does to an estimate that is above it.
+///
+/// The draft introduces the bound for a sender that has less to send than the estimate
+/// allows: "we must make sure that our estimate does not diverge from the rate at which the
+/// sender is actually sending. Thus, if the sender is unable to produce a bit stream with the
+/// bitrate the congestion controller is asking for, the available bandwidth estimate should
+/// stay within a given bound. Therefore we introduce a threshold `A_hat(i) < 1.5 * R_hat(i)`".
+/// It does not say what becomes of an estimate that the received rate has fallen away from:
+/// a camera that was turned off, a key frame that has left the measurement window, a call
+/// that has only just started at the start rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReceivedRateBound {
+    /// The bound limits the increase: an estimate at or above it is not increased, and is
+    /// left where it is until over-use sets it to `beta * R_hat` (which is within the
+    /// bound). The default.
+    ///
+    /// The same section lowers the estimate for one reason, "As soon as over-use has been
+    /// detected", holds it "constant" in the Hold state and has it "increased" on "every
+    /// update" in the Increase state; lowering it because the application sends less does
+    /// none of these, and tells an application whose camera is off that a path which has
+    /// shown no congestion carries one and a half times its audio. libwebrtc, the
+    /// implementation the draft's section 8 names, limits the increase as well
+    /// (`modules/remote_bitrate_estimator/aimd_rate_control.cc:235-249, 266`: "We limit the
+    /// new bitrate based on the troughput to avoid unlimited bitrate increases",
+    /// `if (current_bitrate_ < increase_limit)`, `std::min(increased_bitrate,
+    /// increase_limit)`).
+    #[default]
+    LimitsIncrease,
+    /// The inequality holds after every update: an estimate above the bound is brought down
+    /// to it, in every state, with no congestion signal. The inequality read by itself.
+    Clamps,
+}
+
 /// Smoothing of the average and the variance of the received rate measured at each decrease
 /// ("an exponential moving average with smoothing factor 0.95", section 5.5).
 const CONVERGENCE_SMOOTHING: f64 = 0.95;
@@ -99,9 +133,11 @@ impl Convergence {
 /// # The bound
 ///
 /// The estimate is verified by over-using the path, so it must not drift away from what is
-/// actually sent: it stays below 1.5 times the received rate. Without the bound a sender that has
-/// less to send than the estimate allows (a muted source, a static screen) lets the estimate climb
-/// to the configured maximum, and overshoots by that much when it has something to send again.
+/// actually sent: it is not increased past 1.5 times the received rate. Without the bound a
+/// sender that has less to send than the estimate allows (a muted source, a static screen) lets
+/// the estimate climb to the configured maximum, and overshoots by that much when it has
+/// something to send again. An estimate that is above the bound because the sender now sends
+/// less than it did is held, not lowered ([`ReceivedRateBound`]): only over-use lowers it.
 #[derive(Debug, Clone)]
 pub struct RateController {
     state: RateControlState,
@@ -122,6 +158,7 @@ pub struct RateController {
     one_decrease_per_round_trip: bool,
     /// When the target was last decreased.
     last_decrease: Option<Instant>,
+    received_rate_bound: ReceivedRateBound,
 }
 
 impl RateController {
@@ -141,23 +178,36 @@ impl RateController {
             measured_rate: None,
             convergence: Convergence::new(),
             last_change: None,
-            one_decrease_per_round_trip: true,
+            one_decrease_per_round_trip: false,
             last_decrease: None,
+            received_rate_bound: ReceivedRateBound::default(),
         }
     }
 
-    /// Whether over-use lowers the target at most once per round trip (the default), or on
-    /// every update while it lasts.
+    /// What the bound by the received rate does to an estimate above it: see
+    /// [`ReceivedRateBound`].
+    pub fn with_received_rate_bound(mut self, received_rate_bound: ReceivedRateBound) -> Self {
+        self.received_rate_bound = received_rate_bound;
+        self
+    }
+
+    /// Whether over-use lowers the target at most once per round trip, or on every update
+    /// while it lasts (the default).
     ///
     /// draft-ietf-rmcat-gcc-02 section 5.5 stays in Decrease while over-use lasts and sets
-    /// `A_hat = beta * R_hat` on each update. The received rate lags a cut by its measurement
-    /// window, and the detector by its filter (more so for a flow that sends few packets), so
-    /// over-use that the last cut has already answered goes on being read for some updates,
-    /// and each one cuts again: a newcomer to a shared bottleneck, which sends little and
-    /// filters slowly, cuts itself several times for one episode that the established flow
-    /// answers once. As libwebrtc's `AimdRateControl::TimeToReduceFurther` does, a further
-    /// cut waits one round trip (held within 10 to 200 ms) unless the received rate has
-    /// fallen below half the target. `false` is the draft as written.
+    /// `A_hat = beta * R_hat` on each update: `false`, the default. The estimate then follows
+    /// the received rate down as its measurement window empties of what arrived before the
+    /// path changed, which is what matters when a path loses most of its capacity at once
+    /// (`tests/capacity_cap_video_rtc2rtc.rs`: a 300 kbit/s cap under a sender at 1 Mbit/s
+    /// freezes the video 0.56 to 1.26 s and leaves the oldest picture 1.68 to 2.48 s old;
+    /// with one decrease per round trip 0.85 to 1.36 s and 2.33 to 2.61 s).
+    ///
+    /// `true` is libwebrtc's form (`AimdRateControl::TimeToReduceFurther`): a further cut
+    /// waits one round trip (held within 10 to 200 ms) unless the received rate has fallen
+    /// below half the target. Two flows sharing a bottleneck then keep a shorter queue
+    /// (`rtc-interceptor/tests/rfc8836_multi_flow.rs`: mean 2.8 ms and 95th percentile 10.8 ms
+    /// of queueing delay, against 18.5 ms and 93 ms with the draft's form; the shares are
+    /// 0.48 / 0.50 and 0.49 / 0.49).
     pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
         self.one_decrease_per_round_trip = enabled;
         self
@@ -291,6 +341,20 @@ impl RateController {
                     self.convergence.reset();
                 }
 
+                // A_hat(i) < 1.5 * R_hat(i): the estimate does not run away from what is
+                // sent. One and a half times what is received, or what a probe measured the
+                // path to deliver when that is more: a measurement is a bound in itself,
+                // with no margin on top, so an estimate that rests on a probe never passes
+                // what the probe saw. An estimate already at or above the bound stays where
+                // it is.
+                let bound = self.bound(received);
+                if self.received_rate_bound == ReceivedRateBound::LimitsIncrease
+                    && bound.is_some_and(|bound| self.target >= bound)
+                {
+                    self.last_change = Some(now);
+                    return self.target;
+                }
+
                 let increased = if self.convergence.band().is_some() {
                     // Close to convergence: about half a packet per response time.
                     let response_time = Duration::from_millis(100) + self.round_trip_time;
@@ -302,22 +366,29 @@ impl RateController {
                     let eta = self.increase_factor.powf(elapsed.as_secs_f64().min(1.0));
                     (self.target * eta).max(self.target + 1_000.0)
                 };
-                self.target = increased.clamp(self.min, self.max);
+                self.target = increased
+                    .min(bound.unwrap_or(f64::INFINITY))
+                    .clamp(self.min, self.max);
                 self.last_change = Some(now);
             }
         }
 
-        // A_hat(i) < 1.5 * R_hat(i): the estimate does not run away from what is sent.
-        if let Some(received) = received {
-            // One and a half times what is received, or what a probe measured the path to
-            // deliver when that is more: a measurement is a bound in itself, with no margin
-            // on top, so an estimate that rests on a probe never passes what the probe saw.
-            let bound =
-                (MAX_ESTIMATE_TO_RECEIVED_RATIO * received).max(self.measured_rate.unwrap_or(0.0));
+        // The inequality as a clamp: in every state.
+        if self.received_rate_bound == ReceivedRateBound::Clamps
+            && let Some(bound) = self.bound(received)
+        {
             self.target = self.target.min(bound).clamp(self.min, self.max);
         }
 
         self.target
+    }
+
+    /// The bound of section 5.5 for a received rate: one and a half times it, or what a probe
+    /// measured when that is more. `None` while the received rate is unknown.
+    fn bound(&self, received: Option<f64>) -> Option<f64> {
+        received.map(|received| {
+            (MAX_ESTIMATE_TO_RECEIVED_RATIO * received).max(self.measured_rate.unwrap_or(0.0))
+        })
     }
 
     /// The size of a packet of a 30 frames-per-second stream at the current target, in bits
@@ -495,6 +566,90 @@ mod tests {
             (controller.target() - 300_000.0).abs() < 1.0,
             "1.5 x 200 kbit/s, got {}",
             controller.target()
+        );
+    }
+
+    /// Section 5.5: the bound is for a sender that "is unable to produce a bit stream with the
+    /// bitrate the congestion controller is asking for"; the estimate is lowered "As soon as
+    /// over-use has been detected" and for nothing else. An estimate of 1 Mbit/s whose sender
+    /// goes down to its audio (76 kbit/s received, no over-use) is held for as long as that
+    /// lasts, is not increased meanwhile, and climbs again from where it was held once the
+    /// sender sends more.
+    #[test]
+    fn an_estimate_above_the_bound_is_held_and_not_lowered() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(1_000_000.0, MIN, MAX);
+
+        let mut at = epoch;
+        for _ in 0..600 {
+            at += Duration::from_millis(100);
+            let target = controller.update(at, Usage::Normal, Some(76_000.0));
+            assert_eq!(1_000_000.0, target, "held, neither lowered nor increased");
+        }
+
+        // The video is back at the held estimate: the climb goes on from there, at 8% a
+        // second and not by the whole minute at once.
+        at += Duration::from_millis(100);
+        let target = controller.update(at, Usage::Normal, Some(900_000.0));
+        assert!(
+            target > 1_000_000.0 && target < 1_010_000.0,
+            "one step of 100 ms at 8% a second from the held estimate, got {target}"
+        );
+    }
+
+    /// Held is not frozen: over-use while the sender sends less than the estimate lowers it
+    /// as section 5.5 has it, to beta times the received rate.
+    #[test]
+    fn over_use_lowers_an_estimate_that_was_held_above_the_bound() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(1_000_000.0, MIN, MAX);
+        let mut at = epoch;
+        for _ in 0..10 {
+            at += Duration::from_millis(100);
+            controller.update(at, Usage::Normal, Some(400_000.0));
+        }
+        assert_eq!(1_000_000.0, controller.target());
+
+        at += Duration::from_millis(100);
+        let target = controller.update(at, Usage::Over, Some(400_000.0));
+        assert!(
+            (target - 340_000.0).abs() < 1.0,
+            "0.85 x 400 kbit/s, got {target}"
+        );
+    }
+
+    /// The inequality read as a clamp ([`ReceivedRateBound::Clamps`]): the same estimate is
+    /// brought down to one and a half times what is received, with usage normal.
+    #[test]
+    fn the_bound_as_a_clamp_lowers_an_estimate_to_one_and_a_half_times_the_received_rate() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(1_000_000.0, MIN, MAX)
+            .with_received_rate_bound(ReceivedRateBound::Clamps);
+
+        let target = controller.update(
+            epoch + Duration::from_millis(100),
+            Usage::Normal,
+            Some(76_000.0),
+        );
+
+        assert!(
+            (target - 114_000.0).abs() < 1.0,
+            "1.5 x 76 kbit/s, got {target}"
+        );
+
+        // In every state: under-use holds the estimate (section 5.5), and the clamp still
+        // brings it to the bound.
+        let mut controller = RateController::new(1_000_000.0, MIN, MAX)
+            .with_received_rate_bound(ReceivedRateBound::Clamps);
+        let target = controller.update(
+            epoch + Duration::from_millis(100),
+            Usage::Under,
+            Some(76_000.0),
+        );
+        assert_eq!(RateControlState::Hold, controller.state());
+        assert!(
+            (target - 114_000.0).abs() < 1.0,
+            "1.5 x 76 kbit/s held, got {target}"
         );
     }
 

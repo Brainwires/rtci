@@ -738,6 +738,7 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
             registry,
             setting_engine.crypto_provider(),
             setting_engine.behaviour_profile(),
+            None,
         )
     };
     // RFC 5104 section 7.2: a party that signals a codec control message "must" be able to

@@ -7,6 +7,7 @@ use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
 use crate::Interceptor;
 use crate::circuit_breaker::CircuitBreakerHandle;
+use crate::never_sent::NeverSent;
 use crate::rtpfb::acknowledgement::PacketReport;
 use crate::rtpfb::convert::FeedbackTimeline;
 use crate::rtpfb::history::History;
@@ -226,6 +227,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 remb: None,
                 round_trip_time: None,
                 departures: VecDeque::new(),
+                never_sent: HashMap::new(),
                 per_packet_feedback: false,
                 applied_max: None,
                 unnegotiated_tmmbr: self.unnegotiated_tmmbr,
@@ -269,6 +271,8 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 ///   RFC 3890): [`set_session_bitrate_limit`](Self::set_session_bitrate_limit). `b=AS` counts
 ///   IP and UDP headers, `b=TIAS` does not; the caller converts.
 /// - a selected candidate pair change: [`notify_path_change`](Self::notify_path_change).
+///   The engine's peer connection tells the interceptor of its own pair changes
+///   ([`PathChanged`](crate::PathChanged)); this is for a change it cannot see.
 ///
 /// TMMBR and REMB arrive as RTCP and are read by the interceptor itself.
 #[derive(Clone)]
@@ -364,6 +368,10 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     round_trip_time: Option<Duration>,
     /// Departure instants of the last second, for the packet rate a TMMBR limit depends on.
     departures: VecDeque<Instant>,
+    /// The sequence numbers each local SSRC jumped over on its way out, while receiver reports
+    /// are the loss-based controller's input: the packets the pacer discarded, which the
+    /// receiver counts as lost.
+    never_sent: HashMap<u32, NeverSent>,
     /// Whether TWCC or RFC 8888 feedback has ever been read.
     per_packet_feedback: bool,
     /// The external maximum last handed to the estimator.
@@ -742,8 +750,26 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         {
             for report in reports {
                 if self.streams.contains_key(&report.ssrc) {
-                    self.estimator
-                        .on_receiver_report(now, f64::from(report.fraction_lost) / 256.0);
+                    // The receiver counts every sequence number it did not receive as lost
+                    // (RFC 3550 section 6.4.1), the ones the pacer discarded before they left
+                    // included. Those are not the path's loss: over the interval the report
+                    // covers they are taken out of the count and the fraction is that of the
+                    // packets that left.
+                    let mut fraction_lost = f64::from(report.fraction_lost) / 256.0;
+                    if let Some(interval) =
+                        self.never_sent
+                            .get_mut(&report.ssrc)
+                            .and_then(|never_sent| {
+                                never_sent.on_report(
+                                    report.last_sequence_number,
+                                    report.cumulative_lost(),
+                                )
+                            })
+                        && interval.never_sent() > 0
+                    {
+                        fraction_lost = interval.fraction_lost();
+                    }
+                    self.estimator.on_receiver_report(now, fraction_lost);
                 }
             }
         }
@@ -820,10 +846,29 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         if seen >= PATH_CHANGE_PACKETS {
             self.path = Some(key);
             self.path_candidate = None;
-            self.estimator.on_path_change(now);
+            self.on_new_path(now);
         } else {
             self.path_candidate = Some((key, seen));
         }
+    }
+
+    /// The path changed: seen in the addresses inbound packets arrive between
+    /// ([`observe_path`](Self::observe_path)), or said by the peer connection
+    /// ([`PathChanged`](crate::PathChanged)), which covers a change that keeps the addresses.
+    ///
+    /// The estimator starts over ([`BandwidthEstimator::on_path_change`]), and the packets sent
+    /// before the change are forgotten: they went into the path that was left, and the
+    /// feedback that reports them missing after a break (every packet sent while the old path
+    /// was already dead) would read as the new path's loss. libwebrtc's feedback adapter
+    /// likewise "only reports packets sent on the new route"
+    /// (`RtpTransportControllerSend::OnNetworkRouteChanged`,
+    /// `TransportFeedbackAdapter::SetNetworkRoute`). The probe clusters in flight go with
+    /// them: their packets are among those forgotten.
+    fn on_new_path(&mut self, now: Instant) {
+        self.estimator.on_path_change(now);
+        self.history.forget_sent();
+        self.probe_packets.clear();
+        self.probe_clusters.clear();
     }
 
     /// Bits per second sent over the last second.
@@ -896,6 +941,15 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         }
     }
 
+    /// The estimator's floor, to ride with an announced target ([`crate::MinimumTarget`]).
+    fn minimum_attribute(&self) -> Option<Attribute> {
+        self.estimator.min_bitrate().map(|bits_per_second| {
+            Attribute::Custom(std::sync::Arc::new(crate::MinimumTarget {
+                bits_per_second,
+            }))
+        })
+    }
+
     /// Publish the estimate, and return the attribute to announce when it moved.
     fn publish(&mut self) -> Option<Attribute> {
         let target = self.estimator.target_bitrate();
@@ -924,9 +978,16 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
-        // A packet from the wire, not one of the chain's attribute carriers (an empty RTCP
-        // packet, which never had an address).
-        if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+        if msg.message.custom::<crate::PathChanged>().is_some() {
+            // The peer connection selected another candidate pair. The next inbound packet's
+            // addresses are the new path's, whatever they are: the address-based detection
+            // starts from them and does not count the same change a second time.
+            self.path = None;
+            self.path_candidate = None;
+            self.on_new_path(msg.now);
+        } else if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+            // A packet from the wire, not one of the chain's attribute carriers (an empty
+            // RTCP packet, which never had an address).
             self.observe_path(msg.now, &msg.transport);
         }
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet {
@@ -969,6 +1030,9 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         // after this interceptor does and reads the attribute on its way past.
         if let Some(attribute) = self.publish() {
             msg.message.add(attribute);
+            if let Some(minimum) = self.minimum_attribute() {
+                msg.message.add(minimum);
+            }
         }
 
         self.read_queue.push_back(msg);
@@ -1002,11 +1066,28 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                     // enqueue instant instead would charge its queueing delay to the network.
                     msg.now,
                 );
+                if !self.per_packet_feedback {
+                    self.never_sent
+                        .entry(rtp_packet.header.ssrc)
+                        .or_default()
+                        .on_sent(rtp_packet.header.sequence_number);
+                }
                 self.departures.push_back(msg.now);
                 if self.departures.len() > 4096 {
                     self.departures.pop_front();
                 }
-                self.estimator.on_packet_sent(msg.now, size);
+                // Only a packet that per-packet feedback will report starts the estimator's
+                // wait for feedback: audio without transport-wide sequence numbers, sent
+                // while the video that has them is off, is not "sent and nothing came back".
+                if self
+                    .streams
+                    .get(&rtp_packet.header.ssrc)
+                    .is_some_and(|stream| stream.feedback.is_some())
+                {
+                    self.estimator.on_packet_sent(msg.now, size);
+                } else {
+                    self.estimator.on_unreported_packet_sent(msg.now, size);
+                }
 
                 if self.probing.is_some() {
                     self.sent.push_back((msg.now, size));
@@ -1059,10 +1140,14 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
 
         // No packet to ride on: the estimate leaves on the chain's attribute carrier.
         if let Some(attribute) = self.publish() {
+            let mut message = AttributedPacket::new(Packet::Rtcp(Vec::new())).with(attribute);
+            if let Some(minimum) = self.minimum_attribute() {
+                message.add(minimum);
+            }
             self.read_queue.push_back(TaggedPacket {
                 now,
                 transport: shared::TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtcp(Vec::new())).with(attribute),
+                message,
             });
         }
         Ok(())
@@ -1123,6 +1208,7 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
         for ssrc in flow_ssrcs(info) {
             self.streams.remove(&ssrc);
             self.ecn_counters.remove(&ssrc);
+            self.never_sent.remove(&ssrc);
         }
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
     }

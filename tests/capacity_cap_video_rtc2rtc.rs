@@ -17,15 +17,17 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor as _, PassThroughInterceptor, Registry,
-    RtcpRandom, RtcpSessionBuilder, Slot,
+    GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder, NackResponderBuilder,
+    PassThroughInterceptor, Registry, RetransmissionRateLimit, RtcpRandom, RtcpSessionBuilder,
+    Slot,
 };
 use rtc::media::io::sample_builder::SampleBuilder;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    configure_key_frame_requests, configure_nack, configure_receiver_reference_time,
-    configure_rtcp_reports_with, configure_twcc,
+    DefaultInterceptorHandles, DefaultInterceptorOptions, configure_key_frame_requests,
+    configure_nack, configure_receiver_reference_time, configure_rtcp_reports_with, configure_twcc,
+    register_default_interceptors_with_options,
 };
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
@@ -46,9 +48,16 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
     RTCRtpEncodingParameters, RTCRtpRtxParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
+use rtc::rtp_transceiver::{
+    RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId,
+};
 use rtc::sansio::Protocol;
+use rtc::shared::time::SystemInstant;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtc::statistics::StatsSelector;
+use rtc::statistics::report::RTCStatsReportEntry;
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -104,6 +113,91 @@ impl RtcpRandom for SeededRtcpRandom {
         (self.0.next_u64() >> 32) as u32
     }
 }
+
+thread_local! {
+    /// Whether the next `World`'s caller ignores the target: its video stays at the rate it
+    /// had before the cap and does not pause.
+    static IGNORE_TARGET: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Which interceptor chain the peers of a run use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chain {
+    /// ParolNet's: NACK, the RTCP reports, key-frame requests, TWCC with the TWCC-driven GCC
+    /// (`GccInterceptorBuilder`), no pacer; the video follows `GccHandle::target_bitrate_bps`.
+    ParolNet,
+    /// The engine's default interceptors (the pacer, GCC on transport-wide feedback, the NACK
+    /// pair); the video follows the target the senders are given
+    /// (`RTCRtpSender::target_bitrates`).
+    Default,
+    /// The default interceptors with the pacer's slot passed through.
+    DefaultWithoutPacer,
+}
+
+/// How a run is set up.
+#[derive(Clone, Copy, Debug)]
+struct Setup {
+    seed: u64,
+    /// The NACK responder's rule; the engine's default when `None`.
+    rate_limit: Option<RetransmissionRateLimit>,
+    chain: Chain,
+    /// The wall clock at the instant the peers are built (since the Unix epoch): every NTP
+    /// time on the wire follows from it, so a run with one is reproducible to the byte, and
+    /// runs with different ones differ in the phase of everything derived from NTP times
+    /// (round-trip times to 1/65536 s). The process's wall clock when `None`.
+    anchor: Option<Duration>,
+    /// How long the cap stays after the estimate went under 400 kbit/s.
+    cap: Duration,
+    /// The target the caller's encoder has reached when the cap arrives; after 20 s of call,
+    /// whatever the target, when `None`.
+    cap_at_target: Option<u32>,
+    /// Whether each peer (caller, callee) has a video track from the first offer on. One
+    /// without gains it by renegotiation ([`World::set_video`]).
+    video: [bool; 2],
+}
+
+impl Setup {
+    fn new(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Self {
+        Self {
+            seed,
+            rate_limit,
+            chain: Chain::ParolNet,
+            anchor: None,
+            cap: Duration::from_secs(20),
+            cap_at_target: None,
+            video: [true, true],
+        }
+    }
+
+    /// A call that starts with audio alone, either way.
+    fn audio_only(mut self) -> Self {
+        self.video = [false, false];
+        self
+    }
+
+    fn chain(mut self, chain: Chain) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    fn anchor(mut self, anchor: Duration) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+
+    /// The cap arrives when the caller's target has reached `bps`, not after 20 s.
+    fn capped_at_a_target_of(mut self, bps: u32) -> Self {
+        self.cap_at_target = Some(bps);
+        self
+    }
+}
+
+/// Three wall clocks a run is repeated on: the same second, a different phase within it.
+const ANCHORS: [Duration; 3] = [
+    Duration::new(1_800_000_000, 0),
+    Duration::new(1_800_000_000, 333_333_333),
+    Duration::new(1_800_000_000, 777_777_777),
+];
 
 const VP8_PT: u8 = 96;
 const RTX_PT: u8 = 97;
@@ -227,6 +321,7 @@ struct Uplink {
     queue_drops: u64,
     rtx_sent: u64,
     rtx_dropped: u64,
+    audio_dropped: u64,
 }
 
 impl Uplink {
@@ -238,6 +333,7 @@ impl Uplink {
             queue_drops: 0,
             rtx_sent: 0,
             rtx_dropped: 0,
+            audio_dropped: 0,
         }
     }
 
@@ -281,9 +377,21 @@ struct Peer {
     pc: RTCPeerConnection,
     addr: SocketAddr,
     connected: bool,
-    gcc: GccHandle,
+    /// ParolNet's chain: its GCC's handle.
+    gcc: Option<GccHandle>,
+    /// The default chain: its handles.
+    handles: Option<DefaultInterceptorHandles>,
+    /// The video packets the application wrote, and those that left the host (by sequence
+    /// number): the difference never reached the wire (dropped by a pacer).
+    video_written: BTreeSet<u16>,
+    video_left: BTreeSet<u16>,
+    /// The video packets written from 1 s on (the first key frame, written as the connection
+    /// comes up, is not the pacer's to lose), and the call's time at the current write.
+    video_written_late: BTreeMap<u16, Duration>,
+    media_elapsed: Duration,
     audio: RTCRtpSenderId,
-    video: RTCRtpSenderId,
+    /// The video sender, once the peer has a video track.
+    video: Option<RTCRtpSenderId>,
     audio_packetizer: Option<Box<dyn Packetizer>>,
     video_packetizer: Option<Box<dyn Packetizer>>,
     /// The estimate the encoder follows, read every 100 ms.
@@ -298,9 +406,26 @@ struct Peer {
     builder: SampleBuilder<Vp8Packet>,
     decoder: ModelDecoder,
     usable_at: Vec<Duration>,
+    /// How long after its capture each usable frame came out of the decoder.
+    usable_lag: Vec<Duration>,
     unusable: u64,
     last_keyframe_request: Option<Instant>,
     keyframe_requests: Vec<Duration>,
+    /// The sending side: every `OnPacerDiscard` (time, frames, packets), and the key-frame
+    /// requests (PLI / FIR) it was handed.
+    pacer_discards: Vec<(Duration, u32, usize)>,
+    key_requests_received: u32,
+    /// When the application was told of a selected candidate pair, with the estimate then.
+    pair_changes: Vec<(Duration, Option<u32>)>,
+    /// The lowest `availableOutgoingBitrate` of the nominated pair (webrtc-stats) and the
+    /// lowest estimate of the congestion controller, each read every 100 ms once there is one.
+    lowest_outgoing: Option<f64>,
+    lowest_estimate: Option<u32>,
+    /// Octets of video frames the application wrote.
+    video_octets: u64,
+    /// (time, estimate) each time the congestion controller's estimate moved, looked at
+    /// after every step of the world while it is `sampling`.
+    estimates: Vec<(Duration, u32)>,
 }
 
 fn video_codec() -> RTCRtpCodec {
@@ -357,9 +482,30 @@ fn track(kind: RtpCodecKind, codec: RTCRtpCodec, ssrc: u32, rtx: Option<u32>) ->
     )
 }
 
+/// A peer's video track: the stream after its audio's, with a retransmission stream.
+fn video_track(ssrc_base: u32) -> MediaStreamTrack {
+    track(
+        RtpCodecKind::Video,
+        video_codec(),
+        ssrc_base + 1,
+        Some(ssrc_base + 2),
+    )
+}
+
 impl Peer {
-    /// A peer with ParolNet's media engine and interceptor chain, sending Opus and VP8.
-    fn new(addr: &str, seed: u64, ssrc_base: u32) -> Result<Self> {
+    /// A peer with ParolNet's media engine and interceptor chain, sending Opus and VP8; its
+    /// NACK responder holds retransmissions to `rate_limit`, the engine's default when `None`.
+    fn new(
+        addr: &str,
+        setup: &Setup,
+        salt: u64,
+        ssrc_base: u32,
+        video: bool,
+        start: Instant,
+    ) -> Result<Self> {
+        let seed = setup.seed ^ salt;
+        let rate_limit = setup.rate_limit;
+        let wall_clock = setup.anchor.map(|anchor| SystemInstant::at(start, anchor));
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
             inner: default_provider()?,
             rng: Mutex::new(Rng(seed)),
@@ -392,13 +538,61 @@ impl Peer {
             },
             RtpCodecKind::Audio,
         )?;
-        let registry = configure_nack(Registry::new(), &mut media_engine);
-        let registry = configure_rtcp_reports_with(
-            registry,
-            RtcpSessionBuilder::new()
-                .with_t_rr_interval(Duration::ZERO)
-                .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed))),
-        );
+        if setup.chain != Chain::ParolNet {
+            let mut options = DefaultInterceptorOptions::default();
+            options.rtcp_random = Some(provider.clone());
+            options.wall_clock = wall_clock;
+            if let Some(rate_limit) = rate_limit {
+                options.nack_retransmission_rate_limit = rate_limit;
+            }
+            let (mut registry, handles) = register_default_interceptors_with_options(
+                Registry::new(),
+                &mut media_engine,
+                &options,
+            )?;
+            if setup.chain == Chain::DefaultWithoutPacer {
+                registry = registry.with(Slot::Pacer, PassThroughInterceptor::new());
+            }
+            // The application's bounds, as ParolNet gives its GCC.
+            handles
+                .congestion_control
+                .set_min_bitrate(Some(f64::from(MIN_BPS)));
+            handles
+                .congestion_control
+                .set_session_bitrate_limit(Some(f64::from(MAX_BPS)));
+            return Self::with_chain(
+                addr,
+                provider,
+                media_engine,
+                registry,
+                ssrc_base,
+                video,
+                None,
+                Some(handles),
+                start,
+            );
+        }
+        let registry = match rate_limit {
+            None => configure_nack(Registry::new(), &mut media_engine),
+            // `configure_nack` with the responder's rule set (the codec carries the NACK
+            // feedback already).
+            Some(rate_limit) => Registry::new()
+                .with(
+                    Slot::NackResponder,
+                    NackResponderBuilder::new()
+                        .with_rate_limit(rate_limit)
+                        .build(),
+                )
+                .with(Slot::NackGenerator, NackGeneratorBuilder::new().build()),
+        };
+        let session = RtcpSessionBuilder::new()
+            .with_t_rr_interval(Duration::ZERO)
+            .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match wall_clock {
+            Some(anchor) => session.with_wall_clock(anchor),
+            None => session,
+        };
+        let registry = configure_rtcp_reports_with(registry, session);
         configure_receiver_reference_time(&mut media_engine);
         let registry = configure_key_frame_requests(registry);
         let (gcc, handle) = GccInterceptorBuilder::new();
@@ -410,6 +604,31 @@ impl Peer {
                     .build(),
             ),
         );
+        Self::with_chain(
+            addr,
+            provider,
+            media_engine,
+            registry,
+            ssrc_base,
+            video,
+            Some(handle),
+            None,
+            start,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_chain(
+        addr: &str,
+        provider: Arc<dyn RTCCryptoProvider>,
+        media_engine: MediaEngine,
+        registry: Registry,
+        ssrc_base: u32,
+        video: bool,
+        gcc: Option<GccHandle>,
+        handles: Option<DefaultInterceptorHandles>,
+        start: Instant,
+    ) -> Result<Self> {
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(
@@ -419,19 +638,23 @@ impl Peer {
             )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+            .build(start)?;
         let audio = pc.add_track(track(RtpCodecKind::Audio, opus_codec(), ssrc_base, None))?;
-        let video = pc.add_track(track(
-            RtpCodecKind::Video,
-            video_codec(),
-            ssrc_base + 1,
-            Some(ssrc_base + 2),
-        ))?;
+        let video = if video {
+            Some(pc.add_track(video_track(ssrc_base))?)
+        } else {
+            None
+        };
         Ok(Self {
             pc,
             addr: addr.parse()?,
             connected: false,
-            gcc: handle,
+            gcc,
+            handles,
+            video_written: BTreeSet::new(),
+            video_left: BTreeSet::new(),
+            video_written_late: BTreeMap::new(),
+            media_elapsed: Duration::ZERO,
             audio,
             video,
             audio_packetizer: None,
@@ -445,9 +668,17 @@ impl Peer {
             builder: SampleBuilder::new(256, Vp8Packet::default(), 90_000),
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
+            usable_lag: Vec::new(),
             unusable: 0,
             last_keyframe_request: None,
             keyframe_requests: Vec::new(),
+            pacer_discards: Vec::new(),
+            key_requests_received: 0,
+            pair_changes: Vec::new(),
+            lowest_outgoing: None,
+            lowest_estimate: None,
+            video_octets: 0,
+            estimates: Vec::new(),
         })
     }
 
@@ -468,7 +699,9 @@ impl Peer {
 
     /// Packetize one frame of `kind` and hand it to the engine.
     fn send_frame(&mut self, now: Instant, video: bool, data: &[u8], samples: u32) -> Result<()> {
-        let id = if video { self.video } else { self.audio };
+        let Some(id) = (if video { self.video } else { Some(self.audio) }) else {
+            return Ok(());
+        };
         let Some(mut sender) = self.pc.rtp_sender(id) else {
             return Ok(());
         };
@@ -506,10 +739,83 @@ impl Peer {
         let Some(packetizer) = packetizer.as_mut() else {
             return Ok(());
         };
+        if video {
+            self.video_octets += data.len() as u64;
+        }
         for packet in packetizer.packetize(now, &Bytes::copy_from_slice(data), samples)? {
+            if video {
+                self.video_written.insert(packet.header.sequence_number);
+                if self.media_elapsed >= Duration::from_secs(1) {
+                    self.video_written_late
+                        .insert(packet.header.sequence_number, self.media_elapsed);
+                }
+            }
             sender.write_rtp(now, packet)?;
         }
         Ok(())
+    }
+
+    /// The target the encoder follows: GCC's handle in ParolNet's chain; in the default chain
+    /// the sum of what the two senders are given.
+    fn media_target(&mut self) -> Option<u32> {
+        if let Some(gcc) = &self.gcc {
+            return gcc.target_bitrate_bps();
+        }
+        let mut total = 0.0;
+        let mut shares = 0;
+        for id in [Some(self.audio), self.video].into_iter().flatten() {
+            if let Some(sender) = self.pc.rtp_sender(id) {
+                let targets = sender.target_bitrates();
+                shares += targets.len();
+                total += targets.iter().map(|(_, bps)| bps).sum::<f64>();
+            }
+        }
+        // Zero is a target too: the pacer's pause.
+        (shares > 0).then_some(total as u32)
+    }
+
+    /// The fraction of packets the congestion controller counts as lost (smoothed).
+    fn packet_loss(&self) -> Option<f64> {
+        match (&self.gcc, &self.handles) {
+            (Some(gcc), _) => gcc.stats().packet_loss,
+            (None, Some(handles)) => handles.congestion_control.stats().packet_loss,
+            _ => None,
+        }
+    }
+
+    /// The congestion controller's estimate itself.
+    fn estimate(&self) -> Option<u32> {
+        match (&self.gcc, &self.handles) {
+            (Some(gcc), _) => gcc.estimate_bps(),
+            (None, Some(handles)) => Some(handles.congestion_control.target_bitrate() as u32),
+            _ => None,
+        }
+    }
+
+    /// `availableOutgoingBitrate` of the nominated candidate pair.
+    fn available_outgoing(&mut self, now: Instant) -> Option<f64> {
+        self.pc
+            .get_stats(now, StatsSelector::None)
+            .iter()
+            .find_map(|entry| match entry {
+                RTCStatsReportEntry::IceCandidatePair(pair) if pair.nominated => {
+                    pair.available_outgoing_bitrate
+                }
+                _ => None,
+            })
+    }
+
+    /// The estimator's delay-based and loss-based halves.
+    fn halves(&self) -> (u32, u32) {
+        let stats = match (&self.gcc, &self.handles) {
+            (Some(gcc), _) => gcc.stats(),
+            (None, Some(handles)) => handles.congestion_control.stats(),
+            _ => return (0, 0),
+        };
+        (
+            stats.delay_based_bitrate.unwrap_or(0.0) as u32,
+            stats.loss_based_bitrate.unwrap_or(0.0) as u32,
+        )
     }
 
     /// Ask the sender of the received video for a key frame (PLI), as ParolNet's
@@ -551,10 +857,20 @@ struct World {
     next_target: Instant,
     frame: u64,
     media: bool,
+    /// Whether each peer's camera is on: its video source produces frames.
+    video_on: [bool; 2],
     /// Every 100 ms: time, the caller's estimate, its uplink's queue and drops, the
     /// retransmissions it sent and lost there, the callee's usable frames so far. Printed
     /// with `RTC_CAP_TRACE=1`.
     trace: Vec<String>,
+    /// Nothing sent either way arrives (both hosts' network is gone).
+    blackhole: bool,
+    /// Only STUN arrives until the caller's application is told of a newly selected pair: the
+    /// path the media went on is gone, and the new one carries the restart's checks first.
+    stun_only: bool,
+    /// The caller's estimate and counted loss after every step, while `sampling`.
+    sampling: bool,
+    samples: Vec<(Duration, Option<u32>, Option<f64>)>,
 }
 
 impl World {
@@ -568,11 +884,29 @@ impl World {
             for i in 0..2 {
                 while let Some(msg) = self.peers[i].pc.poll_write() {
                     moved = true;
-                    let rtx = rtp_payload_type(&msg.message) == Some(RTX_PT);
+                    let payload_type = rtp_payload_type(&msg.message);
+                    if payload_type == Some(VP8_PT)
+                        && msg.message.len() >= 12
+                        && msg.message[8..12]
+                            == (0x1000_0001u32 + 0x1000_0000 * i as u32).to_be_bytes()
+                    {
+                        let seq = u16::from_be_bytes([msg.message[2], msg.message[3]]);
+                        self.peers[i].video_left.insert(seq);
+                    }
+                    // RFC 7983: a first octet of 0 to 3 is STUN.
+                    let stun = msg.message.first().is_some_and(|b| *b <= 3);
+                    if self.blackhole
+                        || (self.stun_only && !stun && self.peers[0].pair_changes.is_empty())
+                    {
+                        continue;
+                    }
                     let arrives = self.uplinks[i].send(self.now, msg.message.len());
-                    if rtx {
+                    if payload_type == Some(RTX_PT) {
                         self.uplinks[i].rtx_sent += 1;
                         self.uplinks[i].rtx_dropped += u64::from(arrives.is_none());
+                    }
+                    if payload_type == Some(OPUS_PT) {
+                        self.uplinks[i].audio_dropped += u64::from(arrives.is_none());
                     }
                     let Some(at) = arrives else { continue };
                     self.order += 1;
@@ -637,6 +971,10 @@ impl World {
                     }
                     peer.connected = state == RTCPeerConnectionState::Connected;
                 }
+                RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => {
+                    let estimate = peer.estimate();
+                    peer.pair_changes.push((at, estimate));
+                }
                 RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
                     let video = peer
                         .pc
@@ -647,6 +985,9 @@ impl World {
                         peer.request_keyframe(now)?;
                     }
                 }
+                RTCPeerConnectionEvent::OnPacerDiscard {
+                    frames, packets, ..
+                } => peer.pacer_discards.push((at, frames, packets)),
                 _ => {}
             }
         }
@@ -657,7 +998,20 @@ impl World {
                     peer.builder.push(now, packet);
                     while let Some(sample) = peer.builder.pop(now) {
                         match peer.decoder.accept(&sample.data) {
-                            Some(true) => peer.usable_at.push(at),
+                            Some(true) => {
+                                peer.usable_at.push(at);
+                                let data = &sample.data;
+                                let captured = u32::from_be_bytes([
+                                    0,
+                                    data[VideoModel::HEADER],
+                                    data[VideoModel::HEADER + 1],
+                                    data[VideoModel::HEADER + 2],
+                                ]);
+                                peer.usable_lag
+                                    .push(at.saturating_sub(Duration::from_millis(
+                                        u64::from(captured) * 10,
+                                    )));
+                            }
                             Some(false) => peer.unusable += 1,
                             None => {}
                         }
@@ -681,6 +1035,7 @@ impl World {
                     }) =>
                 {
                     peer.force_key = true;
+                    peer.key_requests_received += 1;
                 }
                 _ => {}
             }
@@ -703,11 +1058,23 @@ impl World {
             self.frame += 1;
             self.next_video =
                 self.start + Duration::from_micros(self.frame * 1_000_000 / u64::from(VIDEO_FPS));
-            for peer in self.peers.iter_mut() {
+            let ignore = IGNORE_TARGET.with(|i| i.get());
+            for (i, peer) in self.peers.iter_mut().enumerate() {
+                peer.media_elapsed = at;
+                // A target of zero is the pacer's pause: no frame is produced until the next
+                // target (a source that ignores the target, the caller under IGNORE_TARGET,
+                // carries on at its rate before the cap).
+                let ignoring = ignore && i == 0;
+                if !self.video_on[i] || (peer.target_bps == 0 && !ignoring) {
+                    continue;
+                }
+                let bitrate = if ignoring { 1_400_000 } else { peer.target_bps };
                 let key = std::mem::take(&mut peer.force_key);
-                let frame = peer
-                    .model
-                    .next_frame(video_bitrate_for(peer.target_bps), key);
+                let mut frame = peer.model.next_frame(video_bitrate_for(bitrate), key);
+                // When it was captured, in units of 10 ms, after the model's header.
+                let captured = (at.as_millis() / 10) as u32;
+                frame[VideoModel::HEADER..VideoModel::HEADER + 3]
+                    .copy_from_slice(&captured.to_be_bytes()[1..]);
                 if key {
                     peer.keyframes_sent.push(at);
                 }
@@ -717,20 +1084,44 @@ impl World {
         if now >= self.next_target {
             self.next_target += Duration::from_millis(100);
             let link = &self.uplinks[0];
+            let (delay_based, loss_based) = self.peers[0].halves();
             self.trace.push(format!(
-                "{:6.1} target {:7} queue {:3} ms drops {:5} rtx {:5}/{:5} lost usable {:5} unusable {:4}",
+                "{:6.1} target {:7} estimate {:7} delay {:7} loss {:7} callee {:7} queue {:3} ms drops {:5} audio {:4} rtx {:5}/{:5} lost usable {:5} unusable {:4}",
                 at.as_secs_f64(),
                 self.peers[0].target_bps,
+                self.peers[0].estimate().unwrap_or(0),
+                delay_based,
+                loss_based,
+                self.peers[1].estimate().unwrap_or(0),
                 link.busy_until
                     .map_or(0, |t| t.saturating_duration_since(now).as_millis()),
                 link.queue_drops,
+                link.audio_dropped,
                 link.rtx_sent,
                 link.rtx_dropped,
                 self.peers[1].usable_at.len(),
                 self.peers[1].unusable,
             ));
             for peer in self.peers.iter_mut() {
-                if let Some(bps) = peer.gcc.target_bitrate_bps()
+                // Only a peer connection whose chain tells it the estimate has one to report.
+                // The statistic leaves the member out when the estimate is zero: once it
+                // has been there, a report without it is a zero.
+                if peer.handles.is_some() {
+                    let outgoing = peer.available_outgoing(now);
+                    if let Some(outgoing) = outgoing.or(peer.lowest_outgoing.map(|_| 0.0)) {
+                        peer.lowest_outgoing = Some(
+                            peer.lowest_outgoing
+                                .map_or(outgoing, |low| low.min(outgoing)),
+                        );
+                    }
+                }
+                if let Some(estimate) = peer.estimate() {
+                    peer.lowest_estimate = Some(
+                        peer.lowest_estimate
+                            .map_or(estimate, |low| low.min(estimate)),
+                    );
+                }
+                if let Some(bps) = peer.media_target()
                     && bps != peer.target_bps
                 {
                     peer.target_bps = bps;
@@ -762,6 +1153,19 @@ impl World {
             }
             self.tick()?;
             self.pump()?;
+            if self.sampling {
+                let caller = &self.peers[0];
+                let sample = (self.elapsed(), caller.estimate(), caller.packet_loss());
+                self.samples.push(sample);
+                let at = self.elapsed();
+                for peer in self.peers.iter_mut() {
+                    if let Some(estimate) = peer.estimate()
+                        && peer.estimates.last().is_none_or(|last| last.1 != estimate)
+                    {
+                        peer.estimates.push((at, estimate));
+                    }
+                }
+            }
             if self.now == next && next < to {
                 // Progress even when a deadline repeats at the same instant.
                 let quiet = self
@@ -777,13 +1181,100 @@ impl World {
         Ok(())
     }
 
+    /// The 100 ms trace, with `RTC_CAP_TRACE` set.
+    fn print_trace(&self, what: &str, setup: &Setup) {
+        if std::env::var("RTC_CAP_TRACE").is_ok() {
+            for line in &self.trace {
+                println!("TRACE {what} {:?} seed {} {line}", setup.chain, setup.seed);
+            }
+        }
+    }
+
+    /// Each peer's host candidate to the other, as after gathering.
+    fn trickle(&mut self) -> Result<()> {
+        for i in 0..2 {
+            let candidate = self.peers[i].candidate()?;
+            self.peers[i].pc.add_local_candidate(candidate.clone())?;
+            self.peers[1 - i].pc.add_remote_candidate(candidate)?;
+        }
+        Ok(())
+    }
+
+    /// An ICE restart from the caller, signalled at once, with the same host candidates.
+    fn restart_ice(&mut self) -> Result<()> {
+        let now = self.now;
+        self.peers[0].pc.restart_ice();
+        let offer = self.peers[0].pc.create_offer(None)?;
+        self.peers[0].pc.set_local_description(now, offer.clone())?;
+        self.peers[1].pc.set_remote_description(now, offer)?;
+        let answer = self.peers[1].pc.create_answer(None)?;
+        self.peers[1]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        self.peers[0].pc.set_remote_description(now, answer)?;
+        self.trickle()
+    }
+
+    /// Peer `i` turns its camera on or off and negotiates the change, signalled at once: its
+    /// video section's direction, or, for a peer that never had a video track, a track (on the
+    /// section the other peer's offer created, when there is one). As ParolNet's
+    /// `set_sending`.
+    fn set_video(&mut self, i: usize, on: bool) -> Result<()> {
+        let now = self.now;
+        match self.peers[i].video {
+            Some(sender) => {
+                let Some(mut transceiver) = self.peers[i]
+                    .pc
+                    .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+                else {
+                    bail!("peer {i} has no video transceiver");
+                };
+                let receive = transceiver.direction().has_recv();
+                transceiver
+                    .set_direction(RTCRtpTransceiverDirection::from_send_recv(on, receive))?;
+            }
+            None if on => {
+                let ssrc_base = 0x1000_0000 * (i as u32 + 1);
+                let sender = self.peers[i].pc.add_track(video_track(ssrc_base))?;
+                self.peers[i].video = Some(sender);
+            }
+            None => return Ok(()),
+        }
+        let offer = self.peers[i].pc.create_offer(None)?;
+        self.peers[i].pc.set_local_description(now, offer.clone())?;
+        self.peers[1 - i].pc.set_remote_description(now, offer)?;
+        let answer = self.peers[1 - i].pc.create_answer(None)?;
+        self.peers[1 - i]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        self.peers[i].pc.set_remote_description(now, answer)?;
+        self.video_on[i] = on;
+        // A camera turned on starts with a key frame.
+        self.peers[i].force_key |= on;
+        Ok(())
+    }
+
     /// Two peers over host candidates, audio and video each way, connected.
-    fn connected(seed: u64) -> Result<Self> {
+    fn connected(setup: &Setup) -> Result<Self> {
         let start = Instant::now();
         let mut world = World {
             peers: [
-                Peer::new("10.0.0.1:5000", seed ^ 0x1111, 0x1000_0000)?,
-                Peer::new("10.0.0.2:5000", seed ^ 0x2222, 0x2000_0000)?,
+                Peer::new(
+                    "10.0.0.1:5000",
+                    setup,
+                    0x1111,
+                    0x1000_0000,
+                    setup.video[0],
+                    start,
+                )?,
+                Peer::new(
+                    "10.0.0.2:5000",
+                    setup,
+                    0x2222,
+                    0x2000_0000,
+                    setup.video[1],
+                    start,
+                )?,
             ],
             uplinks: [Uplink::new(), Uplink::new()],
             start,
@@ -795,7 +1286,12 @@ impl World {
             next_target: start,
             frame: 0,
             media: false,
+            video_on: setup.video,
             trace: Vec::new(),
+            blackhole: false,
+            stun_only: false,
+            sampling: false,
+            samples: Vec::new(),
         };
         let now = world.now;
         let offer = world.peers[0].pc.create_offer(None)?;
@@ -808,11 +1304,7 @@ impl World {
             .pc
             .set_local_description(now, answer.clone())?;
         world.peers[0].pc.set_remote_description(now, answer)?;
-        for i in 0..2 {
-            let candidate = world.peers[i].candidate()?;
-            world.peers[i].pc.add_local_candidate(candidate.clone())?;
-            world.peers[1 - i].pc.add_remote_candidate(candidate)?;
-        }
+        world.trickle()?;
         while !world.peers.iter().all(|p| p.connected) {
             if world.elapsed() > Duration::from_secs(10) {
                 bail!("not connected");
@@ -863,26 +1355,69 @@ struct Outcome {
     reacted: Duration,
     /// Its median over the last twelve seconds of the cap.
     under: u32,
-    /// Its value 20 s after the cap went.
+    /// The target the encoder followed 20 s after the cap went, and the estimate itself then
+    /// (the target less the retransmission reserve, the same with nothing to repair).
     after: u32,
+    estimate_after: u32,
+    /// The estimate when the cap went, and the target the encoder followed 5, 10, 15 and 20 s
+    /// later.
+    estimate_at_lift: u32,
+    recovery: [u32; 4],
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
     freeze_at: Duration,
+    /// The oldest picture the callee showed from the cap on: the longest time between a
+    /// frame's capture and its coming out of the decoder (a frame held back for a repair is
+    /// usable when it comes, and late).
+    lag: Duration,
     capped_at: Duration,
     opened_at: Duration,
     keyframe_requests: Vec<Duration>,
     queue_drops: u64,
     rtx_sent: u64,
     rtx_dropped: u64,
+    /// Opus packets dropped at the capped link's queue.
+    audio_dropped: u64,
+    /// Video packets the caller's application wrote that never left its host, and those of
+    /// them written from 1 s on.
+    pacer_dropped: usize,
+    pacer_dropped_late: usize,
+    /// The caller's `OnPacerDiscard` events (time, frames, packets), and the key-frame requests
+    /// it was handed (the callee's and the pacer's).
+    pacer_discards: Vec<(Duration, u32, usize)>,
+    key_requests_received: u32,
+    /// The caller's pauses (target zero, as its application read it every 100 ms): start and
+    /// end, and how long after each end the callee had its next usable frame.
+    pauses: Vec<(Duration, Duration)>,
+    resumed_after: Vec<Duration>,
     unusable: u64,
+    /// The caller's lowest congestion estimate and lowest `availableOutgoingBitrate` of the
+    /// whole call (read every 100 ms): neither is the pause.
+    lowest_estimate: Option<u32>,
+    lowest_outgoing: Option<f64>,
 }
 
-/// The call: 20 s open, the caller's uplink capped at 300 kbit/s until 20 s after its
-/// estimate went under 400 kbit/s, then open again for 20 s.
-fn run(seed: u64) -> Result<Outcome> {
-    let mut world = World::connected(seed)?;
-    let t = world.now + Duration::from_secs(20);
-    world.advance(t)?;
+/// The call: open for 20 s (or until the caller's target reaches `Setup::cap_at_target`),
+/// the caller's uplink capped at 300 kbit/s until `Setup::cap` (20 s) after its estimate went
+/// under 400 kbit/s, then open again for 20 s.
+fn run(setup: &Setup) -> Result<Outcome> {
+    let seed = setup.seed;
+    let mut world = World::connected(setup)?;
+    match setup.cap_at_target {
+        None => {
+            let t = world.now + Duration::from_secs(20);
+            world.advance(t)?;
+        }
+        Some(bps) => {
+            while world.peers[0].target_bps < bps {
+                if world.elapsed() > Duration::from_secs(40) {
+                    bail!("the target did not reach {bps} bit/s in 40 s");
+                }
+                let t = world.now + Duration::from_millis(100);
+                world.advance(t)?;
+            }
+        }
+    }
     let before = target_at(&world.peers[0].targets, world.elapsed());
     world.uplinks[0].set_profile(LinkProfile::capped_300k());
     let capped_at = world.elapsed();
@@ -898,10 +1433,10 @@ fn run(seed: u64) -> Result<Outcome> {
     let Some(reacted) = reacted else {
         bail!("the estimate did not come down within 5 s");
     };
-    let t = world.now + Duration::from_secs(20);
+    let t = world.now + setup.cap;
     world.advance(t)?;
     let mut samples = Vec::new();
-    let mut at = capped_at + Duration::from_secs(8);
+    let mut at = capped_at + Duration::from_secs(8).min(setup.cap / 2);
     while at <= world.elapsed() {
         samples.push(target_at(&world.peers[0].targets, at));
         at += Duration::from_millis(100);
@@ -910,66 +1445,1038 @@ fn run(seed: u64) -> Result<Outcome> {
     let under = samples[samples.len() / 2];
     world.uplinks[0].set_profile(LinkProfile::open());
     let opened_at = world.elapsed();
-    let t = world.now + Duration::from_secs(20);
-    world.advance(t)?;
+    let estimate_at_lift = world.peers[0].estimate().unwrap_or(0);
+    let mut recovery = [0; 4];
+    for after in recovery.iter_mut() {
+        let t = world.now + Duration::from_secs(5);
+        world.advance(t)?;
+        *after = target_at(&world.peers[0].targets, world.elapsed());
+    }
     let end = world.elapsed();
     let after = target_at(&world.peers[0].targets, end);
+    let estimate_after = world.peers[0].estimate().unwrap_or(0);
+    let caller = &world.peers[0];
+    let pacer_dropped = caller.video_written.difference(&caller.video_left).count();
+    // Written from 1 s on and at least 1 s before the end (the last frames may still wait in
+    // a pacer when the run stops).
+    let pacer_dropped_late = caller
+        .video_written_late
+        .iter()
+        .filter(|(seq, at)| {
+            **at + Duration::from_secs(1) <= end && !caller.video_left.contains(seq)
+        })
+        .count();
     if std::env::var("RTC_CAP_TRACE").is_ok() {
         for line in &world.trace {
-            println!("TRACE seed {seed} {line}");
+            println!("TRACE {:?} seed {seed} {line}", setup.chain);
         }
     }
     let callee = &world.peers[1];
     let (freeze, freeze_at) = longest_gap(&callee.usable_at, Duration::from_secs(2), end);
+    let lag = callee
+        .usable_at
+        .iter()
+        .zip(&callee.usable_lag)
+        .filter(|(at, _)| **at >= capped_at)
+        .map(|(_, lag)| *lag)
+        .max()
+        .unwrap_or_default();
+    let mut pauses = Vec::new();
+    let mut started = None;
+    for &(at, bps) in &caller.targets {
+        match (started, bps) {
+            (None, 0) => started = Some(at),
+            (Some(from), bps) if bps > 0 => {
+                pauses.push((from, at));
+                started = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = started {
+        pauses.push((from, end));
+    }
+    let resumed_after = pauses
+        .iter()
+        .map(|(_, until)| {
+            callee
+                .usable_at
+                .iter()
+                .find(|at| **at >= *until)
+                .map_or(end.saturating_sub(*until), |at| *at - *until)
+        })
+        .collect();
     Ok(Outcome {
         before,
         reacted,
         under,
         after,
+        estimate_after,
+        estimate_at_lift,
+        recovery,
         freeze,
         freeze_at,
+        lag,
         capped_at,
         opened_at,
         keyframe_requests: callee.keyframe_requests.clone(),
         queue_drops: world.uplinks[0].queue_drops,
         rtx_sent: world.uplinks[0].rtx_sent,
         rtx_dropped: world.uplinks[0].rtx_dropped,
+        audio_dropped: world.uplinks[0].audio_dropped,
+        pacer_dropped,
+        pacer_dropped_late,
+        pacer_discards: caller.pacer_discards.clone(),
+        key_requests_received: caller.key_requests_received,
+        pauses,
+        resumed_after,
         unusable: callee.unusable,
+        lowest_estimate: caller.lowest_estimate,
+        lowest_outgoing: caller.lowest_outgoing,
     })
 }
 
-/// Video through a 300 kbit/s cap that comes and goes, on six seeds: never more than 2 s
-/// without a usable frame on the receiving side (engine v0.22.0+brainwires.5 gave at most
-/// 0.85 s in ParolNet's simulation of the same call; v0.22.0+brainwires.6 froze for 5.9 to
-/// 6.8 s here on every seed).
+/// Whether the whole matrix runs (`RTC_CAP_FULL` set): every test of this file on all its
+/// seeds (two to six times those of an ordinary run, which is sized to take a hosted runner
+/// some ninety seconds).
+fn full() -> bool {
+    std::env::var_os("RTC_CAP_FULL").is_some()
+}
+
+/// The seeds of a test: the first `usual`, and the first `whole` under `RTC_CAP_FULL`.
+fn seed_range(usual: u64, whole: u64) -> std::ops::RangeInclusive<u64> {
+    1..=if full() { whole } else { usual }
+}
+
+/// How long the cap is held in the permanent tests: 20 s on three seeds ([`cap_20`]) and 14,
+/// 17, 23 and 26 s on one ([`cap_lengths`]), each set a test of its own under each rule so
+/// that they run side by side; six and three seeds with `RTC_CAP_FULL` set (the matrix every
+/// change to the estimator is measured on: 18 runs per rule, some four minutes). A bound that
+/// holds at one length only can be the phase of the estimate's climb at the instant the cap
+/// goes (the estimator this engine had until v0.22.0+brainwires.6 gave 945, 1192, 477 to
+/// 1316, 549 and 693 kbit/s twenty seconds after caps of these five lengths, whatever the
+/// retransmission rule).
+fn cap_lengths() -> Vec<(u64, std::ops::RangeInclusive<u64>)> {
+    [14, 17, 23, 26]
+        .into_iter()
+        .map(|cap| (cap, seed_range(1, 3)))
+        .collect()
+}
+
+fn cap_20() -> Vec<(u64, std::ops::RangeInclusive<u64>)> {
+    vec![(20, seed_range(3, 6))]
+}
+
+/// The target the caller's encoder has reached when the cap arrives in the permanent tests
+/// of the call without a pacer: 1 Mbit/s, some 15.5 s into the call. Their bounds were
+/// measured on a cap that arrived at this rate (20 s into the call under the estimator of
+/// v0.22.0+brainwires.6's branch, whose estimate stepped down on an open link and climbed
+/// that much slower). How much is lost at a cap is a matter of the rate it meets: for
+/// some 0.45 s (the capped link's 300 ms of queue, the path and a feedback interval) nothing
+/// can tell the sender, and what it sends above the link's rate meanwhile is dropped. The
+/// cap that arrives after 20 s, at 1.4 Mbit/s, is
+/// [`a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`].
+const CAP_AT_TARGET: u32 = 1_000_000;
+
+/// The cap `lengths` and their seeds under `rate_limit` (`None`: the engine's default), each
+/// outcome printed; with the cap's length and the seed.
+fn seeds(
+    rate_limit: Option<RetransmissionRateLimit>,
+    lengths: &[(u64, std::ops::RangeInclusive<u64>)],
+) -> Result<Vec<(u64, u64, Outcome)>> {
+    let mut outcomes = Vec::new();
+    for (cap, seeds) in lengths.iter().cloned() {
+        for seed in seeds {
+            let mut setup = Setup::new(seed, rate_limit)
+                .anchor(ANCHORS[0])
+                .capped_at_a_target_of(CAP_AT_TARGET);
+            setup.cap = Duration::from_secs(cap);
+            let outcome = run(&setup)?;
+            println!("{rate_limit:?} cap {cap} s seed {seed}: {outcome:?}");
+            outcomes.push((cap, seed, outcome));
+        }
+    }
+    Ok(outcomes)
+}
+
+/// What every run of the call without a pacer is held to, at every cap length:
 ///
-/// When the cap comes, the sender is still at 1.4 Mbit/s for half a second and some fifty
-/// video packets are dropped at the link's queue. With the release's NACK request policy (ten
+/// - never more than 2 s without a usable frame on the receiving side;
+/// - the oldest picture shown from the cap on (capture to decoder) no older than `lag`;
+/// - the retransmissions congestion controlled (RFC 4588 section 7): at most 100 sent
+///   through the cap (the rules held to the target send 42 to 54, 13 to 17 of them dropped at
+///   the link's queue; without a limit 54 to 105 were sent and more than half dropped);
+/// - the capped link used: the median target under the cap at least 200 kbit/s of the 300;
+/// - the estimate recovered: at least 800 kbit/s twenty seconds after the cap went.
+fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
+    for (cap, seed, outcome) in outcomes {
+        assert!(
+            outcome.freeze <= Duration::from_secs(2),
+            "cap {cap} s seed {seed}: the video froze for {:?}: {outcome:?}",
+            outcome.freeze
+        );
+        assert!(
+            outcome.lag <= lag,
+            "cap {cap} s seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
+        );
+        assert!(
+            outcome.rtx_sent <= 100,
+            "cap {cap} s seed {seed}: {} retransmissions: {outcome:?}",
+            outcome.rtx_sent
+        );
+        assert!(
+            outcome.under >= 200_000,
+            "cap {cap} s seed {seed}: {} bit/s under the cap: {outcome:?}",
+            outcome.under
+        );
+        assert!(
+            outcome.recovery[3] >= 800_000,
+            "cap {cap} s seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
+            outcome.recovery[3]
+        );
+    }
+}
+
+/// Video through a 300 kbit/s cap that comes and goes, on six seeds, under the engine's
+/// default retransmission rule (RFC 4588 section 7: the original and the retransmitted data
+/// share the target, and the target the encoder follows is lowered while repairs are
+/// pending): never more than 2 s without a usable frame on the receiving side (engine
+/// v0.22.0+brainwires.5 gave at most 0.85 s in ParolNet's simulation of the same call;
+/// v0.22.0+brainwires.6 froze for 5.9 to 6.8 s here on every seed; now 1.33 to 1.44 s, and
+/// 2.46 to 2.47 s with the RFC's sharing but without the lowered target).
+///
+/// When the cap comes ([`CAP_AT_TARGET`]), the sender is still at 1 Mbit/s for half a second
+/// and some forty video packets are dropped at the link's queue. With the release's NACK request policy (ten
 /// requests or two seconds, then a packet is given up) and retransmissions that nothing held
 /// to the estimate (about 300, five times the link, three in four of them dropped at the same
 /// queue), some of those packets were given up, stayed lost, the sample builder held every
 /// later frame back for its 256 packets and the picture froze until a key frame. Now a packet
-/// is asked for while it is missing and the retransmissions stay under the estimate.
+/// is asked for while it is missing, the retransmissions stay within the estimate, and the
+/// encoder leaves them room.
 ///
-/// Not asserted: the estimate 20 s after the cap went (`after` in the output). In ParolNet's
-/// simulation v0.22.0+brainwires.5 was at 1.18 Mbit/s there; here it is 0.45 to 1.5 Mbit/s
-/// depending on the seed: GCC climbs from its floor at 8% a second, and when it has reached the
-/// capacity again before the cap goes, the loss at the overflowing queue cuts it back to the
-/// floor on every feedback (draft-ietf-rmcat-gcc-02 section 6) just before the path opens.
+/// The cap is held 20 s here and 14, 17, 23 and 26 s in the next test ([`cap_lengths`]), and
+/// the same bounds hold at each ([`assert_the_call_holds`]): with the engine's GCC estimator
+/// behind the TWCC-driven interceptor (a loss-based estimate of its own, over-use backing off
+/// from the received rate, the estimate not increased past one and a half times the received
+/// rate: draft-ietf-rmcat-gcc-02 sections 5.5 and 6) the estimate holds about 250 kbit/s of
+/// the 300 under the cap and is at 1 to 1.35 Mbit/s twenty seconds after it, whenever the cap
+/// goes.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()> {
-    let mut outcomes = Vec::new();
-    for seed in 1..=6 {
-        let outcome = run(seed)?;
-        println!("seed {seed}: {outcome:?}");
-        outcomes.push((seed, outcome));
-    }
-    for (seed, outcome) in &outcomes {
+    // Measured (hosted run 45334499296, six seeds, and three at each other length): freeze
+    // 0.56 to 1.26 s, the oldest picture 1.68 to 2.48 s, 39 to 47 retransmissions (10 to 14
+    // dropped), 239 to 257 kbit/s under the cap, 1027 to 1320 kbit/s twenty seconds after
+    // it. With one decrease per round trip (libwebrtc's form, the default until this
+    // estimate was measured; run 45332800112): 0.85 to 1.36 s, 2.33 to 2.61 s, 42 to 49,
+    // 234 to 251, 977 to 1344. With the cap arriving after 20 s at the 0.99 Mbit/s the
+    // earlier estimator had reached by then (runs 45315535896, 45312738975): 0.83 to
+    // 1.24 s, 2.26 to 3.21 s, 43 to 66, 238 to 266, 988 to 1352.
+    assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(3_500));
+    Ok(())
+}
+
+/// The same bounds whenever the cap goes: after 14, 17, 23 and 26 s.
+#[test]
+fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
+    assert_the_call_holds(&seeds(None, &cap_lengths())?, Duration::from_millis(3_500));
+    Ok(())
+}
+
+/// The same call under the setting [`RetransmissionRateLimit::UpToTarget`] (the
+/// retransmissions alone under the target, the encoder's target not lowered), held to bounds
+/// of its own.
+#[test]
+fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_target() -> Result<()>
+{
+    // Measured under this setting (hosted run 45334499296, six seeds, and three at each
+    // other length): freeze 0.80 to 1.29 s, the oldest picture 2.30 to 2.57 s, 46 to 57
+    // retransmissions (12 to 16 dropped at the link's queue, against 10 to 14 under the
+    // default).
+    assert_the_call_holds(
+        &seeds(
+            Some(RetransmissionRateLimit::UpToTarget),
+            &[(20, seed_range(2, 6))],
+        )?,
+        Duration::from_millis(4_000),
+    );
+    Ok(())
+}
+
+/// And under that setting whenever the cap goes: after 14, 17, 23 and 26 s.
+#[test]
+fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions_up_to_the_target()
+-> Result<()> {
+    // The shortest and the longest cap in an ordinary run; all four with `RTC_CAP_FULL`.
+    let lengths: Vec<_> = cap_lengths()
+        .into_iter()
+        .filter(|(cap, _)| full() || matches!(cap, 14 | 26))
+        .collect();
+    assert_the_call_holds(
+        &seeds(Some(RetransmissionRateLimit::UpToTarget), &lengths)?,
+        Duration::from_millis(4_000),
+    );
+    Ok(())
+}
+
+/// The cap that arrives after 20 s of call, when the estimate is at 1.4 Mbit/s (8% a second
+/// from 300 kbit/s: draft-ietf-rmcat-gcc-02 section 5.5), under the default rule. The video
+/// keeps playing (never 2 s without a usable frame), the capped link is used and the
+/// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
+/// and the retransmissions, held here to what was measured so that they do not grow.
+///
+/// Measured (hosted run 45334499296, six seeds): freeze 1.28 to 1.32 s, the oldest picture
+/// 4.40 to 4.51 s, 92 to 101 retransmissions (23 to 32 dropped at the link's queue), 246 to
+/// 254 kbit/s under the cap, 1086 to 1361 kbit/s twenty seconds after it. Some sixty video
+/// packets are lost before the first feedback about the capped link can arrive and while
+/// the received rate's 500 ms window still holds what arrived before the cap (about forty
+/// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
+/// that much longer; a third of the repairs are sent into a queue that is still full and
+/// are dropped. The release before (v0.22.0+brainwires.6, whose estimator met the cap at
+/// 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest picture
+/// 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s under the
+/// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.1 to
+/// 0.3 s longer than it was, the picture up to 0.3 s older and the retransmissions half
+/// again as many, while the capped link carries 45 to 50 kbit/s more and the recovery has
+/// no slow seed (473 and 737 kbit/s on two of six before). What shortens it is not in the
+/// estimator: giving up a repair backlog that has gone stale and sending a key frame
+/// instead, and a delay-based detector that reads a queue filling within a feedback
+/// interval (both planned).
+#[test]
+fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Result<()> {
+    for seed in seed_range(1, 6) {
+        let outcome = run(&Setup::new(seed, None).anchor(ANCHORS[0]))?;
+        println!("cap after 20 s seed {seed}: {outcome:?}");
+        assert!(
+            outcome.before >= 1_300_000,
+            "seed {seed}: the cap met {} bit/s: {outcome:?}",
+            outcome.before
+        );
         assert!(
             outcome.freeze <= Duration::from_secs(2),
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
         );
+        assert!(
+            outcome.lag <= Duration::from_millis(5_500),
+            "seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
+        );
+        assert!(
+            outcome.rtx_sent <= 130,
+            "seed {seed}: {} retransmissions: {outcome:?}",
+            outcome.rtx_sent
+        );
+        assert!(
+            outcome.under >= 200_000,
+            "seed {seed}: {} bit/s under the cap: {outcome:?}",
+            outcome.under
+        );
+        assert!(
+            outcome.recovery[3] >= 800_000,
+            "seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
+            outcome.recovery[3]
+        );
+    }
+    Ok(())
+}
+
+/// The same call with retransmissions not congestion controlled
+/// ([`RetransmissionRateLimit::Unlimited`]), for comparison: prints the outcomes, asserts
+/// nothing.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
+    seeds(Some(RetransmissionRateLimit::Unlimited), &cap_20())?;
+    seeds(Some(RetransmissionRateLimit::Unlimited), &cap_lengths())?;
+    Ok(())
+}
+
+/// A measurement over what the environment names, one line per run; asserts nothing.
+/// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
+/// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
+/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
+/// `20`), each a comma-separated list; `RTC_CAP_AT_TARGET` (the target in bit/s at which the
+/// cap arrives, instead of after 20 s).
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_the_capacity_cap() -> Result<()> {
+    fn list(name: &str, default: &str) -> Vec<String> {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .map(|item| item.trim().to_owned())
+            .filter(|item| !item.is_empty())
+            .collect()
+    }
+    for chain in list("RTC_CAP_CHAINS", "parolnet,default,nopacer") {
+        for rule in list("RTC_CAP_RULES", "within,upto,unlimited") {
+            for seconds in list("RTC_CAP_SECONDS", "20") {
+                for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
+                    for anchor in list("RTC_CAP_ANCHORS", "0,1,2") {
+                        let rate_limit = match rule.as_str() {
+                            "within" => RetransmissionRateLimit::WithinTarget,
+                            "upto" => RetransmissionRateLimit::UpToTarget,
+                            "unlimited" => RetransmissionRateLimit::Unlimited,
+                            other => bail!("unknown rule {other}"),
+                        };
+                        let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
+                        let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
+                            .chain(match chain.as_str() {
+                                "parolnet" => Chain::ParolNet,
+                                "default" => Chain::Default,
+                                "nopacer" => Chain::DefaultWithoutPacer,
+                                other => bail!("unknown chain {other}"),
+                            })
+                            .anchor(ANCHORS[anchor.parse::<usize>()?]);
+                        setup.cap = Duration::from_secs(seconds.parse()?);
+                        if let Some(bps) = &at_target {
+                            setup = setup.capped_at_a_target_of(bps.parse()?);
+                        }
+                        match run(&setup) {
+                            Ok(o) => println!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                o.before / 1000,
+                                o.capped_at.as_secs_f64(),
+                                o.freeze.as_secs_f64(),
+                                o.freeze_at.as_secs_f64(),
+                                o.lag.as_secs_f64(),
+                                o.rtx_sent,
+                                o.rtx_dropped,
+                                o.queue_drops,
+                                o.audio_dropped,
+                                o.pacer_dropped,
+                                o.pacer_dropped_late,
+                                o.pacer_discards.len(),
+                                o.pauses.len(),
+                                o.keyframe_requests.len(),
+                                o.under / 1000,
+                                o.estimate_at_lift / 1000,
+                                o.recovery.map(|bps| bps / 1000),
+                                o.estimate_after / 1000,
+                            ),
+                            Err(error) => println!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | failed: {error}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The same call through the engine's default interceptors (the pacer with its default
+/// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
+/// section 7 default), the video following the target the senders are given
+/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait),
+/// on six seeds. When the cap comes the pacer holds video written at the old rate; once it
+/// would take half its 2 s bound to send, the target the application reads is zero (the pause)
+/// until the queue has drained, and the video produces nothing meanwhile. So nothing is
+/// discarded (no video packet written that never left, no `OnPacerDiscard`), the video
+/// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
+#[test]
+fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
+    let outcomes: Result<Vec<_>> = seed_range(2, 6)
+        .map(|seed| {
+            let outcome = run(&Setup::new(seed, None)
+                .chain(Chain::Default)
+                .anchor(ANCHORS[0]))?;
+            println!("default chain seed {seed}: {outcome:?}");
+            Ok((seed, outcome))
+        })
+        .collect();
+    let outcomes = outcomes?;
+    for (seed, outcome) in &outcomes {
+        assert_eq!(0, outcome.pacer_dropped_late, "seed {seed}: {outcome:?}");
+        assert!(
+            outcome.pacer_discards.is_empty(),
+            "seed {seed}: {outcome:?}"
+        );
+        assert!(
+            !outcome.pauses.is_empty(),
+            "seed {seed}: never paused: {outcome:?}"
+        );
+        // The pause is the pacer's word to the source and nothing else: the congestion
+        // controller's estimate is never zero, and `availableOutgoingBitrate` reports the
+        // estimate through every pause.
+        assert!(
+            outcome.lowest_estimate.is_some_and(|low| low >= MIN_BPS),
+            "seed {seed}: the estimator paused: {outcome:?}"
+        );
+        assert!(
+            outcome
+                .lowest_outgoing
+                .is_some_and(|low| low >= f64::from(MIN_BPS)),
+            "seed {seed}: availableOutgoingBitrate lost the estimate in a pause: {outcome:?}"
+        );
+        for after in &outcome.resumed_after {
+            assert!(
+                *after <= Duration::from_secs(1),
+                "seed {seed}: no usable frame {after:?} after a pause ended: {outcome:?}"
+            );
+        }
+        assert!(
+            outcome.freeze <= Duration::from_secs(2),
+            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            outcome.freeze
+        );
+        // Measured (hosted run 45334499296, six seeds): freeze 0.97 to 1.91 s, 1043 to
+        // 2500 kbit/s twenty seconds after the cap, and the oldest picture shown 5.59 to
+        // 9.84 s old (with one decrease per round trip, run 45332800112: 1.38 to 1.86 s, 946
+        // to 2500 kbit/s, 6.46 to 8.87 s; run 45315529565, six seeds on three wall clocks:
+        // 1.38 to 1.90 s, 902 to 1484 kbit/s, 5.95 to 8.56 s). That last figure is the known cost of this chain at a
+        // sudden drop: some hundred full-sized packets the path lost while the source was at
+        // 2.5 Mbit/s are repaired inside an estimate of 100 to 250 kbit/s, of which the
+        // audio takes 76, at about 17 packets a second, under every retransmission rule (the
+        // pacer holds repairs to the estimate; without one they leave in a burst while the
+        // estimate is still falling). The bound here guards it from growing.
+        assert!(
+            outcome.lag <= Duration::from_secs(10),
+            "seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
+        );
+        assert!(
+            outcome.recovery[3] >= 800_000,
+            "seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
+            outcome.recovery[3]
+        );
+    }
+    Ok(())
+}
+
+/// The default chain with a caller that ignores the target (its video stays at 1.4 Mbit/s
+/// through the cap and through the pause): what waits the pacer's 2 s bound is discarded whole
+/// frames at a time, every video packet that never left was announced (`OnPacerDiscard`), and
+/// each discard came with a key-frame request.
+#[test]
+fn a_sender_ignoring_the_target_has_whole_frames_discarded_and_is_asked_for_key_frames()
+-> Result<()> {
+    IGNORE_TARGET.with(|i| i.set(true));
+    let outcome = run(&Setup::new(1, None).chain(Chain::Default));
+    IGNORE_TARGET.with(|i| i.set(false));
+    let outcome = outcome?;
+    println!("default chain, target ignored, seed 1: {outcome:?}");
+    let announced: usize = outcome.pacer_discards.iter().map(|d| d.2).sum();
+    assert!(announced > 0, "{outcome:?}");
+    // Every packet announced never left, and every packet that never left was announced or
+    // still waited in the pacer when the run ended (at most its 2 s of queue). This source
+    // writes 1.4 Mbit/s from the first frame, so the discards begin in the first second,
+    // before there is an estimate.
+    assert!(announced <= outcome.pacer_dropped, "{outcome:?}");
+    assert!(
+        outcome.pacer_dropped - announced <= 300,
+        "{} packets never left and were not announced: {outcome:?}",
+        outcome.pacer_dropped - announced
+    );
+    let with_frames = outcome.pacer_discards.iter().filter(|d| d.1 > 0).count();
+    assert!(
+        outcome.key_requests_received as usize >= 2 + with_frames,
+        "a key frame asked for with each discard: {outcome:?}"
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Read through `Debug`.
+struct PathChangeOutcome {
+    /// The caller's estimate before its network went.
+    before: Option<u32>,
+    /// When its application was told of the restart's pair, and the estimate then.
+    switched_at: Duration,
+    at_switch: Option<u32>,
+    /// The lowest estimate, and the highest loss the default chain's controller counted, in
+    /// the three seconds after the switch; the estimate at their end.
+    lowest_after: u32,
+    most_loss_after: f64,
+    estimate_after: Option<u32>,
+    /// The lowest target the caller's encoder was given before the switch (the outage
+    /// included).
+    lowest_before: Option<u32>,
+    /// Each peer's estimate, every time it moved, in the ten seconds from the switch on.
+    estimates: [Vec<(Duration, u32)>; 2],
+}
+
+/// The call of ParolNet's `an_ice_restart_follows_a_machine_to_another_network`: ten seconds
+/// open, then nothing arrives either way for four seconds (the caller's machine left its
+/// network, and every packet sent meanwhile went into the dead path), then an ICE restart
+/// whose checks reach the other side while the media path still does not, until the caller
+/// has selected the new pair. Every datagram keeps the same addresses throughout, as in an
+/// application that hands them over with a placeholder pair: only the peer connection's word
+/// tells the congestion controllers that the path changed.
+fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
+    let mut world = World::connected(setup)?;
+    let t = world.now + Duration::from_secs(10);
+    world.advance(t)?;
+    let before = world.peers[0].estimate();
+    for peer in world.peers.iter_mut() {
+        peer.pair_changes.clear();
+    }
+    world.blackhole = true;
+    let t = world.now + Duration::from_secs(4);
+    world.advance(t)?;
+    world.blackhole = false;
+    world.stun_only = true;
+    world.restart_ice()?;
+    let restarted_at = world.elapsed();
+    while world.peers[0].pair_changes.is_empty() {
+        if world.elapsed() > restarted_at + Duration::from_secs(10) {
+            bail!("the restart selected no pair");
+        }
+        let t = world.now + Duration::from_millis(10);
+        world.advance(t)?;
+    }
+    world.stun_only = false;
+    let (switched_at, at_switch) = world.peers[0].pair_changes[0];
+    world.sampling = true;
+    let t = world.now + Duration::from_secs(3);
+    world.advance(t)?;
+    let after: Vec<_> = world
+        .samples
+        .iter()
+        .filter(|(at, _, _)| *at >= switched_at)
+        .cloned()
+        .collect();
+    let estimate_after = world.peers[0].estimate();
+    // And on, to ten seconds after the switch: where the estimate goes on the new path.
+    let t = world.now + Duration::from_secs(7);
+    world.advance(t)?;
+    world.print_trace("path change", setup);
+    Ok(PathChangeOutcome {
+        before,
+        lowest_before: world.peers[0]
+            .targets
+            .iter()
+            .filter(|(at, _)| *at < switched_at)
+            .map(|(_, bps)| *bps)
+            .min(),
+        estimates: [0, 1].map(|i| world.peers[i].estimates.clone()),
+        switched_at,
+        at_switch,
+        lowest_after: after
+            .iter()
+            .filter_map(|(_, estimate, _)| *estimate)
+            .min()
+            .unwrap_or(0),
+        most_loss_after: after
+            .iter()
+            .filter_map(|(_, _, loss)| *loss)
+            .fold(0.0, f64::max),
+        estimate_after,
+    })
+}
+
+/// A new selected pair is a new path for the congestion controller also when the datagrams
+/// keep their addresses (RFC 8836 section 2, requirement 1): the peer connection tells the
+/// chain (`PathChanged`), the estimate starts over from the start rate, and the packets sent
+/// into the dead path during the outage are not counted as the new path's loss (libwebrtc's
+/// `RtpTransportControllerSend::OnNetworkRouteChanged`: `restart_bwe`, and a feedback adapter
+/// that reports only packets sent on the new route). ParolNet's simulation of this call saw
+/// one feedback report a loss of 0.985 after the restart and its GCC cut the estimate from
+/// 437 to 242 kbit/s, and the video froze for 7 s. ParolNet's chain (the TWCC-driven GCC).
+#[test]
+fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<()> {
+    for seed in seed_range(1, 3) {
+        let outcome = path_change_run(&Setup::new(seed, None))?;
+        println!("ParolNet chain seed {seed}: {outcome:?}");
+        assert!(
+            outcome.before.is_some_and(|before| before > 300_000),
+            "seed {seed}: the estimate climbed before the outage: {outcome:?}"
+        );
+        assert_eq!(
+            Some(300_000),
+            outcome.at_switch,
+            "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+        );
+        // The estimator's own word on it: the loss it counted after the switch (the packets
+        // of the outage counted, some thirty of thirty-five, would read 0.8). And the
+        // estimate does not go under the start rate in the three seconds after the switch:
+        // the new path loses and queues nothing. (Until the bound by the received rate
+        // stopped lowering an estimate, it fell to 178 kbit/s here, one and a half times
+        // what arrived once the first key frame had left the measurement window.)
+        assert!(
+            outcome.most_loss_after < 0.1,
+            "seed {seed}: the old path's packets counted as lost: {outcome:?}"
+        );
+        assert!(
+            outcome.lowest_after >= 300_000,
+            "seed {seed}: cut to {}: {outcome:?}",
+            outcome.lowest_after
+        );
+    }
+    Ok(())
+}
+
+/// The same call through the engine's default interceptors (GCC on transport-wide feedback in
+/// the congestion control interceptor, the pacer): the packets sent into the dead path are not
+/// counted as lost after the switch (the controller's smoothed loss stays under the 10 % at
+/// which it starts cutting), and the target is not lower three seconds after the switch than
+/// at it.
+#[test]
+fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chain() -> Result<()> {
+    let outcomes: Result<Vec<_>> = seed_range(1, 3)
+        .map(|seed| {
+            let outcome = path_change_run(&Setup::new(seed, None).chain(Chain::Default))?;
+            println!("default chain seed {seed}: {outcome:?}");
+            Ok((seed, outcome))
+        })
+        .collect();
+    for (seed, outcome) in &outcomes? {
+        assert!(
+            outcome.most_loss_after < 0.1,
+            "seed {seed}: the old path's packets counted as lost: {outcome:?}"
+        );
+        assert_eq!(
+            Some(300_000),
+            outcome.at_switch,
+            "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+        );
+        assert!(
+            outcome.lowest_after >= 300_000,
+            "seed {seed}: cut to {}: {outcome:?}",
+            outcome.lowest_after
+        );
+    }
+    Ok(())
+}
+
+/// The first step down of a series of (time, bit rate), with the value before it.
+fn first_step_down(series: &[(Duration, u32)]) -> Option<(Duration, u32, u32)> {
+    series
+        .windows(2)
+        .find(|pair| pair[1].1 < pair[0].1)
+        .map(|pair| (pair[1].0, pair[0].1, pair[1].1))
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Read through `Debug`.
+struct OpenLinkOutcome {
+    /// Per peer: when its estimate reached 1 Mbit/s, the first time it stepped down (when,
+    /// from, to), where it ended, and the bits of video its application wrote.
+    reached_1m: [Option<Duration>; 2],
+    step_down: [Option<(Duration, u32, u32)>; 2],
+    last: [Option<u32>; 2],
+    video_bits: [u64; 2],
+    /// The same for the target the encoder followed (read every 100 ms).
+    target_step_down: [Option<(Duration, u32, u32)>; 2],
+    /// The lowest target the encoder was given (zero is the pacer's pause) and the lowest
+    /// `availableOutgoingBitrate`.
+    lowest_target: [Option<u32>; 2],
+    lowest_outgoing: [Option<f64>; 2],
+}
+
+/// The call of ParolNet's `the_estimate_climbs_on_an_open_link`: thirty-five seconds on a
+/// link without loss, without a capacity and so without a queue, audio and video each way,
+/// the video following the estimate.
+fn open_link_run(setup: &Setup) -> Result<OpenLinkOutcome> {
+    let mut world = World::connected(setup)?;
+    world.sampling = true;
+    let t = world.now + Duration::from_secs(35);
+    world.advance(t)?;
+    world.print_trace("open link", setup);
+    let peers = &world.peers;
+    Ok(OpenLinkOutcome {
+        reached_1m: [0, 1].map(|i| {
+            peers[i]
+                .estimates
+                .iter()
+                .find(|(_, bps)| *bps >= 1_000_000)
+                .map(|(at, _)| *at)
+        }),
+        step_down: [0, 1].map(|i| first_step_down(&peers[i].estimates)),
+        last: [0, 1].map(|i| peers[i].estimates.last().map(|(_, bps)| *bps)),
+        video_bits: [0, 1].map(|i| peers[i].video_octets * 8),
+        target_step_down: [0, 1].map(|i| first_step_down(&peers[i].targets)),
+        lowest_target: [0, 1].map(|i| peers[i].targets.iter().map(|(_, bps)| *bps).min()),
+        lowest_outgoing: [0, 1].map(|i| peers[i].lowest_outgoing),
+    })
+}
+
+/// What an open link is held to, in both chains: the estimate never steps down (nothing was
+/// lost and nothing queued: there is no evidence of congestion to step down for), it starts
+/// at the start rate, reaches 1 Mbit/s within `by` and the maximum by the end, and the video
+/// followed it.
+fn assert_the_estimate_climbs(setup: &Setup, outcome: &OpenLinkOutcome, by: Duration) {
+    for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+        assert_eq!(
+            None, outcome.step_down[i],
+            "{setup:?} {who}: the estimate stepped down on a link without loss or queueing: {outcome:?}"
+        );
+        assert!(
+            outcome.reached_1m[i].is_some_and(|at| at <= by),
+            "{setup:?} {who}: 1 Mbit/s at {:?}: {outcome:?}",
+            outcome.reached_1m[i]
+        );
+        assert_eq!(
+            Some(MAX_BPS),
+            outcome.last[i],
+            "{setup:?} {who}: up to the maximum: {outcome:?}"
+        );
+        assert!(
+            outcome.video_bits[i] > 20_000_000,
+            "{setup:?} {who}: {} bits of video in 35 s: {outcome:?}",
+            outcome.video_bits[i]
+        );
+        // No pause without a pacer queue, and where the peer connection has the estimate
+        // (the default chain) `availableOutgoingBitrate` never reports less than the start
+        // rate on this link.
+        assert!(
+            outcome.lowest_target[i].is_none_or(|low| low >= 300_000),
+            "{setup:?} {who}: a target under the start rate: {outcome:?}"
+        );
+        if setup.chain != Chain::ParolNet {
+            assert!(
+                outcome.lowest_outgoing[i].is_some_and(|low| low >= 300_000.0),
+                "{setup:?} {who}: availableOutgoingBitrate: {outcome:?}"
+            );
+        }
+    }
+}
+
+/// ParolNet's `the_estimate_climbs_on_an_open_link`, in its chain (the TWCC-driven GCC, no
+/// pacer): on a link that loses nothing and queues nothing the estimate never goes down, and
+/// it is at 1 Mbit/s no later than the estimator this interceptor had until
+/// v0.22.0+brainwires.6 was. draft-ietf-rmcat-gcc-02 section 5.5: the delay-based estimate is
+/// decreased "as soon as over-use has been detected", the loss-based one when "more than 10%
+/// of the packets have been lost" (section 6); otherwise both "increase the estimate of the
+/// available bandwidth".
+#[test]
+fn the_estimate_climbs_on_an_open_link_and_never_steps_down() -> Result<()> {
+    for seed in seed_range(2, 3) {
+        let setup = Setup::new(seed, None).anchor(ANCHORS[0]);
+        let outcome = open_link_run(&setup)?;
+        println!("open link, ParolNet chain seed {seed}: {outcome:?}");
+        assert_the_estimate_climbs(&setup, &outcome, OPEN_LINK_1M_BY);
+        for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+            assert_eq!(
+                None, outcome.target_step_down[i],
+                "seed {seed} {who}: the encoder's target stepped down: {outcome:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The same call through the engine's default interceptors (GCC in the congestion control
+/// interceptor, the pacer, bandwidth probing).
+#[test]
+fn the_estimate_climbs_on_an_open_link_in_the_default_chain() -> Result<()> {
+    for seed in seed_range(1, 3) {
+        let setup = Setup::new(seed, None)
+            .chain(Chain::Default)
+            .anchor(ANCHORS[0]);
+        let outcome = open_link_run(&setup)?;
+        println!("open link, default chain seed {seed}: {outcome:?}");
+        assert_the_estimate_climbs(&setup, &outcome, OPEN_LINK_1M_BY);
+    }
+    Ok(())
+}
+
+/// When the estimate of an open link has to be at 1 Mbit/s: no later than the estimator of
+/// v0.22.0+brainwires.6 was on this call, 15.82 s (hosted run 45331844223; from 300 kbit/s at
+/// 8% a second, draft-ietf-rmcat-gcc-02 section 5.5, it is 15.6 s). Measured: 15.47 to
+/// 15.52 s without a pacer, 0.37 s in the default chain, whose start-up probes find the
+/// open link (run 45334499296).
+const OPEN_LINK_1M_BY: Duration = Duration::from_millis(15_820);
+
+#[derive(Debug)]
+#[allow(dead_code)] // Read through `Debug`.
+struct CameraOutcome {
+    /// Per peer: the lowest estimate of the whole call and the first step down of it.
+    lowest: [Option<u32>; 2],
+    step_down: [Option<(Duration, u32, u32)>; 2],
+    /// The caller's estimate when its camera first went on (after five seconds of audio
+    /// alone), when it went off, when it came on again five seconds later, and the target
+    /// its encoder followed 300 ms after that.
+    at_first_on: Option<u32>,
+    at_off: Option<u32>,
+    at_on_again: Option<u32>,
+    target_on_again: u32,
+    /// The callee's estimate when its camera went off and at the end, after six seconds of
+    /// audio alone.
+    callee_at_off: Option<u32>,
+    callee_at_end: Option<u32>,
+    /// Usable video frames each side decoded.
+    usable: [usize; 2],
+    /// The lowest target each encoder was given (zero is the pacer's pause) and the lowest
+    /// `availableOutgoingBitrate`.
+    lowest_target: [Option<u32>; 2],
+    lowest_outgoing: [Option<f64>; 2],
+}
+
+/// The call of ParolNet's `a_call_gains_and_loses_video_by_renegotiation`, on an open link:
+/// five seconds of audio alone, the caller's camera on (a video section by renegotiation),
+/// the callee's on five seconds later, the caller's off, then the caller's on again and the
+/// callee's off, each five seconds apart, and six seconds more.
+fn camera_run(setup: &Setup) -> Result<CameraOutcome> {
+    let mut world = World::connected(&setup.audio_only())?;
+    world.sampling = true;
+    let five = Duration::from_secs(5);
+    let t = world.now + five;
+    world.advance(t)?;
+    let at_first_on = world.peers[0].estimate();
+    world.set_video(0, true)?;
+    let t = world.now + five;
+    world.advance(t)?;
+    world.set_video(1, true)?;
+    let t = world.now + five;
+    world.advance(t)?;
+    let at_off = world.peers[0].estimate();
+    world.set_video(0, false)?;
+    let t = world.now + five;
+    world.advance(t)?;
+    let at_on_again = world.peers[0].estimate();
+    world.set_video(0, true)?;
+    let callee_at_off = world.peers[1].estimate();
+    world.set_video(1, false)?;
+    let on_again = world.elapsed();
+    let t = world.now + Duration::from_secs(6);
+    world.advance(t)?;
+    world.print_trace("camera", setup);
+    let peers = &world.peers;
+    Ok(CameraOutcome {
+        lowest: [0, 1].map(|i| peers[i].estimates.iter().map(|(_, bps)| *bps).min()),
+        step_down: [0, 1].map(|i| first_step_down(&peers[i].estimates)),
+        at_first_on,
+        at_off,
+        at_on_again,
+        target_on_again: target_at(&peers[0].targets, on_again + Duration::from_millis(300)),
+        callee_at_off,
+        callee_at_end: peers[1].estimate(),
+        usable: [0, 1].map(|i| peers[i].usable_at.len()),
+        lowest_target: [0, 1].map(|i| peers[i].targets.iter().map(|(_, bps)| *bps).min()),
+        lowest_outgoing: [0, 1].map(|i| peers[i].lowest_outgoing),
+    })
+}
+
+/// What a call whose cameras go on and off is held to on a link that loses and queues
+/// nothing: the estimate never steps down (sending less is no evidence of congestion), so it
+/// is never at the floor; it is held while only audio is sent, and the video that comes back
+/// starts from the held estimate.
+fn assert_the_estimate_is_held(setup: &Setup, outcome: &CameraOutcome) {
+    for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+        assert_eq!(
+            None, outcome.step_down[i],
+            "{setup:?} {who}: the estimate stepped down without evidence of congestion: {outcome:?}"
+        );
+        assert!(
+            outcome.lowest[i].is_some_and(|lowest| lowest >= 300_000),
+            "{setup:?} {who}: an estimate under the start rate on a perfect link: {outcome:?}"
+        );
+        assert!(
+            outcome.usable[i] > 100,
+            "{setup:?} {who}: the other side's video was not seen: {outcome:?}"
+        );
+        // What the application is told: never a pause (there is no pacer queue to drain),
+        // never under the start rate, and in the default chain `availableOutgoingBitrate`
+        // says the same.
+        assert!(
+            outcome.lowest_target[i].is_none_or(|low| low >= 300_000),
+            "{setup:?} {who}: a target under the start rate on a perfect link: {outcome:?}"
+        );
+        if setup.chain != Chain::ParolNet {
+            assert!(
+                outcome.lowest_outgoing[i].is_some_and(|low| low >= 300_000.0),
+                "{setup:?} {who}: availableOutgoingBitrate on a perfect link: {outcome:?}"
+            );
+        }
+    }
+    // The start rate, with the one step of 5% the loss-based controller takes on the first
+    // receiver report of a call (section 6: "As long as less than 2% of the packets have been
+    // lost As_hat(i) will be increased").
+    assert!(
+        outcome
+            .at_first_on
+            .is_some_and(|estimate| (300_000..=315_000).contains(&estimate)),
+        "{setup:?}: the start rate kept through five seconds of audio alone: {outcome:?}"
+    );
+    assert!(
+        outcome.at_off.is_some_and(|at_off| at_off > 400_000),
+        "{setup:?}: the estimate climbed while the video was sent: {outcome:?}"
+    );
+    assert!(
+        outcome.at_on_again >= outcome.at_off,
+        "{setup:?}: the estimate was not held while the camera was off: {outcome:?}"
+    );
+    assert!(
+        Some(outcome.target_on_again) >= outcome.at_off,
+        "{setup:?}: the video did not start again from the held estimate: {outcome:?}"
+    );
+    assert!(
+        outcome.callee_at_end >= outcome.callee_at_off,
+        "{setup:?}: the callee's estimate was not held: {outcome:?}"
+    );
+}
+
+/// ParolNet's chain: an application-limited sender (audio alone at 76 kbit/s, a camera that
+/// is off) keeps its estimate. draft-ietf-rmcat-gcc-02 section 5.5: "if the sender is unable
+/// to produce a bit stream with the bitrate the congestion controller is asking for, the
+/// available bandwidth estimate should stay within a given bound": the estimate is not
+/// increased past 1.5 times the incoming rate; it is decreased when "an over-use is
+/// detected" (5.5) or "more than 10% of the packets have been lost" (6), and here neither
+/// happens. Before, the estimate was pulled down to 1.5 times the audio (the floor,
+/// 100 kbit/s) whenever the video stopped, an application was told of a weak connection on a
+/// perfect link, and the video climbed from the floor at 8% a second each time it came back.
+#[test]
+fn an_estimate_is_held_while_only_audio_is_sent_and_video_resumes_from_it() -> Result<()> {
+    for seed in seed_range(2, 3) {
+        let setup = Setup::new(seed, None).anchor(ANCHORS[0]);
+        let outcome = camera_run(&setup)?;
+        println!("camera, ParolNet chain seed {seed}: {outcome:?}");
+        assert_the_estimate_is_held(&setup, &outcome);
+    }
+    Ok(())
+}
+
+/// The same call through the engine's default interceptors.
+#[test]
+fn an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain() -> Result<()> {
+    for seed in seed_range(1, 3) {
+        let setup = Setup::new(seed, None)
+            .chain(Chain::Default)
+            .anchor(ANCHORS[0]);
+        let outcome = camera_run(&setup)?;
+        println!("camera, default chain seed {seed}: {outcome:?}");
+        assert_the_estimate_is_held(&setup, &outcome);
+    }
+    Ok(())
+}
+
+/// After a path change with a four-second outage the estimate starts over at the start rate
+/// and, on a new path that loses and queues nothing, does not go under it: nothing on the
+/// new path is evidence of congestion. (ParolNet's
+/// `an_ice_restart_follows_a_machine_to_another_network` saw 300 kbit/s at the switch, 100
+/// to 110 kbit/s a second later and 200 kbit/s four seconds after the switch.) Both chains.
+#[test]
+fn an_estimate_started_over_on_a_new_path_does_not_fall_without_evidence() -> Result<()> {
+    for chain in [Chain::ParolNet, Chain::Default] {
+        for seed in seed_range(1, 3) {
+            let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
+            let outcome = path_change_run(&setup)?;
+            println!("path change, {chain:?} seed {seed}: {outcome:?}");
+            assert_eq!(
+                Some(300_000),
+                outcome.at_switch,
+                "{chain:?} seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+            );
+            for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+                let after: Vec<_> = outcome.estimates[i]
+                    .iter()
+                    .filter(|(at, _)| *at >= outcome.switched_at)
+                    .copied()
+                    .collect();
+                assert_eq!(
+                    None,
+                    first_step_down(&after),
+                    "{chain:?} seed {seed} {who}: the estimate fell on the new path: {after:?}"
+                );
+                assert!(
+                    after.last().is_some_and(|(_, bps)| *bps > 400_000),
+                    "{chain:?} seed {seed} {who}: no climb in ten seconds: {after:?}"
+                );
+            }
+        }
     }
     Ok(())
 }

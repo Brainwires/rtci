@@ -324,6 +324,21 @@ impl History {
         Some(sent)
     }
 
+    /// Forget every packet sent so far, as on a new path: those went into the path that was
+    /// left, and what a later feedback says of them is neither a loss nor a delivery of the new
+    /// one's. libwebrtc's `TransportFeedbackAdapter::SetNetworkRoute` does the same, so that
+    /// "the feedback adapter only reports packets sent on the new route"
+    /// (`RtpTransportControllerSend::OnNetworkRouteChanged`). A feedback that names one of
+    /// them later matches nothing, as for a packet pruned.
+    pub fn forget_sent(&mut self) {
+        self.packets.clear();
+        self.twcc_index.clear();
+        self.ssrc_sequence_index.clear();
+        self.pending_losses.clear();
+        self.highest_acknowledged = None;
+        self.next_to_report = self.next_id;
+    }
+
     /// Packets reported as not received that a later feedback reported as received.
     pub fn recovered(&self) -> u64 {
         self.recovered

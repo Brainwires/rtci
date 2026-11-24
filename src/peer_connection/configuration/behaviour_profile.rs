@@ -387,7 +387,7 @@ macro_rules! governed_behaviours {
 }
 
 use ice::{FailedNomination, NominationAcceptance};
-use interceptor::{EcnInitiation, EcnMarking, ThresholdTimeBase};
+use interceptor::{EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase};
 
 governed_behaviours! {
     // ---- ICE ----
@@ -957,13 +957,25 @@ governed_behaviours! {
         id: "gcc.one-decrease-per-round-trip",
         setting: "DefaultInterceptorOptions::gcc_one_decrease_per_round_trip",
         clause: "draft-ietf-rmcat-gcc-02 5.5",
-        rfc: true => "true",
+        rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
         chrome_source: "libwebrtc modules/remote_bitrate_estimator/aimd_rate_control.cc::AimdRateControl::TimeToReduceFurther @ a222406d: a decrease waits the round trip time held between 10 and 200 ms since the last change, or for the acknowledged rate to fall under half the estimate (delay_based_bwe.cc calls it on overuse)",
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_one_decrease_per_round_trip = v,
         read: |o: &DefaultInterceptorOptions| o.gcc_one_decrease_per_round_trip,
+    },
+    {
+        id: "gcc.received-rate-bound",
+        setting: "DefaultInterceptorOptions::gcc_received_rate_bound",
+        clause: "draft-ietf-rmcat-gcc-02 5.5",
+        rfc: ReceivedRateBound::LimitsIncrease => "LimitsIncrease",
+        chrome: ReceivedRateBound::LimitsIncrease => "LimitsIncrease",
+        strict_rfc: ReceivedRateBound::Clamps => "Clamps",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/aimd_rate_control.cc::AimdRateControl::ChangeBitrate @ a222406d (lines 235-249, 266): increase_limit = 1.5 * estimated_throughput + 10 kbit/s bounds the increase only (if (current_bitrate_ < increase_limit) ... std::min(increased_bitrate, increase_limit)); an estimate above it is left where it is (lines 244-246: 'If we have previously increased above the limit (for instance due to probing), we don't allow further changes'). Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_received_rate_bound = v,
+        read: |o: &DefaultInterceptorOptions| o.gcc_received_rate_bound,
     },
     {
         id: "pacer.queue-overflow",
@@ -1502,12 +1514,17 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
         class: NotGovernedClass::Same,
-        note: "UpToTarget in every profile on this base: the retransmissions alone held under the congestion controller's target (measured in tests/capacity_cap_video_rtc2rtc.rs, see RetransmissionRateLimit). libwebrtc limits retransmissions by a RateLimiter of their own: modules/rtp_rtcp/source/rtp_sender.cc::RTPSender::ReSendPacket @ a222406d (lines 331-333) drops a retransmission retransmission_rate_limiter_->TryUseRate refuses (rtc_base/rate_limiter.cc lines 37, 59); where its maximum is set to the target was not found in the snapshot (searched call/call.cc, call/rtp_transport_controller_send.{h,cc}, call/rtp_video_sender.cc, video/), so the Chrome value is unverified beyond that. Pending: conf/gcc-2-rfc-retransmission makes Rfc and StrictRfc WithinTarget (RFC 4588 7) and leaves Chrome and Performance UpToTarget, which turns this into a governed row",
+        note: "the same in every profile: the engine default (UpToTarget on master, the measured choice in tests/capacity_cap_video_rtc2rtc.rs; WithinTarget, RFC 4588 7, once conf/gcc-2-rfc-retransmission lands). libwebrtc has no retransmission rate limit on video at a222406d: call/rtp_video_sender.cc (lines 292-354) configures no retransmission_rate_limiter, which modules/rtp_rtcp/source/rtp_rtcp_interface.h line 92 defaults to nullptr, so RTPSender::ReSendPacket's TryUseRate check (rtp_sender.cc lines 331-333) never applies; instead modules/video_coding/fec_controller_default.cc (lines 146-167) lowers the encoder target by the share NACK and FEC took, capped at kProtectionOverheadRateThreshold 0.5 (line 31). That is the RFC's form (retransmissions inside the target, the originals lowered to make room) closer than UpToTarget, which is not libwebrtc's rule at this revision; Performance keeps the default (UpToTarget measured worse than WithinTarget on the paced default chain by gcc-2's owner)",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::rtcp_random",
         class: NotGovernedClass::Input,
         note: "an injected random source for the RTCP sessions (report interval variation, RFC 3550 6.3.1; early feedback dither, RFC 4585 3.5.2; SSRC and CNAME), for runs a seeded provider makes repeatable; `None` (rand) in every profile",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::wall_clock",
+        class: NotGovernedClass::Input,
+        note: "an injected wall-clock anchor for the NTP times the interceptors write (sender reports, XR receiver reference times, RFC 8888 report timestamps, the RFC 6051 header extension), for virtual-time runs that repeat within one process; `None` (the process-wide SystemInstant::shared) in every profile",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_audio_redundancy",

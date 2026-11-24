@@ -15,7 +15,8 @@
 //! go on whatever this does ("regular RTCP SR packets MUST be sent").
 //!
 //! The timestamp is the instant the packet passes, on the clock the RTCP session's sender
-//! reports take theirs from ([`SystemInstant::shared`]): the report generator relates a
+//! reports take theirs from ([`SystemInstant::shared`], or the anchor
+//! [`NtpTimestampBuilder::with_wall_clock`] gives, which the RTCP session must be given too): the report generator relates a
 //! stream's RTP timestamps to the same instants (the packet's passage), so both describe one
 //! mapping, as section 3.3 requires ("MUST correspond to the same time instant as the RTP
 //! timestamp ... MUST be derived from the same clock used to generate the NTP-format
@@ -53,6 +54,7 @@ pub const NTP_TIMESTAMP_INTERVAL: Duration = Duration::from_secs(1);
 pub struct NtpTimestampBuilder {
     initial_window: Duration,
     interval: Duration,
+    wall_clock: Option<SystemInstant>,
 }
 
 impl Default for NtpTimestampBuilder {
@@ -60,6 +62,7 @@ impl Default for NtpTimestampBuilder {
         Self {
             initial_window: NTP_TIMESTAMP_INITIAL_WINDOW,
             interval: NTP_TIMESTAMP_INTERVAL,
+            wall_clock: None,
         }
     }
 }
@@ -83,11 +86,22 @@ impl NtpTimestampBuilder {
         self
     }
 
+    /// The wall-clock anchor the timestamps derive from: the one the RTCP session's sender
+    /// reports use (RFC 6051 section 3.3). Default: the process-wide
+    /// [`SystemInstant::shared`]. Give one per peer connection for reproducible virtual-time
+    /// runs: two runs in one process otherwise map the same instants to NTP times as far apart
+    /// as the real time between them.
+    pub fn with_wall_clock(mut self, anchor: SystemInstant) -> Self {
+        self.wall_clock = Some(anchor);
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> NtpTimestampInterceptor {
         NtpTimestampInterceptor {
             initial_window: self.initial_window,
             interval: self.interval,
+            wall_clock: self.wall_clock,
             streams: HashMap::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -110,6 +124,8 @@ struct Stamped {
 pub struct NtpTimestampInterceptor {
     initial_window: Duration,
     interval: Duration,
+    /// [`NtpTimestampBuilder::with_wall_clock`].
+    wall_clock: Option<SystemInstant>,
     /// By media SSRC.
     streams: HashMap<u32, Stamped>,
     read_queue: VecDeque<TaggedPacket>,
@@ -173,7 +189,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NtpTimestampInterceptor {
             && let Some(mut stream) = self.streams.get(&packet.header.ssrc).copied()
         {
             if self.wanted(&mut stream, packet.header.timestamp, msg.now) {
-                let ntp = SystemInstant::shared(msg.now).ntp(msg.now);
+                let ntp = self
+                    .wall_clock
+                    .unwrap_or_else(|| SystemInstant::shared(msg.now))
+                    .ntp(msg.now);
                 let value = if stream.short {
                     Ntp56Extension::new(ntp).marshal()
                 } else {

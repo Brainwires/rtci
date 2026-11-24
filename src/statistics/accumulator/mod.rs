@@ -1473,6 +1473,13 @@ impl RTCStatsAccumulator {
                 None => {}
             }
         }
+        self.on_outgoing_estimate(transport, bits_per_second);
+    }
+
+    /// The congestion controller's estimate for transport `transport`, where it is not the
+    /// target the streams are given: while the pacer tells the source to pause, the target is
+    /// zero and the estimate is what it was (`PacerPause`).
+    pub(crate) fn on_outgoing_estimate(&mut self, transport: usize, bits_per_second: f64) {
         // webrtc-stats: `availableOutgoingBitrate` is what the congestion control estimates
         // for the outgoing streams on the pair: the transport's own estimate on its selected
         // pair, not another transport's.

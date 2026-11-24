@@ -93,7 +93,8 @@ fn count(asked: &[bool]) -> usize {
 }
 
 /// RFC 4588 Appendix A: a receiver may limit how often it asks for one packet. With a limit
-/// of ten requests (libwebrtc's), it gives the packet up after the tenth.
+/// of ten requests (`NACK_SUGGESTED_MAX_NACKS_PER_PACKET`; libwebrtc's is 100), it gives the
+/// packet up after the tenth.
 #[test]
 fn a_lost_packet_is_asked_for_ten_times_then_given_up() {
     let mut chain = generator(
