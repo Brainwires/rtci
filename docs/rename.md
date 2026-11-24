@@ -179,10 +179,8 @@ or its header, so a local variable called `rtc_pc` elsewhere stays.
 
 `cargo publish` order for the new names, dependencies first (normal and build dependencies, and
 versioned dev-dependencies), generated from `cargo metadata` and written into release.yml's
-commented publish step. On the rename commit's tree it was the first nineteen below with
-`rtci-signal` between `rtci-sdp` and `rtci-srtp`; since then `rtci-signal` is `publish = false`
-and `rtci-stream-driver` is published, and the audio crates (`rtci-audio`, `rtci-devices`,
-ported from a pre-rename branch with this script) are publishable after `rtci`:
+commented publish step. `docs/releasing.md` ("What is published") is the reference; 0.1.0 is
+published in this order:
 
 1. `rtci-crypto`
 2. `rtci-interceptor-derive`
@@ -202,23 +200,28 @@ ported from a pre-rename branch with this script) are publishable after `rtci`:
 16. `rtci-ice`
 17. `rtci-turn`
 18. `rtci`
-19. `rtci-audio`
-20. `rtci-devices`
-21. `rtci-stream-driver`
+19. `rtci-stream-driver` (its default feature `peer` depends on `rtci`)
 
-`rtci-ffi` is `publish = false` (a C library delivered as built libraries and a header,
-`docs/packaging.md`). The root crate's dev-dependencies on `rtci-stream-driver`, `rtci-signal`
-and `rtci-audio` carry no version, so `cargo publish` drops them.
+The root crate's dev-dependencies on `rtci-stream-driver` and `rtci-signal` carry no version, so
+`cargo publish` drops them from `rtci`'s published manifest. `rtci-signal` (the examples'
+signalling helper) is `publish = false`, as are the fuzz crates, the benchmark and the test
+environment's peers.
 
-crates.io fields (`--manifest-report`): every publishable crate has a description, a licence and
-`repository = "https://github.com/Brainwires/rtci"` and a README; `license` is the SPDX
-`MIT OR Apache-2.0` and no crate names a `homepage` (both changed after the rename, not by it).
+After 0.1.0, `rtci-audio` and `rtci-devices` (the audio pipeline, ported from a pre-rename
+branch with the script, which renamed them like every other crate) are published after `rtci`
+and before `rtci-stream-driver`; the root crate's dev-dependency on `rtci-audio` carries no
+version either. `rtci-ffi` (renamed with its C names, see above) is `publish = false`: a C
+library delivered as built libraries and a header (`docs/packaging.md`).
+
+crates.io fields (`--manifest-report`): every publishable crate has a description, a README, the
+licence `MIT OR Apache-2.0` and `repository = "https://github.com/Brainwires/rtci"`, all
+inherited from `[workspace.package]` where they are shared; none sets `homepage`.
 
 ## For dependents
 
 | Before | After |
 |---|---|
-| `rtc = "0.22"` (or a git dependency on `Brainwires/webrtc-rs-rtc`) | `rtci = "0.1"` (git: `Brainwires/rtci`, tag `v0.1.0`) |
+| `rtc = "0.22"` (or a git dependency on `Brainwires/webrtc-rs-rtc`) | `rtci = "0.1"` from crates.io |
 | `rtc-<x> = "..."` | `rtci-<x> = "0.1"` |
 | `use rtc::...` | `use rtci::...` |
 | `use rtc_<x>::...` | `use rtci_<x>::...` |
@@ -230,3 +233,7 @@ crates.io fields (`--manifest-report`): every publishable crate has a descriptio
 
 A dependent that keeps its code unchanged can rename on its side instead:
 `rtc = { package = "rtci", version = "0.1" }`.
+
+A git dependency on the old repository URL keeps resolving through GitHub's redirect (at the old
+tags the crates are still `rtc`; from `v0.1.0` on there is no crate `rtc` to find). Move it to the
+crates.io release rather than to a git dependency on `Brainwires/rtci`.
