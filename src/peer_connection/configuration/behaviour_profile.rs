@@ -989,18 +989,6 @@ governed_behaviours! {
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_max_nacks_per_packet = v,
         read: |o: &DefaultInterceptorOptions| o.nack_max_nacks_per_packet,
     },
-    {
-        id: "nack.retransmission-rate-limit",
-        setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
-        clause: "RFC 4588 7",
-        rfc: interceptor::RetransmissionRateLimit::WithinTarget => "WithinTarget",
-        chrome: interceptor::RetransmissionRateLimit::UpToTarget => "UpToTarget",
-        strict_rfc: interceptor::RetransmissionRateLimit::WithinTarget => "WithinTarget",
-        chrome_source: "libwebrtc @ a222406d: RtpVideoSender configures no retransmission_rate_limiter of its own (call/rtp_video_sender.cc:292-354; modules/rtp_rtcp/source/rtp_rtcp_interface.h:92 defaults it to nullptr); Call gives the RTP modules one limiter held to the target over a window (call/call.cc, kRetransmitWindowSizeMs; rtc_base/rate_limiter.cc), which counts retransmitted octets only: the retransmissions alone stay under the target. The original media is lowered separately, by the protection share FecControllerDefault::UpdateFecRates takes from the encoder target, at most kProtectionOverheadRateThreshold = 0.5 (modules/video_coding/fec_controller_default.cc:31, 146-167). Performance: same as Rfc, because UpToTarget measured no faster: tests/capacity_cap_video_rtc2rtc.rs (300 kbit/s cap, six seeds, three wall clocks, hosted run 45315535896), without a pacer, longest freeze 0.84-1.29 s against WithinTarget's 0.83-1.24 s, oldest picture shown 2.37-3.49 s against 2.26-3.21 s, 42-78 retransmissions of which 17-27 were dropped at the capped link against 43-66 and 14-17",
-        evidence: Source,
-        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_retransmission_rate_limit = v,
-        read: |o: &DefaultInterceptorOptions| o.nack_retransmission_rate_limit,
-    },
 }
 
 /// Why a setting is not governed by the profiles.
@@ -1510,6 +1498,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_sctp_inbound_reassembly_limit",
         class: NotGovernedClass::EngineOnly,
         note: "the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
+        class: NotGovernedClass::Same,
+        note: "the same in every profile: the engine default (UpToTarget on master, the measured choice in tests/capacity_cap_video_rtc2rtc.rs; WithinTarget, RFC 4588 7, once conf/gcc-2-rfc-retransmission lands). libwebrtc has no retransmission rate limit on video at a222406d: call/rtp_video_sender.cc (lines 292-354) configures no retransmission_rate_limiter, which modules/rtp_rtcp/source/rtp_rtcp_interface.h line 92 defaults to nullptr, so RTPSender::ReSendPacket's TryUseRate check (rtp_sender.cc lines 331-333) never applies; instead modules/video_coding/fec_controller_default.cc (lines 146-167) lowers the encoder target by the share NACK and FEC took, capped at kProtectionOverheadRateThreshold 0.5 (line 31). That is the RFC's form (retransmissions inside the target, the originals lowered to make room) closer than UpToTarget, which is not libwebrtc's rule at this revision; Performance keeps the default (UpToTarget measured worse than WithinTarget on the paced default chain by gcc-2's owner)",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::rtcp_random",

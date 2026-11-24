@@ -1434,9 +1434,9 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
     Ok(())
 }
 
-/// The same call with libwebrtc's retransmission rule
-/// ([`RetransmissionRateLimit::UpToTarget`]: the retransmissions alone under the target, the
-/// encoder's target not lowered), the `Chrome` and `Performance` profiles' setting.
+/// The same call under the setting [`RetransmissionRateLimit::UpToTarget`] (the
+/// retransmissions alone under the target, the encoder's target not lowered), held to bounds
+/// of its own.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_target() -> Result<()>
 {

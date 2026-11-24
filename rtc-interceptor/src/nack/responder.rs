@@ -114,9 +114,13 @@ pub enum RetransmissionRateLimit {
     /// libwebrtc's `RtpSender` when it is given a `retransmission_rate_limiter`,
     /// `modules/rtp_rtcp/source/rtp_sender.cc`): the retransmissions stay under the target
     /// whatever the original packets take, and the target reported for the original media is
-    /// not lowered, so the sum may reach twice the target. A setting (the `Chrome` and
-    /// `Performance` profiles); measured in `tests/capacity_cap_video_rtc2rtc.rs` against the
-    /// default: longest freeze 1.31 to 1.43 s against 1.33 to 1.44 s.
+    /// not lowered, so the sum may reach twice the target. A setting in no behaviour profile:
+    /// libwebrtc gives its video senders no such limiter (`call/rtp_video_sender.cc:292-354`
+    /// at a222406d; `rtp_rtcp_interface.h:92` defaults it to null) and lowers the encoder
+    /// target by the protection share instead. Measured in
+    /// `tests/capacity_cap_video_rtc2rtc.rs` against the default: longest freeze 0.84 to
+    /// 1.29 s against 0.83 to 1.24 s, 17 to 27 retransmissions dropped at the capped link
+    /// against 14 to 17.
     UpToTarget,
     /// No limit beyond the per-stream budget (one retransmission per original packet sent): the
     /// fork's behaviour before. Retransmissions are then not congestion controlled.
@@ -269,7 +273,8 @@ impl NackResponderBuilder {
 
     /// Set how retransmissions are held to the congestion controller's target (RFC 4588
     /// section 7). Default: [`RetransmissionRateLimit::WithinTarget`], the RFC's form;
-    /// [`RetransmissionRateLimit::UpToTarget`] is libwebrtc's.
+    /// [`RetransmissionRateLimit::UpToTarget`] is the limiter libwebrtc's `RtpSender` has
+    /// when it is given one.
     pub fn with_rate_limit(mut self, rate_limit: RetransmissionRateLimit) -> Self {
         self.rate_limit = rate_limit;
         self

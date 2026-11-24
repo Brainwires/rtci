@@ -41,9 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into a pause. Retransmissions leave ahead of new media, a stream's oldest packet first, and
   none is made for a packet whose retransmission still waits in the pacer. See "Pausing the
   source" on `PacerInterceptor` for what a target of zero means and how an encoder resumes.
-- **behaviour profiles**: `DefaultInterceptorOptions::nack_retransmission_rate_limit` is
-  governed: `WithinTarget` (RFC 4588 section 7) under `Rfc`, `StrictRfc` and `Performance`,
-  `UpToTarget` under `Chrome`.
+- **interceptors (NACK)**: `RetransmissionRateLimit::WithinTarget` (RFC 4588 section 7) is the
+  default of `NackResponderBuilder` and of `DefaultInterceptorOptions::
+  nack_retransmission_rate_limit` in every behaviour profile (libwebrtc at a222406d sets no
+  retransmission rate limiter on video and lowers the encoder target by the protection
+  share: the RFC's form, see the profile table); `UpToTarget` and `Unlimited` are settings.
+  Measured without a pacer (300 kbit/s cap, six seeds, three wall clocks): `WithinTarget`
+  0.83 to 1.24 s longest freeze, 43 to 66 retransmissions of which 14 to 17 were dropped at
+  the capped link; `UpToTarget` 0.84 to 1.29 s, 42 to 78 and 17 to 27.
 
 - **peer connection, interceptors**: the `Performance` behaviour profile and the
   `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
