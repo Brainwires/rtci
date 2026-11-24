@@ -154,6 +154,9 @@ struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     video: [bool; 2],
+    /// The default chain's congestion window (`DefaultInterceptorOptions::cc_congestion_window`);
+    /// `RTC_CAP_CWND` (milliseconds) when `None`.
+    congestion_window: Option<Duration>,
 }
 
 impl Setup {
@@ -166,6 +169,7 @@ impl Setup {
             cap: Duration::from_secs(20),
             cap_at_target: None,
             video: [true, true],
+            congestion_window: None,
         }
     }
 
@@ -556,7 +560,9 @@ impl Peer {
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
             // A measurement knob: libwebrtc's congestion window (`Some(350 ms)` in its form).
-            if let Ok(ms) = std::env::var("RTC_CAP_CWND") {
+            if let Some(window) = setup.congestion_window {
+                options.cc_congestion_window = Some(window);
+            } else if let Ok(ms) = std::env::var("RTC_CAP_CWND") {
                 options.cc_congestion_window = Some(Duration::from_millis(ms.parse()?));
             }
             if let Some(rate_limit) = rate_limit {
@@ -2374,6 +2380,36 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
             outcome.lowest_after >= 300_000,
             "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
+        );
+    }
+    Ok(())
+}
+
+/// libwebrtc's congestion window (the `Chrome` profile's `cc_congestion_window`, 350 ms) in the
+/// default chain, through the 4 s outage: once the octets sent and not yet named by feedback
+/// reach the target times the round trip and 350 ms, the pacer holds what waits but for one
+/// packet every 500 ms. Measured (hosted run 45443488672, six seeds): into the dead path 182 kB
+/// (136 to 138 kB in its first 1.3 s) against 333 kB (256 kB) without, and the callee frozen
+/// 0.26 s from one second after the switch against 7.9 to 8.0 s (no usable frame to the end of
+/// the run: the receiver plays in order and waits for the repair of every packet lost in
+/// the outage; with the window 111 to 114 retransmissions follow the switch, against 291 to
+/// 293). The bounds: 160 kB in the first 1.3 s, 1 s.
+#[test]
+fn a_congestion_window_bounds_what_goes_into_a_dead_path() -> Result<()> {
+    for seed in seed_range(1, 3) {
+        let mut setup = Setup::new(seed, None).chain(Chain::Default);
+        setup.congestion_window = Some(Duration::from_millis(350));
+        let outcome = path_change_run(&setup)?;
+        println!("default chain with the window seed {seed}: {outcome:?}");
+        assert!(
+            outcome.dead_octets_early <= 160_000,
+            "seed {seed}: {} octets into the dead path in 1.3 s: {outcome:?}",
+            outcome.dead_octets_early
+        );
+        assert!(
+            outcome.freeze_after <= Duration::from_secs(1),
+            "seed {seed}: frozen {:?} after the switch: {outcome:?}",
+            outcome.freeze_after
         );
     }
     Ok(())
