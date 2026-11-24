@@ -1238,6 +1238,71 @@ fn a_source_above_the_target_is_paused_before_anything_waits_the_bound() {
     );
 }
 
+/// A source that follows the target is paused before its media is old enough to be discarded,
+/// also when the expected queue time (queued bits over the target) is short: retransmissions
+/// leave ahead of new media and can take the whole target. Two video packets wait (20 ms at
+/// the target) while a retransmission is written every 10 ms, which is all the target
+/// carries: when the video has waited half the 2 s bound the source is told to pause, the
+/// video is what it wrote before the pause and is not discarded when it has waited the bound,
+/// and it leaves when the retransmissions stop (at 3 s). The pause lasts until then, although
+/// the expected queue time was under the resume mark all along. (Capacity-cap ensemble, seed
+/// 638 of 1100 with the smoothed retransmission limiter: 71 frames a resumed source wrote in
+/// 2.4 s at the controller's floor were discarded here, and the picture froze for 6 s.)
+#[test]
+fn a_source_whose_media_waits_behind_retransmissions_is_paused_not_discarded() {
+    let mut harness = Harness::new();
+    let mut reads = Vec::new();
+    // One retransmission leaves at once; from then on one always waits ahead of the video.
+    harness.send_retransmission(ms(0), 500);
+    harness.send_retransmission(ms(0), 501);
+    harness.send(ms(0), 1);
+    harness.send(ms(0), 2);
+    harness.drain();
+    let mut paused_at = None;
+    for n in 1..300u16 {
+        let at = ms(10 * u64::from(n));
+        harness.advance_to(at);
+        harness.send_retransmission(at, 501 + n);
+        harness.drain();
+        let now = harness.reads();
+        if paused_at.is_none() && targets(&now).iter().any(|(bps, _)| *bps == 0.0) {
+            paused_at = Some(at);
+        }
+        reads.extend(now);
+    }
+    let paused_at = paused_at.expect("the source was paused");
+    assert!(
+        (ms(1_000)..=ms(1_020)).contains(&paused_at),
+        "paused at {paused_at:?}"
+    );
+    assert_eq!(
+        vec![(0.0, Some(BITRATE))],
+        targets(&reads),
+        "one pause, not ended while the video waits"
+    );
+    assert!(discards(&reads).is_empty(), "{:?}", discards(&reads));
+    assert!(key_frame_requests(&reads).is_empty());
+    assert!(
+        !harness.schedule().iter().any(|(seq, _)| *seq < 500),
+        "the video still waits at 3 s"
+    );
+    harness.advance_to(ms(3_200));
+    let video: Vec<u16> = harness
+        .schedule()
+        .iter()
+        .map(|(seq, _)| *seq)
+        .filter(|seq| *seq < 500)
+        .collect();
+    assert_eq!(
+        vec![1, 2],
+        video,
+        "it left when the retransmissions stopped"
+    );
+    let after = harness.reads();
+    assert!(discards(&after).is_empty());
+    assert_eq!(vec![(BITRATE, None)], targets(&after), "the pause ended");
+}
+
 /// A retransmission of a packet whose retransmission already waits in the queue is not queued
 /// again (libwebrtc's packet history ignores a request for a packet "already in pacer queue"):
 /// two RTX packets repairing the same original (sequence number 0 ahead of the payload, RFC 4588

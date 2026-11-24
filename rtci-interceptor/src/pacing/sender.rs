@@ -359,6 +359,9 @@ pub struct PacerInterceptor {
     paused: bool,
     /// When the pause in force, or the last one, began.
     pause_began: Option<Instant>,
+    /// Whether the pause in force began for the wait of the oldest new media, the expected
+    /// queue time being short.
+    paused_for_wait: bool,
     /// How many times a pause began.
     pauses: u64,
     /// Retransmissions not queued because the same packet's retransmission already waited.
@@ -400,6 +403,7 @@ impl PacerInterceptor {
             discarded_frame: HashMap::new(),
             paused: false,
             pause_began: None,
+            paused_for_wait: false,
             pauses: 0,
             duplicate_retransmissions: 0,
             departed: Vec::new(),
@@ -482,6 +486,14 @@ impl PacerInterceptor {
         self.queue.front().map_or(Duration::ZERO, |head| {
             now.saturating_duration_since(head.now)
         })
+    }
+
+    /// When the oldest queued new media (not a retransmission) was written.
+    fn oldest_new_media(&self) -> Option<Instant> {
+        self.queue
+            .iter()
+            .find(|queued| !queued.message.has(&Attribute::Retransmission))
+            .map(|oldest| oldest.now)
     }
 
     /// The rate to pace at now: the target, or more when the queue would otherwise not drain
@@ -674,9 +686,30 @@ impl PacerInterceptor {
     /// changed.
     fn update_pause(&mut self, now: Instant) -> bool {
         let expected = self.expected_queue_time();
+        // What the queue holds over the target says how long it takes when the whole target
+        // is the new media's. It is not while audio (never queued) and retransmissions
+        // (served first) take the rate: near the controller's floor they can take all of it,
+        // and the few frames a paused-then-resumed source wrote then wait the bound with an
+        // expected queue time of a fraction of a second. So the pause also begins when the
+        // oldest new media has itself waited that share of the bound.
+        let oldest = self.oldest_new_media();
         let change = match self.queue_time_limit {
-            Some(limit) if !self.paused => expected >= limit.mul_f64(PAUSE_AT),
-            Some(limit) => expected <= limit.mul_f64(RESUME_AT),
+            Some(limit) if !self.paused => {
+                let waited = oldest.is_some_and(|written| {
+                    now.saturating_duration_since(written) >= limit.mul_f64(PAUSE_AT)
+                });
+                self.paused_for_wait = waited && expected < limit.mul_f64(PAUSE_AT);
+                expected >= limit.mul_f64(PAUSE_AT) || waited
+            }
+            // A pause begun for the media's own wait lasts until what waited then has left
+            // (the expected queue time was short all along and says nothing here).
+            Some(limit) => {
+                expected <= limit.mul_f64(RESUME_AT)
+                    && !(self.paused_for_wait
+                        && oldest
+                            .zip(self.pause_began)
+                            .is_some_and(|(written, began)| written <= began))
+            }
             None => self.paused,
         };
         if change {
@@ -684,6 +717,8 @@ impl PacerInterceptor {
             if self.paused {
                 self.pauses += 1;
                 self.pause_began = Some(now);
+            } else {
+                self.paused_for_wait = false;
             }
         }
         change
@@ -884,7 +919,11 @@ pub struct PacerDiscard {
 
 /// The pause begins when the expected queue time reaches this share of the queue time bound:
 /// half, so a source that stops when told (within a frame or a read of its target) never lets
-/// its packets wait the bound, even when the target falls by half once more meanwhile.
+/// its packets wait the bound, even when the target falls by half once more meanwhile. It
+/// also begins when the oldest new media has itself waited that share of the bound, whatever
+/// the expected queue time says: audio and retransmissions leave ahead of it and can take the
+/// whole target, and a source that follows the target must be paused before its media is
+/// old enough to be discarded, not have it discarded.
 const PAUSE_AT: f64 = 0.5;
 
 /// The pause ends when the expected queue time is back under this share of the bound (100 ms
