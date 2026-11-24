@@ -154,8 +154,9 @@ struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     video: [bool; 2],
-    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains, the
-    /// options' default when `None`.
+    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains and
+    /// `RtcpSessionBuilder::with_report_from_every_ssrc` for ParolNet's, their default when
+    /// `None`.
     report_from_every_ssrc: Option<bool>,
 }
 
@@ -614,6 +615,10 @@ impl Peer {
         let session = RtcpSessionBuilder::new()
             .with_t_rr_interval(Duration::ZERO)
             .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match setup.report_from_every_ssrc {
+            Some(every) => session.with_report_from_every_ssrc(every),
+            None => session,
+        };
         let session = match wall_clock {
             Some(anchor) => session.with_wall_clock(anchor),
             None => session,
@@ -1884,8 +1889,10 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 
 /// A measurement over what the environment names, one line per run; asserts nothing.
 /// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
-/// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
-/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
+/// (`within`, `upto`, `unlimited`, `default`: the engine's), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
+/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_EVERY` (`true` or `false`: RFC 8108
+/// 5.1's report blocks from every SSRC or once; the chains' default when unset),
+/// `RTC_CAP_SECONDS` (how long the cap stays;
 /// `20`), each a comma-separated list; `RTC_CAP_AT_TARGET` (the target in bit/s at which the
 /// cap arrives, instead of after 20 s).
 #[test]
@@ -1905,13 +1912,14 @@ fn measure_the_capacity_cap() -> Result<()> {
                 for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
                     for anchor in list("RTC_CAP_ANCHORS", "0,1,2") {
                         let rate_limit = match rule.as_str() {
-                            "within" => RetransmissionRateLimit::WithinTarget,
-                            "upto" => RetransmissionRateLimit::UpToTarget,
-                            "unlimited" => RetransmissionRateLimit::Unlimited,
+                            "within" => Some(RetransmissionRateLimit::WithinTarget),
+                            "upto" => Some(RetransmissionRateLimit::UpToTarget),
+                            "unlimited" => Some(RetransmissionRateLimit::Unlimited),
+                            "default" => None,
                             other => bail!("unknown rule {other}"),
                         };
                         let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
-                        let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
+                        let mut setup = Setup::new(seed.parse()?, rate_limit)
                             .chain(match chain.as_str() {
                                 "parolnet" => Chain::ParolNet,
                                 "default" => Chain::Default,
@@ -1922,6 +1930,9 @@ fn measure_the_capacity_cap() -> Result<()> {
                         setup.cap = Duration::from_secs(seconds.parse()?);
                         if let Some(bps) = &at_target {
                             setup = setup.capped_at_a_target_of(bps.parse()?);
+                        }
+                        if let Ok(every) = std::env::var("RTC_CAP_EVERY") {
+                            setup = setup.report_from_every_ssrc(every.parse()?);
                         }
                         match run(&setup) {
                             Ok(o) => println!(
@@ -1989,49 +2000,6 @@ fn draft_climb_mean(from: u32) -> u32 {
 /// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
 /// Once the cap goes, the target is never cut again and climbs at least about as fast as the
 /// draft's multiplicative increase from where the cap left it.
-/// The measurement behind the default of `rtcp_report_from_every_ssrc` (RFC 8108 section 5.1
-/// as written is `true`: every SSRC reports on every other, the co-located ones included):
-/// the default chain through a capacity cap, on two seeds (and three wall clocks each with
-/// `RTC_CAP_FULL`), with the report blocks from every SSRC and carried once. With the larger
-/// compound packets of the RFC form the video froze longer after the cap and lagged more.
-/// Run with `--nocapture` for the figures.
-#[test]
-fn report_blocks_from_every_ssrc_measured_against_once() -> Result<()> {
-    let anchors: &[Duration] = if full() { &ANCHORS } else { &ANCHORS[..1] };
-    let runs = 2 * anchors.len() as u32;
-    let mut totals = [(Duration::ZERO, Duration::ZERO, Duration::ZERO); 2];
-    for (form, every) in [(0, true), (1, false)] {
-        for seed in 1..=2 {
-            for &anchor in anchors {
-                let outcome = run(&Setup::new(seed, None)
-                    .chain(Chain::Default)
-                    .anchor(anchor)
-                    .report_from_every_ssrc(every))?;
-                println!(
-                    "every {every}, seed {seed}, anchor {anchor:?}: freeze {:?}, lag {:?}",
-                    outcome.freeze, outcome.lag
-                );
-                totals[form].0 += outcome.freeze;
-                totals[form].1 = totals[form].1.max(outcome.freeze);
-                totals[form].2 += outcome.lag;
-            }
-        }
-    }
-    for (form, every) in [(0, true), (1, false)] {
-        println!(
-            "every {every}: mean freeze {:?}, longest {:?}, mean lag {:?}",
-            totals[form].0 / runs,
-            totals[form].1,
-            totals[form].2 / runs
-        );
-    }
-    assert!(
-        totals[0].0 > totals[1].0,
-        "the RFC form froze no longer: {totals:?}"
-    );
-    Ok(())
-}
-
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
     let outcomes: Result<Vec<_>> = seed_range(2, 6)

@@ -400,6 +400,8 @@ struct Flow {
     last_departure: Option<Instant>,
     /// Smoothed interval between the receiver's reports: the estimate of Tdr.
     receiver_interval: Option<Duration>,
+    /// The reporting SSRC whose blocks the flow follows, and when it last reported.
+    reporter: Option<(u32, Instant)>,
     /// The extended highest sequence number the receiver last reported.
     highest_sequence: Option<u32>,
     /// The previous report's cumulative number lost and extended highest sequence number,
@@ -434,6 +436,7 @@ impl Flow {
             last_report_at: None,
             last_departure: None,
             receiver_interval: None,
+            reporter: None,
             highest_sequence: None,
             previous_report: None,
             never_sent: NeverSent::default(),
@@ -659,15 +662,35 @@ impl CircuitBreakerInterceptor {
         self.config.rtcp_interval * RTCP_TIMEOUT_INTERVALS
     }
 
-    /// One report block about a flow this endpoint sends.
-    fn on_report_block(&mut self, now: Instant, report: &rtcp::reception_report::ReceptionReport) {
+    /// One report block about a flow this endpoint sends, from the SSRC `reporter`.
+    ///
+    /// The breaker is RFC 8083's for a unicast session: one receiver. That receiver may report
+    /// on the flow from each of its SSRCs (RFC 8108 section 5.1: every SSRC reports on every
+    /// source), the same reception each time: the flow follows one reporting SSRC, and takes
+    /// another only once the one it follows has been silent for the RTCP timeout (it left, or
+    /// changed SSRC). Counting every copy would count each report several times (MEDIA_TIMEOUT
+    /// reached in a fraction of the reports) and see a zero spacing between the copies (Tdr).
+    fn on_report_block(
+        &mut self,
+        now: Instant,
+        reporter: u32,
+        report: &rtcp::reception_report::ReceptionReport,
+    ) {
         let config = self.config;
+        let rtcp_timeout = self.rtcp_timeout();
         let Some(flow) = self.flows.get_mut(&report.ssrc) else {
             return;
         };
         if flow.is_ceased() {
             return;
         }
+        if let Some((followed, at)) = flow.reporter
+            && followed != reporter
+            && now.saturating_duration_since(at) < rtcp_timeout
+        {
+            return;
+        }
+        flow.reporter = Some((reporter, now));
 
         // Tr: RFC 3550 section 6.4.1, smoothed as RFC 8083 section 3 says.
         if report.last_sender_report != 0
@@ -918,10 +941,10 @@ impl CircuitBreakerInterceptor {
             let any = packet.as_any();
             if let Some(sr) = any.downcast_ref::<rtcp::sender_report::SenderReport>() {
                 has_report_packet = true;
-                reports.extend(sr.reports.iter().cloned());
+                reports.extend(sr.reports.iter().map(|block| (sr.ssrc, block.clone())));
             } else if let Some(rr) = any.downcast_ref::<rtcp::receiver_report::ReceiverReport>() {
                 has_report_packet = true;
-                reports.extend(rr.reports.iter().cloned());
+                reports.extend(rr.reports.iter().map(|block| (rr.ssrc, block.clone())));
             }
         }
 
@@ -930,13 +953,13 @@ impl CircuitBreakerInterceptor {
         // received for this breaker too (section 5), and for this breaker only.
         let reports_on_us = reports
             .iter()
-            .any(|report| self.flows.contains_key(&report.ssrc));
+            .any(|(_, report)| self.flows.contains_key(&report.ssrc));
         if !packets.is_empty() && (!has_report_packet || reports_on_us) {
             self.awaiting_rtcp_since = None;
         }
 
-        for report in &reports {
-            self.on_report_block(now, report);
+        for (reporter, report) in &reports {
+            self.on_report_block(now, *reporter, report);
         }
     }
 }
