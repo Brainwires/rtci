@@ -7,37 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **media pipeline, phase one: audio** (`conf/mp-1-audio-pipeline`). Two new crates beside the
-  engine, sans-I/O, pure Rust by default; `docs/media-pipeline.md` describes them and the
-  measured quality.
-  - `rtc-audio`: Opus encode / decode (opus-rs, pure Rust; the reference libopus with feature
-    `libopus`), the RFC 7587 parameters both ways (`OpusFmtp`, `OpusEncoderConfig::for_remote`),
-    G.711 PCMU / PCMA and G.722, an Opus packet reader (TOC, frame offsets, the LBRR flag);
-    the receive pipeline `JitterBuffer` (adaptive delay from the 95th percentile of relative
-    arrival delay, `jitterBufferTarget`, minimum and maximum delay, reordering and duplicates,
-    Opus in-band FEC recovery, codec and generic concealment, Opus DTX and RFC 3389 comfort
-    noise, accelerate / preemptive expand by pitch periods, clock-drift compensation, RED
-    blocks, telephone events kept from the decoder, and the W3C inbound audio statistics);
-    `AudioProcessing` (high-pass, echo canceller with delay estimation, residual echo and
-    noise suppression, gain control, voice activity, each switchable); the `SendPipeline`
-    (bitrate from the congestion controller's share minus packet overhead, FEC on reported
-    loss, DTX, RFC 3389 SIDs, RFC 6464 levels); and `engine::{AudioSender, AudioReceiver}`,
-    the glue to `RTCRtpSender` / `RTCRtpReceiver` (packetizing with the engine's payloaders,
-    `write_rtp_with_audio_level`, RED, `target_bitrates`, RTCP loss, `getStats()` feeds).
-  - `rtc-devices`: capture and playout through real-time-safe rings, rate and channel
-    conversion to the pipeline's 48 kHz mono, device listing, selection, hot-swap and
-    replacement of a failed device, a fake backend for tests, and cpal behind feature
-    `devices`.
-  - `rtc-audio/examples/audio-loopback.rs`: WAV or synthetic speech through two peer
-    connections over a lossy link and back to WAV and Ogg; run in the test environment's env
-    stage, its Ogg decoded by GStreamer.
-  - The interop peer's `{"media":"pipeline"}` scenario and the browser matrix cell "audio
-    pipeline": the browser decodes the pipeline's Opus, the pipeline decodes the browser's.
-  - The root manifest optimises `rtc-audio` and `opus-rs` in the dev profile (their tests run
-    seconds of DSP); cargo.yml's MSRV job installs `libasound2-dev` for the `devices` feature.
-
 ### Breaking changes
 
 - **peer connection, interceptors**: the `Performance` behaviour profile and the
@@ -897,6 +866,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+
+### Added
+
+- **media pipeline, phase one: audio** (`conf/mp-1-audio-pipeline`). Two new crates beside the
+  engine, sans-I/O, pure Rust by default; `docs/media-pipeline.md` describes them and the
+  measured quality.
+  - `rtc-audio`: Opus encode / decode (opus-rs, pure Rust; the reference libopus with feature
+    `libopus`), the RFC 7587 parameters both ways (`OpusFmtp`, `OpusEncoderConfig::for_remote`),
+    G.711 PCMU / PCMA and G.722, an Opus packet reader (TOC, frame offsets, the LBRR flag);
+    the receive pipeline `JitterBuffer` (adaptive delay from the 95th percentile of relative
+    arrival delay, `jitterBufferTarget`, minimum and maximum delay, reordering and duplicates,
+    Opus in-band FEC recovery, codec and generic concealment, Opus DTX and RFC 3389 comfort
+    noise, accelerate / preemptive expand by pitch periods, clock-drift compensation, RED
+    blocks, telephone events kept from the decoder, and the W3C inbound audio statistics);
+    `AudioProcessing` (high-pass, echo canceller with delay estimation, residual echo and
+    noise suppression, gain control, voice activity, each switchable); the `SendPipeline`
+    (bitrate from the congestion controller's share minus packet overhead, FEC on reported
+    loss, DTX, RFC 3389 SIDs, RFC 6464 levels); and `engine::{AudioSender, AudioReceiver}`,
+    the glue to `RTCRtpSender` / `RTCRtpReceiver` (packetizing with the engine's payloaders,
+    `write_rtp_with_audio_level`, RED, `target_bitrates`, RTCP loss, `getStats()` feeds).
+  - `rtc-devices`: capture and playout through real-time-safe rings, rate and channel
+    conversion to the pipeline's 48 kHz mono, device listing, selection, hot-swap and
+    replacement of a failed device, a fake backend for tests, and cpal behind feature
+    `devices`.
+  - `rtc-audio/examples/audio-loopback.rs`: WAV or synthetic speech through two peer
+    connections over a lossy link and back to WAV and Ogg; run in the test environment's env
+    stage, its Ogg decoded by GStreamer.
+  - The interop peer's `{"media":"pipeline"}` scenario and the browser matrix cell "audio
+    pipeline": the browser decodes the pipeline's Opus, the pipeline decodes the browser's.
+  - The root manifest optimises `rtc-audio` and `opus-rs` in the dev profile (their tests run
+    seconds of DSP); cargo.yml's MSRV job installs `libasound2-dev` for the `devices` feature.
+- **ffi**: `.github/workflows/release-binaries.yml` builds rtc-ffi's libraries and header for
+  Linux x86_64 and aarch64 (glibc 2.17 with cargo-zigbuild, checked), macOS aarch64 (11.0) and
+  x86_64 (10.13) and Windows x86_64 (MSVC), with `SHA256SUMS` and `manifest.json`; on a `v*`
+  tag or by hand only, artifacts on a dispatch and attached to the tag's release on a tag, no
+  secret but `GITHUB_TOKEN`. It has not been run. `docs/packaging.md` documents the C
+  interface, the platforms, the Deno example, the release contents and the owner's two
+  decisions (tagging and publishing; crate names, since the `rtc*` names on crates.io are
+  upstream's).
+- **ffi**: a reference Deno binding of the driven layer, `bindings/deno/` (not published; the
+  Denext project maintains its own): `RTCPeerConnection`, `RTCDataChannel`,
+  `RTCRtpTransceiver` / `Sender` / `Receiver`, `RTCSessionDescription`, `RTCIceCandidate`, their
+  events and `getStats` over `Deno.dlopen`, the server options as the second constructor
+  argument, `RTCSharedPort`, and encoded media (`writeFrame`, `writeRtp`, the receiver's `rtp`
+  event). The library comes from `RTC_FFI_LIB` or beside the module; nothing is downloaded.
+- **ffi**: the driven layer of `rtc-ffi` (feature `driver`, on by default): `rtc_driven_*`, a
+  peer connection that owns its sockets and a thread running the reference tokio driver
+  (`examples/stream-driver`), driven by method name and JSON (`rtc_driven_call`, the
+  sans-I/O layer's own entry points on that thread), delivering events, data channel messages
+  and RTP / RTCP to a callback or a queue (`rtc_driven_wait`, `rtc_driven_next`); the server
+  options of the driver (bind addresses, loopback and link-local opt-in, a port range for UDP
+  sockets and ICE-TCP listeners, the engine's TCP, 1:1 NAT, ICE-lite); and `rtc_mux_*`, one
+  UDP port and one passive ICE-TCP port shared by many driven connections, routed by ICE
+  ufrag. Tested in Rust through the C declarations over loopback (`tests/driven.rs`) and by a C
+  program compiled against the static library (`tests/c/loopback.c`, `tests/c_loopback.rs`).
+- **ffi**: `rtc-ffi`, a C ABI over the engine (`cdylib`, `staticlib` and `rlib`; header
+  `rtc-ffi/include/rtc.h`, generated by cbindgen and checked by the `C header up to date` job).
+  The sans-I/O layer (`rtc_pc_*`) is the Rust API one to one: configuration (W3C
+  `RTCConfiguration`) and engine settings as JSON, descriptions and candidates as their W3C
+  JSON, data channels, transceivers, senders and receivers by id, RTP written as packets or as
+  encoded frames the library packetizes, `handle_read` / `poll_write` / `poll_read` /
+  `poll_event` (JSON) / `poll_timeout` / `handle_timeout` with buffers the caller owns, the
+  stream interface (ICE-TCP, TURN over TCP / TLS) with commands and events as JSON, and
+  statistics as JSON. Time is the caller's monotonic nanoseconds. No panic crosses the
+  boundary (`RTC_ERR_PANIC`, the handle is poisoned), errors are status codes with a
+  per-thread message (`rtc_last_error`), every allocation has its free function, and
+  `rtc_debug_live_objects` counts what is not freed. `rtc_abi_version` is 1. Tested by two peer
+  connections that see each other only through the C declarations (`rtc-ffi/tests/`). The
+  sans-I/O time boundary allows the one anchor read the nanoseconds need.
 
 ### Bug Fixes
 
@@ -3751,45 +3789,6 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
-
-- **ffi**: `.github/workflows/release-binaries.yml` builds rtc-ffi's libraries and header for
-  Linux x86_64 and aarch64 (glibc 2.17 with cargo-zigbuild, checked), macOS aarch64 (11.0) and
-  x86_64 (10.13) and Windows x86_64 (MSVC), with `SHA256SUMS` and `manifest.json`; on a `v*`
-  tag or by hand only, artifacts on a dispatch and attached to the tag's release on a tag, no
-  secret but `GITHUB_TOKEN`. It has not been run. `docs/packaging.md` documents the C
-  interface, the platforms, the Deno example, the release contents and the owner's two
-  decisions (tagging and publishing; crate names, since the `rtc*` names on crates.io are
-  upstream's).
-- **ffi**: a reference Deno binding of the driven layer, `bindings/deno/` (not published; the
-  Denext project maintains its own): `RTCPeerConnection`, `RTCDataChannel`,
-  `RTCRtpTransceiver` / `Sender` / `Receiver`, `RTCSessionDescription`, `RTCIceCandidate`, their
-  events and `getStats` over `Deno.dlopen`, the server options as the second constructor
-  argument, `RTCSharedPort`, and encoded media (`writeFrame`, `writeRtp`, the receiver's `rtp`
-  event). The library comes from `RTC_FFI_LIB` or beside the module; nothing is downloaded.
-- **ffi**: the driven layer of `rtc-ffi` (feature `driver`, on by default): `rtc_driven_*`, a
-  peer connection that owns its sockets and a thread running the reference tokio driver
-  (`examples/stream-driver`), driven by method name and JSON (`rtc_driven_call`, the
-  sans-I/O layer's own entry points on that thread), delivering events, data channel messages
-  and RTP / RTCP to a callback or a queue (`rtc_driven_wait`, `rtc_driven_next`); the server
-  options of the driver (bind addresses, loopback and link-local opt-in, a port range for UDP
-  sockets and ICE-TCP listeners, the engine's TCP, 1:1 NAT, ICE-lite); and `rtc_mux_*`, one
-  UDP port and one passive ICE-TCP port shared by many driven connections, routed by ICE
-  ufrag. Tested in Rust through the C declarations over loopback (`tests/driven.rs`) and by a C
-  program compiled against the static library (`tests/c/loopback.c`, `tests/c_loopback.rs`).
-- **ffi**: `rtc-ffi`, a C ABI over the engine (`cdylib`, `staticlib` and `rlib`; header
-  `rtc-ffi/include/rtc.h`, generated by cbindgen and checked by the `C header up to date` job).
-  The sans-I/O layer (`rtc_pc_*`) is the Rust API one to one: configuration (W3C
-  `RTCConfiguration`) and engine settings as JSON, descriptions and candidates as their W3C
-  JSON, data channels, transceivers, senders and receivers by id, RTP written as packets or as
-  encoded frames the library packetizes, `handle_read` / `poll_write` / `poll_read` /
-  `poll_event` (JSON) / `poll_timeout` / `handle_timeout` with buffers the caller owns, the
-  stream interface (ICE-TCP, TURN over TCP / TLS) with commands and events as JSON, and
-  statistics as JSON. Time is the caller's monotonic nanoseconds. No panic crosses the
-  boundary (`RTC_ERR_PANIC`, the handle is poisoned), errors are status codes with a
-  per-thread message (`rtc_last_error`), every allocation has its free function, and
-  `rtc_debug_live_objects` counts what is not freed. `rtc_abi_version` is 1. Tested by two peer
-  connections that see each other only through the C declarations (`rtc-ffi/tests/`). The
-  sans-I/O time boundary allows the one anchor read the nanoseconds need.
 
 - **sctp**: `Association::peer_abort_reason()` (the Upper Layer Abort Reason of the peer's
   User-Initiated Abort, RFC 9260 sections 3.3.10.12 and 9.1) and
