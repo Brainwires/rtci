@@ -81,9 +81,12 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-/// How many datagrams a host socket's reader takes in one receive, when its socket can
-/// ([`AsyncUdpSocket::max_receive_batch`]: `recvmmsg` with `TokioRuntime` on Linux).
-const RECEIVE_BATCH: usize = 32;
+/// How many datagrams a host socket's reader takes in one receive. One: a batch of 32
+/// (`recvmmsg` with `TokioRuntime` on Linux, [`runtime::receive_datagrams`]) measured no faster
+/// on a hosted 4-vCPU runner (`examples/udp_receive_bench.rs`, run 45453875337: medians 214547
+/// against 217617 datagrams/s with one sender, 446222 against 442658 with two, 394069 against
+/// 359260 with four), so the driver keeps one datagram per receive.
+const RECEIVE_BATCH: usize = 1;
 
 /// A datagram a socket of the driver received: its local address, the sender, the bytes.
 type Received = (SocketAddr, SocketAddr, Vec<u8>);
