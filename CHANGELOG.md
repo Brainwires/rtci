@@ -110,6 +110,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at MTU boundaries as before. `Vp8Payloader::ignore_partitions` (new public field) selects
   the old cut, which is libwebrtc's. Conformance rows RFC7741-4-1, 4.2-7, 4.2-11, 4.4-4 and
   4.4-6 are `tested`.
+- **`vp8.ignore-partitions`, a governed behaviour: the `Chrome` profile packetizes VP8 as
+  libwebrtc does** (`conf/vp-9r-vp8-partitions`). New `MediaEngine::set_vp8_ignore_partitions`
+  (`false` by default, RFC 7741 section 3's partition packets; `true` under `Chrome`:
+  libwebrtc's `RtpPacketizerVp8` cuts the whole frame, `S` on the first packet only, `PID` 0),
+  `MediaEngine::payloader` and `RTCRtpSender::payloader(&codec)`, which build a payloader with
+  the connection's packetization settings (`RTCRtpCodec::payloader` keeps the default form).
+  `rtci-video`'s `VideoSender` takes its payloader from the sender, so its VP8 follows the
+  profile. Tests: `tests/vp8_packetization_profile.rs`.
 
 - **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
   application; no default format is one) is offered and answered with
@@ -604,6 +612,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivered from such a packet).
 
 ### Test environment and documentation
+
+- **video** (`conf/vp-9r-vp8-partitions`): the golden-stream tests of `rtci-video`
+  (`*_ivf_survives_loss_and_reordering_intact`, `*_annexb_*`,
+  `vp8_ivf_through_loss_decodes_bit_exactly_with_the_vp8_decoder`) no longer require 99 % of
+  the frames decoded at 5 % loss, a figure calibrated to one packetization and one seeded loss
+  pattern: RFC 7741's partition packets (every VP8 frame at least two packets) took 296 of
+  300. They now state the requirement: every released frame decodes, and a frame is left out
+  only when the next key frame was released while that frame, or one it predicts from, still
+  waited for a repair (the frames skipped were 208, 209, 239 and 269, each just before a key
+  frame). No pipeline change: no frame split at a partition boundary was mishandled.
 
 - **audit**: the library's advisory check (`.github/deny-library.toml`, no ignores) covers the
   published crates (`exclude-unpublished`); the whole-workspace check (`deny.toml`) now resolves

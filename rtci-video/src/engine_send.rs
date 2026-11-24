@@ -63,7 +63,10 @@ pub struct VideoSender {
 
 impl VideoSender {
     /// Binds to `sender` after negotiation: its SSRC, its negotiated codec's payload type and
-    /// payloader.
+    /// payloader (built by the connection, [`RTCRtpSender::payloader`], so its behaviour
+    /// profile decides the VP8 packetization).
+    ///
+    /// [`RTCRtpSender::payloader`]: rtci::rtp_transceiver::rtp_sender::RTCRtpSender::payloader
     ///
     /// # Errors
     ///
@@ -89,9 +92,9 @@ impl VideoSender {
             .find(|c| crate::Codec::from_mime_type(&c.rtp_codec.mime_type).is_some())
             .cloned()
             .ok_or_else(|| Error::Engine("no negotiated video codec".into()))?;
-        let payloader = codec
-            .rtp_codec
-            .payloader()
+        // The connection's packetization (its behaviour profile: VP8 partitions or not).
+        let payloader = s
+            .payloader(&codec.rtp_codec)
             .map_err(|e| Error::Engine(e.to_string()))?;
         let pipeline = SendPipeline::new(
             factory,

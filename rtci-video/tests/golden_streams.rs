@@ -146,6 +146,10 @@ struct Outcome {
     broken_chain: usize,
     /// Decoded pictures that differ from decoding the source stream directly, in order.
     pictures_differ: usize,
+    /// When the last packet of each frame first arrived (the frame became complete).
+    completed_at: Vec<Instant>,
+    /// When each released frame was released, and whether it is a key frame.
+    released_at: HashMap<usize, (Instant, bool)>,
 }
 
 fn run(codec: Codec, frames: &[Bytes], payloader: Box<dyn Payloader>, net: Network) -> Outcome {
@@ -177,6 +181,7 @@ fn run_with(
     let mut lost_for_good = 0;
     let mut sent: HashMap<u32, Bytes> = HashMap::new();
     let mut index_of: HashMap<u32, usize> = HashMap::new();
+    let mut completed_at: Vec<Instant> = Vec::with_capacity(frames.len());
     for (i, frame) in frames.iter().enumerate() {
         let send = t0 + interval * i as u32;
         let ts = (i as u32).wrapping_mul(3003).wrapping_add(0xffff_0000);
@@ -184,6 +189,7 @@ fn run_with(
         index_of.insert(ts, i);
         let payloads = payloader.payload(1200, frame).expect("payloads");
         let n = payloads.len();
+        let mut complete = send;
         for (k, payload) in payloads.into_iter().enumerate() {
             let packet = VideoPacket {
                 arrival: send,
@@ -208,6 +214,7 @@ fn run_with(
                     let mut p = packet.clone();
                     p.arrival = arrival;
                     arrivals.push((arrival, p));
+                    complete = complete.max(arrival);
                     delivered = true;
                     break;
                 }
@@ -215,8 +222,10 @@ fn run_with(
             }
             if !delivered {
                 lost_for_good += 1;
+                complete = complete.max(t0 + Duration::from_secs(3600));
             }
         }
+        completed_at.push(complete);
     }
     arrivals.sort_by_key(|a| a.0);
     let mut pipeline = ReceivePipeline::new(codec, t0, ReceiveConfig::default());
@@ -233,6 +242,8 @@ fn run_with(
         longest_ms: 0.0,
         broken_chain: 0,
         pictures_differ: 0,
+        completed_at,
+        released_at: HashMap::new(),
     };
     let end = t0 + interval * frames.len() as u32 + Duration::from_secs(3);
     let mut next = 0;
@@ -257,6 +268,8 @@ fn run_with(
                 out.broken_chain += 1;
             }
             last_released = Some(index);
+            out.released_at
+                .insert(index, (now, request.frame.is_keyframe()));
             let expected = &sent[&ts];
             let same = match codec {
                 Codec::H264 | Codec::H265 => nal_units(expected) == nal_units(request.frame.data()),
@@ -366,12 +379,8 @@ fn check(codec: Codec, frames: &[Bytes], payloader: impl Fn() -> Box<dyn Payload
         "freezes (longest interval {:.0} ms)",
         o.longest_ms
     );
-    assert!(
-        o.decoded * 100 >= frames.len() * 99,
-        "decoded {} of {}",
-        o.decoded,
-        frames.len()
-    );
+    assert_eq!(o.decoded, o.released, "every released frame decodes");
+    only_frames_a_key_frame_superseded_are_skipped(codec, frames.len(), &o);
 }
 
 #[test]
@@ -452,11 +461,11 @@ fn vp8_ivf_through_loss_decodes_bit_exactly_with_the_vp8_decoder() {
         );
         assert_eq!(o.decoder_errors, 0, "loss {loss}: decode errors");
         assert_eq!(o.pictures_differ, 0, "loss {loss}: pictures differ");
-        assert!(
-            o.decoded * 100 >= frames.len() * 99,
-            "loss {loss}: decoded {}",
-            o.decoded
+        assert_eq!(
+            o.decoded, o.released,
+            "loss {loss}: every released frame decodes"
         );
+        only_frames_a_key_frame_superseded_are_skipped(Codec::Vp8, frames.len(), &o);
         assert_eq!(o.freezes, 0, "loss {loss}: freezes");
     }
 }
@@ -521,4 +530,37 @@ fn av1_from_rav1e_through_loss_decodes_bit_exactly_with_rav1d() {
             o.decoded
         );
     }
+}
+
+/// Every frame arrives whole (`lost_for_good` is 0), so a frame may go unreleased only when a
+/// later key frame made it unnecessary: the frame buffer released that key frame while the
+/// frame, or one it predicts from (back to the key frame before it), still waited for a
+/// repair. Which frames that hits depends on how the frames were cut into packets and on the
+/// seeded loss, not on a share of the stream (RFC 7741's partition packetization makes every
+/// VP8 frame at least two packets and moves the losses to other frames).
+fn only_frames_a_key_frame_superseded_are_skipped(codec: Codec, frames: usize, o: &Outcome) {
+    let skipped: Vec<usize> = (0..frames)
+        .filter(|i| !o.released_at.contains_key(i))
+        .collect();
+    for &i in &skipped {
+        let (key, (key_released, _)) = o
+            .released_at
+            .iter()
+            .filter(|(k, (_, keyframe))| **k > i && *keyframe)
+            .min_by_key(|(k, _)| **k)
+            .unwrap_or_else(|| panic!("frame {i} skipped with no key frame released after it"));
+        let chain_start = o
+            .released_at
+            .iter()
+            .filter(|(k, (_, keyframe))| **k < i && *keyframe)
+            .map(|(k, _)| *k)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            (chain_start..=i).any(|j| o.completed_at[j] > *key_released),
+            "frame {i} skipped although it and the frames back to key frame {chain_start} were \
+             complete when key frame {key} was released"
+        );
+    }
+    println!("{codec:?}: skipped {skipped:?}, each superseded by a key frame");
 }
