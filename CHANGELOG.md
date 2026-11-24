@@ -36,7 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   octets on the wire (1.01 in the order written, run 45441790794). One video stream (the
   capacity-cap matrix, six seeds on three wall clocks, both chains, run 45441814325), the
   reordering sweep, the rate-limited link, the multi-flow tests and the VP8 jitter tests: the
-  same figures as without it. Audit rows RFC8835-4.1-1 and RFC8836-2-6b are `tested`.
+  same figures as without it. Audit row RFC8836-2-6b is `tested`; RFC8835-4.1-1 is `partial`
+  with its two departures stated: audio leaves ahead of video whatever their priorities (the
+  text makes the prioritisation "independent of the media type"; kept for the audio's latency),
+  and retransmissions ahead of new media whatever their stream's priority (kept: a repair
+  completes a frame the receiver holds for).
 
 - **congestion control (GCC), the over-use detector's threshold adapts over the arrival
   gaps** (`conf/gcc-9-draft-threshold-time-base`): draft-ietf-rmcat-gcc-02 section 5.4,
