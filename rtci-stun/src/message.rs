@@ -42,6 +42,10 @@ pub const TRANSACTION_ID_SIZE: usize = 12;
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Default, Debug)]
 /// A 96-bit transaction id, which pairs a response with its request.
+///
+/// A request takes [`TransactionId::new`]: RFC 8489 section 5 has the id "uniformly and
+/// randomly chosen from the interval 0 .. 2**96-1, and MUST be cryptographically random".
+/// [`Default`] is the all-zero id, for decoding into and for tests, never for a request.
 pub struct TransactionId(pub [u8; TRANSACTION_ID_SIZE]);
 
 impl TransactionId {

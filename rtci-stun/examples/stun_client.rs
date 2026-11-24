@@ -40,7 +40,7 @@ fn main() -> Result<(), Error> {
     )?;
 
     let mut msg = Message::new();
-    msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
+    msg.build(&[Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)])?;
     client.handle_write(TaggedMessage {
         now: Instant::now(),
         message: msg,
