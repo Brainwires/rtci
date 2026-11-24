@@ -3491,7 +3491,7 @@ fn data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_receive
 /// One DTLS handshake as the wire showed it, from its plaintext messages: the client's
 /// address and the server's, the step of the client's first ClientHello, whether a ClientHello
 /// offered to resume (a DTLS 1.3 `pre_shared_key`, a DTLS 1.2 session id or ticket), whether
-/// the server answered, and whether it resumed (its ServerHello selected the PSK in DTLS 1.3;
+/// the server answered with a ServerHello (not a HelloRetryRequest), and whether it resumed (its ServerHello selected the PSK in DTLS 1.3;
 /// in DTLS 1.2, no Certificate came from it).
 #[derive(Debug, Clone)]
 struct WireHandshake {
@@ -3611,7 +3611,16 @@ fn wire_handshakes(world: &World, latest_from: u64) -> Vec<WireHandshake> {
         if *kind != 2 || *received < body.len() {
             continue;
         }
-        // ServerHello: version, random, session id, suite, compression.
+        // ServerHello: version, random, session id, suite, compression. A HelloRetryRequest
+        // (RFC 8446 section 4.1.3: the ServerHello with this random) answers nothing yet.
+        const HELLO_RETRY_REQUEST: [u8; 32] = [
+            0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65,
+            0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2,
+            0xc8, 0xa8, 0x33, 0x9c,
+        ];
+        if body.get(2..34) == Some(&HELLO_RETRY_REQUEST[..]) {
+            continue;
+        }
         let at = 35 + usize::from(body[34]) + 3;
         let extensions = hello_extensions(body, at);
         let Some(handshake) = by_client.get_mut(to) else {
