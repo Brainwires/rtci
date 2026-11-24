@@ -42,6 +42,8 @@ fn a(s: &str) -> SocketAddr {
 fn candidate(line: &str) -> RTCIceCandidateInit {
     RTCIceCandidateInit {
         candidate: format!("candidate:{line}"),
+        // The one media section (the data channel's).
+        sdp_mline_index: Some(0),
         ..Default::default()
     }
 }
