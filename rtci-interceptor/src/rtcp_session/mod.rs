@@ -46,7 +46,7 @@ use scheduler::{
 use shared::TransportContext;
 use shared::error::Error;
 use shared::marshal::MarshalSize;
-use shared::time::SystemInstant;
+use shared::time::{SystemInstant, near_leap_second};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1806,7 +1806,11 @@ impl RtcpSessionInterceptor {
             }
 
             if let Some(sr) = any.downcast_ref::<SenderReport>() {
-                if let Some(remote) = self.remotes.get_mut(&sr.ssrc) {
+                // RFC 7164 section 5.1: the timestamps of a sender report from near a leap
+                // second are ignored; the last one before it stays the one reported on (LSR).
+                if let Some(remote) = self.remotes.get_mut(&sr.ssrc)
+                    && !near_leap_second(sr.ntp_time)
+                {
                     remote.stream.process_sender_report(now, sr);
                 }
                 self.observe_report_blocks(now, &sr.reports);
@@ -2018,7 +2022,13 @@ impl RtcpSessionInterceptor {
         let we_sent = self.we_sent(index, now);
         let local = &mut self.locals[index];
         local.rtcp_sent = true;
-        if we_sent && let Some(mut report) = local.stream.generate_report(now) {
+        // RFC 7164 section 5.1: no sender report "containing an originating NTP timestamp in
+        // the vicinity of a positive leap second"; a receiver report in its place keeps the
+        // schedule.
+        if we_sent
+            && let Some(mut report) = local.stream.generate_report(now)
+            && !near_leap_second(report.ntp_time)
+        {
             local
                 .sent_reports
                 .push_back(((report.ntp_time >> 16) as u32, now));
@@ -2124,9 +2134,11 @@ impl RtcpSessionInterceptor {
             let wall_clock = *self
                 .wall_clock
                 .get_or_insert_with(|| SystemInstant::shared(now));
-            blocks.push(Box::new(ReceiverReferenceTimeReportBlock {
-                ntp_timestamp: wall_clock.ntp(now),
-            }));
+            let ntp_timestamp = wall_clock.ntp(now);
+            // RFC 7164 section 5: no NTP timestamp generated near a leap second.
+            if !near_leap_second(ntp_timestamp) {
+                blocks.push(Box::new(ReceiverReferenceTimeReportBlock { ntp_timestamp }));
+            }
         }
         // RFC 3611 section 5.1: "non RTP senders SHALL NOT send DLRR blocks" under
         // `rcvr-rtt=sender`; under `all` they MAY, and this endpoint does not. A DLRR block is
