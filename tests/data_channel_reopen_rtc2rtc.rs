@@ -23,7 +23,7 @@ use std::time::Duration;
 const SIZE: usize = 64 * 1024;
 /// The messages of the second channel: enough to number past whatever the first channel's
 /// sender had queued when the close came (its old numbers would collide with these).
-const SECOND: u32 = 60;
+const SECOND: u32 = 80;
 
 /// A message's bytes: its number, then a pattern that depends on it.
 fn msg(id: u32) -> Vec<u8> {
@@ -41,12 +41,24 @@ fn msg(id: u32) -> Vec<u8> {
 /// The answerer's application: it writes messages `first..first + total` to its channel `ch`
 /// while fewer than `backlog` of them are buffered. Returns false once the channel refuses.
 fn top_up(p: &mut Pair, ch: RTCDataChannelId, next: &mut u32, first: u32, total: u32) -> bool {
-    const BACKLOG: u64 = 8 * SIZE as u64;
+    top_up_to(p, ch, next, first, total, 8)
+}
+
+/// As [`top_up`], with `backlog` messages buffered at most.
+fn top_up_to(
+    p: &mut Pair,
+    ch: RTCDataChannelId,
+    next: &mut u32,
+    first: u32,
+    total: u32,
+    backlog: u64,
+) -> bool {
+    let limit = backlog * SIZE as u64;
     let now = p.now;
     let Some(mut dc) = p.answerer.pc.data_channel(ch) else {
         return false;
     };
-    while *next < total && dc.buffered_amount() < BACKLOG {
+    while *next < total && dc.buffered_amount() < limit {
         if dc
             .send(now, BytesMut::from(&msg(first + *next)[..]))
             .is_err()
@@ -109,7 +121,7 @@ fn close_and_reopen(close_after: usize) -> Result<()> {
             &mut p,
             Duration::from_secs(60),
             |p| {
-                top_up(p, sender1, &mut next, 1000, 40);
+                top_up(p, sender1, &mut next, 1000, 60);
             },
             |p| received_on(p, file1).len() >= close_after,
         )?,
@@ -117,9 +129,13 @@ fn close_and_reopen(close_after: usize) -> Result<()> {
     );
 
     // The receiver refuses the transfer: it closes the channel; the sender's application
-    // stops writing when its end of the channel closes. The close reaches the sender with its
-    // send queue full: it has just written what its back-pressure allows, none of it sent.
-    top_up(&mut p, sender1, &mut next, 1000, 40);
+    // stops writing when its end of the channel closes. The close reaches the sender with
+    // data of the channel in its send queue: it writes more than the receive window holds,
+    // and the receiver's acknowledgements of what it sends first are lost, so the rest waits.
+    top_up_to(&mut p, sender1, &mut next, 1000, 60, 20);
+    p.offerer.drop_outgoing = true;
+    p.run_for(Duration::from_millis(1))?;
+    p.offerer.drop_outgoing = false;
     p.offerer.pc.data_channel(file1).expect("file-1").close()?;
     ensure!(
         drive(
@@ -127,7 +143,7 @@ fn close_and_reopen(close_after: usize) -> Result<()> {
             Duration::from_secs(60),
             |p| {
                 if !p.answerer.closed(sender1) {
-                    top_up(p, sender1, &mut next, 1000, 40);
+                    top_up(p, sender1, &mut next, 1000, 60);
                 }
             },
             |p| p.offerer.closed(file1) && p.answerer.closed(sender1),
