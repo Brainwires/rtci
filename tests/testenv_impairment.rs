@@ -665,6 +665,7 @@ fn gcc_follows_a_rate_limited_link() {
     let mut last = Instant::now();
     let mut connected_at = None;
     let mut samples = vec![];
+    let mut last_target = 0.0;
     let mut last_sample = Instant::now();
     pump(&mut [&mut a, &mut b], Duration::from_secs(45), |p| {
         if p[0].connected() && p[1].connected() {
@@ -696,7 +697,15 @@ fn gcc_follows_a_rate_limited_link() {
                     .outbound_rtp_streams()
                     .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
                 {
-                    samples.push(o.target_bitrate.unwrap_or(0.0));
+                    // This source writes 2.4 Mbit/s whatever it is told, so the pacer
+                    // tells it to pause nearly all the time (a target of zero,
+                    // `PacerInterceptor`, "Pausing the source"): the controller's target is
+                    // the last one read that was not a pause.
+                    let target = o.target_bitrate.unwrap_or(0.0);
+                    if target > 0.0 {
+                        last_target = target;
+                    }
+                    samples.push(last_target);
                 }
             }
         }
