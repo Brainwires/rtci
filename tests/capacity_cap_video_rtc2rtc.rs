@@ -1307,6 +1307,12 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 /// until the queue has drained, and the video produces nothing meanwhile. So nothing is
 /// discarded (no video packet written that never left, no `OnPacerDiscard`), the video
 /// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
+///
+/// Not yet true (run 45477541216, b2419ef3): nothing is discarded and every pause resumes within
+/// 1.2 s, but the longest freeze is 1.7 to 4.4 s, beginning 0.3 s into the cap: the 0.6 s of
+/// video written at 1.4 Mbit/s before the target fell still has to cross the 300 kbit/s link,
+/// drained from the pacer's queue within its 2 s bound into the link's 300 ms queue.
+/// ParolNet's chain, without a pacer, freezes 1.3 to 1.4 s.
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
     DEFAULT_CHAIN.with(|d| d.set(true));
