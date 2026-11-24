@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `vec![]`; read `connection_information.first()` where one address was read, and
   `is_empty()` for `is_none()`.
 
+- **interceptor** (rtp-1): `RtcpSessionEvent` has a new variant, `ReportingSsrc`, before
+  `RoundTripTime`, so the implicit discriminants of the later variants moved
+  (cargo-semver-checks `enum_no_repr_variant_discriminant_changed`). The enum is
+  `#[non_exhaustive]` and its variants carry data, so no code could cast it with `as`; a `match`
+  already needed a wildcard arm. Nothing to change in practice.
+
 ### Behaviour changes
 
 - **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
