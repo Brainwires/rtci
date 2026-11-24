@@ -97,7 +97,7 @@ impl Schedule {
 /// The retransmission timeout of RFC 6298, as RFC 8489 section 6.2.1 uses it: kept per
 /// server, to 1 ms, never below the configured initial value, and forgotten after ten minutes
 /// without a transaction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct RtoEstimator {
     initial: Duration,
     enabled: bool,

@@ -126,6 +126,10 @@ pub struct CandidatePair {
     pub(crate) total_round_trip_time: Duration,
     /// Latest round trip time measured.
     pub(crate) current_round_trip_time: Duration,
+    /// The pair's RTO (RFC 8489 Section 6.2.1, RFC 6298): 500 ms until a round trip has been
+    /// measured, then the smoothed round-trip time plus four times its variation, 500 ms at
+    /// least. What a consent request's wait is based on (RFC 7675 Section 5.1).
+    pub(crate) rto: stun::timer::RtoEstimator,
 }
 
 impl fmt::Debug for CandidatePair {
@@ -199,6 +203,7 @@ impl CandidatePair {
             // RTT tracking
             total_round_trip_time: Duration::ZERO,
             current_round_trip_time: Duration::ZERO,
+            rto: stun::timer::RtoEstimator::new(crate::agent::agent_config::MIN_RTO, true),
         }
     }
 
