@@ -94,6 +94,7 @@ fn params(
         },
         offered_tag_rtcp_mux_only: false,
         rtcp_mux_only: true,
+        rtcp_mux_only_renegotiated: false,
         bundle_policy: RTCBundlePolicy::MaxCompat,
         initial_offer: false,
         bundle_attributes_in_tagged_section_only: false,
@@ -1238,7 +1239,7 @@ fn test_populate_sdp_reject() -> Result<()> {
         found_rejected_track = true;
 
         assert!(
-            desc.connection_information.is_some(),
+            !desc.connection_information.is_empty(),
             "connection_information should not be None, even for rejected tracks"
         );
         assert_eq!(

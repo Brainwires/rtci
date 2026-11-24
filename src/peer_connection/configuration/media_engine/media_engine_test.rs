@@ -745,13 +745,16 @@ fn negotiated_with_ulpfec_at(ulpfec_rate: u32) -> Result<Vec<String>> {
 /// RFC 5109 section 13: "In cases in which it is sent as redundant data to another stream, the
 /// rate SHALL be the same as the primary encoding it is used to protect." A `ulpfec` format at
 /// a rate no media format of the section has (8 kHz beside VP8's 90 kHz, a registration and an
-/// offer that agree on the mistake) is not negotiated; at the media's rate it is.
+/// offer that agree on the mistake) is not negotiated; at the media's rate it is. The RED
+/// format, which names no encodings and so had that ULPFEC as its only secondary codec, goes
+/// with it (section 14.3: "when the FEC stream is rejected the redundant encoding payload type
+/// SHOULD also be removed").
 #[test]
 fn a_ulpfec_format_at_another_rate_than_the_media_is_not_negotiated() -> Result<()> {
     assert_eq!(
-        vec!["video/vp8".to_owned(), "video/red".to_owned()],
+        vec!["video/vp8".to_owned()],
         negotiated_with_ulpfec_at(8000)?,
-        "ULPFEC at 8000 Hz protects no 90000 Hz format"
+        "ULPFEC at 8000 Hz protects no 90000 Hz format, and RED carries nothing without it"
     );
     assert_eq!(
         vec![

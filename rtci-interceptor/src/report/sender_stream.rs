@@ -20,6 +20,8 @@ pub(crate) struct SenderStream {
 
     /// Last sequence number seen (for out-of-order detection)
     last_rtp_sn: u16,
+    /// The sequence number cycles (wraps) counted, shifted left 16 (RFC 3550 Appendix A.1).
+    cycles: u32,
 
     /// data from rtp packets
     last_rtp_time_rtp: u32,
@@ -44,6 +46,7 @@ impl SenderStream {
 
             started: false,
             last_rtp_sn: 0,
+            cycles: 0,
             last_rtp_time_rtp: 0,
             last_rtp_time_time: None,
             time_baseline: None,
@@ -102,6 +105,9 @@ impl SenderStream {
         // - this is the first packet, OR
         // - packet is in-order
         if self.use_latest_packet || is_in_order {
+            if self.started && is_in_order && seq < self.last_rtp_sn {
+                self.cycles = self.cycles.wrapping_add(1 << 16);
+            }
             self.started = true;
             self.last_rtp_sn = seq;
 
@@ -129,6 +135,13 @@ impl SenderStream {
         // Always count packets and octets regardless of order
         self.counters.increment_packets();
         self.counters.count_octets(pkt.payload.len());
+    }
+
+    /// The extended highest sequence number sent (RFC 3550 6.4.1: the cycles in the high 16
+    /// bits), `None` before the first packet.
+    pub(crate) fn extended_highest_sequence(&self) -> Option<u32> {
+        self.started
+            .then(|| self.cycles | u32::from(self.last_rtp_sn))
     }
 
     /// Whether this stream has sent anything, so a report about it means something.

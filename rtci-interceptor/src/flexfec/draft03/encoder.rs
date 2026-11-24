@@ -24,6 +24,16 @@ const MASK3_SIZE: usize = 8;
 /// k-bit, the RFC does not.
 pub const DRAFT03_MAX_MEDIA_PACKETS: u32 = 109;
 
+/// The largest repair packet (RTP header, FlexFEC header and repair payload) a draft-03 encoder
+/// builds by default: what an Ethernet path MTU of 1500 octets leaves for an RTP packet under
+/// IPv6 (40), UDP (8) and the longest SRTP authentication tag of the DTLS-SRTP profiles (16).
+///
+/// draft-ietf-payload-flexible-fec-scheme-03 section 6.2: a repair packet is the largest
+/// packet it protects plus 20 to 32 octets, "which may cause problems if the resulting repair
+/// packet size exceeds the Maximum Transmission Unit size of the path": a repair packet that
+/// would be larger is not built, and the block goes unprotected by it.
+pub const DRAFT03_MAX_REPAIR_PACKET_SIZE: usize = 1436;
+
 /// Builds FlexFEC **draft-03** repair packets.
 ///
 /// Draft-03 rather than [RFC 8627] because draft-03 is what browsers negotiate as
@@ -60,6 +70,7 @@ pub struct FlexFec03Encoder {
     ssrc: u32,
     next_sequence_number: u16,
     coverage: Option<ProtectionCoverage>,
+    max_packet_size: usize,
 }
 
 impl FlexFec03Encoder {
@@ -73,7 +84,15 @@ impl FlexFec03Encoder {
             ssrc,
             next_sequence_number: 0,
             coverage: None,
+            max_packet_size: DRAFT03_MAX_REPAIR_PACKET_SIZE,
         }
+    }
+
+    /// The largest repair packet to build, in octets (RTP header included): one that would be
+    /// larger is left out (section 6.2). [`DRAFT03_MAX_REPAIR_PACKET_SIZE`] by default.
+    pub fn with_max_packet_size(mut self, max_packet_size: usize) -> Self {
+        self.max_packet_size = max_packet_size;
+        self
     }
 
     /// Start the repair stream's sequence numbers at `sequence_number`.
@@ -189,6 +208,12 @@ impl FlexFec03Encoder {
             .iter()
             .map(|&index| media_packets[index as usize].marshal_size() - BASE_RTP_HEADER_SIZE)
             .max()?;
+
+        // Section 6.2: not larger than the path MTU allows. Checked before anything is built,
+        // and before a sequence number is taken, so the repair stream has no hole for it.
+        if BASE_RTP_HEADER_SIZE + header_size + max_payload > self.max_packet_size {
+            return None;
+        }
 
         let mut payload = vec![0u8; header_size + max_payload];
         let (header, repair) = payload.split_at_mut(header_size);
@@ -343,6 +368,38 @@ mod tests {
 
     fn encoder() -> FlexFec03Encoder {
         FlexFec03Encoder::new(REPAIR_PT, REPAIR_SSRC)
+    }
+
+    /// Section 6.2: a repair packet is the largest packet it protects plus its header, and one
+    /// larger than the path MTU allows is not built. The limit counts the RTP header; a block
+    /// of small packets is protected as before, and the sequence numbers of the repair stream
+    /// skip nothing for the packet left out.
+    #[test]
+    fn a_repair_packet_larger_than_the_path_allows_is_not_built() {
+        let large: Vec<rtp::Packet> = (0..2u16)
+            .map(|i| media_packet(100 + i, &vec![i as u8; DRAFT03_MAX_REPAIR_PACKET_SIZE - 12]))
+            .collect();
+        let mut default = encoder().with_base_sequence_number(7);
+        assert!(
+            default.encode(&large, 1, 0).is_empty(),
+            "over the default limit"
+        );
+        let repair = default.encode(&run(2), 1, 0);
+        assert_eq!(1, repair.len());
+        assert_eq!(
+            7, repair[0].header.sequence_number,
+            "no number spent on the one left out"
+        );
+        let size = repair[0].marshal_size();
+        assert!(size <= DRAFT03_MAX_REPAIR_PACKET_SIZE);
+
+        let mut tight = encoder().with_max_packet_size(size - 1);
+        assert!(
+            tight.encode(&run(2), 1, 0).is_empty(),
+            "one octet over a lower limit"
+        );
+        let mut exact = encoder().with_max_packet_size(size);
+        assert_eq!(1, exact.encode(&run(2), 1, 0).len(), "exactly at the limit");
     }
 
     /// The repair packet is a stream of its own: its own SSRC, payload type and sequence numbers,

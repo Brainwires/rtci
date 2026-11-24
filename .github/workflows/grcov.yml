@@ -18,6 +18,7 @@ permissions:
 
 jobs:
   grcov:
+    timeout-minutes: 60
     name: Coverage (${{ matrix.crypto.name }})
     runs-on: ${{ matrix.os }}
     strategy:

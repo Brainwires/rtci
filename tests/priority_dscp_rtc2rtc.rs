@@ -324,3 +324,67 @@ fn datagrams_are_marked_by_their_flows_priority() -> Result<()> {
     assert_eq!(caller.pc.dscp(&datagram), 1);
     Ok(())
 }
+
+/// The DSCP of an RTP datagram of `ssrc` from `pc`.
+fn rtp_dscp(pc: &RTCPeerConnection, ssrc: u32) -> u8 {
+    let mut packet = bytes::BytesMut::from(&[0x80u8, 96, 0, 1, 0, 0, 0, 0][..]);
+    packet.extend_from_slice(&ssrc.to_be_bytes());
+    pc.dscp(&TaggedBytesMut {
+        now: Instant::now(),
+        transport: TransportContext::default(),
+        message: packet,
+    })
+}
+
+/// RFC 8837 section 5: "Non-browser implementations of WebRTC MAY use the AF3x DSCP values
+/// for video that is known not to be interactive". With
+/// `SettingEngineBuilder::with_non_interactive_video(true)` a video encoding at `high` is
+/// marked AF31 (26) and at `medium` AF32 (28); by default the same encodings are interactive
+/// video, AF41 (34) and AF42 (36). Audio is not video: EF (46) either way.
+#[test]
+fn non_interactive_video_is_marked_af3x_by_setting() -> Result<()> {
+    for (non_interactive, high, medium) in [(false, 34, 36), (true, 26, 28)] {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_non_interactive_video(non_interactive)
+                    .build(),
+            )
+            .build(Instant::now())?;
+        let video = pc.add_track(track(
+            RtpCodecKind::Video,
+            VIDEO_SSRC,
+            "video/VP8",
+            90000,
+            0,
+        ))?;
+        let audio = pc.add_track(track(
+            RtpCodecKind::Audio,
+            AUDIO_SSRC,
+            MIME_TYPE_OPUS,
+            48000,
+            2,
+        ))?;
+        let mut marks = vec![];
+        for (sender, ssrc, priority) in [
+            (video, VIDEO_SSRC, RTCPriorityType::High),
+            (video, VIDEO_SSRC, RTCPriorityType::Medium),
+            (audio, AUDIO_SSRC, RTCPriorityType::High),
+        ] {
+            let mut sender = pc.rtp_sender(sender).expect("sender");
+            let mut parameters = sender.get_parameters().clone();
+            parameters.encodings[0].priority = priority;
+            sender.set_parameters(parameters, None)?;
+            marks.push(rtp_dscp(&pc, ssrc));
+        }
+        assert_eq!(
+            marks,
+            vec![high, medium, 46],
+            "non-interactive {non_interactive}"
+        );
+    }
+    Ok(())
+}

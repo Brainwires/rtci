@@ -229,3 +229,81 @@ fn h265_an_access_unit_whose_middle_fragment_was_lost_is_dropped() {
     );
     assert_eq!((annex_b(&[H265_TRAIL_1]), 6000), out[0]);
 }
+
+/// The NAL units (their last octet, a tag) of the samples that come out when packets
+/// `1..=n` carrying `payload(seq)` arrive in `arrival` order, then packets `n+1..n+8` in
+/// order: each packet is an access unit of its own.
+fn tags_through_jitter<T: Depacketizer>(
+    depacketizer: T,
+    payload: impl Fn(u16) -> Vec<u8>,
+    arrival: &[u16],
+    unit_len: usize,
+) -> Vec<u8> {
+    let last = *arrival.iter().max().unwrap_or(&0);
+    let mut packets: Vec<Packet> = arrival
+        .iter()
+        .map(|&seq| packet(seq, 3000 * u32::from(seq), true, &payload(seq)))
+        .collect();
+    for seq in last + 1..=last + 8 {
+        packets.push(packet(seq, 3000 * u32::from(seq), true, &payload(seq)));
+    }
+    let data: Vec<u8> = samples(depacketizer, packets)
+        .into_iter()
+        .flat_map(|(data, _)| data.to_vec())
+        .collect();
+    data.chunks(unit_len)
+        .map(|unit| unit[unit_len - 1])
+        .collect()
+}
+
+/// The DONs sent, by sequence number: pairs swapped (interleaved), then in order.
+fn interleaved_don(seq: u16) -> u16 {
+    let i = seq - 1;
+    if i < 8 { i ^ 1 } else { i }
+}
+
+/// Arrival order with transmission delay jitter: packets 1 to 8 arrive 3 1 4 2 7 5 8 6.
+const JITTERED: [u16; 8] = [3, 1, 4, 2, 7, 5, 8, 6];
+
+/// RFC 6184 section 7.2: "Receivers SHOULD also prepare for transmission delay jitter, i.e.,
+/// either reserve separate buffers for transmission delay jitter buffering and
+/// de-interleaving buffering ..." and "take transmission delay jitter into account in the
+/// buffering operation". The sample builder is the jitter buffer, the depacketizer's
+/// de-interleaving buffer the other: an interleaved stream (DONs 1 0 3 2 ...) whose packets
+/// also arrive out of order comes out in decoding order. The de-interleaving buffer alone,
+/// given the packets as they arrived, would not restore it.
+#[test]
+fn h264_an_interleaved_stream_with_jitter_comes_out_in_decoding_order() {
+    let depacketizer = || {
+        H264Packet::default()
+            .with_deinterleaving(rtp::codec::h264::H264DeinterleavingBuffer::new(1, None))
+    };
+    let payload = |seq: u16| {
+        let don = interleaved_don(seq);
+        rtp::codec::h264::stap_b(don, &[Bytes::from(vec![0x41, don as u8])])
+            .expect("a STAP-B")
+            .to_vec()
+    };
+    let tags = tags_through_jitter(depacketizer(), payload, &JITTERED, 6);
+    assert!(tags.len() >= 8, "{tags:?}");
+    assert_eq!((0..tags.len() as u8).collect::<Vec<_>>(), tags);
+}
+
+/// RFC 7798 section 6: "Receivers should also prepare for transmission delay jitter; that is,
+/// either reserve separate buffers for transmission delay jitter buffering and
+/// de-packetization buffering or use a receiver buffer for both". As for H.264: DONL single
+/// NAL unit packets sent out of decoding order (`sprop-max-don-diff` 1) and arriving out of
+/// order come out in decoding order.
+#[test]
+fn h265_a_reordered_stream_with_jitter_comes_out_in_decoding_order() {
+    let mut depacketizer = H265Packet::default();
+    depacketizer
+        .with_depacketization_buffer(rtp::codec::h265::H265DepacketizationBuffer::new(1, 1));
+    let payload = |seq: u16| {
+        let don = interleaved_don(seq);
+        vec![0x02, 0x01, (don >> 8) as u8, don as u8, don as u8]
+    };
+    let tags = tags_through_jitter(depacketizer, payload, &JITTERED, 7);
+    assert!(tags.len() >= 8, "{tags:?}");
+    assert_eq!((0..tags.len() as u8).collect::<Vec<_>>(), tags);
+}

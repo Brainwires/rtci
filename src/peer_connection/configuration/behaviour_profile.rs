@@ -586,6 +586,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| !s.max_bundle_ignored,
     },
     {
+        id: "jsep.rtcp-mux-only-in-subsequent-offers",
+        setting: "SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers",
+        clause: "RFC 8858 4.5 (RFC 9429 5.2.2 MUST NOT add it)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "Chromium's subsequent offers carry a=rtcp-mux and no a=rtcp-mux-only (fixture chromium--direction-changes-are-answered-with-the-complementary-direction--3-offer.sdp)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_rtcp_mux_only_in_subsequent_offers(v),
+        read: |s: &SettingEngine| s.rtcp_mux_only_in_subsequent_offers,
+    },
+    {
         id: "jsep.stopping-transceiver-rejected-in-answer",
         setting: "SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer",
         clause: "RFC 9429 5.3.1",
@@ -940,6 +952,18 @@ governed_behaviours! {
         evidence: Observed,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.receiver_reference_time_on_audio = v,
         read: |o: &DefaultInterceptorOptions| o.receiver_reference_time_on_audio,
+    },
+    {
+        id: "fec.video-red-ulpfec",
+        setting: "DefaultInterceptorOptions::video_red_ulpfec",
+        clause: "RFC 8854 7 (RFC 5109 14.2)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc media/engine/webrtc_video_engine.cc::GetDefaultSupportedFormats @ a222406d: kRedCodecName and kUlpfecCodecName are pushed for every video section with no field trial (FlexFEC only with WebRTC-FlexFEC-03-Advertised); GetPayloadTypesAndDefaultCodecs adds RTX for RED",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.video_red_ulpfec = v,
+        read: |o: &DefaultInterceptorOptions| o.video_red_ulpfec,
     },
     {
         id: "gcc.threshold-time-base",
@@ -1512,6 +1536,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "off in every profile: a new DTLS association over UDP gets a new 3-tuple (RFC 8842 5.1 MUST, 6), so the ICE restart that comes with it drops the local candidates and refuses their addresses, the TURN links allocate again, and the transport set up again after every m= section was rejected gathers on new ports too; `true` is the opt-out for an application with one fixed socket, in no profile. libwebrtc gathers each ICE generation on new sockets as well: p2p/base/p2p_transport_channel.cc::P2PTransportChannel::MaybeStartGathering @ a222406d (lines 842-882) stops the previous allocator session and takes a pooled or new one, and p2p/client/basic_port_allocator.cc binds that session's UDP sockets afresh (AllocationSequence::Init, lines 1261-1266, with the shared socket; AllocationSequence::CreateUDPPorts, lines 1471-1481, without it), port 0 within min_port..max_port",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_separate_fec_sessions",
+        class: NotGovernedClass::Same,
+        note: "off in every profile: an offered FEC session of its own (RFC 5109 14.1, an m= section of ulpfec alone grouped by a=group:FEC-FR or a=group:FEC) is refused, port 0 and the group left out (RFC 5109 14.3), as RFC 8854 5.2 asks of a WebRTC endpoint (\"Answerers SHOULD reject any FEC-only m= lines\"); `true` accepts it, for a peer that implements RFC 5109 as written, in no profile. libwebrtc has no such session either: its offer/answer reads no SDP group but BUNDLE (pc/media_session.cc, pc/sdp_offer_answer.cc, pc/jsep_transport_controller.cc @ a222406d call GetGroupsByName / HasGroup with GROUP_TYPE_BUNDLE only) and carries ULPFEC in RED",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_inbound_reassembly_limit",
         class: NotGovernedClass::EngineOnly,
         note: "the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow",
@@ -1530,6 +1559,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::wall_clock",
         class: NotGovernedClass::Input,
         note: "an injected wall-clock anchor for the NTP times the interceptors write (sender reports, XR receiver reference times, RFC 8888 report timestamps, the RFC 6051 header extension), for virtual-time runs that repeat within one process; `None` (the process-wide SystemInstant::shared) in every profile",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_wall_clock",
+        class: NotGovernedClass::Input,
+        note: "an injected wall-clock time for the instant the peer connection is built at, for the wall-clock values it writes itself (the o= session version, RFC 8866 5.2; the receivers' source timestamps; the NTP times of the RTCP session it installs), for virtual-time runs that repeat; `None` (the system clock, read once) in every profile",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_audio_redundancy",

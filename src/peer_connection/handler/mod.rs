@@ -445,6 +445,29 @@ impl RTCPeerConnection {
                 debug!("RTCP for a transport without an RTP session dropped");
                 continue;
             }
+            // A FEC session's transport (RFC 5109 section 14.1): the chain's SSRCs become the
+            // wire's, where the FEC stream has the SSRC of the media stream it protects
+            // (section 7.2), in RTP and in the session's RTCP.
+            {
+                let ctx = &self.pipeline_context.interceptor_handler_context;
+                if let Some(map) = ctx.fec_session_map
+                    && ctx.fec_session_transports.contains_key(&id.0)
+                {
+                    match &mut msg.message {
+                        RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(packet))) => {
+                            map.map_rtp(packet);
+                        }
+                        RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtcp(packets))) => {
+                            let mapped = map.map_rtcp(packets);
+                            if mapped.is_empty() {
+                                continue;
+                            }
+                            *packets = mapped;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let index = ids.iter().position(|t| *t == id).unwrap_or(0);
             per_transport[index].push_back(msg);
         }
@@ -542,20 +565,25 @@ impl RTCPeerConnection {
                 || coding.rtx.as_ref().is_some_and(|rtx| rtx.ssrc == ssrc)
                 || coding.fec.as_ref().is_some_and(|fec| fec.ssrc == ssrc)
         };
-        self.rtp_transceivers.iter().find_map(|transceiver| {
-            let mid = transceiver.mid().as_ref()?;
-            let sends = transceiver.sender().as_ref().is_some_and(|sender| {
-                sender
-                    .send_encodings()
-                    .iter()
-                    .any(|encoding| has(&encoding.rtp_coding_parameters))
-            });
-            let receives = transceiver
-                .receiver()
-                .as_ref()
-                .is_some_and(|receiver| receiver.get_coding_parameters().iter().any(&has));
-            (sends || receives).then(|| self.pipeline_context.transports.transport_id_for(mid))
-        })
+        self.rtp_transceivers
+            .iter()
+            .find_map(|transceiver| {
+                let mid = transceiver.mid().as_ref()?;
+                let sends = transceiver.sender().as_ref().is_some_and(|sender| {
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .any(|encoding| has(&encoding.rtp_coding_parameters))
+                });
+                let receives = transceiver
+                    .receiver()
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.get_coding_parameters().iter().any(&has));
+                (sends || receives).then(|| self.pipeline_context.transports.transport_id_for(mid))
+            })
+            // The stream of a FEC session (RFC 5109 section 14.1), which the chain knows by an
+            // SSRC of its own: that session's transport.
+            .or_else(|| self.fec_session_transport_of_ssrc(ssrc))
     }
 
     /// Starts and ends each transport's RTCP session. RFC 3550 section 6: RTCP is the control

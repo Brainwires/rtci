@@ -280,6 +280,14 @@ impl RTCPeerConnection {
         // Record the resolution so `SettingEngine::crypto_provider` reports the provider this
         // connection actually uses, not merely what was requested.
         setting_engine.crypto_provider = Some(crypto_provider.clone());
+        // The `o=` line of every description this peer connection generates (RFC 9429 section
+        // 5.2.1): its version the time the peer connection is built, on the wall clock the
+        // application gave or the system's, read here once.
+        let built_at = setting_engine
+            .wall_clock
+            .unwrap_or_else(|| shared::time::SystemInstant::now(now))
+            .unix(now);
+        let sdp_origin = super::sdp::jsep_origin(crypto_provider.random(), built_at);
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
         let engine_srflx = super::srflx::EngineSrflx::new(
@@ -378,7 +386,8 @@ impl RTCPeerConnection {
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
             interceptor_handler_context: InterceptorHandlerContext::default()
-                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track),
+                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track)
+                .with_wall_clock(setting_engine.wall_clock),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
             data_read_outs: VecDeque::new(),
@@ -448,7 +457,7 @@ impl RTCPeerConnection {
             removed_transceivers: Vec::new(),
             default_remote_stream_id: None,
             greater_mid: -1,
-            sdp_origin: Origin::default(),
+            sdp_origin,
             last_generated_sdp: String::new(),
             last_offer: String::new(),
             last_answer: String::new(),
@@ -739,7 +748,7 @@ impl RTCPeerConnection {
         let port = section.media_name.port.value;
         let address = section
             .connection_information
-            .as_ref()
+            .first()
             .and_then(|c| c.address.as_ref())
             .map(|a| a.address.as_str());
         // A trickled description's placeholder (`9` and `0.0.0.0` / `::`, RFC 8838 section
@@ -773,7 +782,8 @@ impl RTCPeerConnection {
     /// generate_unmatched_sdp generates an SDP that doesn't take remote state into account
     /// This is used for the initial call for CreateOffer
     pub(super) fn generate_unmatched_sdp(&mut self) -> Result<SessionDescription> {
-        let d = SessionDescription::new_jsep_session_description(false);
+        let d =
+            SessionDescription::new_jsep_session_description_with_origin(self.sdp_origin.clone());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
         let candidates = self.offered_local_candidates(true)?;
@@ -781,6 +791,7 @@ impl RTCPeerConnection {
 
         let local_mids = self.local_description_mids();
         let mut media_sections = vec![];
+        let fec_sections = self.fec_sections();
 
         for (i, t) in self.rtp_transceivers.iter_mut().enumerate() {
             if t.stopped() {
@@ -810,10 +821,18 @@ impl RTCPeerConnection {
                 media_sections.push(MediaSection {
                     mid,
                     transceiver_index: i,
+                    fec: fec_sections[i].clone(),
                     ..Default::default()
                 });
             }
         }
+        // A FEC session is a second RTP session (RFC 5109 section 14.1): its section stays
+        // outside the BUNDLE group and has a transport of its own.
+        let fec_mids: Vec<String> = media_sections
+            .iter()
+            .filter(|section| section.fec.is_some())
+            .map(|section| section.mid.clone())
+            .collect();
 
         if self.always_negotiate_data_channels {
             // wpt100:hdrext — alwaysNegotiateDataChannels: the data section comes first.
@@ -843,9 +862,10 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            bundle: BundleMode::initial_offer(),
+            bundle: BundleMode::initial_offer().with_requests(&fec_mids, &[]),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
             bundle_attributes_in_tagged_section_only: self
@@ -894,7 +914,8 @@ impl RTCPeerConnection {
         connection_role: ConnectionRole,
         ignore_rid_pause_for_recv: bool,
     ) -> Result<SessionDescription> {
-        let mut d = SessionDescription::new_jsep_session_description(false);
+        let mut d =
+            SessionDescription::new_jsep_session_description_with_origin(self.sdp_origin.clone());
         d = d.with_value_attribute(ATTR_KEY_MSID_SEMANTIC.to_owned(), "WMS *".to_owned());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
@@ -903,6 +924,7 @@ impl RTCPeerConnection {
             self.selected_pair_in_sdp(include_unmatched);
 
         let mut media_sections = vec![];
+        let fec_sections = self.fec_sections();
         let mut already_have_application_media_section = false;
         let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
         let local_mids = self.local_description_mids();
@@ -975,6 +997,7 @@ impl RTCPeerConnection {
                             media_sections.push(MediaSection {
                                 mid: self.rtp_transceivers[j].mid().clone().unwrap_or_default(),
                                 transceiver_index: j,
+                                fec: fec_sections[j].clone(),
                                 ..Default::default()
                             });
                             continue;
@@ -1137,6 +1160,42 @@ impl RTCPeerConnection {
                                 ),
                             )
                         });
+                        // A FEC session's section (RFC 5109 section 14.1): one `ulpfec`
+                        // format, no source, no header extension.
+                        if let Some(mut fec) = fec_sections[i].clone() {
+                            // An answer keeps the session only while the offer sets it up
+                            // (RFC 5109 section 14.3: the answerer "accepts the FEC RTP
+                            // session and the grouping in the offer"); else its section is
+                            // refused, port 0.
+                            if !include_unmatched
+                                && self.rtp_transceivers[i]
+                                    .fec_session()
+                                    .is_some_and(|session| session.remote.is_none())
+                            {
+                                media_sections.push(MediaSection {
+                                    mid: mid_value.to_owned(),
+                                    rejected: true,
+                                    rejected_kind: media.media_name.media.clone(),
+                                    transceiver_index: usize::MAX,
+                                    rejected_name: Some(media.media_name.clone()),
+                                    ..Default::default()
+                                });
+                                continue;
+                            }
+                            if let Some(direction) = answer_direction {
+                                fec.direction = direction;
+                            }
+                            media_sections.push(MediaSection {
+                                mid: mid_value.to_owned(),
+                                transceiver_index: i,
+                                answer_direction,
+                                offered_protos: offered_protos(media),
+                                renegotiated: include_unmatched,
+                                fec: Some(fec),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
                             transceiver_index: i,
@@ -1234,6 +1293,7 @@ impl RTCPeerConnection {
                     media_sections.push(MediaSection {
                         mid,
                         transceiver_index: i,
+                        fec: fec_sections[i].clone(),
                         ..Default::default()
                     });
                 }
@@ -1256,17 +1316,29 @@ impl RTCPeerConnection {
             .flatten()
             .find(|d| d.sdp_type == RTCSdpType::Answer)
             .and_then(|d| d.parsed.as_ref())
-            .map_or_else(BundleMode::initial_offer, |answer| {
-                // The groups the application asked for (RFC 9143 sections 7.5.1, 7.5.2).
-                let requested = |want: bool| -> Vec<String> {
-                    self.rtp_transceivers
+            .map_or_else(
+                || {
+                    // No answer yet: as an initial offer, with the FEC sessions' sections
+                    // outside the group (RFC 5109 section 14.1: a second RTP session).
+                    let fec_mids: Vec<String> = media_sections
                         .iter()
-                        .filter(|t| !t.stopped() && t.bundle_request() == Some(want))
-                        .filter_map(|t| t.mid().clone())
-                        .collect()
-                };
-                BundleMode::following(answer).with_requests(&requested(false), &requested(true))
-            })
+                        .filter(|section| section.fec.is_some())
+                        .map(|section| section.mid.clone())
+                        .collect();
+                    BundleMode::initial_offer().with_requests(&fec_mids, &[])
+                },
+                |answer| {
+                    // The groups the application asked for (RFC 9143 sections 7.5.1, 7.5.2).
+                    let requested = |want: bool| -> Vec<String> {
+                        self.rtp_transceivers
+                            .iter()
+                            .filter(|t| !t.stopped() && t.bundle_request() == Some(want))
+                            .filter_map(|t| t.mid().clone())
+                            .collect()
+                    };
+                    BundleMode::following(answer).with_requests(&requested(false), &requested(true))
+                },
+            )
         } else {
             // The offered BUNDLE group, whatever other `a=group` lines the offer has
             // (RFC 9429 section 5.3.1); none when the offer has none.
@@ -1317,6 +1389,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .bundle_attributes_tagged_only,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
                     .as_ref()
@@ -1373,6 +1446,9 @@ impl RTCPeerConnection {
             // RFC 5583 section 6.1: the offered decoding dependencies, kept for what the
             // answer accepts.
             crate::peer_connection::sdp::answer_decoding_dependencies(offer, &mut d);
+            // RFC 5888 section 9.3: empty `a=group` lines of the offer are answered with this
+            // endpoint's.
+            crate::peer_connection::sdp::answer_group_capabilities(offer, &mut d);
             // RFC 3264 section 6: "The 't=' line in the answer MUST be equal to the ones in
             // the offer" (a WebRTC offer says `t=0 0`, which the answer has already).
             if !offer.time_descriptions.is_empty() {
@@ -1404,7 +1480,17 @@ impl RTCPeerConnection {
             };
 
             if !parsed.media_descriptions.is_empty() {
-                let mut m = parsed.media_descriptions.remove(0);
+                // The first section the description does not reject: a section with port
+                // zero carries no candidates (RFC 8839 section 4.2.1.6). A bundle-only
+                // section has port zero too and is never first (RFC 9143 section 7.2.1).
+                let Some(at) = parsed
+                    .media_descriptions
+                    .iter()
+                    .position(|m| m.media_name.port.value != 0)
+                else {
+                    return Some(sd.clone());
+                };
+                let mut m = parsed.media_descriptions.remove(at);
                 m = match add_candidates_to_media_descriptions(
                     &candidates,
                     m,
@@ -1413,7 +1499,7 @@ impl RTCPeerConnection {
                     Ok(m) => m,
                     Err(_) => return Some(sd.clone()),
                 };
-                parsed.media_descriptions.insert(0, m);
+                parsed.media_descriptions.insert(at, m);
                 share_bundle_destination(&mut parsed);
                 self.populate_other_transports_candidates(&mut parsed);
             }
@@ -2400,6 +2486,29 @@ impl RTCPeerConnection {
                 }
             }
         }
+        // A FEC session's streams run in its own RTP session (RFC 5109 section 14.1), under
+        // the SSRCs the chain knows them by.
+        for (index, transceiver) in self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| live(t))
+        {
+            if transceiver.fec_session().is_none() {
+                continue;
+            }
+            let Some(id) = transceiver
+                .mid()
+                .as_deref()
+                .and_then(|mid| self.pipeline_context.transports.assignment(mid))
+            else {
+                continue;
+            };
+            assignments
+                .entry(id.0)
+                .or_default()
+                .extend(self.fec_session_chain_ssrcs(index));
+        }
         for (session, ssrcs) in &assignments {
             controls.push(
                 interceptor::RtpSessionAssignment {
@@ -2657,6 +2766,9 @@ impl RTCPeerConnection {
     }
 
     pub(super) fn start_rtp_senders(&mut self) -> Result<()> {
+        // The FEC sessions as this negotiation left them (RFC 5109 section 14.1): the
+        // protected senders' streams are bound, below, with where their FEC goes.
+        self.sync_fec_sessions();
         // Collect SSRCs, kinds, mids, rids, encoding indices, rtx_ssrc, and transceiver_id for outbound stream accumulators
         // We do this in two phases to avoid borrow conflicts
         #[allow(clippy::type_complexity)]
@@ -2889,6 +3001,8 @@ impl RTCPeerConnection {
                 transceiver.mid().as_ref() == Some(&incoming_track.mid)
                     && incoming_track.kind == transceiver.kind()
                     && transceiver.direction().has_recv()
+                    // A FEC session's section describes no track (RFC 5109 section 14.1).
+                    && transceiver.fec_session().is_none()
             }) && let Some(receiver) = transceiver.receiver_mut()
             {
                 // The MediaStreams the track is in, one per `a=msid` line (RFC 8830 section 2).
@@ -3538,8 +3652,49 @@ impl RTCPeerConnection {
         }
     }
 
-    /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
-    fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
+    /// An unused SSRC for a stream's media (not a repair flow): the SSRC the RTCP sessions
+    /// report from while the connection has never had a local stream, any other unused one
+    /// after that.
+    ///
+    /// RFC 8108 section 6.1: "An endpoint that has never sent an RTP stream will have an SSRC
+    /// that it uses for RTCP reporting. If that endpoint wants to start sending an RTP
+    /// stream, it is RECOMMENDED that it use its existing SSRC for that stream, since
+    /// otherwise the participant count in the RTP session will be unnecessarily increased".
+    /// The session announces its reporting SSRC
+    /// ([`RtcpSessionEvent::ReportingSsrc`](interceptor::RtcpSessionEvent)) when it draws it
+    /// (with its own random source, which an application may seed). The second and later
+    /// streams get new SSRCs ("it will need to generate a new SSRC for the second and any
+    /// subsequent RTP streams"), and so does every stream once a local stream has been
+    /// described (the SSRC may then have said BYE as the reporting SSRC).
+    pub(super) fn unused_media_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
+        let reporting = self
+            .pipeline_context
+            .interceptor_handler_context
+            .reporting_ssrc;
+        let never_sent = self.ssrc_history.is_empty()
+            && self.rtp_transceivers.iter().all(|transceiver| {
+                transceiver.sender().as_ref().is_none_or(|sender| {
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .all(|encoding| encoding.rtp_coding_parameters.ssrc.is_none())
+                        && sender.parked_ssrcs().next().is_none()
+                })
+            });
+        if let Some(reporting) = reporting
+            && never_sent
+            && !self.taken_ssrcs(minted).contains(&reporting)
+        {
+            minted.push(reporting);
+            return reporting;
+        }
+        self.unused_ssrc(minted)
+    }
+
+    /// The SSRCs a new local SSRC must differ from: `minted`, every local stream's (with
+    /// their repair flows and the streams of other clock rates), the remote descriptions'
+    /// and those local streams used before.
+    fn taken_ssrcs(&self, minted: &[SSRC]) -> HashSet<SSRC> {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
         for transceiver in &self.rtp_transceivers {
             if let Some(sender) = transceiver.sender() {
@@ -3563,6 +3718,12 @@ impl RTCPeerConnection {
         }
         // RFC 5576 sections 5 and 8: nor one a local stream used before.
         taken.extend(&self.ssrc_history);
+        taken
+    }
+
+    /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
+    fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
+        let taken = self.taken_ssrcs(minted);
         let ssrc = unused_ssrc_from(std::iter::repeat_with(draw), &taken);
         minted.push(ssrc);
         ssrc
@@ -4810,7 +4971,7 @@ impl RTCPeerConnection {
         }
         for encoding in &mut send_encodings {
             if encoding.rtp_coding_parameters.ssrc.is_none() {
-                encoding.rtp_coding_parameters.ssrc = Some(self.unused_ssrc(&mut minted));
+                encoding.rtp_coding_parameters.ssrc = Some(self.unused_media_ssrc(&mut minted));
             }
             if is_rtx_enabled && encoding.rtp_coding_parameters.rtx.is_none() {
                 encoding.rtp_coding_parameters.rtx = Some(RTCRtpRtxParameters {

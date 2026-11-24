@@ -93,7 +93,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
 /// `packet` without what the peer connection draws from `rand`, which no seed reaches: the
 /// text of an SDES CNAME item is replaced by a fixed one of the same length, and the sequence
 /// numbers of the RTX stream (whose first one the NACK responder draws) reported in a
-/// reception report block or an RFC 8888 report block are zeroed.
+/// reception report block (of an RR or an SR) or an RFC 8888 report block are zeroed.
 fn normalised(packet: &dyn rtci::rtcp::Packet) -> Box<dyn rtci::rtcp::Packet> {
     use rtci::rtcp::receiver_report::ReceiverReport;
     use rtci::rtcp::source_description::{SdesType, SourceDescription};
@@ -119,6 +119,16 @@ fn normalised(packet: &dyn rtci::rtcp::Packet) -> Box<dyn rtci::rtcp::Packet> {
             }
         }
         Box::new(rr)
+    } else if let Some(sr) = any.downcast_ref::<rtci::rtcp::sender_report::SenderReport>() {
+        // The sender's own SSRCs report on each other (RFC 8108 section 5.1), the RTX
+        // stream's sequence numbers too.
+        let mut sr = sr.clone();
+        for block in sr.reports.iter_mut() {
+            if block.ssrc == RECORDED_RTX_SSRC {
+                block.last_sequence_number = 0;
+            }
+        }
+        Box::new(sr)
     } else if let Some(ccfb) = any.downcast_ref::<CcFeedbackReport>() {
         let mut ccfb = ccfb.clone();
         for block in ccfb.report_blocks.iter_mut() {

@@ -378,8 +378,9 @@ pub struct DefaultInterceptorOptions {
     /// or waits its turn under RFC 4585 section 3.5.2 like other feedback. See
     /// [`RtcpSessionBuilder::with_immediate_congestion_feedback`](interceptor::RtcpSessionBuilder::with_immediate_congestion_feedback).
     pub rtcp_immediate_congestion_feedback: bool,
-    /// Whether every local SSRC carries a report block for every remote SSRC (RFC 8108
-    /// section 5.1 to the letter). `false` by default. See
+    /// Whether every local SSRC carries a report block for every remote SSRC and for the
+    /// endpoint's other SSRCs (RFC 8108 section 5.1). `false` by default (measured, see the
+    /// setting), `true` in the `StrictRfc` behaviour profile. See
     /// [`RtcpSessionBuilder::with_report_from_every_ssrc`](interceptor::RtcpSessionBuilder::with_report_from_every_ssrc).
     pub rtcp_report_from_every_ssrc: bool,
     /// Whether transport-wide feedback reports a packet received again when the base sequence
@@ -410,6 +411,12 @@ pub struct DefaultInterceptorOptions {
     /// video ([`configure_receiver_reference_time`]). `false` by default; Chromium offers them
     /// on audio too.
     pub receiver_reference_time_on_audio: bool,
+    /// Whether video offers `red` and `ulpfec` (RFC 2198, RFC 5109 section 14.2) and the
+    /// chain sends and recovers ULPFEC in RED ([`configure_video_red_ulpfec`]). `false` by
+    /// default: RFC 8854 section 7, "Implementations MAY support additional FEC mechanisms if
+    /// desired, e.g., [RFC5109]", and FlexFEC is the mechanism it names for video; Chromium
+    /// offers both for every video section.
+    pub video_red_ulpfec: bool,
     /// How the RTP circuit breaker takes s, the packet size of RFC 8083 section 4.3's TCP
     /// throughput equation: by default the mean size of the packets sent over the reporting
     /// intervals the sending rate is measured over;
@@ -492,6 +499,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "receiver_reference_time_on_audio",
                 &self.receiver_reference_time_on_audio,
             )
+            .field("video_red_ulpfec", &self.video_red_ulpfec)
             .field(
                 "circuit_breaker_packet_size",
                 &self.circuit_breaker_packet_size,
@@ -542,6 +550,7 @@ impl DefaultInterceptorOptions {
             gcc_received_rate_bound: interceptor::ReceivedRateBound::LimitsIncrease,
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,
+            video_red_ulpfec: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
             rtcp_congestion_feedback_in_budget: false,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
@@ -753,6 +762,11 @@ pub fn register_default_interceptors_with_options(
     configure_default_header_extensions(media_engine)?;
     configure_abs_send_time(media_engine)?;
     options.register_audio_extras(media_engine)?;
+    let registry = if options.video_red_ulpfec {
+        configure_video_red_ulpfec(registry, media_engine)?
+    } else {
+        registry
+    };
     let registry = if options.rapid_synchronisation {
         configure_rapid_synchronisation_with(registry, media_engine, options.wall_clock)?
     } else {
@@ -2091,6 +2105,118 @@ pub fn configure_ulpfec_with_placement(
         .with(
             Slot::FecDecoder,
             interceptor::UlpfecReceiveBuilder::red(red_payload_type, ulpfec_payload_type).build(),
+        )
+}
+
+/// The payload type [`configure_video_red_ulpfec`] registers `video/red` under.
+pub const VIDEO_RED_PAYLOAD_TYPE: PayloadType = 116;
+/// The payload type of the RTX format for `video/red` (`apt=116`).
+pub const VIDEO_RED_RTX_PAYLOAD_TYPE: PayloadType = 117;
+/// The payload type [`configure_video_red_ulpfec`] registers `video/ulpfec` under.
+pub const VIDEO_ULPFEC_PAYLOAD_TYPE: PayloadType = 43;
+
+/// Video `red` and `ulpfec` as Chromium offers them, and ULPFEC in RED in both directions
+/// (the `Chrome` behaviour profile's `DefaultInterceptorOptions::video_red_ulpfec`):
+///
+/// - registers `video/red` ([`VIDEO_RED_PAYLOAD_TYPE`]), RTX for it
+///   ([`VIDEO_RED_RTX_PAYLOAD_TYPE`], `apt=116`) and `video/ulpfec`
+///   ([`VIDEO_ULPFEC_PAYLOAD_TYPE`]) after the video codecs already registered, unless the
+///   media engine has a `video/red` or `video/ulpfec` of its own;
+/// - the encoder at [`Slot::FecEncoder`] with its wire tap at [`Slot::FecWireImage`], so the
+///   FEC protects each packet as it leaves: FEC in RED packets of its own in the media's
+///   sequence space (`RedPlacement::OwnPacket`, the form libwebrtc sends and the only one it
+///   reads), after each frame or five packets, in the amount the receiver's reported loss
+///   asks for (`FecRate`);
+/// - the decoder at [`Slot::FecDecoder`].
+///
+/// A stream is protected only when its section negotiated both `red` and `ulpfec` (RFC 5109
+/// section 14.2), under the payload types the section has (an answer keeps the offerer's).
+///
+/// # Errors
+///
+/// When a codec cannot be registered.
+pub fn configure_video_red_ulpfec(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Result<Registry> {
+    let has = |media_engine: &MediaEngine, subtype: &str| {
+        media_engine.video_codecs.iter().any(|codec| {
+            codec
+                .rtp_codec
+                .mime_type
+                .rsplit_once('/')
+                .is_some_and(|(_, sub)| sub.eq_ignore_ascii_case(subtype))
+        })
+    };
+    if !has(media_engine, "red") && !has(media_engine, "ulpfec") {
+        let codec = |mime_type: &str, sdp_fmtp_line: String, payload_type| RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line,
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        };
+        for parameters in [
+            codec("video/red", String::new(), VIDEO_RED_PAYLOAD_TYPE),
+            codec(
+                crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX,
+                format!("apt={VIDEO_RED_PAYLOAD_TYPE}"),
+                VIDEO_RED_RTX_PAYLOAD_TYPE,
+            ),
+            codec(
+                crate::peer_connection::configuration::media_engine::MIME_TYPE_ULP_FEC,
+                String::new(),
+                VIDEO_ULPFEC_PAYLOAD_TYPE,
+            ),
+        ] {
+            media_engine.register_codec(parameters, RtpCodecKind::Video)?;
+        }
+    }
+    let mut encoder =
+        interceptor::UlpfecSendBuilder::red(VIDEO_RED_PAYLOAD_TYPE, VIDEO_ULPFEC_PAYLOAD_TYPE)
+            .with_red_placement(interceptor::RedPlacement::OwnPacket)
+            .with_flush_on_marker(true)
+            .build();
+    let tap = encoder.wire_tap();
+    Ok(registry
+        .with(Slot::FecEncoder, encoder)
+        .with(Slot::FecWireImage, tap)
+        .with(
+            Slot::FecDecoder,
+            interceptor::UlpfecReceiveBuilder::red(
+                VIDEO_RED_PAYLOAD_TYPE,
+                VIDEO_ULPFEC_PAYLOAD_TYPE,
+            )
+            .build(),
+        ))
+}
+
+/// Adds ULPFEC (RFC 5109) for FEC sessions of their own (section 14.1,
+/// [`RTCPeerConnection::add_fec_session`](crate::peer_connection::RTCPeerConnection::add_fec_session),
+/// `SettingEngineBuilder::with_separate_fec_sessions`), in both directions: the encoder at
+/// [`Slot::FecEncoder`] with its wire tap at [`Slot::FecWireImage`], so the FEC protects each
+/// media packet as it leaves, and the decoder at [`Slot::FecDecoder`], which keeps a decoder
+/// for every video stream so the FEC of a session finds it.
+///
+/// A stream no FEC session protects is left alone (and one with a ULPFEC repair flow of its
+/// own session is protected there, as a separate stream). FEC is produced after each frame or
+/// five packets, whichever comes first, in the amount the receiver's reported loss asks for
+/// (`FecRate`: none below 0.5% loss, at most one FEC packet for two of media), and its bit
+/// rate is taken out of the target the application encodes at.
+pub fn configure_ulpfec_sessions(registry: Registry) -> Registry {
+    let mut encoder = interceptor::UlpfecSendBuilder::stream()
+        .with_flush_on_marker(true)
+        .build();
+    let tap = encoder.wire_tap();
+    registry
+        .with(Slot::FecEncoder, encoder)
+        .with(Slot::FecWireImage, tap)
+        .with(
+            Slot::FecDecoder,
+            interceptor::UlpfecReceiveBuilder::sessions().build(),
         )
 }
 

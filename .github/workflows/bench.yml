@@ -26,6 +26,7 @@ defaults:
 
 jobs:
   benchmark:
+    timeout-minutes: 60
     name: Run criterion benchmarks
     runs-on: ubuntu-latest
     steps:
@@ -78,6 +79,7 @@ jobs:
           path: bench-all.txt
 
   publish:
+    timeout-minutes: 15
     name: Publish benchmark results
     needs: benchmark
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'

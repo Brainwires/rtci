@@ -324,18 +324,30 @@ fn unordered_media_lines_is_the_only_leniency_about_order() {
 }
 
 #[test]
-fn several_connection_lines_in_a_media_description_keep_the_last() {
-    // RFC 8866 section 9: `*connection-field` in a media description (layered multicast).
-    let sdp = media("c=IN IP4 233.252.0.1/127\r\nc=IN IP4 233.252.0.2/127\r\n");
+fn several_connection_lines_in_a_media_description_are_all_kept() {
+    // RFC 8866 section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media
+    // basis" (layered multicast); section 9: `*connection-field` in a media description. Each
+    // line is kept in order and written back, the address ranges too.
+    let sdp =
+        media("c=IN IP4 233.252.0.1/127\r\nc=IN IP4 233.252.0.2/127/2\r\nc=IN IP6 ff15::101/3\r\n");
     let parsed = strict(&sdp).unwrap();
+    let addresses: Vec<_> = parsed.media_descriptions[0]
+        .connection_information
+        .iter()
+        .map(|c| {
+            let a = c.address.as_ref().unwrap();
+            (a.address.as_str(), a.ttl, a.range)
+        })
+        .collect();
     assert_eq!(
-        parsed.media_descriptions[0]
-            .connection_information
-            .as_ref()
-            .and_then(|c| c.address.as_ref())
-            .map(|a| a.address.as_str()),
-        Some("233.252.0.2")
+        vec![
+            ("233.252.0.1", Some(127), None),
+            ("233.252.0.2", Some(127), Some(2)),
+            ("ff15::101", None, Some(3)),
+        ],
+        addresses
     );
+    assert_eq!(sdp, parsed.marshal());
 }
 
 // --- v= ---------------------------------------------------------------------------------------
@@ -1327,6 +1339,19 @@ fn the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives() {
     assert!(origin[2].parse::<i64>().is_ok());
     assert_eq!(origin[3..], ["IN", "IP4", "0.0.0.0"]);
     assert_eq!(lines[2..], ["s=-", "t=0 0", ""]);
+
+    // RFC 8866 section 5.2: "it is RECOMMENDED that a timestamp be used" for <sess-version>,
+    // "in seconds since January 1, 1900 UTC" as for <sess-id>: the system clock's, now.
+    let ntp_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + NTP_UNIX_EPOCH_OFFSET_SECS;
+    let version: u64 = origin[2].parse().unwrap();
+    assert!(
+        (ntp_now - 60..=ntp_now).contains(&version),
+        "{version} is not the seconds since 1900 of now ({ntp_now})"
+    );
 
     // A media section: port 9, UDP/TLS/RTP/SAVPF, and c=IN IP4 0.0.0.0 right after m=.
     let media = MediaDescription::new_jsep_media_description("audio".to_owned(), vec![])

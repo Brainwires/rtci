@@ -66,6 +66,9 @@ struct Peer {
     read_rtp: Vec<(u32, u16)>,
     /// The RTCP datagrams this peer put on the wire.
     rtcp_datagrams: usize,
+    /// The packet type and SSRC of the first packet of each of those datagrams (the SR or RR
+    /// that heads a compound packet; SRTCP leaves the first eight octets in the clear).
+    rtcp_leaders: Vec<(u8, u32)>,
     /// The `ssrcchange` / `csrcchange` events (webrtc-extensions 11), in order.
     source_changes: Vec<&'static str>,
     /// The SSRCs `OnSsrcCollision` named.
@@ -157,12 +160,33 @@ impl Peer {
         registry: Registry,
         setting_engine: SettingEngine,
     ) -> Result<Self> {
-        let pc = RTCPeerConnectionBuilder::new()
-            .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_media_engine(media_engine)
-            .with_setting_engine(setting_engine)
-            .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+        Self::built_from(
+            addr,
+            RTCPeerConnectionBuilder::new()
+                .with_configuration(RTCConfigurationBuilder::new().build())
+                .with_media_engine(media_engine)
+                .with_setting_engine(setting_engine)
+                .with_interceptor_registry(registry),
+        )
+    }
+
+    /// A peer as [`new`](Self::new) (no FEC), created with the RTCP CNAME `cname`
+    /// (`RTCPeerConnectionBuilder::with_rtcp_cname`).
+    fn with_cname(addr: &str, cname: &str) -> Result<Self> {
+        let mut media_engine = Self::media_engine(false)?;
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        Self::built_from(
+            addr,
+            RTCPeerConnectionBuilder::new()
+                .with_configuration(RTCConfigurationBuilder::new().build())
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
+                .with_rtcp_cname(cname),
+        )
+    }
+
+    fn built_from(addr: &str, builder: RTCPeerConnectionBuilder) -> Result<Self> {
+        let pc = builder.build(Instant::now())?;
         Ok(Self {
             pc,
             addr: addr.parse()?,
@@ -174,6 +198,7 @@ impl Peer {
             read_rtcp: Vec::new(),
             read_rtp: Vec::new(),
             rtcp_datagrams: 0,
+            rtcp_leaders: Vec::new(),
             source_changes: Vec::new(),
             collisions: Vec::new(),
             negotiation_needed: 0,
@@ -238,6 +263,9 @@ impl World {
                 while let Some(msg) = peer.pc.poll_write() {
                     if wire_rtcp(&msg.message) {
                         peer.rtcp_datagrams += 1;
+                        let d = &msg.message;
+                        peer.rtcp_leaders
+                            .push((d[1], u32::from_be_bytes([d[4], d[5], d[6], d[7]])));
                     }
                     in_flight.push((
                         i,
@@ -545,6 +573,51 @@ fn the_receiver_learns_one_cname_for_the_media_and_the_rtx_ssrc() -> Result<()> 
         world.peers[1].pc.remote_rtcp_cname(rtx_ssrc),
         "the RTX SSRC is described with the same CNAME"
     );
+    Ok(())
+}
+
+/// RFC 8834 4.9: "if explicitly requested at creation, an RTCPeerConnection MAY use the same
+/// CNAME as an existing RTCPeerConnection". A connection built with another connection's
+/// CNAME (`RTCPeerConnectionBuilder::with_rtcp_cname`) describes its SSRC with it in its
+/// description (RFC 5576 `a=ssrc:<ssrc> cname:`) and in its RTCP SDES, so the receiver binds
+/// the stream to that synchronisation context; a CNAME an SDES item cannot carry (empty, over
+/// 255 octets) is refused when the connection is built.
+#[test]
+fn a_connection_created_with_an_existing_connections_cname_uses_it() -> Result<()> {
+    let existing = Peer::new("10.0.0.3:5000", false)?;
+    let cname = existing.pc.rtcp_cname().to_owned();
+    let (mut world, sender) = World::connected_peers([
+        Peer::with_cname("10.0.0.1:5000", &cname)?,
+        Peer::new("10.0.0.2:5000", false)?,
+    ])?;
+    assert_eq!(cname, world.peers[0].pc.rtcp_cname());
+    let (ssrc, _, _) = world.sender_stream(sender);
+    let offer = world.peers[0]
+        .pc
+        .local_description()
+        .expect("a local description")
+        .sdp;
+    assert!(
+        offer.contains(&format!("a=ssrc:{ssrc} cname:{cname}")),
+        "{offer}"
+    );
+
+    world.send_media(sender, FIRST_SEQ, 50)?;
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    assert_eq!(
+        Some(cname.as_str()),
+        world.peers[1].pc.remote_rtcp_cname(ssrc)
+    );
+
+    for refused in [String::new(), "x".repeat(256)] {
+        assert!(
+            RTCPeerConnectionBuilder::new()
+                .with_rtcp_cname(refused)
+                .build(Instant::now())
+                .is_err()
+        );
+    }
     Ok(())
 }
 
@@ -1279,6 +1352,125 @@ fn a_key_frame_request_reaches_an_application_with_an_empty_registry() -> Result
     assert!(
         world.peers[0].read_rtcp.iter().any(is_pli),
         "the PLI was delivered"
+    );
+    Ok(())
+}
+
+/// RFC 8108 section 6.1: "An endpoint that has never sent an RTP stream will have an SSRC
+/// that it uses for RTCP reporting. If that endpoint wants to start sending an RTP stream, it
+/// is RECOMMENDED that it use its existing SSRC for that stream, since otherwise the
+/// participant count in the RTP session will be unnecessarily increased". The receiving peer
+/// reports from one SSRC; when its transceiver starts sending, the stream is sent on that
+/// SSRC, whose reports become sender reports: every compound packet the peer sends, before
+/// and after, is headed by that one SSRC.
+#[test]
+fn a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from() -> Result<()> {
+    use rtci::rtp_transceiver::RTCRtpTransceiverId;
+    const SR: u8 = 200;
+    const RR: u8 = 201;
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 50)?;
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+    let leaders = world.peers[1].rtcp_leaders.clone();
+    assert!(!leaders.is_empty(), "the receiver reports");
+    let reporting = leaders[0].1;
+    assert!(leaders.contains(&(RR, reporting)));
+    assert!(
+        leaders.iter().all(|&(_, leader)| leader == reporting),
+        "the receiver reports from one SSRC: {leaders:?}"
+    );
+
+    // The receiving transceiver starts sending, and the receiver offers it.
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    let transceiver = RTCRtpTransceiverId::from(receiver);
+    let back = {
+        let mut handle = world.peers[1]
+            .pc
+            .rtp_transceiver(transceiver)
+            .expect("transceiver");
+        handle.set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
+        handle.sender().expect("a sender")
+    };
+    assert_eq!(
+        reporting,
+        encoding_ssrcs(&mut world, 1, back).0,
+        "the new stream's SSRC is the reporting SSRC"
+    );
+    let now = world.now;
+    let offer = world.peers[1].pc.create_offer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[0].pc.set_remote_description(now, offer)?;
+    // The sending side receives too now.
+    world.peers[0]
+        .pc
+        .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
+    let answer = world.peers[0].pc.create_answer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[1].pc.set_remote_description(now, answer)?;
+    world.pump()?;
+
+    let (ssrc, rtx) = encoding_ssrcs(&mut world, 1, back);
+    assert_eq!(reporting, ssrc);
+    let pt = world.peers[1]
+        .pc
+        .rtp_sender(back)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .first()
+        .expect("a negotiated codec")
+        .payload_type;
+    for n in 0..100u16 {
+        let now = world.now;
+        world.peers[1]
+            .pc
+            .rtp_sender(back)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: 100 + n,
+                        timestamp: u32::from(n) * 1800,
+                        ssrc,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 200]),
+                },
+            )?;
+        world.pump()?;
+        world.run_until(now + Duration::from_millis(20))?;
+    }
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+
+    assert!(
+        world.peers[0].read_rtp.iter().any(|(s, _)| *s == reporting),
+        "the media arrives on the reporting SSRC"
+    );
+    let leaders = &world.peers[1].rtcp_leaders;
+    assert!(
+        leaders.contains(&(SR, reporting)),
+        "the reporting SSRC sends sender reports: {leaders:?}"
+    );
+    // The stream's RTX SSRC is a participant of its own once it sends (RFC 4588 6.1); no
+    // other SSRC is.
+    assert!(
+        leaders
+            .iter()
+            .all(|&(_, leader)| leader == reporting || Some(leader) == rtx),
+        "one SSRC heads every compound packet but the stream's RTX one ({rtx:?}): {leaders:?}"
     );
     Ok(())
 }

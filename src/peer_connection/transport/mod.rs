@@ -493,6 +493,18 @@ impl<'a> RTCSctpTransport<'a> {
             .find(|association| !association.is_ended())
             .map(|association| association.congestion_window())
     }
+
+    /// The SCTP association's counters (T3-rtx expiries and the time they waited, Fast
+    /// Retransmits, retransmissions, abandoned messages, FORWARD TSNs sent), `None` without a
+    /// live association. A diagnostic, not a W3C member.
+    pub fn association_stats(&self) -> Option<crate::sctp::AssociationStats> {
+        self.peer_connection
+            .sctp_transport()
+            .sctp_associations
+            .values()
+            .find(|association| !association.is_ended())
+            .map(|association| association.stats())
+    }
 }
 
 #[cfg(test)]

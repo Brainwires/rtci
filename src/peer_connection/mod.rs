@@ -250,6 +250,7 @@ pub(crate) mod dns_discovery;
 mod dtls_sdp;
 mod early_media;
 pub mod event;
+pub(crate) mod fec_session;
 pub(crate) mod handler;
 pub mod identity;
 mod internal;
@@ -313,8 +314,8 @@ use crate::peer_connection::sdp::{
     check_repair_primaries, codecs_from_media_description, discard_stray_bundle_only,
     effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
     get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
-    inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
-    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_media_protocol,
+    ignored_candidate_line, inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line,
+    is_lite_set, is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_media_protocol,
     media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates,
     remote_ice_options, remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin,
     validate_application_media_section, validate_dtls_attributes,
@@ -464,6 +465,7 @@ pub struct RTCPeerConnectionBuilder {
     media_engine: MediaEngine,
     setting_engine: SettingEngine,
     interceptor_registry: Registry,
+    rtcp_cname: Option<String>,
 }
 
 impl RTCPeerConnectionBuilder {
@@ -666,6 +668,24 @@ impl RTCPeerConnectionBuilder {
         self
     }
 
+    /// Gives the connection the RTCP canonical name (CNAME) of an existing connection
+    /// ([`RTCPeerConnection::rtcp_cname`]) instead of a new one.
+    ///
+    /// RFC 8834 section 4.9: a WebRTC endpoint generates a new, unique CNAME for each
+    /// RTCPeerConnection (RFC 7022), "with a single exception; if explicitly requested at
+    /// creation, an RTCPeerConnection MAY use the same CNAME as an existing RTCPeerConnection
+    /// within their common same-origin context". Streams with one CNAME are one
+    /// synchronisation context (RFC 3550 6.5.1): a receiver may synchronise the two
+    /// connections' audio and video, so both must take their RTP and NTP timestamps from
+    /// the same clock (the application drives both with the same `Instant`s and wall clock).
+    ///
+    /// Without this call (the default) the connection generates its own CNAME. Checked by
+    /// [`build`](Self::build): a CNAME is 1 to 255 octets (an SDES item's length).
+    pub fn with_rtcp_cname(mut self, cname: impl Into<String>) -> Self {
+        self.rtcp_cname = Some(cname.into());
+        self
+    }
+
     /// Builds the RTCPeerConnection with the configured settings.
     ///
     /// This method validates the configuration and creates a new peer connection.
@@ -702,16 +722,31 @@ impl RTCPeerConnectionBuilder {
         if let Some(lifetime) = self.setting_engine.srtp_key_lifetime {
             ::srtp::keying::validate_key_lifetime(lifetime)?;
         }
+        if self
+            .rtcp_cname
+            .as_ref()
+            .is_some_and(|cname| cname.is_empty() || cname.len() > 255)
+        {
+            return Err(Error::ErrRtcpCnameLength);
+        }
         let interceptor =
             with_rtcp_session(self.interceptor_registry, &self.setting_engine).build();
-        RTCPeerConnection::new(
+        let mut pc = RTCPeerConnection::new(
             now,
             self.configuration,
             self.media_engine,
             self.setting_engine,
             // The registry is a list until here; `build` freezes it into the chain.
             Box::new(interceptor),
-        )
+        )?;
+        if let Some(cname) = self.rtcp_cname {
+            // Before any sender or RTCP session exists: every place the CNAME goes (the
+            // RTCP session, the descriptions' `a=ssrc` lines, the senders' parameters) reads
+            // it from these two.
+            pc.media_engine.rtcp_cname = cname.clone();
+            pc.pipeline_context.interceptor_handler_context.cname = cname;
+        }
+        Ok(pc)
     }
 }
 
@@ -738,7 +773,7 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
             registry,
             setting_engine.crypto_provider(),
             setting_engine.behaviour_profile(),
-            None,
+            setting_engine.wall_clock,
         )
     };
     // RFC 5104 section 7.2: a party that signals a codec control message "must" be able to
@@ -968,6 +1003,9 @@ impl RTCPeerConnection {
         ) {
             return Err(Error::ErrIncorrectSignalingState);
         }
+        // A FEC session with no media left to protect (RFC 5109 section 14.1) is offered
+        // rejected.
+        self.stop_fec_sessions_without_media()?;
 
         // Staging, not restarting: the offer must advertise fresh ICE credentials, but JSEP
         // requires `createOffer` to be free of side effects, and inbound STUN is still being
@@ -2598,7 +2636,7 @@ impl RTCPeerConnection {
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
             // RFC 8866 section 5.7: "A session description MUST contain either at least one
             // 'c=' line in each media description or a single 'c=' line at the session level."
-            if media.connection_information.is_none() && parsed.connection_information.is_none() {
+            if media.connection_information.is_empty() && parsed.connection_information.is_none() {
                 return Err(Error::SdpInvalidValue(format!(
                     "m= section {index} has no c= line and the session has none (RFC 8866 \
                      section 5.7)"
@@ -2948,6 +2986,19 @@ impl RTCPeerConnection {
                 // matching a description's m-sections is one lookup each.
                 let mut transceiver_by_mid =
                     RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+                // The FEC sessions the description sets up (RFC 5109 section 14.1): an
+                // answer's are those it accepted of this side's offer; an offer's are taken
+                // only when the application said so (RFC 8854 section 5.2: "Answerers SHOULD
+                // reject any FEC-only "m=" lines, unless they specifically know how to handle
+                // such a thing").
+                let fec_sessions = if we_offer || self.setting_engine.separate_fec_sessions {
+                    crate::peer_connection::sdp::fec_session::fec_sessions(
+                        parsed_remote_description,
+                    )
+                } else {
+                    vec![]
+                };
+                let mut fec_sessions_made = vec![];
                 if !we_offer {
                     for media in &media_descriptions {
                         let mid_value = match get_mid_value(media) {
@@ -3002,6 +3053,30 @@ impl RTCPeerConnection {
                         // is sendrecv (RFC 8866 section 6.7, RFC 3264 section 6.1).
                         let direction = effective_direction(parsed_remote_description, media);
                         if kind == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
+                            continue;
+                        }
+
+                        // An offered FEC session this endpoint takes: the section's own
+                        // transceiver, never one that waits for media.
+                        if let Some(offered) = fec_sessions
+                            .iter()
+                            .find(|session| &session.fec_mid == mid_value)
+                        {
+                            let existing = transceiver_by_mid.get(mid_value.as_str()).copied();
+                            let (i, made) =
+                                self.apply_offered_fec_session(offered, kind, existing)?;
+                            if made {
+                                fec_sessions_made.push(i);
+                            }
+                            transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
+                            continue;
+                        }
+                        // A FEC session's transceiver whose section the offer no longer sets
+                        // up as one: nothing is agreed for it, and the answer refuses it.
+                        if let Some(&i) = transceiver_by_mid.get(mid_value.as_str())
+                            && let Some(session) = self.rtp_transceivers[i].fec_session_mut()
+                        {
+                            session.remote = None;
                             continue;
                         }
 
@@ -3067,6 +3142,7 @@ impl RTCPeerConnection {
                             transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
                         }
                     }
+                    self.pair_offered_fec_sessions(&fec_sessions, &fec_sessions_made);
                 } else {
                     // we_offer
                     // WebRTC Spec 1.0 https://www.w3.org/TR/webrtc/
@@ -3115,6 +3191,18 @@ impl RTCPeerConnection {
                         // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"
                         // ... Set transceiver.[[CurrentDirection]] to direction".
                         transceiver.set_current_direction(direction);
+
+                        // A FEC session this side offered (RFC 5109 section 14.3): accepted
+                        // when the answer keeps the section, as a FEC section, and repeats
+                        // the grouping ("by including the same grouping in the answer"). Its
+                        // `ulpfec` payload type is the one to send with.
+                        if let Some(session) = transceiver.fec_session_mut() {
+                            session.remote = fec_sessions
+                                .iter()
+                                .find(|answered| &answered.fec_mid == mid_value)
+                                .map(|answered| answered.format);
+                            continue;
+                        }
 
                         transceiver.set_codec_preferences_from_remote_description(
                             media,
@@ -3493,6 +3581,19 @@ impl RTCPeerConnection {
         if after_end_of_candidates {
             unmarshal_candidate(candidate_value)?;
             log::warn!("ignoring remote candidate: it follows end-of-candidates");
+            return Ok(());
+        }
+
+        // RFC 8839 section 5.1: "An agent processing remote candidates MUST ignore "candidate"
+        // lines that include candidates with FQDNs". draft-ietf-mmusic-mdns-ice-candidates
+        // section 3.2.1 step 1 sends an address that does not end with ".local", or has more
+        // than one ".", to that processing, and section 4 leaves other FQDNs ignored: the
+        // line is well formed, so the operation resolves (W3C addIceCandidate; RFC 9429
+        // section 4.1.19 refuses invalid values only) and the candidate reaches neither the
+        // agent nor the statistics, as such a line of a description does. A host `.local` name
+        // goes on to mDNS resolution.
+        if let Some(reason) = ignored_candidate_line(candidate_value) {
+            log::debug!("ignoring remote candidate {candidate_value:?}: {reason}");
             return Ok(());
         }
 
@@ -4024,7 +4125,8 @@ impl RTCPeerConnection {
     /// It is generated with the connection as RFC 7022 section 4.2 defines a short-term
     /// persistent CNAME (96 random bits, Base64: 16 characters), is the same for senders,
     /// retransmission and FEC streams and receiver reports, and does not change (RFC 8834
-    /// 4.9).
+    /// 4.9). A connection built with
+    /// [`RTCPeerConnectionBuilder::with_rtcp_cname`] has the CNAME it was given instead.
     pub fn rtcp_cname(&self) -> &str {
         &self.pipeline_context.interceptor_handler_context.cname
     }
@@ -5125,6 +5227,15 @@ impl RTCPeerConnection {
         self.pipeline_context
             .stats
             .snapshot_with_selector(now, selector)
+    }
+
+    /// The FEC counts webrtc-stats has no member for: per outbound stream the FEC it sent,
+    /// per inbound stream the FEC it received, the packets FEC rebuilt and why FEC was
+    /// discarded ([`FecStats`](crate::statistics::FecStats)). The webrtc-stats members
+    /// (`fecPacketsReceived`, `fecBytesReceived`, `fecPacketsDiscarded`) are in
+    /// [`get_stats`](Self::get_stats).
+    pub fn fec_stats(&self) -> crate::statistics::FecStats {
+        self.pipeline_context.stats.fec_stats()
     }
 
     /// [`get_stats`](Self::get_stats), refusing a selector that is not this connection's.

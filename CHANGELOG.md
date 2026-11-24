@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
   or `fec_session: None`.
 
+- **rtci-sdp** (jsep-79, pass2): `MediaDescription::connection_information` is a
+  `Vec<ConnectionInformation>`, every `c=` line of the media description in order (RFC 8866
+  section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media basis", for
+  layered multicast). The parser kept only the last one. RFC8866-5.7-7 is `tested`
+  (`grammar_test::several_connection_lines_in_a_media_description_are_all_kept`). Generated
+  SDP is unchanged (one `c=` line per section).
+  **Migration**: `connection_information: Some(c)` becomes `vec![c]`, `None` becomes
+  `vec![]`; read `connection_information.first()` where one address was read, and
+  `is_empty()` for `is_none()`.
+
 ### Behaviour changes
 
 - **interceptors (NACK responder), retransmissions leave at the limit's rate**
@@ -81,13 +91,311 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the picture's age after a sudden drop with the pacer). Tests:
   `rtci-interceptor/tests/nack_repeat_repairs.rs`.
 
+- **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
+  candidate it is (RFC 6544 section 5.4): type preference 75 (section 4.2,
+  `candidate::UDP_TUNNELLED_TYPE_PREFERENCE`) instead of the TCP host preference 125, so it
+  comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
+  rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
+- **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
   RFC7798-4.4.3-12 (`SampleBuilder` never depacketizes across a missing packet, now tested)
   and RFC7798-4.3-1 are `tested`.
 
+- **jsep / sdp**: the `o=` line of a peer connection's descriptions is drawn once, when it is
+  built (`conf/jsep-75-session-version`). The session version starts at a timestamp, the
+  seconds since 1900 of the wall clock at that moment (RFC 8866 section 5.2: "it is RECOMMENDED
+  that a timestamp be used"), instead of the clock's sub-second nanoseconds, and still goes up
+  by one with each description that differs (RFC 9429 section 5.2.2). The session id comes from
+  the crypto provider's `random()` and is below 2^63 - 1 (RFC 9429 section 5.2.1).
+  `SessionDescription::new_jsep_session_description` writes the same kind of version. Peers
+  see a larger first version (about 3.9e9, still below 2^32). Tests:
+  `tests/jsep_session_version.rs::the_first_session_version_is_the_wall_clocks_seconds_since_1900`,
+  `rtci-sdp` `grammar_test::the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives`.
+  RFC8866-5.2-3 is `tested`.
+
+- **jsep**: an offer with empty `a=group` lines (RFC 5888 section 9.3 capability indication)
+  is answered with an empty `a=group` line for each semantics the engine understands and the
+  answer does not use (BUNDLE, LS, DDP) (`conf/jsep-77-small-rows`). Offers without such lines,
+  which is every browser's, are answered as before. Test:
+  `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
+- **jsep**: a section an answer rejects after writing it (outside the offered BUNDLE group
+  under `must-bundle`, or beyond what the bundle policy takes from an offer without BUNDLE)
+  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6); the
+  next section written takes them, and the local description puts the candidates in the first
+  section that is not rejected (it used to be the first section) (`conf/jsep-77-small-rows`). Test:
+  `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
+- **tests** (`conf/jsep-77-small-rows`): a late identification-tag does not end the session
+  (RFC 9143 section 15,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_late_identification_tag_does_not_end_the_session`); the
+  end-of-gathering event names its section (RFC 9429 section 4.1.20). RFC9143-15-3, RFC5888-6-5,
+  RFC8839-4.4.1.2.1-2, RFC9429-4.1.20-4, RFC3264-6.1-15 and 7-3 are `tested`, RFC3264-6.1-20 `n/a`.
+  RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
+  lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,
+  `rtci-dtls` `a_client_hello_offering_only_the_null_suite_is_refused`).
+
+- **sdp / jsep**: a remote description with two direction attributes at one level is refused
+  (RFC 8866 section 6.7: at most one at session level and one per media description); the
+  first was taken before. The informational attributes `a=tool`, `a=type`, `a=orient` and
+  `a=quality` (RFC 8866 sections 6.3, 6.9, 6.8, 6.14) now have their grammar checked, so a
+  remote description with a malformed one, or one at the wrong level, is refused (RFC 9429
+  section 5.8) (`conf/jsep-78-sdp-informational`). Browsers send neither.
+- **rtp**: `Vp8Payloader` starts each partition of a VP8 frame in a packet of its own, with the
+  partition's `PID` and `S` on its first packet (RFC 7741 sections 3, 4.2, 4.4): it reads the
+  frame tag, the token partition count from the first partition's header (RFC 6386 section
+  19.2) and the partition sizes. A frame with one token partition now goes out in at least two
+  packets (the first partition, then the residual). A frame whose sizes do not add up is cut
+  at MTU boundaries as before. `Vp8Payloader::ignore_partitions` (new public field) selects
+  the old cut, which is libwebrtc's. Conformance rows RFC7741-4-1, 4.2-7, 4.2-11, 4.4-4 and
+  4.4-6 are `tested`.
+
+- **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
+  application; no default format is one) is offered and answered with
+  `deint-buf-cap=33554432`, the de-interleaving buffer the depacketizer holds
+  (`MAX_DEINTERLEAVING_BYTES`), unless the application gave its own value (RFC 6184 section
+  8.2.2). Default offers are unchanged.
+- **rtp**: `rtp::codec::h264::mtap` writes its units in decoding order (ascending DON from the
+  DON base), whatever order they are given in (RFC 6184 section 5.7.2). Conformance rows
+  RFC6184-5.7.2-3, 7.2.1-1, 7.2.1-2 and 8.2.2-9 are `tested`.
+
+- **RFC 8108 section 6.1: an endpoint starts sending on the SSRC it reported from.** A
+  connection that sends no media reported from an SSRC its RTCP session drew, and when its
+  first stream started (a receiver that turns `sendrecv`, an `addTrack` after the call is up)
+  that SSRC said BYE and the stream joined as a second participant. The RTCP session now
+  announces the reporting SSRC it draws (`RtcpSessionEvent::ReportingSsrc`, new; `None` once
+  the SSRC is a stream's or said BYE); the first media SSRC the connection mints is that one,
+  and the stream bound under it takes the reporting SSRC over: no BYE, one participant, its
+  reports become sender reports. Later streams, and SSRCs the application
+  names in a track's codings, are unchanged. On the wire: a peer sees RTP and sender reports
+  arrive from the SSRC that sent the receiver reports (as libwebrtc does with its own
+  receiver-report SSRC), signalled in the next description as usual. Engine behaviour change
+  (SSRC handling). Rows: RFC8108-6.1-1 (`violated` -> `tested`).
+
+- **RFC 4585 section 3.5.4: congestion control feedback sent at once counts in the average
+  RTCP packet size.** The transport-wide and RFC 8888 feedback the RTCP session sends as it is
+  built (`with_immediate_congestion_feedback`, the default) was left out of `avg_rtcp_size`
+  when sent, though the peer's was counted when received; the clause has the average "updated
+  accordingly" for every packet, Early or Regular. Now every packet sent moves it, so the
+  regular report interval reflects the packets the endpoint actually sends (slightly longer
+  where that feedback is larger than the regular reports). With
+  `with_congestion_feedback_in_budget` (the `Performance` profile) the regular reports' budget
+  still rests on their own size. Engine behaviour change (RTCP timing). Rows: RFC4585-3.5.4-2
+  (`partial` -> `tested`).
+
+- **RFC 8108 section 5.2: senders report first when not every SSRC fits.** When an endpoint's
+  SSRCs cannot all report in one aggregated compound packet (the MTU), the RTCP session now
+  puts the sending SSRCs' reports in first ("those most useful to the peers"), then the others
+  by their timers; before, the order was the timers' alone. The SSRCs left out still report
+  when their own timers expire. Engine behaviour change (report content on the wire, only for
+  endpoints with more SSRCs than one packet holds). Rows: RFC8108-5.2-3 (`missing` ->
+  `tested`); RFC8108-5.2-1 (initial report at zero delay, already done by
+  `with_first_report_at_join`) marked `tested`.
+
+- **RFC 7164: no RTCP timestamps around a possible leap second.** Taking up section 5.1's
+  assumption of a positive leap second at the end of every month, the RTCP session sends no
+  sender report and no XR receiver reference time stamped in the last second of a month's last
+  day or the second after it (UTC): the SSRC reports with a receiver report there, keeping its
+  schedule. A sender report received with such a timestamp is not used for LSR / DLSR or the
+  remote-outbound timestamps (its counts are). New: `rtci_shared::time::near_leap_second`.
+  Engine behaviour change (report content on the wire, two seconds a month). Rows:
+  RFC7164-5.1-1 to 5.1-5 (`missing` -> `tested`), 5-3 (`missing` -> `partial`: the RFC 8888
+  report timestamp and the NTP header extensions are still written there).
+
+- **RFC 8108 section 5.1: the RFC form of `with_report_from_every_ssrc` reports on the
+  co-located SSRCs too.** With `RtcpSessionBuilder::with_report_from_every_ssrc(true)`
+  (`DefaultInterceptorOptions::rtcp_report_from_every_ssrc`, the `StrictRfc` profile) each
+  local SSRC's SR or RR now also carries a block for each of the endpoint's other SSRCs that
+  has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
+  highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
+  libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
+  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
+  1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
+  `setting`, measured).
+
+- **rtp**: `HevcPayloader` puts the parameter sets, AUD and prefix SEI that precede a slice in
+  the slice's aggregation packet when the slice does not fit the packet being filled and they
+  fit one together, instead of leaving them with the units before them (RFC 7798 section 5).
+  Conformance row RFC7798-5-5 is `tested`.
+
+- **sdp**: an H.265 answer to an offer with `sprop-max-don-diff` above 0, and an H.265 format
+  of this endpoint with it, state `depack-buf-cap=33554432`, the de-packetization buffer the
+  depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
+  section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
+  `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+
+### Changed
+
+- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
+  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
+  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
+  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
+  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
+  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
+  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
+
+- **A video RED format is not negotiated without ULPFEC (RFC 5109 section 14.3).** "In
+  cases in which the redundancy payload format is used with FEC as the only secondary codec,
+  when the FEC stream is rejected the redundant encoding payload type SHOULD also be
+  removed": a `video/red` format without an fmtp line (it names no encodings, so ULPFEC is
+  the only thing it can carry) is left out of the negotiated formats when no `ulpfec` format
+  of its rate is negotiated, and the RTX format that names it goes too. This changes the
+  answer of an application that registered `video/red` and not `ulpfec`; the default codecs
+  register neither, and audio RED is untouched.
+- A new m= section that an offer keeps outside every BUNDLE group although the offer has
+  groups (`RTCRtpTransceiver::set_bundle_request(Some(false))` on a transceiver the last
+  answer did not have) gets a transport of its own, as the method's documentation says; it
+  was put on the BUNDLE transport. A section a description leaves outside every group is
+  never written `a=bundle-only`.
+
+- **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
+  (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
+  Retransmit found in messages whose retransmission budget was spent and abandoned instead
+  (`get_num_fast_retrans_abandoned`), FORWARD TSN chunks sent (`get_num_forward_tsns`) and the
+  time T3-rtx expiries waited (`get_t3_wait`, the RTO at each expiry); `RTCSctpTransport::
+  association_stats` gives them for the live association (a diagnostic, not a W3C member). The
+  documentation of `get_num_datas` said "sent"; it counts DATA chunks received.
+- **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
+  (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
+  protocol events: no DATA of the channel sent twice, every lost message abandoned and
+  skipped with FORWARD TSN, at least 45 % of the losses found by Fast Retransmit, T3-rtx
+  expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
+  waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
+  90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
+  behaviour change: no (counters only).
+
+- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
+  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
+  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
+  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
+  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
+  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
+  stale cookie; a counter).
+- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
+  9260 8.1: "report the failure to the upper layer and optionally report back all
+  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
+  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
+  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
+  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
+  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
+- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
+  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
+  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
+  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
+  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
+  the outbound queues of an ended association are emptied into the undelivered list.
+- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
+  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
+  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
+  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
+  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
+  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
+  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
+  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
+  test.
+
+### Features
+
+- **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
+  time paired with the instant the peer connection is built, for the values it writes on the
+  wall clock itself: the `o=` session version, the receivers' source timestamps and the NTP
+  times of the RTCP session it installs. With a seeded crypto provider the `o=` line is the
+  same in every run under virtual time. Also `sdp::description::session::Origin::jsep`,
+  `SessionDescription::new_jsep_session_description_with_origin` and
+  `NTP_UNIX_EPOCH_OFFSET_SECS`.
+
+- **SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers** (`conf/jsep-76-spec-conflicts`):
+  RFC 8858 section 4.5's form, a subsequent offer saying `a=rtcp-mux-only` again in the m=
+  sections it carries over (under the `require` mux policy; in the tagged section, or in every
+  bundled one with the bundle attributes repeated). Off by default and in the `Rfc` and
+  `Chrome` profiles, on in `StrictRfc`: RFC 9429 section 5.2.2, which governs a JSEP endpoint,
+  says "The 'a=rtcp-mux-only' line MUST NOT be added". No change to what the engine generates
+  by default. RFC8858-4.5-1 is `conflict` (was `violated`), with
+  `tests/jsep_rtcp_mux.rs::when_asked_a_subsequent_offer_says_rtcp_mux_only_again`; RFC8858-4.5-4
+  is `n/a`.
+- **jsep**: RFC9429-4.1.1-4 (ignore `max-bundle`) is `conflict` (was `violated`): the existing
+  `with_max_bundle_as_must_bundle(false)` is RFC 9429's form and the default is W3C
+  webrtc-pc 4.2.5's; the test is split in two, one per form
+  (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
+  `max_bundle_is_ignored_when_set_to_be_ignored`).
+
+- **rtci-sdp**: typed `Tool`, `ConferenceType`, `Orient` and `Quality` attributes with
+  `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
+  (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
+  6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
+
+- **A connection can take an existing connection's RTCP CNAME (RFC 8834 section 4.9 MAY).**
+  `RTCPeerConnectionBuilder::with_rtcp_cname(existing.rtcp_cname())`: "if explicitly
+  requested at creation, an RTCPeerConnection MAY use the same CNAME as an existing
+  RTCPeerConnection", so a receiver can synchronise the streams of both. Without it each
+  connection generates its own (unchanged). A CNAME outside 1 to 255 octets fails `build`
+  with the new `Error::ErrRtcpCnameLength`. Audit: RFC8834-4.9-5 `tested`; with new tests
+  RFC8835-4.2-8 (bundling by media type), RFC8837-5-6 (AF3x for non-interactive video) and
+  the stale RFC8834-8-2 (RTCP XR generation) `tested`.
+
 ### Added
+
+- **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
+  section 6.2): `FlexFec03Encoder` builds no repair packet larger than
+  `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
+  16-octet SRTP tag; `with_max_packet_size` sets another); the block goes without it and the
+  repair stream's sequence numbers skip nothing. Engine behaviour change only for media
+  packets above about 1400 octets.
+- **RFC 8854 audit** (`docs/conformance/audit/rfc8854.md`): 23 rows (MUST 3 tested, 1 n/a;
+  SHOULD 6 tested, 6 partial, 2 missing, 3 n/a; MAY 1 tested, 1 missing), and a test that no
+  behaviour profile offers a FEC-only m= section (section 5.2).
+- **Browser cell: video RED + ULPFEC from the browser.** `examples/interop-peer` takes
+  `?video_red_ulpfec=1` (`DefaultInterceptorOptions::video_red_ulpfec`) and reports the
+  engine's FEC counts (`fec`); `scenarios.spec.mjs` has the browser send VP8 in RED with
+  ULPFEC, NACK off, through netem loss, and checks that the engine rebuilt packets from it.
+  `scripts/test-env/hosted-cell.sh` runs a browser cell on a disposable Linux machine (a
+  GitHub-hosted runner through `agent-test.yml`) outside the test image.
+- **Video `red` + `ulpfec` in the `Chrome` behaviour profile.**
+  `DefaultInterceptorOptions::video_red_ulpfec` (profile row `fec.video-red-ulpfec`: `Rfc`
+  `false`, `Chrome` `true`): `register_default_interceptors` then registers `video/red` (116),
+  RTX for it (117, `apt=116`) and `video/ulpfec` (43) after the video codecs, as Chromium
+  offers them (libwebrtc `GetDefaultSupportedFormats`), and `configure_video_red_ulpfec`
+  installs ULPFEC in RED in both directions (FEC in RED packets of its own, read from the wire
+  tap, loss-driven amount). The default stays RFC 8854 section 7's: neither is offered for
+  video. `UlpfecReceiveInterceptor` now reads RED and FEC under the payload types the stream's
+  section negotiated (as the sender already did), not only the builder's: an answer keeps
+  the offerer's numbers. Engine behaviour change for the `Chrome` profile (its video offers
+  and chain).
+- **FEC statistics.** The receiver's webrtc-stats now count all the FEC received for a
+  stream (8.5): `fecPacketsReceived` and `fecBytesReceived` include the FEC blocks of the
+  stream's RED packets (RFC 5109 section 14.2) and the packets of a FEC session of its own
+  (section 14.1; those also count in `packetsReceived` / `bytesReceived`, webrtc-stats 7.1),
+  besides a FEC SSRC's; `fecPacketsDiscarded` is measured for ULPFEC (FEC whose packets all
+  arrived or were rebuilt, FEC the recovery window left behind or that arrived outside it,
+  malformed FEC). `RTCPeerConnection::fec_stats()` (`FecStats`, `FecSentStats`,
+  `FecReceivedStats`) has what webrtc-stats has no member for: the FEC each outbound stream
+  sent (packets and payload octets, any carriage, ULPFEC and FlexFEC), the media packets FEC
+  rebuilt, and the discards by reason. In the interceptor crate: `UlpfecDecoderStats` gains
+  `discarded_unneeded`, `discarded_expired` and `discarded()`; `UlpfecReceiveInterceptor`
+  passes `UlpfecReceiveStats` application-ward on an empty RTCP carrier when its counts change
+  (and `receive_stats(ssrc)`); every packet a ULPFEC or FlexFEC encoder puts FEC into carries
+  a `FecSent` mark. An application that drives a chain itself sees the carriers (empty RTCP
+  packets with that attribute) on the read leg.
+- **data channel** (up-340, test only): `tests/data_channel_close_sibling_rtc2rtc.rs` holds the
+  reproduction of webrtc-rs/rtc#340 by @schiapellone. A channel closed by the receiver while
+  the peer still sends on it, beside a healthy channel, used to make the read of its stream
+  fail mid-pass and drop the messages already read from the other streams in that pass
+  (acknowledged, so lost for good). The fork had the fix without a test: b91196d7 (the read of
+  a closed stream ends its data, not the pass) and e9b19fa3 (a stream the application stopped
+  reading drops what arrives on it). No behaviour change.
+- **rtp** (up-336): the H.264 / H.265 Annex B splitter (`annex_b_nal_units`, used by
+  `H264Payloader` and `HevcPayloader`) finds start codes with `memchr::memmem` instead of a byte
+  at a time; the NAL units are the same (test
+  `h264_test::annex_b_nal_units_are_those_a_byte_scan_finds`). Measured on a GitHub-hosted
+  ubuntu runner, release build, best of 15: a 30 KB one-slice frame 14.0 us to 0.57 us, a 1 MB
+  eight-slice frame 500 us to 27 us, SPS + PPS + a 100 B slice 106 ns to 92 ns; 1000 NAL units
+  of 5 B each 19.8 us to 21.5 us (+8%). Same change as webrtc-rs/rtc#336 by @g4lb.
+- **tooling** (up-watch): `scripts/upstream-watch.py` lists what webrtc-rs did since the fork last
+  looked: `webrtc-rs/rtc` commits after the merged one, its pull requests and issues opened or
+  updated since the triage day, and `webrtc-rs/webrtc` commits (`master`, `v0.17.x`). Both
+  points are FORK.md's (new row "Open upstream work last triaged"). Read-only GitHub API
+  calls; no workflow runs it.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
@@ -102,8 +410,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
   rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
   has a new public field (`..Default::default()` in a struct literal covers it).
+- **ULPFEC as a separate stream: a FEC session of its own (RFC 5109 sections 7.2, 14.1,
+  14.3).** `RTCPeerConnection::add_fec_session(transceiver, semantics)` offers, for the media
+  of one transceiver, a second m= section that lists only `ulpfec` (one dynamic payload type,
+  the media's rate), outside the BUNDLE group and so on a transport of its own (its own
+  candidates, DTLS association and SRTP keys), grouped with the media section by
+  `a=group:FEC-FR <media> <fec>` (RFC 5956 section 4.1, the default) or `a=group:FEC ...`
+  (RFC 4756, the semantics RFC 5109 names; `RTCFecGroupSemantics`). The returned transceiver is
+  the session: it has a mid, a direction, can be stopped, and never has a track
+  (`fec_session_of`, `fec_session_protects`). Once the answer keeps the section and repeats
+  the grouping, the ULPFEC of the protected sender's streams travels there, each FEC stream
+  with the SSRC of the media stream it protects, marker 0, sequence numbers of its own and
+  RTCP of its own; what arrives there repairs the protected receiver's streams and is never
+  delivered as media. `SettingEngineBuilder::with_separate_fec_sessions(true)` accepts an
+  offered FEC session (same grouping and payload type in the answer, the direction of the
+  transceiver it protects). `configure_ulpfec_sessions` adds the interceptors (encoder with
+  its wire tap, decoder); the amount of FEC follows the reported loss and comes out of the
+  target the application encodes at. In the interceptor crate: `FecSessionPacket` marks what
+  was read in a FEC session for the decoder, and `UlpfecReceiveBuilder::sessions()` keeps a
+  decoder for each bound stream.
+  **Defaults are unchanged**: nothing offers a FEC session by itself, and an offered one is
+  refused (port 0, the group left out), as RFC 8854 section 5.2 asks of a WebRTC endpoint
+  ("SHOULD NOT be offered"; "Answerers SHOULD reject any FEC-only "m=" lines, unless they
+  specifically know how to handle such a thing"). No browser accepts one.
+  **Known limits**: the FEC section negotiates no header extension, so the FEC session's
+  congestion controller has no per-packet feedback and stays at its start estimate; FEC for a
+  stream whose SSRC the description does not declare is used from that stream's first media
+  packet on.
 
 ### Fixed
+
+- **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
+  checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length
+  4 followed by other bytes read a New Cumulative TSN it does not hold and panicked. Not
+  reachable from a peer: `Packet::unmarshal` slices each chunk to its length first; a direct
+  caller and the `chunk_chunk_forward_tsn_unmarshal` fuzz target could reach it. A value whose
+  length is not 4 plus a multiple of 4 is an error, as for I-FORWARD-TSN. Found while checking
+  the siblings of webrtc-rs/rtc#333 by @mitsuhiko (error-cause length and DCEP threshold
+  panics), whose two sites the fork had fixed in 3866ed31. Test:
+  `chunk_test::test_chunk_forward_tsn_is_read_within_its_own_length`.
+- **turn** (up-316): a CreatePermission the application asked for that fails no longer drops a
+  permission the server granted meanwhile. A permission is per IP address (RFC 8656 section 9):
+  `create_permission` for two ports of one address before the first answer sends two requests,
+  and when the first was granted and the second refused, the address lost its permission here
+  (`send_to` failed with `ErrNoPermission` and the refresh left it out) though the server held
+  it. The refusal is still reported (`CreatePermissionError`). Same defect as webrtc-rs/rtc#316
+  by @hsdfat (whose other half, permissions keyed per IP, the fork already had). Engine
+  behaviour change (TURN client). Test:
+  `client_permission_test::test_a_refused_request_keeps_a_permission_granted_meanwhile`.
+- **examples / stun** (up-954): the `trickle-ice`, `trickle-ice-srflx` and `rtci-stun` `stun_client`
+  examples sent their STUN Binding requests with the all-zero transaction id
+  (`Box::<TransactionId>::default()`); they use `TransactionId::new()`, which RFC 8489 section 5
+  requires ("MUST be cryptographically random"), and `TransactionId`'s documentation says
+  `Default` is never for a request. The engine itself always drew random ids (ICE checks,
+  srflx gathering, the TURN client: `rand::rng()`, a CSPRNG). Same defect as
+  webrtc-rs/webrtc#954 (webrtc-rs/rtc#283), in an application's gatherer there. No engine
+  behaviour change.
 
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
@@ -118,6 +480,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
   the peer resets it. Engine behaviour change. Tests:
   `rtci-sctp/src/association/reset_answer_test.rs`.
+
+- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
+  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
+  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
+  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
+  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
+  original stream has arrived). The likely source of the Firefox interop cell's
+  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
+  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
+  delivered from such a packet).
 
 ## [0.1.0] - 2026-11-24
 

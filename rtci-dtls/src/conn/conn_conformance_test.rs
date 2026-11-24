@@ -772,6 +772,35 @@ fn unknown_cipher_suites_in_a_client_hello_are_ignored() {
     assert_eq!(&server_hello[35..37], &ECDSA_GCM.to_be_bytes());
 }
 
+/// RFC 8122 section 7: "TLS_NULL_WITH_NULL_NULL ... is not acceptable" for the DTLS of an
+/// SDP-negotiated session, which SHOULD refuse it. A ClientHello offering only that suite
+/// (0x0000) has nothing the server selects: a handshake_failure, and no ServerHello; offered
+/// before a real suite, it is passed over.
+#[test]
+fn a_client_hello_offering_only_the_null_suite_is_refused() {
+    let answer = answer_from(builder(), |cookie| {
+        client_hello_body(&[], cookie, &[0x0000], Some(&usual_client_extensions()))
+    });
+    assert_eq!(answer.result, Err(Error::ErrCipherSuiteNoIntersection));
+    assert_eq!(
+        plaintext_alerts(&answer.datagrams),
+        vec![(ALERT_FATAL, ALERT_HANDSHAKE_FAILURE)]
+    );
+    assert!(body_of(&answer.messages(), SERVER_HELLO).is_none());
+
+    let answer = answer_from(builder(), |cookie| {
+        client_hello_body(
+            &[],
+            cookie,
+            &[0x0000, ECDSA_GCM],
+            Some(&usual_client_extensions()),
+        )
+    });
+    answer.result.as_ref().expect("the ClientHello is accepted");
+    let server_hello = body_of(&answer.messages(), SERVER_HELLO).expect("a ServerHello");
+    assert_eq!(&server_hello[35..37], &ECDSA_GCM.to_be_bytes());
+}
+
 /// RFC 5246 E.1: a ClientHello offering a later version than the server speaks, under whatever
 /// record-layer version of the family, is answered with the server's highest version, 1.2.
 #[test]

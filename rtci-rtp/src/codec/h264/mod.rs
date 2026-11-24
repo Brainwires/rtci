@@ -98,19 +98,17 @@ const MAX_HELD_PARAMETER_SET_BYTES: usize = 1024 * 1024;
 /// The NAL units of an Annex B byte stream, without their start codes (three or four bytes,
 /// mixed freely). A buffer with no start code is one NAL unit.
 pub(crate) fn annex_b_nal_units(payload: &Bytes) -> Vec<Bytes> {
-    /// The next start code at or after `start`: its offset, zeros included, and its length.
+    /// The next start code at or after `start`: its offset, zeros included (every zero before
+    /// the `00 00 01` from `start` on: a four-byte code, or trailing zeros of the NAL unit before
+    /// it), and its length. `memmem` finds the `00 00 01`; a byte at a time was most of the
+    /// payloader's time on a large frame (webrtc-rs/rtc#336).
     fn next_start_code(data: &[u8], start: usize) -> Option<(usize, usize)> {
-        let mut zero_count = 0;
-        for (i, &b) in data[start..].iter().enumerate() {
-            if b == 0 {
-                zero_count += 1;
-                continue;
-            } else if b == 1 && zero_count >= 2 {
-                return Some((start + i - zero_count, zero_count + 1));
-            }
-            zero_count = 0
-        }
-        None
+        let at = start + memchr::memmem::find(&data[start..], &[0, 0, 1])?;
+        let first_zero = data[start..at]
+            .iter()
+            .rposition(|&b| b != 0)
+            .map_or(start, |nonzero| start + nonzero + 1);
+        Some((first_zero, at + 3 - first_zero))
     }
 
     let mut nalus = vec![];
@@ -285,7 +283,9 @@ pub struct MtapUnit {
 /// The DON base is the DON of the unit that is first in decoding order, each unit's DOND its
 /// distance from that; the packet's timestamp is the earliest NALU-time, whose unit gets the
 /// timestamp offset zero, and each other unit's offset is its NALU-time less that (modulo
-/// 2^32). The units are written in the order given, which should be decoding order.
+/// 2^32). The units are written in decoding order (section 5.7.2: "The NAL units in the
+/// multi-time aggregation packet SHOULD be in decoding order"), ascending DOND, whatever
+/// order they are given in; units with the same DON keep their order.
 ///
 /// # Errors
 ///
@@ -306,6 +306,11 @@ pub fn mtap(kind: MtapKind, units: &[MtapUnit]) -> Result<(Bytes, u32)> {
             timestamp = unit.timestamp;
         }
     }
+
+    // Decoding order: ascending DON distance from the DON base (a stable sort).
+    let mut ordered: Vec<&MtapUnit> = units.iter().collect();
+    ordered.sort_by_key(|unit| don_diff(don_base, unit.don));
+    let units = ordered;
 
     let nalus: Vec<Bytes> = units.iter().map(|unit| unit.nalu.clone()).collect();
     let mut out = BytesMut::with_capacity(
