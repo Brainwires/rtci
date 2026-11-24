@@ -27,8 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since libwebrtc's form is the default. Tests:
   `a_pause_stops_the_encoder_and_the_resume_continues_with_delta_frames`,
   `with_key_frame_on_resume_the_first_picture_after_a_pause_is_a_key_frame`,
-  `a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it`, and in the capacity
-  call `a_pacer_pause_stops_the_encoder_and_the_video_resumes_without_a_forced_key_frame`.
+  `a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it` (a forced key frame by
+  default fails the first and `the_chrome_profile_resumes_as_the_default_does`; hosted run
+  45410448247), and in the capacity call
+  `a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second` (there the receiver's
+  requests during the long pause make a key frame due at the resume either way).
 
 ### Features
 

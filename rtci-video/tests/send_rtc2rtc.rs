@@ -999,11 +999,12 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
 
 /// The pacer's pause in the same call (a target of 0 when the pacer holds a second of media):
 /// no picture is encoded while the target reads 0, no key frame is made because a pause ended
-/// (the default: nothing encoded was lost, the receiver's references are intact), every
-/// picture decodes, and the receiver renders within a second of each pause's end.
+/// (the default), every picture decodes, and the receiver renders within a second of each
+/// pause's end. In this call the receiver asks for a key frame during every long pause, so one
+/// is due at the resume whatever `key_frame_on_resume` says: the resume rule itself is held by
+/// the unit tests in `send_test.rs` (a forced key frame by default fails two of them).
 #[test]
-fn a_pacer_pause_stops_the_encoder_and_the_video_resumes_without_a_forced_key_frame() -> Result<()>
-{
+fn a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second() -> Result<()> {
     let (call, o) = cap_run(3, SendConfig::default(), "pause")?;
     assert!(!o.pauses.is_empty(), "the pacer paused the sender");
     assert_eq!(call.sent_in_pause, 0, "nothing encoded in a pause");
