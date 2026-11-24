@@ -70,6 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.50 after 40 s (0.49), and 0.50 without probing (0.42); beside a TCP-like transfer the
   share is 0.22 with a 0.2 s buffer (0.19) and 0.25 with a 0.05 s buffer (0.37)
   (`rtc-interceptor/tests/rfc8836_multi_flow.rs`).
+- **statistics**: `availableOutgoingBitrate` keeps the congestion controller's estimate
+  through the whole of a pacer pause. While the source was paused, the NACK responder's own
+  target announcements (sent when its retransmission reserve moved) carried the zero target
+  without the estimate that the pacer's carry (`PacerPause`), and the statistic had no value
+  until the pacer next spoke. They carry it now.
+  (`a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer` reads the statistic
+  every 100 ms and counts a report without the member as zero.)
 - **interceptors (congestion control)**: `BandwidthEstimator::on_unreported_packet_sent` (a
   provided method): the congestion control interceptor calls it, and no longer
   `on_packet_sent`, for a packet of a stream that negotiated no per-packet feedback (no
