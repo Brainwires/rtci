@@ -87,6 +87,7 @@ pub struct UlpfecSendBuilder {
     flush_on_marker: bool,
     initial_fec_sequence_number: Option<u16>,
     filter: StreamFilter,
+    zero_mutable_extensions: bool,
 }
 
 impl UlpfecSendBuilder {
@@ -102,7 +103,26 @@ impl UlpfecSendBuilder {
             flush_on_marker: false,
             initial_fec_sequence_number: None,
             filter: video_streams(),
+            zero_mutable_extensions: false,
         }
+    }
+
+    /// Protect each media packet with the values of its transport-wide sequence number,
+    /// abs-send-time and toffset extensions zeroed, as libwebrtc's sender does (`false` by
+    /// default; the `Chrome` profile's `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`).
+    ///
+    /// libwebrtc computes its FEC before it writes those values (`RtpSenderEgress::SendPacket`
+    /// at a222406d: `AddPacketAndGenerateFec` comes before the `SetExtension<TransmissionOffset>`,
+    /// `<AbsoluteSendTime>` and `<TransportSequenceNumber>` calls, "these modifications of the
+    /// header below are happening after the FEC protection packets are calculated"; the packet
+    /// reserved them as zeros), and its receiver zeroes them in its copy of each media packet
+    /// before recovering (`UlpfecReceiver::ProcessReceivedFec`, `ZeroMutableExtensions`). With
+    /// this on, a packet libwebrtc rebuilds from this engine's FEC is exactly the one its own
+    /// FEC would rebuild: as sent, those values zero. Off (RFC 5109 section 8), the FEC covers
+    /// the packet as it left, and those octets of a packet libwebrtc rebuilds are XOR noise.
+    pub fn with_mutable_extensions_zeroed(mut self, zero: bool) -> Self {
+        self.zero_mutable_extensions = zero;
+        self
     }
 
     /// FEC as a redundant encoding (RFC 5109 14.2): every packet of a protected stream leaves as
@@ -211,6 +231,7 @@ impl UlpfecSendBuilder {
             flush_on_marker: self.flush_on_marker,
             initial_fec_sequence_number: self.initial_fec_sequence_number,
             filter: self.filter,
+            zero_mutable_extensions: self.zero_mutable_extensions,
             streams: HashMap::new(),
             sequence_offsets: HashMap::new(),
             wire: None,
@@ -241,6 +262,9 @@ struct ProtectedStream {
     /// One protection level only for this stream (RFC 5109 section 13: `onelevelonly=1` on
     /// the negotiated `ulpfec` format, or the builder's setting).
     one_level_only: bool,
+    /// The ids of the extensions whose values are zeroed in what is protected
+    /// ([`UlpfecSendBuilder::with_mutable_extensions_zeroed`]); empty when off.
+    zeroed_extensions: Vec<u8>,
 }
 
 /// The most media packets remembered between this slot and the wire tap. The pacer between the
@@ -296,6 +320,8 @@ pub struct UlpfecSendInterceptor {
     flush_on_marker: bool,
     initial_fec_sequence_number: Option<u16>,
     filter: StreamFilter,
+    /// See [`UlpfecSendBuilder::with_mutable_extensions_zeroed`].
+    zero_mutable_extensions: bool,
     /// Keyed by the media SSRC.
     streams: HashMap<u32, ProtectedStream>,
     /// FEC packets inserted so far into each media stream's sequence space. Kept apart from
@@ -542,6 +568,13 @@ impl UlpfecSendInterceptor {
         // The packet FEC protects: in RED, the virtual packet of RFC 5109 section 14.2, which is
         // the packet on the wire without its block headers and redundant data, under the
         // primary's payload type. That is what the receiver rebuilds from what arrives.
+        let zeroed;
+        let rtp_packet = if stream.zeroed_extensions.is_empty() {
+            rtp_packet
+        } else {
+            zeroed = super::with_extensions_zeroed(rtp_packet, &stream.zeroed_extensions);
+            &zeroed
+        };
         let protected = match stream.carriage {
             Carriage::Stream => wire_image(rtp_packet).ok(),
             Carriage::Red { .. } => {
@@ -978,6 +1011,11 @@ impl Interceptor for UlpfecSendInterceptor {
                 in_flight: VecDeque::new(),
                 passing: 0,
                 one_level_only,
+                zeroed_extensions: if self.zero_mutable_extensions {
+                    super::mutable_extension_ids(info)
+                } else {
+                    vec![]
+                },
             },
         );
         if let Some(images) = &self.wire {
