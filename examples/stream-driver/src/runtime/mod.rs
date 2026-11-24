@@ -139,6 +139,14 @@ pub trait Runtime: Send + Sync + Debug + 'static {
 
     /// Runs `future` to completion on the calling thread. The future need not be `Send`.
     fn block_on(&self, future: Pin<Box<dyn Future<Output = ()> + '_>>);
+
+    /// Whether [`now`](Self::now) is a virtual clock (a mock's) rather than the wall clock.
+    /// What is kept per process on the wall clock (the mDNS budget,
+    /// [`process_mdns_rate_limit`](crate::peer::process_mdns_rate_limit)) is not shared with a
+    /// driver on a virtual clock, whose times run elsewhere. `false` by default.
+    fn virtual_clock(&self) -> bool {
+        false
+    }
 }
 
 /// A task spawned with [`Runtime::spawn`]. Dropping it detaches the task.

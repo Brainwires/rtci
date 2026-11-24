@@ -686,6 +686,13 @@ impl Mdns {
         self.queries.len()
     }
 
+    /// Declares, from now on, whether the caller of
+    /// [`handle_read`](sansio::Protocol::handle_read) puts each datagram's destination address
+    /// in `local_addr` ([`MdnsConfig::with_destination_reported`]).
+    pub fn set_destination_reported(&mut self, reported: bool) {
+        self.config.destination_reported = reported;
+    }
+
     /// Whether `ip` may be on the local link (RFC 6762 section 11): in one of the configured
     /// subnets, or, with none configured, by the scope of the address.
     fn is_on_link(&self, ip: IpAddr) -> bool {
@@ -811,14 +818,18 @@ impl Mdns {
         // the driver puts the destination there.
         let (unicast_arrival, multicast_arrival) = match destination {
             Some(dst) => (!dst.is_multicast(), dst.is_multicast()),
-            None => {
+            // RFC 6762 section 11: "All responses received with a destination address in the
+            // IP header that is the mDNS IPv4 link-local multicast address 224.0.0.251 or the
+            // mDNS IPv6 link-local multicast address FF02::FB are necessarily deemed to have
+            // originated on the local link, regardless of source IP address."
+            None if self.config.destination_reported => {
                 let dst = msg.transport.local_addr.ip();
                 (
-                    self.config.destination_reported
-                        && !(dst.is_unspecified() || dst.is_multicast()),
-                    false,
+                    !(dst.is_unspecified() || dst.is_multicast()),
+                    dst.is_multicast(),
                 )
             }
+            None => (false, false),
         };
 
         if inbound.header.response {

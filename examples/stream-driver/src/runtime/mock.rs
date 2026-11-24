@@ -65,6 +65,8 @@ enum Timer {
     Datagram {
         to: Arc<UdpEndpoint>,
         from: SocketAddr,
+        /// The destination address of its IP header.
+        destination: IpAddr,
         data: Vec<u8>,
     },
     Bytes {
@@ -277,7 +279,12 @@ impl MockClock {
 fn fire(timer: Timer) {
     match timer {
         Timer::Wake(waker) => waker.wake(),
-        Timer::Datagram { to, from, data } => to.deliver(from, data),
+        Timer::Datagram {
+            to,
+            from,
+            destination,
+            data,
+        } => to.deliver(from, destination, data),
         Timer::Bytes { to, data } => to.push(&data),
         Timer::End { to, reset } => to.end(reset),
     }
@@ -511,6 +518,10 @@ impl Runtime for MockRuntime {
 
     fn block_on(&self, future: Pin<Box<dyn Future<Output = ()> + '_>>) {
         self.run(future);
+    }
+
+    fn virtual_clock(&self) -> bool {
+        true
     }
 }
 
@@ -819,8 +830,9 @@ fn free_port(next: &mut u16, taken: impl Fn(u16) -> bool) -> io::Result<u16> {
     Err(io::Error::from(io::ErrorKind::AddrInUse))
 }
 
-/// A datagram waiting in a mock socket: its sender and bytes.
-type Received = (SocketAddr, Vec<u8>);
+/// A datagram waiting in a mock socket: its sender, the destination address it was sent to
+/// (a multicast group, or the socket's own), and its bytes.
+type Received = (SocketAddr, IpAddr, Vec<u8>);
 
 struct UdpEndpoint {
     local: SocketAddr,
@@ -840,10 +852,10 @@ impl UdpEndpoint {
         }
     }
 
-    fn deliver(&self, from: SocketAddr, data: Vec<u8>) {
+    fn deliver(&self, from: SocketAddr, destination: IpAddr, data: Vec<u8>) {
         let waker = {
             let mut inbox = lock(&self.inbox);
-            inbox.0.push_back((from, data));
+            inbox.0.push_back((from, destination, data));
             inbox.1.take()
         };
         if let Some(waker) = waker {
@@ -940,13 +952,14 @@ impl AsyncUdpSocket for MockUdp {
         for receiver in deliveries {
             let data = transmit.contents.to_vec();
             if delay.is_zero() {
-                receiver.deliver(from, data);
+                receiver.deliver(from, to.ip(), data);
             } else {
                 self.runtime.schedule_timer(
                     now + delay,
                     Timer::Datagram {
                         to: receiver,
                         from,
+                        destination: to.ip(),
                         data,
                     },
                 );
@@ -964,7 +977,7 @@ impl AsyncUdpSocket for MockUdp {
         let mut inbox = lock(&self.endpoint.inbox);
         let mut filled = 0;
         while filled < bufs.len().min(meta.len()) {
-            let Some((from, data)) = inbox.0.pop_front() else {
+            let Some((from, destination, data)) = inbox.0.pop_front() else {
                 break;
             };
             let len = data.len().min(bufs[filled].len());
@@ -974,7 +987,8 @@ impl AsyncUdpSocket for MockUdp {
                 len,
                 stride: len,
                 ecn: None,
-                dst_ip: Some(self.endpoint.local.ip()),
+                // The destination of the IP header, as `IP_PKTINFO` reports it.
+                dst_ip: Some(destination),
             };
             filled += 1;
         }

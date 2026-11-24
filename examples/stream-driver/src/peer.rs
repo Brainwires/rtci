@@ -80,7 +80,9 @@
 //! ```
 
 use crate::mdns_io::{MDNS_MAX_DATAGRAM, MdnsEgress, mdns_v4, mdns_v6};
-pub use crate::mdns_io::{MDNS_MULTICAST_IPV6, process_mdns_rate_limit};
+pub use crate::mdns_io::{
+    MDNS_MULTICAST_IPV6, process_mdns_rate_limit, set_process_mdns_rate_limit,
+};
 use crate::runtime::{self, AsyncUdpSocket, JoinHandle, Runtime, Transmit};
 use crate::sockets::{self, PortRange};
 use crate::{DriverConfig, DriverInput, StreamDriver};
@@ -131,7 +133,8 @@ pub struct PeerDriverConfig {
     pub retired_socket_linger: Duration,
     /// The budget the connection's mDNS datagrams take from
     /// (draft-ietf-mmusic-mdns-ice-candidates section 7.1). `None`, the default: the one of
-    /// the process, [`process_mdns_rate_limit`], shared by every driver that has none named.
+    /// the process, [`process_mdns_rate_limit`], shared by every driver that has none named
+    /// (on a runtime with a virtual clock, [`Runtime::virtual_clock`], one of the driver's own).
     /// A limit given here is shared by the drivers given clones of it.
     pub mdns_rate_limit: Option<MdnsRateLimit>,
     /// Whether the driver binds the host's mDNS sockets (`true` by default). `false`: it
@@ -416,6 +419,11 @@ impl PeerDriver {
         pc: RTCPeerConnection,
         config: PeerDriverConfig,
     ) -> Self {
+        // The driver hands each mDNS datagram over with its destination (the group's where it
+        // knows the datagram arrived there: RFC 6762 section 11 then deems it on the link).
+        let mut pc = pc;
+        pc.set_multicast_dns_destination_reported(true);
+        let virtual_clock = runtime.virtual_clock();
         let (datagrams_tx, datagrams) = async_channel::unbounded();
         let (mdns_tx, mdns_rx) = async_channel::bounded(MAX_QUEUED_MDNS_RECEIVED);
         Self {
@@ -435,7 +443,13 @@ impl PeerDriver {
             events: VecDeque::new(),
             gathered: HashSet::new(),
             unsent: 0,
-            mdns_egress: MdnsEgress::new(config.mdns_rate_limit()),
+            // A driver on a virtual clock does not share the process's budget, whose times
+            // are the wall clock's: a mock clock ahead would leave it empty for real drivers,
+            // one behind would never see it refill.
+            mdns_egress: MdnsEgress::new(match &config.mdns_rate_limit {
+                None if virtual_clock => MdnsRateLimit::default(),
+                _ => config.mdns_rate_limit(),
+            }),
             mdns_sockets: None,
             mdns_publishing_told: None,
             mdns_sent: 0,
@@ -921,6 +935,7 @@ impl PeerDriver {
                     let reader = self.runtime.spawn(Box::pin(read_loop(
                         socket.clone(),
                         local,
+                        true,
                         move |received| match tx.force_send(received) {
                             Ok(None) => true,
                             Ok(Some(_)) => {
@@ -1186,6 +1201,7 @@ impl PeerDriver {
             let reader = self.runtime.spawn(Box::pin(read_loop(
                 socket.clone(),
                 local,
+                false,
                 move |received| tx.try_send(received).is_ok(),
                 2048,
             )));
@@ -1343,18 +1359,36 @@ fn decisive(e: &io::Error) -> bool {
     )
 }
 
-/// Reads `socket` and hands each datagram to `deliver` (`false`: the driver is gone).
+/// Reads `socket` and hands each datagram to `deliver` (`false`: the driver is gone), with
+/// `local` as its local address, or, with `destination`, the destination address of its IP
+/// header where the socket reports it (else `local`'s: a socket bound to the mDNS group
+/// receives only what was sent to the group).
 async fn read_loop(
     socket: Arc<dyn AsyncUdpSocket>,
     local: SocketAddr,
+    destination: bool,
     mut deliver: impl FnMut(Received) -> bool + Send + 'static,
     max_datagram: usize,
 ) {
     let mut buf = vec![0u8; max_datagram];
     loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((n, peer)) => {
-                if !deliver((local, peer, buf[..n].to_vec())) {
+        let received = std::future::poll_fn(|cx| {
+            let mut meta = [runtime::RecvMeta::default()];
+            let mut bufs = [std::io::IoSliceMut::new(&mut buf)];
+            socket
+                .poll_recv(cx, &mut bufs, &mut meta)
+                .map_ok(|_| meta[0])
+        })
+        .await;
+        match received {
+            Ok(meta) => {
+                let to = match meta.dst_ip {
+                    Some(ip) if destination && !ip.is_unspecified() => {
+                        SocketAddr::new(ip, local.port())
+                    }
+                    _ => local,
+                };
+                if !deliver((to, meta.addr, buf[..meta.len].to_vec())) {
                     return;
                 }
             }

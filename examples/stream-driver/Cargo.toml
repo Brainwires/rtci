@@ -88,6 +88,10 @@ name = "mdns_shutdown"
 required-features = ["peer", "runtime-mock"]
 
 [[test]]
+name = "mdns_budget"
+required-features = ["peer", "runtime-mock"]
+
+[[test]]
 name = "mdns_unavailable"
 required-features = ["peer", "runtime-tokio"]
 

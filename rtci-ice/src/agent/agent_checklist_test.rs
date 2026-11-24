@@ -1825,3 +1825,54 @@ fn test_agents_that_share_a_pacing_group_start_one_transaction_per_5_ms_together
         "without the group two agents start together"
     );
 }
+
+/// draft-ietf-mmusic-mdns-ice-candidates section 3.3.1: "Statistics related to ICE
+/// candidates that are accessible to the web application MUST NOT contain the IP address of a
+/// local or remote mDNS candidate". With the host address hidden behind a name
+/// (`QueryAndGather`), a local peer-reflexive candidate learnt from a mapped address that is
+/// that host address shows the name, not the address, and does not give its base in the
+/// related address; the selected pair the application reads carries neither.
+#[test]
+fn test_a_local_peer_reflexive_candidate_does_not_show_a_hidden_host_address() {
+    let start = Instant::now();
+    let hidden = addr(LOCAL).ip();
+    let mapped = SocketAddr::new(hidden, 4000);
+    let cfg = AgentConfig {
+        multicast_dns_mode: MulticastDnsMode::QueryAndGather,
+        ..config(true)
+    };
+    let mut a = agent_with(start, cfg, &[(1, 500)]);
+    run_with(&mut a, start, Duration::ZERO, 300 * MS, |_| {
+        Answer::Success(mapped)
+    });
+    let name = a.local_candidates[0].address().to_owned();
+    assert!(name.ends_with(".local"), "the host is hidden: {name}");
+    let learned = a
+        .local_candidates
+        .iter()
+        .find(|c| c.candidate_type() == CandidateType::PeerReflexive)
+        .expect("a local peer-reflexive candidate");
+    assert_eq!(
+        learned.addr(),
+        mapped,
+        "the agent itself still uses the address"
+    );
+    assert_eq!(learned.address(), name, "shown under the host's name");
+    assert_eq!(
+        learned.signalled_related_address().map(|r| r.address),
+        Some("0.0.0.0".to_owned()),
+        "its base is not shown"
+    );
+    // What the peer connection gives the application of the selected pair: the address and
+    // the signalled related address.
+    let (local, _) = a.get_selected_candidate_pair().unwrap();
+    let shown = format!(
+        "{} {:?}",
+        local.address(),
+        local.signalled_related_address()
+    );
+    assert!(
+        !shown.contains(&hidden.to_string()),
+        "the selected pair's local candidate: {shown}"
+    );
+}

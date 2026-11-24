@@ -215,3 +215,28 @@ fn a_publishing_driver_gives_each_of_its_sockets_a_port_of_its_own() -> Result<(
     assert!(up, "connected over the resolved names");
     Ok(())
 }
+
+/// RFC 6762 section 11: a response that arrived at the mDNS group is on the link "regardless
+/// of source IP address". On a LAN of public addresses the drivers' answers come from public
+/// sources; the driver reports that they arrived at the group (the mock reports each
+/// datagram's destination as `IP_PKTINFO` would), so the names resolve. (Judged by the scope of
+/// the source alone, every answer was refused and nothing resolved.)
+#[test]
+fn drivers_on_a_lan_of_public_addresses_resolve_each_other() -> Result<()> {
+    const A1: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+    const B1: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2));
+    let runtime = MockRuntime::new();
+    let shared: Arc<dyn Runtime> = Arc::new(runtime.clone());
+    let mut a = Peer::with_settings(shared.clone(), A1, publishing())?;
+    let mut b = Peer::with_settings(shared, B1, publishing())?;
+    let up = resolve_and_connect(&runtime, &mut a, &mut b)?;
+    assert!(
+        up,
+        "resolved over the group from public sources: a {:?} {:?}, b {:?} {:?}",
+        a.driver.pc().connection_state(),
+        a.selected_remote_type(),
+        b.driver.pc().connection_state(),
+        b.selected_remote_type()
+    );
+    Ok(())
+}

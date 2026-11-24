@@ -349,6 +349,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dropping a driver that was not shut down now closes its connection and sends at once what
   the budget lets go (an async driver on a pluggable runtime cannot wait in `drop`). Tests
   `tests/mdns_shutdown.rs`. Not an engine change.
+- **mdns, ice, peer connection, stream-driver** (`conf/mdns-10-on-link`, review F6, F9, F12
+  and its observation on peer-reflexive candidates):
+  - RFC 6762 section 11's first test ("All responses received with a destination address in
+    the IP header that is ... 224.0.0.251 or ... FF02::FB are necessarily deemed to have
+    originated on the local link, regardless of source IP address") now applies through
+    `handle_read` too: with the destination declared as reported
+    (`with_multicast_dns_destination_reported`, new at run time
+    `RTCPeerConnection::set_multicast_dns_destination_reported`, `Agent::...`, `Mdns::
+    set_destination_reported`), a group address in `local_addr` is an arrival at the group.
+    Before, only `Mdns::handle_datagram` applied it, so through a peer connection a LAN of
+    public addresses resolved no `.local` name. `PeerDriver` declares it and reports each mDNS
+    datagram's destination where it knows it (Linux IPv4, bound to the group; a runtime that
+    fills `RecvMeta::dst_ip`); unknown elsewhere (tokio, smol: no `IP_PKTINFO` read), where the
+    scope of the source still decides.
+  - Under `QueryAndGather` a local peer-reflexive candidate (RFC 8445 7.2.5.3.1) no longer shows
+    its base in the related address, and one whose mapped address is a hidden host address
+    shows the host's name (draft-ietf-mmusic-mdns-ice-candidates 3.3.1, first MUST).
+  - `RTCIceCandidate`'s string form ran the related address into the port
+    (`udp prflx 10.1.0.135:55410172.17.0.1`); it now reads `... related 172.17.0.1:40000`.
+  - The process's mDNS budget can be set once before first use
+    (`peer::set_process_mdns_rate_limit`); a driver on a runtime with a virtual clock
+    (`Runtime::virtual_clock`, new, `true` for `MockRuntime`) takes from a budget of its own
+    instead of the process's wall-clock one, so a mock clock can neither empty it for real
+    drivers nor wait on it.
+  - F9 decided: QU stays off with the driver (its IPv4 socket on Linux is bound to the group
+    and receives no unicast; RFC 6762 section 15.1).
+  Tests: `mdns_answer_trust_test.rs::test_a_reported_multicast_destination_in_local_addr_makes_a_public_source_on_link`,
+  `mdns_virtual_time.rs::drivers_on_a_lan_of_public_addresses_resolve_each_other`,
+  `agent_checklist_test.rs::test_a_local_peer_reflexive_candidate_does_not_show_a_hidden_host_address`,
+  `candidate.rs::the_string_form_separates_the_related_address_from_the_port`,
+  `tests/mdns_budget.rs`. Engine behaviour change (rtci-mdns trust with a reported
+  destination; rtci-ice local peer-reflexive candidates; the candidate string form).
 
 ### Changed
 
