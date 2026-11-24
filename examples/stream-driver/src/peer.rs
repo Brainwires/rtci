@@ -477,6 +477,7 @@ impl PeerDriver {
             contents: &datagram.message,
             traffic_class,
             segment_size: None,
+            source: None,
         });
         // The platform does not mark (RFC 8835 4.2: "appropriate to depart ... on platforms
         // where QoS marking is not implemented"): counted once per socket.
@@ -502,12 +503,15 @@ impl PeerDriver {
                 SocketAddr::V4(_) => &sockets.v4,
                 SocketAddr::V6(_) => &sockets.v6,
             };
+            // The engine names the address each mDNS datagram leaves from (its record's).
+            let from = datagram.transport.local_addr.ip();
             let sent = socket.as_ref().is_some_and(|(socket, _)| {
                 socket.try_send(&Transmit {
                     destination: datagram.transport.peer_addr,
                     contents: &datagram.message,
                     traffic_class: 0,
                     segment_size: None,
+                    source: (!from.is_unspecified()).then_some(from),
                 })
             });
             if sent {

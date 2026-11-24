@@ -811,7 +811,14 @@ impl AsyncUdpSocket for MockUdp {
             .traffic_class
             .store(transmit.traffic_class, Ordering::Relaxed);
         let now = self.runtime.now();
-        let from = self.endpoint.local;
+        // A socket bound to the unspecified address (the mDNS sockets) sends from the address
+        // the transmit names, as a real one does from its interface's address.
+        let from = match transmit.source {
+            Some(ip) if self.endpoint.local.ip().is_unspecified() => {
+                SocketAddr::new(ip, self.endpoint.local.port())
+            }
+            _ => self.endpoint.local,
+        };
         let to = transmit.destination;
         let mut deliveries = Vec::new();
         let delay;

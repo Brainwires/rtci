@@ -3,12 +3,13 @@
 //! and resolve each other's through the driver's mDNS sockets, within one budget shared by both
 //! (section 7.1).
 //!
-//! Linux only. Multicast needs a route that carries it back to this host: GitHub's macOS image
-//! has none (an mDNS send fails with "No route to host"; `cargo.yml` reroutes it for the root
-//! crate's interop tests only), Windows runners fail the root crate's mDNS interop tests for the
-//! same reason, and on a desktop Mac a multicast socket raises the Local Network privacy prompt.
-//! The budget's own rules are unit tests of the crate (`mdns_io.rs`), on every platform.
-#![cfg(target_os = "linux")]
+//! Linux and Windows. Multicast needs a route that carries it back to this host: GitHub's macOS
+//! image has none (an mDNS send fails with "No route to host"; `cargo.yml` reroutes it for the
+//! root crate's interop tests only), and on a desktop Mac a multicast socket raises the Local
+//! Network privacy prompt. The same connection on virtual time, on every platform, is
+//! `tests/mdns_virtual_time.rs`; the budget's own rules are unit tests of the crate
+//! (`mdns_io.rs`).
+#![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use rtci::ice::mdns::MulticastDnsMode;
 use rtci::mdns::{MDNS_MULTICAST_IPV4, MDNS_PORT, MdnsRateLimit};

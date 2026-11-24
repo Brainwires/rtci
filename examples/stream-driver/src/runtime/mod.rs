@@ -174,6 +174,11 @@ pub struct Transmit<'a> {
     /// `Some(n)`: `contents` is several datagrams of `n` bytes (the last may be shorter), for a
     /// socket that sends them in one call (GSO). The driver sends one datagram per transmit.
     pub segment_size: Option<usize>,
+    /// The address the datagram is to leave from, for a socket bound to the unspecified
+    /// address: the engine names one for each mDNS datagram (an answer leaves from the address
+    /// of its record, on that address's interface, RFC 6762 section 14). `None`: the socket's
+    /// own address, or the system's choice.
+    pub source: Option<IpAddr>,
 }
 
 /// What [`AsyncUdpSocket::poll_recv`] says about one buffer it filled.
@@ -342,6 +347,7 @@ impl<'a> dyn AsyncUdpSocket + 'a {
             contents: buf,
             traffic_class: 0,
             segment_size: None,
+            source: None,
         };
         std::future::poll_fn(|cx| self.poll_send(cx, &transmit)).await
     }

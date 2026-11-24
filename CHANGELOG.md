@@ -92,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
   flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
 - **ice / jsep / stream-driver** (mdns-4): new public fields `AgentConfig::multicast_dns_fail_closed` and `AgentConfig::multicast_dns_publishing`, `MulticastDNS::fail_closed` (the setting engine's mDNS settings) and `PeerDriverConfig::mdns_sockets` (see "Added"). Migration: a struct literal of `AgentConfig` or `MulticastDNS` adds `..Default::default()` (or `multicast_dns_fail_closed: false, multicast_dns_publishing: Default::default()` / `fail_closed: false`); one of `PeerDriverConfig` adds `mdns_sockets: true`, or builds on `..PeerDriverConfig::on(addresses)`.
+- **stream-driver** (`conf/mdns-6-regression-test`): `runtime::Transmit` has a new public
+  field, `source: Option<IpAddr>`, the address a datagram is to leave from (the engine names
+  one for each mDNS datagram, RFC 6762 section 14). Migration: a struct literal of `Transmit`
+  adds `source: None`; a third-party `AsyncUdpSocket` may ignore it where it sends from a bound
+  address.
 
 ### Behaviour changes
 
@@ -784,6 +789,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   H.264 / H.265 patent situation and Cisco's OpenH264 binary conditions,
   `specs/openh264-BINARY_LICENSE.txt` quoted), the crate layout, threading and A/V sync, the
   phases with their acceptance figures, and the decisions left to the owner.
+- **stream-driver** (`conf/mdns-6-regression-test`): a return of 0.1.0's `PeerDriver`
+  defect (the UDP sockets of `.local` candidates closed when the signalling state returns to
+  stable) was caught on Linux only. `tests/mdns_virtual_time.rs` connects two publishing
+  drivers on the mock runtime (whose multicast sockets now send from the address a transmit
+  names, as the engine asks for mDNS) and runs on Linux, macOS and Windows in CI;
+  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux.
 
 ## [0.1.0] - 2026-11-24
 
