@@ -465,6 +465,15 @@ struct Sender {
     force_key: bool,
     sent: HashMap<u32, Bytes>,
     plis: u32,
+    /// The real VP8 encoder and the synthetic source (feature `vp8`), instead of the
+    /// rate-following fake frames; and each source picture by RTP timestamp.
+    #[cfg(feature = "vp8")]
+    real: Option<(
+        rtc_video::codec::vp8::Vp8Encoder,
+        rtc_video::picture::TestSource,
+    )>,
+    #[cfg(feature = "vp8")]
+    sources: HashMap<u32, rtc_video::picture::I420Buffer>,
 }
 
 struct Receiver {
@@ -473,6 +482,13 @@ struct Receiver {
     video: Option<VideoReceiver>,
     receiver_id: Option<RTCRtpReceiverId>,
     decoder: ReferenceCheckingDecoder,
+    /// The real VP8 decoder, with the PSNR of each picture against its source.
+    #[cfg(feature = "vp8")]
+    real: Option<rtc_video::codec::vp8::Vp8Decoder>,
+    #[cfg(feature = "vp8")]
+    psnr: Vec<f64>,
+    #[cfg(feature = "vp8")]
+    real_errors: u32,
     renders: VecDeque<(Instant, u32)>,
     corrupt: u32,
     /// Delta pictures decoded without the picture before them (the source's own numbering).
@@ -658,6 +674,10 @@ impl Call {
                 force_key: true,
                 sent: HashMap::new(),
                 plis: 0,
+                #[cfg(feature = "vp8")]
+                real: None,
+                #[cfg(feature = "vp8")]
+                sources: HashMap::new(),
             },
             receiver: Receiver {
                 pc: rpc,
@@ -665,6 +685,12 @@ impl Call {
                 video: None,
                 receiver_id: None,
                 decoder: ReferenceCheckingDecoder::new((320, 240)),
+                #[cfg(feature = "vp8")]
+                real: None,
+                #[cfg(feature = "vp8")]
+                psnr: Vec::new(),
+                #[cfg(feature = "vp8")]
+                real_errors: 0,
                 renders: VecDeque::new(),
                 corrupt: 0,
                 broken_chain: 0,
@@ -738,6 +764,25 @@ impl Call {
             (bps as u64 * 9 / 10) as u32
         });
         let key = std::mem::take(&mut self.sender.force_key);
+        #[cfg(feature = "vp8")]
+        let mut source_picture = None;
+        #[cfg(feature = "vp8")]
+        let data = if let Some((enc, src)) = &mut self.sender.real {
+            use rtc_video::encoder::VideoEncoder;
+            enc.set_bitrate(bitrate);
+            let picture = src.next_picture();
+            let Some(f) = enc
+                .encode(&picture.view(), key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+            else {
+                return Ok(());
+            };
+            source_picture = Some(picture);
+            Bytes::from(f.data)
+        } else {
+            Bytes::from(self.sender.source.next_frame(bitrate, key))
+        };
+        #[cfg(not(feature = "vp8"))]
         let data = Bytes::from(self.sender.source.next_frame(bitrate, key));
         let now = self.now;
         let Some(mut s) = self.sender.pc.rtp_sender(self.sender.track) else {
@@ -771,6 +816,10 @@ impl Call {
                 .packetize(now, &data, 90_000 / FPS)?;
         if let Some(p) = packets.first() {
             self.sender.sent.insert(p.header.timestamp, data.clone());
+            #[cfg(feature = "vp8")]
+            if let Some(picture) = source_picture {
+                self.sender.sources.insert(p.header.timestamp, picture);
+            }
         }
         for p in packets {
             s.write_rtp(now, p)?;
@@ -932,6 +981,19 @@ impl Call {
                     r.broken_chain += 1;
                 }
                 r.last_number = Some(number);
+            }
+            #[cfg(feature = "vp8")]
+            if let Some(real) = &mut r.real {
+                match real.decode(&request.frame) {
+                    Ok(Some(_)) => {
+                        let src = self.sender.sources.get(&request.frame.frame.rtp_timestamp);
+                        if let (Some(src), Some(p)) = (src, real.picture()) {
+                            r.psnr.extend(rtc_video::picture::psnr(&src.view(), &p));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => r.real_errors += 1,
+                }
             }
             let outcome = match r.decoder.decode(&request.frame) {
                 Ok(Some(p)) => DecodeOutcome::Decoded {
@@ -1183,5 +1245,49 @@ fn a_packet_lost_for_good_is_not_asked_for_once_playout_has_passed_it() -> Resul
         nacks.behind_horizon, 0,
         "NACKs for packets behind the horizon"
     );
+    Ok(())
+}
+
+/// The real VP8 encoder and decoder (feature `vp8`) in the two-peer call at 2 % loss: the
+/// encoder follows the rate the test sets, the pipeline releases only what decodes, and every
+/// picture the real decoder makes is close to its source (no corrupt picture, no decoder
+/// error); freezes are the repairs', as in the call without real codecs.
+#[cfg(feature = "vp8")]
+#[test]
+fn a_call_with_the_real_vp8_codecs_decodes_every_released_picture() -> Result<()> {
+    use rtc_video::codec::vp8::{Vp8Decoder, Vp8Encoder};
+    use rtc_video::picture::TestSource;
+    let mut call = Call::new(Link::lossy(0.02, 40), 16, Some(500_000))?;
+    call.sender.real = Some((
+        Vp8Encoder::new(320, 240, FPS, 500_000).map_err(|e| anyhow::anyhow!("{e}"))?,
+        TestSource::new(320, 240),
+    ));
+    call.sender.force_key = true;
+    call.receiver.real = Some(Vp8Decoder::new());
+    call.run_for(Duration::from_secs(20))?;
+    let s = report("real VP8, 2% loss, 320x240, 500 kbit/s, 20 s", &mut call);
+    let psnr = &call.receiver.psnr;
+    let mean = psnr.iter().sum::<f64>() / psnr.len().max(1) as f64;
+    let worst = psnr.iter().copied().fold(f64::INFINITY, f64::min);
+    println!(
+        "MEASURE real VP8 call: {} pictures decoded by vp8-decoder, PSNR mean {mean:.2} dB worst \
+         {worst:.2} dB, decoder errors {}",
+        psnr.len(),
+        call.receiver.real_errors
+    );
+    assert_eq!(call.receiver.corrupt, 0, "every picture as sent");
+    assert_eq!(
+        call.receiver.real_errors, 0,
+        "the real decoder decodes every released picture"
+    );
+    assert!(
+        psnr.len() as u32 + 5 >= s.frames_decoded,
+        "{} of {}",
+        psnr.len(),
+        s.frames_decoded
+    );
+    assert!(s.frames_decoded > 550, "decoded {}", s.frames_decoded);
+    assert!(worst > 28.0, "worst picture {worst:.2} dB");
+    assert_no_wait_beyond_repair(&s);
     Ok(())
 }

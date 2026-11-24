@@ -460,3 +460,65 @@ fn vp8_ivf_through_loss_decodes_bit_exactly_with_the_vp8_decoder() {
         assert_eq!(o.freezes, 0, "loss {loss}: freezes");
     }
 }
+
+/// An AV1 stream from rav1e (feature `av1`; the synthetic source at 160x96, 60 pictures,
+/// key frame first) through the lossy, reordering network into rav1d: every picture decoded
+/// from the pipeline's output is bit for bit the picture of decoding the stream in order.
+#[cfg(feature = "av1")]
+#[test]
+fn av1_from_rav1e_through_loss_decodes_bit_exactly_with_rav1d() {
+    use rtc::rtp::codec::av1::Av1Payloader;
+    use rtc_video::codec::av1::{Av1Decoder, Av1Encoder};
+    use rtc_video::encoder::VideoEncoder;
+    use rtc_video::picture::TestSource;
+    let mut source = TestSource::new(160, 96);
+    let mut enc = Av1Encoder::new(160, 96, 30, 200_000, 10).expect("encoder");
+    let mut tus = Vec::new();
+    for i in 0..60 {
+        tus.extend(
+            enc.encode(&source.next_picture().view(), i == 0)
+                .expect("encode"),
+        );
+    }
+    tus.extend(enc.flush().expect("flush"));
+    assert_eq!(tus.len(), 60);
+    let frames: Vec<Bytes> = tus.iter().map(|t| Bytes::from(t.data.clone())).collect();
+    let mut direct = Av1Decoder::new().expect("decoder");
+    let reference: Vec<I420Buffer> = tus
+        .iter()
+        .map(|t| {
+            direct
+                .decode_bytes(&t.data, t.keyframe)
+                .expect("decodes")
+                .expect("a picture");
+            direct.picture().expect("picture").to_buffer()
+        })
+        .collect();
+    for net in [
+        Network {
+            loss: 0.0,
+            jitter: Duration::ZERO,
+            ..lossy(1)
+        },
+        lossy(3),
+    ] {
+        let loss = net.loss;
+        let o = run_with(
+            Codec::Av1,
+            &frames,
+            Box::<Av1Payloader>::default(),
+            net,
+            &mut Av1Decoder::new().expect("decoder"),
+            Some(&reference),
+        );
+        // The payload format rewrites the OBUs (temporal delimiters dropped, size fields
+        // removed and restored), so the bytes differ from rav1e's; the pictures may not.
+        assert_eq!(o.decoder_errors, 0, "loss {loss}: decode errors");
+        assert_eq!(o.pictures_differ, 0, "loss {loss}: pictures differ");
+        assert!(
+            o.decoded * 100 >= frames.len() * 95,
+            "loss {loss}: decoded {}",
+            o.decoded
+        );
+    }
+}

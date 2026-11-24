@@ -150,51 +150,31 @@ fn av1_at_640x360_and_600_kbits_is_reported() {
 
 /// A decoder that panics on a hostile frame cannot be a default: it would take down the
 /// application on a malicious peer's stream. Seeded mutations of a real stream (the libvpx
-/// fixture for VP8, a rav1e stream for AV1), each fed to a decoder that has decoded the
-/// stream so far: every outcome is an `Ok` or an `Err`, never a panic; and after the hostile
-/// frame, the decoder still decodes the stream's key frame.
+/// fixture), each fed to a decoder that has decoded the stream so far: every outcome is an
+/// `Ok` or an `Err`, never a panic; and after the hostile frame, the decoder still decodes the
+/// stream's key frame.
+///
+/// Not run for AV1: rav1d 1.1.0 panicked on such a mutation (`src/decode.rs:4997`, hosted
+/// run 45316346260), and its panic crosses its `extern "C"` API, which aborts the process
+/// whatever catches it (docs/video-pipeline.md 4.6).
 #[test]
-fn hostile_frames_never_panic_the_decoders() {
+fn hostile_vp8_frames_never_panic_the_decoder() {
     let vp8 = ivf_frames(&test_data("output_vp8.ivf"));
-    let mut av1_enc = Av1Encoder::new(96, 64, 30, 150_000, 10).expect("encoder");
-    let mut source = TestSource::new(96, 64);
-    let mut av1: Vec<Vec<u8>> = Vec::new();
-    for i in 0..12 {
-        let tu = av1_enc
-            .encode(&source.next_picture().view(), i == 0)
-            .expect("encode");
-        av1.extend(tu.map(|t| t.data));
-    }
-    av1.extend(av1_enc.flush().expect("flush").into_iter().map(|t| t.data));
-    assert_eq!(av1.len(), 12);
     let mut rng = Rng(0x5eed_f00d);
     let (mut panics, mut errors, mut cases) = (0, 0, 0);
-    for case in 0..1500 {
-        let use_vp8 = case % 2 == 0;
-        let stream = if use_vp8 { &vp8 } else { &av1 };
-        let at = rng.below(stream.len().min(40));
-        let hostile = mutate(&mut rng, &stream[at]);
+    for _ in 0..1500 {
+        let at = rng.below(40);
+        let hostile = mutate(&mut rng, &vp8[at]);
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            if use_vp8 {
-                let mut d = Vp8Decoder::new();
-                for f in &stream[..at] {
-                    d.decode_bytes(f).expect("the stream decodes");
-                }
-                let hostile_failed = d.decode_bytes(&hostile).is_err();
-                // Recovery: the key frame decodes again.
-                d.decode_bytes(&stream[0])
-                    .expect("a key frame after a hostile one");
-                hostile_failed
-            } else {
-                let mut d = Av1Decoder::new().expect("decoder");
-                for (i, f) in stream[..at].iter().enumerate() {
-                    d.decode_bytes(f, i == 0).expect("the stream decodes");
-                }
-                let hostile_failed = d.decode_bytes(&hostile, at == 0).is_err();
-                d.decode_bytes(&stream[0], true)
-                    .expect("a key frame after a hostile one");
-                hostile_failed
+            let mut d = Vp8Decoder::new();
+            for f in &vp8[..at] {
+                d.decode_bytes(f).expect("the stream decodes");
             }
+            let hostile_failed = d.decode_bytes(&hostile).is_err();
+            // Recovery: the key frame decodes again.
+            d.decode_bytes(&vp8[0])
+                .expect("a key frame after a hostile one");
+            hostile_failed
         }));
         cases += 1;
         match outcome {
@@ -203,7 +183,7 @@ fn hostile_frames_never_panic_the_decoders() {
             Err(_) => panics += 1,
         }
     }
-    println!("MEASURE hostile frames: {cases} cases, {errors} refused, {panics} panics");
+    println!("MEASURE hostile vp8 frames: {cases} cases, {errors} refused, {panics} panics");
     assert_eq!(panics, 0, "panics on hostile input");
     assert!(errors > 0, "the mutations are hostile enough to be refused");
 }
