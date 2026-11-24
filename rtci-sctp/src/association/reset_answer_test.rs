@@ -182,13 +182,16 @@ fn a_held_message_outlives_an_incoming_reset_request_and_the_peers_reset() -> Re
     let now = Instant::now();
     a.peer_rsn_window = Some((300, 300));
     let base = a.peer_last_tsn;
-    a.open_stream(1, PPI)?;
+    a.open_stream(1, PPI)?
+        .write_sctp(now, &Bytes::from_static(b"sent"), PPI)?;
+    let _ = a.gather_outbound(now);
+    ack_everything(&mut a, now);
     a.handle_data(&ordered(base.wrapping_add(1), 1, 0, b"unread"))?;
     let reply = a.handle_reconfig(&chunk_of(ParamIncomingResetRequest {
         reconfig_request_sequence_number: 300,
         stream_identifiers: vec![1],
     }))?;
-    let _ = own_resets(&mut a, reply, now);
+    assert_eq!(vec![vec![1u16]], own_resets(&mut a, reply, now));
 
     let reply = a.handle_reconfig(&reset_request_chunk(301, base.wrapping_add(1), vec![1]))?;
     assert_eq!(vec![(301, 6)], responses(&reply), "waits for the message");
