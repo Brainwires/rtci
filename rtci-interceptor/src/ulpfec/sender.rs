@@ -330,51 +330,8 @@ impl UlpfecSendInterceptor {
     /// `None`: the stream is not protected. A binder that names no formats (an empty
     /// `section_mime_types`) gets the builder's carriage as it is.
     fn negotiated_carriage(&self, info: &StreamInfo) -> Option<Carriage> {
-        // A FEC session of its own was negotiated for the stream (RFC 5109 section 14.1, an
-        // m= section grouped with the media's): that is where its FEC goes.
-        if info.fec_session.is_some() {
-            return Some(Carriage::Stream);
-        }
-        if info.section_mime_types.is_empty() {
-            return Some(self.carriage);
-        }
-        let formats = |subtype: &str| -> Vec<u8> {
-            info.section_mime_types
-                .iter()
-                .filter(|(_, mime_type)| {
-                    mime_type
-                        .rsplit_once('/')
-                        .is_some_and(|(_, sub)| sub.eq_ignore_ascii_case(subtype))
-                })
-                .map(|(payload_type, _)| *payload_type)
-                .collect()
-        };
-        let red = |wanted: Option<(u8, u8)>| -> Option<Carriage> {
-            let (reds, fecs) = (formats("red"), formats("ulpfec"));
-            let pick = |found: &[u8], wanted: Option<u8>| {
-                wanted
-                    .filter(|payload_type| found.contains(payload_type))
-                    .or_else(|| found.first().copied())
-            };
-            Some(Carriage::Red {
-                red_payload_type: pick(&reds, wanted.map(|(red, _)| red))?,
-                fec_payload_type: pick(&fecs, wanted.map(|(_, fec)| fec))?,
-            })
-        };
-        let separate = (info.ssrc_fec.is_some()
-            && info
-                .payload_type_fec
-                .is_some_and(|payload_type| formats("ulpfec").contains(&payload_type)))
-        .then_some(Carriage::Stream);
-        match self.carriage {
-            Carriage::Red {
-                red_payload_type,
-                fec_payload_type,
-            } => red(Some((red_payload_type, fec_payload_type))).or(separate),
-            Carriage::Stream => separate.or_else(|| red(None)),
-        }
+        negotiated_carriage(self.carriage, info)
     }
-
     /// The media SSRCs currently being protected.
     pub fn protected_streams(&self) -> impl Iterator<Item = u32> + '_ {
         self.streams.keys().copied()
@@ -697,6 +654,55 @@ impl UlpfecSendInterceptor {
                 message,
             });
         }
+    }
+}
+
+/// The carriage of `info`'s stream given the builder's (`builder`): see
+/// [`UlpfecSendInterceptor::negotiated_carriage`]. The receive side reads a stream the same way,
+/// so the payload types the section negotiated are the ones it looks for.
+pub(super) fn negotiated_carriage(builder: Carriage, info: &StreamInfo) -> Option<Carriage> {
+    // A FEC session of its own was negotiated for the stream (RFC 5109 section 14.1, an
+    // m= section grouped with the media's): that is where its FEC goes.
+    if info.fec_session.is_some() {
+        return Some(Carriage::Stream);
+    }
+    if info.section_mime_types.is_empty() {
+        return Some(builder);
+    }
+    let formats = |subtype: &str| -> Vec<u8> {
+        info.section_mime_types
+            .iter()
+            .filter(|(_, mime_type)| {
+                mime_type
+                    .rsplit_once('/')
+                    .is_some_and(|(_, sub)| sub.eq_ignore_ascii_case(subtype))
+            })
+            .map(|(payload_type, _)| *payload_type)
+            .collect()
+    };
+    let red = |wanted: Option<(u8, u8)>| -> Option<Carriage> {
+        let (reds, fecs) = (formats("red"), formats("ulpfec"));
+        let pick = |found: &[u8], wanted: Option<u8>| {
+            wanted
+                .filter(|payload_type| found.contains(payload_type))
+                .or_else(|| found.first().copied())
+        };
+        Some(Carriage::Red {
+            red_payload_type: pick(&reds, wanted.map(|(red, _)| red))?,
+            fec_payload_type: pick(&fecs, wanted.map(|(_, fec)| fec))?,
+        })
+    };
+    let separate = (info.ssrc_fec.is_some()
+        && info
+            .payload_type_fec
+            .is_some_and(|payload_type| formats("ulpfec").contains(&payload_type)))
+    .then_some(Carriage::Stream);
+    match builder {
+        Carriage::Red {
+            red_payload_type,
+            fec_payload_type,
+        } => red(Some((red_payload_type, fec_payload_type))).or(separate),
+        Carriage::Stream => separate.or_else(|| red(None)),
     }
 }
 

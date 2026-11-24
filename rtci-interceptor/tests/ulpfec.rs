@@ -1442,3 +1442,58 @@ fn every_packet_that_carries_fec_is_marked_with_the_fec_it_carries() {
         wire[4].1
     );
 }
+
+/// RFC 5109 section 14.2: the RED and FEC payload types are those the section negotiated, and
+/// an answer keeps the offerer's numbers. A receiver built for 100 / 127 whose stream's section
+/// negotiated `red` as 121 and `ulpfec` as 122 takes those RED packets apart and rebuilds from
+/// their FEC, as the sender reading the same section sends them.
+#[test]
+fn the_receiver_reads_red_and_fec_under_the_payload_types_the_section_negotiated() {
+    let packets = rfc_packets();
+    let now = Instant::now();
+    let mut info = stream_info("video/VP8", false);
+    info.section_mime_types = vec![
+        (MEDIA_PT, "video/VP8".to_owned()),
+        (121, "video/red".to_owned()),
+        (122, "video/ulpfec".to_owned()),
+    ];
+    let mut sender = Registry::new()
+        .with(
+            Slot::FecEncoder,
+            red_builder().with_num_media_packets(4).build(),
+        )
+        .build();
+    sender.bind_local_stream(&info);
+    let wire = send(&mut sender, now, &packets[..4]);
+    assert_eq!(5, wire.len());
+    assert!(wire.iter().all(|packet| packet.header.payload_type == 121));
+
+    let mut receiver = Registry::new()
+        .with(
+            Slot::FecDecoder,
+            UlpfecReceiveBuilder::red(RED_PT, FEC_PT).build(),
+        )
+        .build();
+    receiver.bind_remote_stream(&info);
+    let arriving: Vec<_> = wire
+        .iter()
+        .filter(|packet| packet.header.sequence_number != 10)
+        .cloned()
+        .collect();
+    let delivered = receive(&mut receiver, now, &arriving);
+    let media = media_delivered(&delivered);
+    assert_eq!(
+        4,
+        media.len(),
+        "three arrived as RED and were unwrapped, one rebuilt"
+    );
+    for message in &media {
+        assert_eq!(MEDIA_PT, rtp_of(message).header.payload_type);
+    }
+    let recovered: Vec<_> = media
+        .iter()
+        .filter(|message| message.has(&Attribute::RecoveredByFec))
+        .collect();
+    assert_eq!(1, recovered.len());
+    assert_same_packet(&packets[2], rtp_of(recovered[0]));
+}

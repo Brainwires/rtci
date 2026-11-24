@@ -942,6 +942,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.receiver_reference_time_on_audio,
     },
     {
+        id: "fec.video-red-ulpfec",
+        setting: "DefaultInterceptorOptions::video_red_ulpfec",
+        clause: "RFC 8854 7 (RFC 5109 14.2)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc media/engine/webrtc_video_engine.cc::GetDefaultSupportedFormats @ a222406d: kRedCodecName and kUlpfecCodecName are pushed for every video section with no field trial (FlexFEC only with WebRTC-FlexFEC-03-Advertised); GetPayloadTypesAndDefaultCodecs adds RTX for RED",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.video_red_ulpfec = v,
+        read: |o: &DefaultInterceptorOptions| o.video_red_ulpfec,
+    },
+    {
         id: "gcc.threshold-time-base",
         setting: "DefaultInterceptorOptions::gcc_threshold_time_base",
         clause: "draft-ietf-rmcat-gcc-02 5.4",

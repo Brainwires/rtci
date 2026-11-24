@@ -2,7 +2,7 @@
 
 use super::decoder::{UlpfecDecoder, UlpfecDecoderStats};
 use super::red::depacketize_red;
-use super::sender::{Carriage, StreamFilter, video_streams};
+use super::sender::{Carriage, StreamFilter, negotiated_carriage, video_streams};
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
@@ -166,6 +166,7 @@ impl UlpfecReceiveBuilder {
             decode_every_stream: self.decode_every_stream,
             filter: self.filter,
             decoders: HashMap::new(),
+            carriages: HashMap::new(),
             in_red: HashMap::new(),
             reported: HashMap::new(),
             repair_to_media: HashMap::new(),
@@ -202,6 +203,10 @@ pub struct UlpfecReceiveInterceptor {
     filter: StreamFilter,
     /// Decoders keyed by the media SSRC they protect.
     decoders: HashMap<u32, UlpfecDecoder>,
+    /// How each protected stream's FEC travels, with the payload types its section
+    /// negotiated (the builder's when the section lists none, or lists them under those
+    /// numbers).
+    carriages: HashMap<u32, Carriage>,
     /// FEC blocks (and their octets) read from each protected stream's RED packets.
     in_red: HashMap<u32, (u64, u64)>,
     /// What was last passed on about each protected stream ([`UlpfecReceiveStats`]).
@@ -346,7 +351,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
         if let Carriage::Red {
             red_payload_type,
             fec_payload_type,
-        } = self.carriage
+        } = self.carriages.get(&ssrc).copied().unwrap_or(self.carriage)
         {
             if rtp_packet.header.payload_type == fec_payload_type {
                 // FEC by itself in a RED stream (RFC 5109 14.2 forbids it).
@@ -447,9 +452,12 @@ impl Interceptor for UlpfecReceiveInterceptor {
         // RFC 5109 section 13: `onelevelonly=1` on this endpoint's `ulpfec` format of the
         // section ("what the receiver accepts to receive", section 14.3): FEC with more than
         // one level is refused.
+        // RFC 5109 section 14.2: the RED and FEC payload types are the section's, as the
+        // sender reads them (an answer keeps the offerer's numbers).
+        let carriage = negotiated_carriage(self.carriage, info).unwrap_or(self.carriage);
         let fec_format = separate
             .map(|(_, payload_type)| payload_type)
-            .or(match self.carriage {
+            .or(match carriage {
                 Carriage::Red {
                     fec_payload_type, ..
                 } => Some(fec_payload_type),
@@ -468,10 +476,12 @@ impl Interceptor for UlpfecReceiveInterceptor {
             info.ssrc,
             UlpfecDecoder::new(info.ssrc).with_one_level_only(one_level_only),
         );
+        self.carriages.insert(info.ssrc, carriage);
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.decoders.remove(&info.ssrc);
+        self.carriages.remove(&info.ssrc);
         self.in_red.remove(&info.ssrc);
         self.reported.remove(&info.ssrc);
         self.media_transport.remove(&info.ssrc);

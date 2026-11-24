@@ -9,8 +9,10 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use rtci::interceptor::{RedPlacement, Registry, Slot, UlpfecReceiveBuilder, UlpfecSendBuilder};
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
 use rtci::peer_connection::message::RTCMessage;
 use rtci::peer_connection::state::RTCPeerConnectionState;
@@ -101,6 +103,30 @@ impl Peer {
             read_rtp: 0,
         })
     }
+    /// The `Chrome` behaviour profile's codecs and interceptors, nothing added by hand.
+    fn chrome(addr: &str) -> Result<Self> {
+        let mut media_engine = MediaEngine::for_profile(BehaviourProfile::Chrome);
+        media_engine.register_default_codecs()?;
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        let pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_behaviour_profile(BehaviourProfile::Chrome)
+                    .build(),
+            )
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build(Instant::now())?;
+        Ok(Self {
+            pc,
+            addr: addr.parse()?,
+            connected: false,
+            states: Vec::new(),
+            read_rtp: 0,
+        })
+    }
+
     fn candidate(&self) -> Result<RTCIceCandidateInit> {
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
@@ -217,8 +243,12 @@ impl World {
     }
 
     fn connected() -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with(Peer::new)
+    }
+
+    fn connected_with(make: fn(&str) -> Result<Peer>) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [make("10.0.0.1:5000")?, make("10.0.0.2:5000")?],
             now: Instant::now(),
             lost: 0,
             sent_rtp: 0,
@@ -380,5 +410,27 @@ fn fec_in_red_is_counted_by_both_ends_and_what_it_rebuilt_is_reported() -> Resul
         "FEC for pairs that lost nothing: {fec:?}"
     );
     assert!(fec.fec_packets_discarded + fec.packets_recovered <= fec.fec_packets_received);
+    Ok(())
+}
+
+/// The `Chrome` behaviour profile offers video `red` and `ulpfec` as Chromium does
+/// (`DefaultInterceptorOptions::video_red_ulpfec`): between two such peers the video goes in
+/// RED, and once the receiver reports loss FEC follows and rebuilds packets the network lost
+/// before a retransmission could (NACK is negotiated too).
+#[test]
+fn in_the_chrome_profile_fec_in_red_rebuilds_what_the_network_lost() -> Result<()> {
+    let (mut world, sender) = World::connected_with(Peer::chrome)?;
+    for seq in 1000..1150 {
+        world.send(sender, seq)?;
+    }
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    assert!(world.lost > 0, "the network lost packets");
+    let sent = world.peers[0].pc.fec_stats().sent;
+    assert_eq!(sent.len(), 1, "FEC was sent: {sent:?}");
+    let received = world.peers[1].pc.fec_stats().received;
+    assert_eq!(received.len(), 1, "{received:?}");
+    assert!(received[0].fec_packets_in_red > 0, "{received:?}");
+    assert!(received[0].packets_recovered > 0, "{received:?}");
     Ok(())
 }

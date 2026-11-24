@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Video `red` + `ulpfec` in the `Chrome` behaviour profile.**
+  `DefaultInterceptorOptions::video_red_ulpfec` (profile row `fec.video-red-ulpfec`: `Rfc`
+  `false`, `Chrome` `true`): `register_default_interceptors` then registers `video/red` (116),
+  RTX for it (117, `apt=116`) and `video/ulpfec` (43) after the video codecs, as Chromium
+  offers them (libwebrtc `GetDefaultSupportedFormats`), and `configure_video_red_ulpfec`
+  installs ULPFEC in RED in both directions (FEC in RED packets of its own, read from the wire
+  tap, loss-driven amount). The default stays RFC 8854 section 7's: neither is offered for
+  video. `UlpfecReceiveInterceptor` now reads RED and FEC under the payload types the stream's
+  section negotiated (as the sender already did), not only the builder's: an answer keeps
+  the offerer's numbers. Engine behaviour change for the `Chrome` profile (its video offers
+  and chain).
 - **FEC statistics.** The receiver's webrtc-stats now count all the FEC received for a
   stream (8.5): `fecPacketsReceived` and `fecBytesReceived` include the FEC blocks of the
   stream's RED packets (RFC 5109 section 14.2) and the packets of a FEC session of its own
