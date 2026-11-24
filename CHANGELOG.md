@@ -182,8 +182,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outage and an ICE restart (six seeds) the chain without a pacer is frozen 0.33 to 0.92 s
   from one second after the switch (0.70 to 0.99), the default chain still shows no usable
   frame to the end of the run (a known limit of 0.1.0). The tests' bounds on the picture's
-  age and the retransmissions are tightened to these figures (3.6 s and 74 without a pacer,
-  8.2 s and 92 with it). Not offered: libwebrtc's
+  age and the retransmissions on this branch are the tripwires of the perturbed ensemble
+  (`conf/capmatrix-1-perturbed-ensemble`, measured on the tree before this change; this
+  change sits well inside them). Not offered: libwebrtc's
   form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
   (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
   every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
