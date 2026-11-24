@@ -203,7 +203,12 @@ fn the_target_sets_the_encoder_rate_and_the_packets_carry_the_stream() {
 
 #[test]
 fn a_target_under_the_encoders_minimum_keeps_the_minimum_and_drops_pictures() {
-    let mut b = Bench::new(SendConfig::default(), 320, 240);
+    // No degradation, so that the encoder's minimum alone drops pictures.
+    let config = SendConfig {
+        degradation_preference: DegradationPreference::MaintainFramerateAndResolution,
+        ..SendConfig::default()
+    };
+    let mut b = Bench::new(config, 320, 240);
     b.target(300_000.0);
     b.sent();
     // 15 kbit/s is half the encoder's 30 kbit/s: the encoder stays at 30 and every other
