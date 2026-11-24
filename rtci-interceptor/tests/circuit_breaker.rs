@@ -673,9 +673,10 @@ fn a_receiver_that_reports_less_often_than_calculated_has_the_interval_its_repor
         sender: ms(30),
         receiver: ms(30),
     };
-    // The packet sent at 3 s is the first lost; reports at 3.5, 4.5, 5.5, 6.5 and 7.5 s.
+    // The packet sent at 3 s is the first lost. The report at 3.5 s still shows progress (the
+    // packets up to 2.9 s); those at 4.5, 5.5, 6.5, 7.5 and 8.5 s do not.
     assert_eq!(
-        Some(7500),
+        Some(8500),
         media_timeout_at(Some(calculated), false, 100, 1000, 3000, 20_000)
     );
 }

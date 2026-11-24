@@ -3292,7 +3292,10 @@ mod tests {
                     message: AttributedPacket::new(Packet::Rtcp(vec![rr(7)])),
                 })
                 .unwrap();
-            let packet = session.poll_read().expect("the packet is passed on");
+            // What the session says of itself application-ward comes first; then the packet.
+            let packet = std::iter::from_fn(|| session.poll_read())
+                .find(|packet| matches!(&packet.message.packet, Packet::Rtcp(p) if !p.is_empty()))
+                .expect("the packet is passed on");
             let interval = *packet
                 .message
                 .custom::<RtcpReportingInterval>()
