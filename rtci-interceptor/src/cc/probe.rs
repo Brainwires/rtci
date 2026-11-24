@@ -74,8 +74,11 @@ const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
 const RECOVERY_LASTING: Duration = Duration::from_secs(2);
 /// How far back the high recovery probing compares the target with reaches.
 const RECOVERY_HIGH_WINDOW: Duration = Duration::from_secs(10);
-/// Recovery probes go out once this long has passed since the last probe.
+/// Recovery probes go out once this long has passed since the last probe; each result below
+/// the target doubles it, up to [`RECOVERY_PROBE_MAX_INTERVAL`].
 pub const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// The longest wait between recovery probes.
+pub const RECOVERY_PROBE_MAX_INTERVAL: Duration = Duration::from_secs(40);
 /// And only when the target has not fallen for this long.
 const RECOVERY_QUIET: Duration = Duration::from_secs(1);
 
@@ -226,6 +229,8 @@ pub struct ProbeController {
     last_target: Option<f64>,
     /// The target when the outstanding cluster, a recovery probe, was asked for.
     recovery_probe: Option<f64>,
+    /// The wait between recovery probes now.
+    recovery_interval: Duration,
 }
 
 impl ProbeController {
@@ -256,6 +261,7 @@ impl ProbeController {
             fell_at: None,
             last_target: None,
             recovery_probe: None,
+            recovery_interval: RECOVERY_PROBE_INTERVAL,
         }
     }
 
@@ -281,9 +287,10 @@ impl ProbeController {
     /// back-off in steps alike).
     /// While the target is below 85 % of it and has not fallen for a second, a cluster at
     /// twice the target (at most the high) is asked for once five seconds have passed since
-    /// the last probe; a confirming result allows further probes as at the start. The high
-    /// is forgotten when the target reaches 85 % of it, or when a recovery probe's result is
-    /// below the target it was asked at (the path has not come back).
+    /// the last probe; a confirming result allows further probes as at the start. A result
+    /// below the target the probe was asked at (the path has not come back) doubles the
+    /// wait, up to 40 s; a result at or above it brings it back to five seconds. The high is
+    /// forgotten when the target reaches 85 % of it.
     pub fn with_recovery_probing(mut self, enabled: bool) -> Self {
         self.recovery_probing = enabled;
         self
@@ -375,7 +382,7 @@ impl ProbeController {
                 .is_none_or(|fell| now.saturating_duration_since(fell) >= RECOVERY_QUIET)
             && self
                 .last_probe
-                .is_none_or(|last| now.saturating_duration_since(last) >= RECOVERY_PROBE_INTERVAL)
+                .is_none_or(|last| now.saturating_duration_since(last) >= self.recovery_interval)
         {
             // The rate before a drop that lasted, while the target is still well under it:
             // if the drop has gone, the path carries it again.
@@ -458,6 +465,7 @@ impl ProbeController {
             .is_some_and(|high| target >= PROBE_AFTER_DROP_SHARE * high)
         {
             self.recovery_high = None;
+            self.recovery_interval = RECOVERY_PROBE_INTERVAL;
         }
     }
 
@@ -479,12 +487,12 @@ impl ProbeController {
         let drop_probe = std::mem::take(&mut self.drop_probe);
         // A recovery probe whose result is below the target it was asked at: the path has
         // not come back, and the high is forgotten.
-        if let Some(target) = self.recovery_probe.take()
-            && estimate < target
-        {
-            self.recovery_high = None;
-            self.recovery_peak = self.last_target.zip(self.polled_at);
-            self.below_since = None;
+        if let Some(target) = self.recovery_probe.take() {
+            self.recovery_interval = if estimate < target {
+                (self.recovery_interval * 2).min(RECOVERY_PROBE_MAX_INTERVAL)
+            } else {
+                RECOVERY_PROBE_INTERVAL
+            };
         }
         if !drop_probe && estimate >= FURTHER_PROBE_THRESHOLD * rate && self.initial.is_empty() {
             let next = estimate * FURTHER_PROBE;
@@ -531,7 +539,7 @@ impl ProbeController {
             .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
         let recovery = self
             .recovery_high
-            .map(|_| last + RECOVERY_PROBE_INTERVAL)
+            .map(|_| last + self.recovery_interval)
             .or_else(|| self.below_since.map(|since| since + RECOVERY_LASTING));
         let second = match (after_drop, recovery) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -806,23 +814,26 @@ mod tests {
     }
 
     /// A recovery probe whose result is below the target it was asked at says the path has
-    /// not come back: the high is forgotten and nothing more is asked.
+    /// not come back: the next waits twice as long, up to 40 s.
     #[test]
-    fn a_recovery_probe_below_the_target_ends_recovery_probing() {
+    fn a_recovery_probe_below_the_target_backs_off() {
         let epoch = Instant::now();
         let at = |ms: u64| epoch + Duration::from_millis(ms);
         let mut controller = settled(epoch).with_recovery_probing(true);
         capped(&mut controller, epoch, 9_000);
-        let request = (9_100..=20_000)
-            .step_by(100)
-            .find_map(|ms| controller.poll(at(ms), 300_000.0, 300_000.0, true))
-            .expect("a recovery probe");
-        controller.on_result(request.cluster, 250_000.0);
-        assert!((20_100..=40_000).step_by(100).all(|ms| {
-            controller
-                .poll(at(ms), 300_000.0, 300_000.0, true)
-                .is_none()
-        }));
+        let mut asked = vec![];
+        for ms in (9_100..=200_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 300_000.0, true) {
+                asked.push(ms);
+                controller.on_result(request.cluster, 250_000.0);
+            }
+        }
+        let gaps: Vec<u64> = asked.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert_eq!(
+            vec![10_000, 20_000, 40_000, 40_000],
+            gaps[..4].to_vec(),
+            "{asked:?}"
+        );
     }
 
     /// The target back at 85 % of the high ends recovery probing; a confirming recovery
