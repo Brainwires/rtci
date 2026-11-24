@@ -3739,7 +3739,14 @@ fn without_dtls_session_resumption_every_transport_runs_a_full_handshake() -> Re
 /// no server resumes one.
 #[test]
 fn a_new_dtls_association_after_a_resumed_one_is_a_full_handshake() -> Result<()> {
-    let (mut world, senders) = three_unbundled_transports(true)?;
+    // As `renewing_the_dtls_association_renews_every_transport`, with the default settings
+    // (session resumption on).
+    let mut world = World::with_credentials(RTCBundlePolicy::MaxCompat, false)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
     assert_eq!(
         wire_handshakes(&world, 0)
             .iter()
@@ -3748,10 +3755,31 @@ fn a_new_dtls_association_after_a_resumed_one_is_a_full_handshake() -> Result<()
         2,
         "two transports resumed"
     );
+    world.renegotiate_with(without_bundle_group)?;
+    world.peers[0].events.clear();
+    world.peers[0].event_steps.clear();
     let from = world.steps + 1;
     world.peers[0].pc.renew_dtls_association();
     world.renegotiate_with(without_bundle_group)?;
     world.regather(7000)?;
+    let ids: Vec<RTCTransportId> = world.peers[0]
+        .pc
+        .dtls_transports()
+        .iter()
+        .map(|t| t.id())
+        .collect();
+    world.run_traced("every transport ran a new handshake", |peers| {
+        let events = transport_events(&peers[0]);
+        ids.iter().all(|id| {
+            events.iter().any(|(_, dtls, kind)| {
+                dtls == id
+                    && matches!(
+                        kind,
+                        RTCTransportEventKind::DtlsStateChange(RTCDtlsTransportState::Connected)
+                    )
+            })
+        })
+    })?;
     world.run_traced(
         "every transport selected a pair on the new ports",
         |peers| peers.iter().all(|p| selected_on_new_ports(p, 7000)),
@@ -3806,7 +3834,12 @@ fn another_certificates_fingerprint() -> Result<String> {
         .into_iter()
         .next()
         .context("a fingerprint")?;
-    Ok(format!("{} {}", fingerprint.algorithm, fingerprint.value))
+    // RFC 8122 section 5: upper-case hex.
+    Ok(format!(
+        "{} {}",
+        fingerprint.algorithm,
+        fingerprint.value.to_uppercase()
+    ))
 }
 
 /// The second section of the offer (`in_offer`, seen by the DTLS client) or of the answer
