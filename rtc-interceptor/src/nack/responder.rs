@@ -1022,11 +1022,25 @@ impl NackResponderInterceptor {
                         break;
                     }
                     self.pending_asked.insert((ssrc, seq), now);
-                    self.pending.push_back(PendingRetransmission {
-                        ssrc,
-                        sequence_number: seq,
-                        octets,
-                    });
+                    // A stream's oldest packet first, whenever it was asked for: a receiver
+                    // that plays in order waits for its oldest gap, and a packet asked for
+                    // again (its repair was lost) would otherwise wait behind every newer one.
+                    let at = self
+                        .pending
+                        .iter()
+                        .position(|waiting| {
+                            waiting.ssrc == ssrc
+                                && waiting.sequence_number.wrapping_sub(seq) < 0x8000
+                        })
+                        .unwrap_or(self.pending.len());
+                    self.pending.insert(
+                        at,
+                        PendingRetransmission {
+                            ssrc,
+                            sequence_number: seq,
+                            octets,
+                        },
+                    );
                     self.pending_octets += octets;
                 }
             }

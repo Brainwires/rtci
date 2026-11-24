@@ -199,8 +199,10 @@ impl PacerBuilder {
 ///    and FEC SSRCs, from [`Interceptor::bind_local_stream`]) count as audio, so an audio
 ///    retransmission never waits behind video either.
 /// 3. **Video retransmissions** (`Attribute::Retransmission` on any other stream) wait in the
-///    media queue, in the order written, ahead of all new media (libwebrtc's
-///    `prioritized_packet_queue.cc`: "Send retransmissions before new media"). One whose packet
+///    media queue ahead of all new media (libwebrtc's `prioritized_packet_queue.cc`: "Send
+///    retransmissions before new media"), a stream's oldest packet first (by the sequence
+///    number repaired, whenever each was written: a receiver that plays in order waits for
+///    its oldest gap). One whose packet
 ///    already has a retransmission waiting is not queued again
 ///    ([`PacerInterceptor::duplicate_retransmissions`]), and each that leaves or is dropped is
 ///    reported application-ward ([`RetransmissionsLeft`]), so the NACK responder does not make
@@ -1125,11 +1127,31 @@ impl PacerInterceptor {
         let now = msg.now;
         self.queued_bits += Self::bits_of(&msg);
         if msg.message.has(&Attribute::Retransmission) {
-            let at = self
+            let end = self
                 .queue
                 .iter()
                 .position(|queued| !queued.message.has(&Attribute::Retransmission))
                 .unwrap_or(self.queue.len());
+            // Among the retransmissions of one stream the oldest packet goes first, whenever
+            // it was asked for: a receiver that plays in order waits for the oldest gap, and
+            // a repair that was itself lost and is made again would otherwise wait behind
+            // every newer one.
+            let at = self
+                .retransmission_key(&msg)
+                .map_or(end, |(ssrc, repaired)| {
+                    self.queue
+                        .iter()
+                        .take(end)
+                        .position(|queued| {
+                            self.retransmission_key(queued)
+                                .is_some_and(|(other, waiting)| {
+                                    other == ssrc
+                                        && waiting != repaired
+                                        && waiting.wrapping_sub(repaired) < 0x8000
+                                })
+                        })
+                        .unwrap_or(end)
+                });
             self.queue.insert(at, msg);
             if at == 0 {
                 // First in line now: it may leave at once if the budget allows.
