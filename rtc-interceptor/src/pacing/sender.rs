@@ -189,8 +189,9 @@ impl PacerBuilder {
 /// 1. **Audio** (the packets of a stream bound with an `audio/` codec, and its repair flows)
 ///    leaves the moment it is written, charged to the budget, which the packets behind it then
 ///    wait out. A voice that waits behind a video backlog is the call breaking up.
-/// 2. **Other media** (video, retransmissions, FEC) waits in one queue, in the order it was
-///    written, and leaves as the budget allows. The **queue time bound** (2 s by default,
+/// 2. **Other media** (video, retransmissions, FEC) waits in one queue and leaves as the
+///    budget allows: retransmissions in the order written, ahead of new media; new media in
+///    the order written. The **queue time bound** (2 s by default,
 ///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's: by
 ///    default ([`QueueOverflow::Drop`]) a packet that has waited the bound, or the oldest one
 ///    when the queue is full, is dropped, so nothing leaves above the target;
@@ -596,9 +597,29 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             }
         }
 
-        // Held: it leaves later, from `poll_write`, when the budget allows.
+        // Held: it leaves later, from `poll_write`, when the budget allows. A retransmission
+        // goes ahead of the new media waiting, behind the retransmissions before it: a repair
+        // the NACK responder has already held to the congestion controller's target is worth
+        // most early, and waiting behind seconds of new video it may outlive its use or be
+        // dropped as overdue. libwebrtc's pacer orders its queue the same way
+        // (`modules/pacing/prioritized_packet_queue.cc`, `GetPriorityForType`: "Send
+        // retransmissions before new media").
         let now = msg.now;
         self.queued_bits += Self::bits_of(&msg);
+        if msg.message.has(&Attribute::Retransmission) {
+            let at = self
+                .queue
+                .iter()
+                .position(|queued| !queued.message.has(&Attribute::Retransmission))
+                .unwrap_or(self.queue.len());
+            self.queue.insert(at, msg);
+            if at == 0 {
+                // First in line now: it may leave at once if the budget allows.
+                self.handle_timeout(now)?;
+            }
+            self.follow_queue(now);
+            return Ok(());
+        }
         self.queue.push_back(msg);
         self.follow_queue(now);
         Ok(())

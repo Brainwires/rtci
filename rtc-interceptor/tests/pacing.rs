@@ -170,6 +170,29 @@ impl Harness {
 
     /// A padding-only packet (RFC 3550 section 5.1), as the NACK responder fills a probe
     /// cluster with: no payload and 255 octets of padding, 2136 bits on the wire.
+    /// A retransmission (`Attribute::Retransmission`, as the NACK responder tags it) on the
+    /// RTX stream.
+    fn send_retransmission(&mut self, at: Duration, sequence_number: u16) {
+        self.chain
+            .handle_write(TaggedPacket {
+                now: self.epoch + at,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 97,
+                        sequence_number,
+                        ssrc: 3,
+                        ..Default::default()
+                    },
+                    payload: vec![0u8; PAYLOAD_BYTES].into(),
+                }))
+                .with(rtc_interceptor::Attribute::Retransmission),
+            })
+            .expect("handle_write");
+        self.drain();
+    }
+
     fn send_padding(&mut self, at: Duration, sequence_number: u16) {
         self.chain
             .handle_write(TaggedPacket {
@@ -408,6 +431,24 @@ fn media_leaves_ahead_of_queued_padding() {
         media_at < ms(10),
         "the media packet left at {media_at:?}, behind the padding"
     );
+}
+
+/// Retransmissions leave ahead of the new media already waiting, in the order they were
+/// written, as in libwebrtc's pacer ("Send retransmissions before new media"): ten video
+/// packets queue at 0 ms (one leaves at once, one every 10 ms after), two retransmissions are
+/// written at 15 ms and leave next, at 20 and 30 ms, before the video still waiting.
+#[test]
+fn retransmissions_leave_ahead_of_queued_new_media() {
+    let mut harness = Harness::new();
+    for sequence_number in 1..=10 {
+        harness.send(ms(0), sequence_number);
+    }
+    harness.advance_to(ms(15));
+    harness.send_retransmission(ms(15), 500);
+    harness.send_retransmission(ms(15), 501);
+    harness.advance_to(ms(200));
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![1, 2, 500, 501, 3, 4, 5, 6, 7, 8, 9, 10], order);
 }
 
 // ---------------------------------------------------------------------------------------
