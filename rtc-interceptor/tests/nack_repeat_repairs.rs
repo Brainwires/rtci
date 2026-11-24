@@ -17,6 +17,9 @@ use rtc_interceptor::{
     RTPHeaderExtension, Registry, RetransmissionRateLimit, RetransmissionsReported, Slot,
     StreamInfo, TaggedPacket, TwccSenderBuilder,
 };
+use rtcp::transport_feedbacks::cc_feedback_report::{
+    CcFeedbackMetricBlock, CcFeedbackReport, CcFeedbackReportBlock, Ecn,
+};
 use rtcp::transport_feedbacks::transport_layer_cc::{
     PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc,
     TransportLayerCc,
@@ -87,6 +90,8 @@ fn chain(twcc: bool) -> impl Interceptor {
 struct Left {
     repaired: u16,
     number: Option<u16>,
+    /// The RTX packet's own sequence number.
+    rtx_sequence: u16,
 }
 
 /// What leaves toward the wire: the retransmissions, with the transport-wide number each got.
@@ -107,6 +112,7 @@ fn drain(chain: &mut impl Interceptor) -> Vec<Left> {
             left.push(Left {
                 repaired: u16::from_be_bytes([packet.payload[0], packet.payload[1]]),
                 number,
+                rtx_sequence: packet.header.sequence_number,
             });
         }
     }
@@ -136,7 +142,7 @@ fn send_originals(chain: &mut impl Interceptor, base: Instant) {
     drain(chain);
 }
 
-fn read(chain: &mut impl Interceptor, now: Instant, message: AttributedPacket) {
+fn read(chain: &mut (impl Interceptor + ?Sized), now: Instant, message: AttributedPacket) {
     chain
         .handle_read(TaggedPacket {
             now,
@@ -410,4 +416,56 @@ fn the_report_rides_an_empty_carrier() {
     );
     drain(&mut chain);
     assert!(nack(&mut chain, ms(base, 300), &[3]).is_empty());
+}
+
+/// With RFC 8888 feedback (the default between two endpoints of this engine: RFC 8888 section 6,
+/// one feedback format per stream) the report on the RTX stream names each retransmission by
+/// its own sequence number; the responder maps it back to the packet it repaired. A request
+/// for a packet whose retransmission arrived is not answered; one crossing a retransmission
+/// reported lost is answered at once.
+#[test]
+fn rfc_8888_feedback_on_the_rtx_stream_counts_as_the_report() {
+    let base = Instant::now();
+    let mut chain = chain(false);
+    send_originals(&mut chain, base);
+    let ccfb = |chain: &mut dyn Interceptor, now: Instant, rtx_sequence: u16, received: bool| {
+        read(
+            chain,
+            now,
+            AttributedPacket::new(Packet::Rtcp(vec![Box::new(CcFeedbackReport {
+                sender_ssrc: 1,
+                report_blocks: vec![CcFeedbackReportBlock {
+                    media_ssrc: RTX_SSRC,
+                    begin_sequence: rtx_sequence,
+                    metric_blocks: vec![CcFeedbackMetricBlock {
+                        received,
+                        ecn: Ecn::NotEct,
+                        arrival_time_offset: if received { 10 } else { 0 },
+                    }],
+                }],
+                report_timestamp: 65_536,
+            })])),
+        );
+    };
+    let three = nack(&mut chain, ms(base, 200), &[3]);
+    ccfb(&mut chain, ms(base, 250), three[0].rtx_sequence, true);
+    drain(&mut chain);
+    assert!(
+        nack(&mut chain, ms(base, 300), &[3]).is_empty(),
+        "its retransmission arrived"
+    );
+    let five = nack(&mut chain, ms(base, 400), &[5]);
+    assert!(
+        nack(&mut chain, ms(base, 450), &[5]).is_empty(),
+        "no report yet: the request waits"
+    );
+    ccfb(&mut chain, ms(base, 500), five[0].rtx_sequence, false);
+    assert_eq!(
+        vec![5],
+        drain(&mut chain)
+            .iter()
+            .map(|left| left.repaired)
+            .collect::<Vec<_>>(),
+        "reported lost: repaired at once"
+    );
 }

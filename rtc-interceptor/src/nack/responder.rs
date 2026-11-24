@@ -344,6 +344,11 @@ struct LocalStream {
     /// When each buffered packet was sent, by its place in the send buffer (the sequence
     /// number modulo the buffer size), with the sequence number the entry is for.
     sent_at: Vec<Option<(u16, Instant)>>,
+    /// The sequence number each recent RTX packet of this stream was given → the packet it
+    /// repairs, oldest first in `repairs_order`: how RFC 8888 feedback, which reports the RTX
+    /// stream under its own sequence numbers, names a retransmission.
+    repairs_by_rtx: HashMap<u16, u16>,
+    repairs_order: VecDeque<u16>,
 }
 
 /// The most octets one probe cluster is filled with.
@@ -734,6 +739,15 @@ impl NackResponderInterceptor {
 
         let packet =
             if let (Some(ssrc_rtx), Some(pt_rtx)) = (stream.ssrc_rtx, stream.payload_type_rtx) {
+                if stream.repairs_order.len() >= usize::from(self.size).max(1)
+                    && let Some(oldest) = stream.repairs_order.pop_front()
+                {
+                    stream.repairs_by_rtx.remove(&oldest);
+                }
+                stream
+                    .repairs_by_rtx
+                    .insert(stream.rtx_sequence_number, seq);
+                stream.repairs_order.push_back(stream.rtx_sequence_number);
                 rtx_packet(
                     &mut stream.rtx_sequence_number,
                     (stream.rid_extension_id, stream.repaired_rid_extension_id),
@@ -1125,6 +1139,46 @@ impl NackResponderInterceptor {
         self.release_at = None;
     }
 
+    /// What RFC 8888 congestion control feedback (`CcFeedbackReport`) in `rtcp_packets` says
+    /// of the retransmissions: it reports the packets of the RTX stream under their own
+    /// sequence numbers, each mapped back to the packet it repaired. The counterpart of the
+    /// TWCC sender's [`RetransmissionsReported`](crate::RetransmissionsReported) for streams
+    /// whose feedback is RFC 8888.
+    fn ccfb_report(
+        &self,
+        rtcp_packets: &[Box<dyn rtcp::Packet>],
+    ) -> crate::RetransmissionsReported {
+        let mut report = crate::RetransmissionsReported::default();
+        for feedback in rtcp_packets.iter().filter_map(|packet| {
+            packet
+                .as_any()
+                .downcast_ref::<rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport>()
+        }) {
+            let (_, per_stream) = crate::rtpfb::convert::convert_ccfb(feedback);
+            for (ssrc, acknowledgements) in per_stream {
+                let Some(stream) = self
+                    .streams
+                    .values()
+                    .find(|stream| stream.ssrc_rtx == Some(ssrc))
+                else {
+                    continue;
+                };
+                for acknowledgement in acknowledgements {
+                    if let Some(&repaired) =
+                        stream.repairs_by_rtx.get(&acknowledgement.sequence_number)
+                    {
+                        if acknowledgement.arrived {
+                            report.received.push((ssrc, repaired));
+                        } else {
+                            report.lost.push((ssrc, repaired));
+                        }
+                    }
+                }
+            }
+        }
+        report
+    }
+
     /// Handle a NACK request by queuing retransmissions.
     fn handle_nack(
         &mut self,
@@ -1353,6 +1407,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             self.retransmissions_left(now, &notice);
         }
 
+        // What RFC 8888 feedback reports on the RTX streams: read here, where the sequence
+        // number each RTX packet was given is known.
+        if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
+            let report = self.ccfb_report(rtcp_packets);
+            if !report.received.is_empty() || !report.lost.is_empty() {
+                self.repairs_reported(now, &report);
+                self.release(now);
+            }
+        }
+
         // What transport-wide feedback reported on the retransmissions.
         if let Some(report) = msg.message.custom::<crate::RetransmissionsReported>() {
             let report = report.clone();
@@ -1536,6 +1600,8 @@ impl Interceptor for NackResponderInterceptor {
                     retransmit_budget: usize::from(self.size),
                     retransmit_budget_max: usize::from(self.size),
                     sent_at: vec![None; usize::from(self.size).max(1)],
+                    repairs_by_rtx: HashMap::new(),
+                    repairs_order: VecDeque::new(),
                 },
             );
         }
