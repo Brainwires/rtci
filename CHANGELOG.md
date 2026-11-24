@@ -135,9 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
-- **stream-driver** (mdns-4): with mDNS `QueryAndGather` the driver binds the host's mDNS sockets when its connection begins gathering, before the first host candidates (before: at the first mDNS datagram), and tells the connection for which address families it has none (`RTCPeerConnection::set_multicast_dns_publishing`). The names of host addresses of such a family are not registered: their candidates go out under a `.local` name that is not published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1), or not at all with `with_multicast_dns_fail_closed(true)`. Before, the name was registered and announced into a socket that did not exist.
-- **ice** (mdns-4): a host candidate whose mDNS name cannot be registered keeps one unpublished name per address (its UDP and TCP candidates share it, section 3.1.1 steps 2 and 5); before, each candidate past the cap of 64 names got a name of its own. No `QueryAndGather` path writes the literal address any more except the fixed-IP mode's other addresses (the agent without an mDNS connection used to, a path that `Agent::new` never takes).
-- **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
 - **`rtci-stream-driver` marks what it sends (RFC 8835 section 4.2 SHOULD, RFC 8837).**
   `PeerDriver` sets `IP_TOS` / `IPV6_TCLASS` on its UDP socket before each datagram whose byte
   differs from the last (the new `RTCPeerConnection::traffic_class`: the RFC 8837 DSCP with the
@@ -155,6 +152,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
   `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
   packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
+
+- **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
+  6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
+  4.1 asks ("attempt to approximate this information"), where it had no header extension
+  before; other extensions of the RED packet are still left out.
+
+- **fec** (fec-12): a FEC session's m= section (RFC 5109 section 14.1, `add_fec_session`)
+  states the per-packet congestion feedback the media sections state for the kind: the
+  transport-wide sequence number extension (`a=extmap:1`, its own id in a section of its own)
+  with `a=rtcp-fb:<pt> transport-cc`, and `a=rtcp-fb:<pt> ack ccfb` (RFC 8888), and an
+  answerer keeps one of them (RFC 8888 section 6), RFC 8888 when both sides state it as for
+  the media, the extension under the offer's id. The FEC session's packets then
+  carry the transport-wide sequence number of their own transport and are reported on, so that
+  transport's congestion controller (each transport is a path, RFC 8836 section 2) has the
+  feedback it ran without before. A section without these lines (an earlier peer) is taken as
+  before: no extension, no feedback.
+- **congestion control (GCC), the over-use detector's threshold adapts over the arrival
+  gaps** (`conf/gcc-9-draft-threshold-time-base`): draft-ietf-rmcat-gcc-02 section 5.4,
+  `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)|-del_var_th(i-1))`, t(i)
+  the arrival time of group i, is now the default (`ThresholdTimeBase::Arrival`, for `Gcc`,
+  `DefaultInterceptorOptions::gcc_threshold_time_base` and the `Rfc` profile row
+  `gcc.threshold-time-base`). The earlier default, the gap between the readings on the
+  sender's clock capped at 100 ms, stays as `ThresholdTimeBase::Departure` (a setting, no
+  profile selects it); `Chrome` keeps libwebrtc's capped arrival gap (`ArrivalCapped`). It was
+  kept as the default because it measured better; since the draft's decrease on every update
+  (0.1.0) it no longer does. Measured (`rtci-interceptor/tests/rfc8836_multi_flow.rs`, hosted
+  run 45416144506, against Departure): two flows on one bottleneck share 0.48 / 0.50 with a
+  queueing delay of 2.9 ms mean and 11.0 ms p95 (0.49 / 0.49, 18.5 and 93.2 ms); a late flow
+  0.49 (0.50); beside a TCP-like transfer 0.33 of the path with a 0.05 s buffer (0.25) and
+  **0.14 with a 0.2 s buffer (0.22): the cost**, above the tests' bound of 0.05. The
+  capacity-cap call (`tests/capacity_cap_video_rtc2rtc.rs`, six seeds on three wall clocks,
+  hosted run 45416130268 against 0.1.0's 45407054812): without a pacer freeze, oldest picture
+  and retransmissions unchanged, 249 to 281 kbit/s under the 300 kbit/s cap (246 to 252),
+  1101 to 1501 kbit/s on average 15 to 25 s after it (1060 to 1363); with the pacer freeze
+  0.97 to 1.87 s (0.97 to 1.91), oldest picture 6.01 to 9.83 s (5.56 to 10.23), 94 to 106
+  retransmissions (90 to 104), 154 to 231 kbit/s under the cap (122 to 230), recovery 862 to
+  2500 kbit/s (646 to 2500). The lossy reordering sweep (48 cells) is unchanged but for two
+  cells of 100 ms reordering at 2 Mbit/s, higher (1 %: 331 -> 340 kbit/s, 5 %: 100 -> 218);
+  the rate-limited link 574 / 539 / 535 kbit/s (574 / 538 / 535). Audit row GCC-5.4-4 is
+  `tested`.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
@@ -282,6 +320,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+- **ice** (`conf/ice-25-mdns-tcp-candidate`, also in 0.1.0): a TCP host candidate whose
+  address is an mDNS name was built as a UDP candidate (`CandidateHostConfig::new_candidate_host`
+  gave every `.local` candidate `NetworkType::Udp4`), so the agent's own ICE-TCP candidates
+  under `QueryAndGather` were signalled `… 1 udp … <uuid>.local 35225 typ host tcptype passive`
+  and a peer's `tcp … .local` candidate was taken for UDP: two publishing peers had no ICE-TCP
+  path. It now keeps its transport (RFC 6544 section 4.5; draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1 step 6 replaces only the address), and resolves to `Tcp4` / `Tcp6`. Tests
+  `candidate_test.rs::test_tcp_host_candidate_under_an_mdns_name_is_signalled_as_tcp`,
+  `to_json_of_a_tcp_candidate_under_an_mdns_name_says_tcp`. Engine behaviour change (SDP).
 
 ### Changed
 
@@ -447,6 +494,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says whether an address's host candidates were withheld. `rtci-stream-driver`'s
   `PeerDriver` does it by itself, and `PeerDriverConfig::mdns_sockets` (`true` by default)
   turns its mDNS sockets off.
+- **fec** (fec-15): libwebrtc's ULPFEC form for the pacer-written extensions, a `Chrome`
+  profile row (`fec.ulpfec-zero-mutable-extensions`, `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`):
+  `UlpfecSendBuilder::with_mutable_extensions_zeroed` protects the transport-wide sequence
+  number, abs-send-time and toffset values as zeros (libwebrtc computes its FEC before it
+  writes them, `RtpSenderEgress::SendPacket` @ a222406d) and
+  `UlpfecReceiveBuilder::with_mutable_extensions_zeroed` zeroes them in the decoder's copies
+  (`ZeroMutableExtensions`), so a packet rebuilt on either side is exact with those values
+  zero. `configure_video_red_ulpfec_with(registry, media_engine, zero)`; the `Chrome` profile's
+  chain has it on. `Rfc` keeps RFC 5109 section 8's FEC over the packet as sent.
+
+- **fec** (fec-13): RFC 8854 section 5.2's `video/flexfec` in the offer as a setting:
+  `DefaultInterceptorOptions::video_flexfec` / `configure_video_flexfec` registers
+  `video/flexfec` (payload type 49, `repair-window=10000000`) and runs the RFC 8627 coder in the
+  standard chain at slots of its own (`FLEXFEC_ENCODER_SLOT` 5_100, `FLEXFEC_WIRE_IMAGE_SLOT`
+  1_510, `FLEXFEC_DECODER_SLOT` 10_310), beside ULPFEC's, so a chain can run both. On in the
+  `StrictRfc` profile (row `fec.video-flexfec`); off by default and in `Chrome`, because RFC 8627
+  section 1.1.7 has an answerer offered FlexFEC and RTX answer with FlexFEC only, which would
+  leave two default peers without RTX (audit row RFC8854-5.2-1, `conflict`). No change to the
+  default's offers.
+
+- **ULPFEC across an SRTP key change** (RFC 5109 section 11, row RFC5109-11-3 untested ->
+  tested): `tests/ulpfec_across_srtp_rekeying_rtc2rtc.rs` sends a FEC block whose first media
+  packet leaves under one DTLS association's keys and whose second media packet and FEC
+  packet leave under a new association's (`renew_dtls_association`), after the receiver
+  dropped the old keys; whichever media packet the network loses is rebuilt. No engine
+  change.
+- **Browser cell: the engine's ULPFEC in RED rebuilt by the browser.** `scenarios.spec.mjs`
+  has Rust send VP8 in RED with ULPFEC (the `Chrome` profile's form), NACK off on both sides,
+  and checks that the browser decodes every frame although Rust's sender discarded every
+  tenth media packet after the FEC protected it (`examples/interop-peer`
+  `?drop_video_every=N`, reported as `videoDropped`). The earlier finding that Chromium does
+  not rebuild from the engine's FEC was wrong: the packets are byte for byte what libwebrtc's
+  `UlpfecReceiver` reads, and Chromium rebuilds from them; the earlier cell's threshold under
+  random netem loss failed on frames whose media and FEC packets were both dropped (VP8
+  without NACK then waits for a key frame). The browser offers VP8, red and ulpfec only
+  (`setCodecPreferences`): as offerer Firefox otherwise also receives the VP9 and AV1 it
+  offered, with its default NACK, and turns NACK on for the whole receive stream. Firefox
+  rebuilds every dropped packet too; it never decodes the fixture's first group of pictures in
+  that cell, loss or not, which its column leaves out. No engine change.
 - **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
   section 6.2): `FlexFec03Encoder` builds no repair packet larger than
   `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
@@ -520,23 +606,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tiebreaker stays for the agent's life, as before and as in libwebrtc. Test: `rtci-ice`
   `agent_rfc8445_test.rs::test_ice_restart_draws_a_new_tie_breaker_only_when_configured`.
   RFC8445-16.1-4 is `tested`.
-- **mDNS host candidates can fail closed (mdns-4, MDNSICE-3.1.1-6).** With mDNS
-  `QueryAndGather`, a host candidate whose name cannot be registered (the application has no
-  mDNS socket for its address family, or the agent holds the most names it can, 64) goes out,
-  by default, under a `.local` name that is not published: draft-ietf-mmusic-mdns-ice-candidates
-  section 3.1.1, "the ICE agent SHOULD still provide mDNS candidates in step 6 even if the
-  local network does not support mDNS or mDNS registration fails in step 4".
-  `SettingEngineBuilder::with_multicast_dns_fail_closed(true)` (`AgentConfig::multicast_dns_fail_closed`)
-  provides no host candidate for such an address instead, UDP or TCP, for an embedder that
-  must never offer a candidate its peer cannot resolve; its server-reflexive candidates are
-  still gathered (raddr `0.0.0.0` rport 9). The literal address is written in neither case.
-  An application with sockets of its own says which families it can send mDNS on with
-  `RTCPeerConnection::set_multicast_dns_publishing(MulticastDnsPublishing { ipv4, ipv6 })`
-  (`Agent::set_multicast_dns_publishing`) before it adds host candidates;
-  `RTCPeerConnection::multicast_dns_mode` reads the mode; `Agent::multicast_dns_withholds`
-  says whether an address's host candidates were withheld. `rtci-stream-driver`'s
-  `PeerDriver` does it by itself, and `PeerDriverConfig::mdns_sockets` (`true` by default)
-  turns its mDNS sockets off.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
@@ -608,6 +677,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   webrtc-rs/webrtc#954 (webrtc-rs/rtc#283), in an application's gatherer there. No engine
   behaviour change.
 
+- **interceptor** (fec-13): the RFC 8627 FlexFEC encoder no longer takes a retransmission on
+  the media SSRC (a NACK answered without RTX, as after an answer that kept only FlexFEC, RFC
+  8627 section 1.1.7) into its current block: its old sequence number broke the run of
+  consecutive source packets, and the block went unprotected.
+
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
   performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
@@ -631,34 +705,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
   unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
   delivered from such a packet).
-
-### Known limits
-
-- **congestion control, default (paced) chain: a sudden capacity drop can freeze the video for
-  more than 2 s** (`tests/capacity_cap_video_rtc2rtc.rs`, the 300 kbit/s cap arriving at
-  2.5 Mbit/s). Over 108 runs (six seeds, three wall clocks, six perturbations of incidental wire
-  sizes and seeded draws) the longest freeze is 0.88 to 2.31 s (median 1.35 s) and 1 run is
-  over the 2 s the test requires (4 of 108, 2.10 to 2.28 s, before train 24; one of them a seed
-  `RTC_CAP_FULL` runs, so the full matrix failed then). Not a regression of train 23:
-  `conf/jsep-75-session-version` draws the `o=` session id from the crypto provider, which the
-  test seeds, and that one draw moved every seeded figure (with the draw removed every cell is
-  train 22's again). The freeze is the repair of the drop's losses inside the pacer's pause;
-  `conf/rtx-2r-smooth-limiter` (with `conf/rtx-1r-duplicate-repairs`) brings all 108 runs to
-  0.75 to 1.28 s.
-
-### Testing
-
-- **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
-  `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
-  bytes; one or two seeded draws dropped first), `RTC_CAP_RULES=default` and runs side by side.
-  Each bound says whether it is a requirement (the 2 s freeze: unchanged everywhere) or a
-  tripwire, set at the ensemble's most measured and some 15 %: without a pacer at a 1 Mbit/s
-  target, oldest picture 3.5 s (4 s under `UpToTarget`) -> 2.9 s and retransmissions 100 -> 63;
-  the cap after 20 s, oldest picture 5.5 -> 6.1 s (one draw per seed had put it 4 % over the
-  most measured) and retransmissions 130 -> 122; the paced test, retransmissions 130 -> 127.
-  The paced test's recovery is measured from the lowest target of the first second after the
-  lift; its ordinary seeds are 1 and 4 (the ensemble's medians; seed 2 was among its mildest),
-  and it reports every failing seed, not the first.
 
 ## [0.1.0] - 2026-11-24
 
