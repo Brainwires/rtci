@@ -283,6 +283,7 @@ fn unreliable_channel_loses_without_retransmitting() {
     let Delivery {
         got,
         drained_after,
+        sender_at_open,
         sender_at_drain,
         sender_at_end,
     } = send_numbered(
@@ -299,6 +300,7 @@ fn unreliable_channel_loses_without_retransmitting() {
     let drained_after = drained_after.expect("the send queue never drained");
     let mut at_drain = sender_at_drain.expect("no live association when the queue drained");
     let mut at_end = sender_at_end.expect("no live association at the end");
+    let mut at_open = sender_at_open.expect("no live association at the first send");
     let t3 = at_drain.get_num_t3timeouts();
     let t3_wait = at_drain.get_t3_wait();
     // The part of the drain the retransmission timer does not account for: sending, round
@@ -309,12 +311,13 @@ fn unreliable_channel_loses_without_retransmitting() {
     eprintln!(
         "unreliable: {} of 1000 delivered over a 10%-loss link (each way), queue drained after \
          {drained_after:?}: {t3} T3-rtx expiries waiting {t3_wait:?} (mean {:?}), rest {rest:?}; \
-         fast retransmits {}, retransmissions {}, abandoned messages {} (end {}), FORWARD TSNs {} \
-         (end {})",
+         losses found by Fast Retransmit {}, retransmissions {} (before the first message {}), \
+         abandoned messages {} (end {}), FORWARD TSNs {} (end {})",
         unique.len(),
         t3_wait.checked_div(t3 as u32).unwrap_or_default(),
-        at_drain.get_num_fast_retrans(),
+        at_drain.get_num_fast_retrans_abandoned(),
         at_drain.get_num_retransmissions(),
+        at_open.get_num_retransmissions(),
         at_drain.get_num_abandoned_messages(),
         at_end.get_num_abandoned_messages(),
         at_drain.get_num_forward_tsns(),
@@ -330,13 +333,14 @@ fn unreliable_channel_loses_without_retransmitting() {
         "{} of 1000 delivered over a 10%-loss link; expected 800 to 960",
         unique.len()
     );
-    // "Without retransmitting", counted: no DATA chunk went twice (max_retransmits 0, RFC 7496
-    // 3.1), by T3-rtx or by Fast Retransmit.
-    assert_eq!(0, at_end.get_num_retransmissions(), "DATA was sent again");
+    // "Without retransmitting", counted: no DATA chunk of the channel's messages went twice
+    // (max_retransmits 0, RFC 7496 3.1), by T3-rtx or by Fast Retransmit. Counted from the
+    // first message: the DATA_CHANNEL_OPEN before it is sent reliably (RFC 8832 5) and is
+    // retransmitted when it is lost.
     assert_eq!(
-        0,
-        at_end.get_num_fast_retrans(),
-        "DATA was fast retransmitted"
+        at_open.get_num_retransmissions(),
+        at_end.get_num_retransmissions(),
+        "DATA of the channel was sent again"
     );
     // Every message that did not arrive was given up by the sender and skipped with FORWARD
     // TSN (RFC 3758 3.5 A2, C3): what is lost is abandoned, not left outstanding. A message
