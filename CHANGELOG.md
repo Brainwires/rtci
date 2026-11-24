@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
+  section 6.2): `FlexFec03Encoder` builds no repair packet larger than
+  `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
+  16-octet SRTP tag; `with_max_packet_size` sets another); the block goes without it and the
+  repair stream's sequence numbers skip nothing. Engine behaviour change only for media
+  packets above about 1400 octets.
 - **RFC 8854 audit** (`docs/conformance/audit/rfc8854.md`): 23 rows (MUST 3 tested, 1 n/a;
   SHOULD 6 tested, 6 partial, 2 missing, 3 n/a; MAY 1 tested, 1 missing), and a test that no
   behaviour profile offers a FEC-only m= section (section 5.2).
