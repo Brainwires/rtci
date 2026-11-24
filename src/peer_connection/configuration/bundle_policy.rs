@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = RTCConfigurationBuilder::new()

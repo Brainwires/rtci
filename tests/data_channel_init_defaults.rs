@@ -13,8 +13,8 @@
 //! [W3C `RTCDataChannelInit`]: https://www.w3.org/TR/webrtc/#dom-rtcdatachannelinit
 
 use anyhow::Result;
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
 use std::time::Instant;
 
 #[test]

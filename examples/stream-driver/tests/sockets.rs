@@ -1,10 +1,10 @@
 //! The driver's server-side socket choices on real sockets: port ranges, the local address
 //! list, and a passive ICE-TCP port shared by several engines.
 
-use rtc_stream_driver::sockets::{
+use rtci_stream_driver::sockets::{
     AddressFilter, PortRange, accept_by_ufrag, bind_tcp_listener_in_range, bind_udp_in_range,
 };
-use rtc_stream_driver::{DriverConfig, DriverInput, StreamDriver};
+use rtci_stream_driver::{DriverConfig, DriverInput, StreamDriver};
 use shared::stream::{Framing, StreamCommand, StreamEvent, StreamTable};
 use std::net::IpAddr;
 use std::time::Duration;

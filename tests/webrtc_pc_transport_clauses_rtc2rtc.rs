@@ -8,14 +8,14 @@ mod dc_common;
 use anyhow::Result;
 use dc_common::{Pair, Peer};
 use dtls::cipher_suite::CipherSuiteId;
-use rtc::crypto::SignatureScheme;
-use rtc::peer_connection::certificate::RTCCertificate;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::rtc_error::RTCErrorDetailType;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCIceRole, RTCIceTransportState};
+use rtci::crypto::SignatureScheme;
+use rtci::peer_connection::certificate::RTCCertificate;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCIceRole, RTCIceTransportState};
 use std::time::{Instant, SystemTime};
 
 fn engine(role: RTCDtlsRole) -> SettingEngineBuilder {
@@ -39,7 +39,7 @@ fn ice_role(peer: &Peer) -> Option<RTCIceRole> {
 /// the peer's DTLS transport reports it as the remote certificate.
 #[test]
 fn of_several_certificates_the_first_is_presented() -> Result<()> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let now = SystemTime::now();
     let first = RTCCertificate::generate_certificate(
         provider.crypto(),
@@ -204,7 +204,7 @@ fn a_dtls_failure_this_side_ended_names_the_alert_it_sent() -> Result<()> {
 /// description carries them, and DTLS completes with it, the peer seeing that certificate.
 #[test]
 fn a_reimported_pem_certificate_keeps_its_fingerprint_and_completes_dtls() -> Result<()> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let now = SystemTime::now();
     let original = RTCCertificate::generate_certificate(
         provider.crypto(),

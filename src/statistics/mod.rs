@@ -38,9 +38,9 @@
 //! # Examples
 //!
 //! ```
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::rtp_transceiver::RTCRtpSenderId;
-//! use rtc::statistics::StatsSelector;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::rtp_transceiver::RTCRtpSenderId;
+//! use rtci::statistics::StatsSelector;
 //! use std::time::Instant;
 //!
 //! # fn example(pc: &mut RTCPeerConnection, sender_id: RTCRtpSenderId) {

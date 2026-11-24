@@ -5,7 +5,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 fn offer(ls_group: &str) -> String {
     crlf(&format!(

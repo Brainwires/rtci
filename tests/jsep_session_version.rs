@@ -7,7 +7,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, video_track};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 /// (everything of the `o=` line but the version, the version).
 fn origin(sdp: &str) -> (String, u64) {
@@ -39,7 +39,7 @@ fn the_session_version_goes_up_by_one_with_each_changed_description() -> TestRes
     // A changed offer: one more, same session.
     a.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let second = a.create_offer(None)?;
     assert_eq!(origin(&second.sdp), (session.clone(), version + 1));
@@ -89,13 +89,13 @@ fn a_remote_origin_beyond_64_bits_is_accepted() -> TestResult {
     };
     b.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(long("18446744073709551616"))?,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(long("18446744073709551616"))?,
     )?;
     let answer = b.create_answer(None)?;
     b.set_local_description(Instant::now(), answer)?;
     b.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(long("18446744073709551617"))?,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(long("18446744073709551617"))?,
     )?;
     let answer = b.create_answer(None)?;
     assert!(answer.sdp.contains("m=video"), "{}", answer.sdp);

@@ -20,8 +20,8 @@
 //!
 //! ```
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Simple configuration with STUN server
@@ -46,8 +46,8 @@
 //! ## STUN and TURN Servers
 //!
 //! ```
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::configuration::RTCIceServer;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::configuration::RTCIceServer;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = RTCConfigurationBuilder::new()
@@ -73,8 +73,8 @@
 //! ## Force TURN/Relay Only (Privacy Mode)
 //!
 //! ```
-//! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
-//! use rtc::peer_connection::configuration::RTCIceServer;
+//! use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+//! use rtci::peer_connection::configuration::RTCIceServer;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Only use TURN relays, hide local IP addresses
@@ -96,10 +96,10 @@
 //! ## Custom Certificate
 //!
 //! ```
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let provider = crypto::default_provider()?;
@@ -120,7 +120,7 @@
 //! ## Bundle Policy Configuration
 //!
 //! ```
-//! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
+//! use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Only the first m= section of an initial offer carries a transport
@@ -134,7 +134,7 @@
 //! ## RTCP Multiplexing
 //!
 //! ```
-//! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
+//! use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Require RTCP-mux (standard for modern WebRTC)
@@ -148,16 +148,16 @@
 //! ## Complete Configuration
 //!
 //! ```
-//! use rtc::peer_connection::configuration::{
+//! use rtci::peer_connection::configuration::{
 //!     RTCConfigurationBuilder,
 //!     RTCBundlePolicy,
 //!     RTCRtcpMuxPolicy,
 //!     RTCIceTransportPolicy,
 //! };
-//! use rtc::peer_connection::configuration::RTCIceServer;
-//! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rtc::crypto::{self, SignatureScheme};
-//! use rtc::peer_connection::certificate::CertificateParams;
+//! use rtci::peer_connection::configuration::RTCIceServer;
+//! use rtci::peer_connection::certificate::RTCCertificate;
+//! use rtci::crypto::{self, SignatureScheme};
+//! use rtci::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let provider = crypto::default_provider()?;
@@ -502,7 +502,7 @@ pub const MAX_ICE_SERVERS: usize = 32;
 /// ## Basic configuration with STUN
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = RTCConfigurationBuilder::new()
@@ -520,7 +520,7 @@ pub const MAX_ICE_SERVERS: usize = 32;
 /// ## TURN server with credentials
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = RTCConfigurationBuilder::new()
@@ -540,7 +540,7 @@ pub const MAX_ICE_SERVERS: usize = 32;
 /// ## Relay-only (privacy mode)
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{
+/// use rtci::peer_connection::configuration::{
 ///     RTCConfigurationBuilder,
 ///     RTCIceServer,
 ///     RTCIceTransportPolicy
@@ -565,10 +565,10 @@ pub const MAX_ICE_SERVERS: usize = 32;
 /// ## Custom certificate
 ///
 /// ```
-/// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-/// use rtc::peer_connection::certificate::RTCCertificate;
-/// use rtc::crypto::{self, SignatureScheme};
-/// use rtc::peer_connection::certificate::CertificateParams;
+/// use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+/// use rtci::peer_connection::certificate::RTCCertificate;
+/// use rtci::crypto::{self, SignatureScheme};
+/// use rtci::peer_connection::certificate::CertificateParams;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 ///     let provider = crypto::default_provider()?;
@@ -602,7 +602,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    /// use rtci::peer_connection::configuration::RTCConfigurationBuilder;
     ///
     /// let config = RTCConfigurationBuilder::new().build();
     /// ```
@@ -618,7 +618,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+    /// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
     ///
     /// let config = RTCConfigurationBuilder::new()
     ///     .with_ice_servers(vec![
@@ -649,7 +649,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+    /// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
     ///
     /// // Privacy mode - only use TURN relays
     /// let config = RTCConfigurationBuilder::new()
@@ -680,7 +680,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
+    /// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
     ///
     /// let config = RTCConfigurationBuilder::new()
     ///     .with_bundle_policy(RTCBundlePolicy::MustBundle)
@@ -700,7 +700,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
+    /// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
     ///
     /// let config = RTCConfigurationBuilder::new()
     ///     .with_rtcp_mux_policy(RTCRtcpMuxPolicy::Require)
@@ -719,7 +719,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    /// use rtci::peer_connection::configuration::RTCConfigurationBuilder;
     ///
     /// let config = RTCConfigurationBuilder::new()
     ///     .with_peer_identitys("peer@example.com".to_string())
@@ -738,10 +738,10 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-    /// use rtc::peer_connection::certificate::RTCCertificate;
-    /// use rtc::crypto::{self, SignatureScheme};
-    /// use rtc::peer_connection::certificate::CertificateParams;
+    /// use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+    /// use rtci::peer_connection::certificate::RTCCertificate;
+    /// use rtci::crypto::{self, SignatureScheme};
+    /// use rtci::peer_connection::certificate::CertificateParams;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let provider = crypto::default_provider()?;
@@ -770,7 +770,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    /// use rtci::peer_connection::configuration::RTCConfigurationBuilder;
     ///
     /// let config = RTCConfigurationBuilder::new()
     ///     .with_ice_candidate_pool_size(5)
@@ -803,7 +803,7 @@ impl RTCConfigurationBuilder {
     /// # Examples
     ///
     /// ```
-    /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    /// use rtci::peer_connection::configuration::RTCConfigurationBuilder;
     ///
     /// let config = RTCConfigurationBuilder::new().build();
     /// ```

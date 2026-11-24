@@ -1,4 +1,4 @@
-//! A sender sends once negotiated, between two `rtc` peer connections in virtual time, for
+//! A sender sends once negotiated, between two `rtci` peer connections in virtual time, for
 //! each way the W3C object model makes one (webrtc-pc 5.1 addTrack, 4.4.1.6 a remote offer's
 //! transceiver, RFC 9429 5.7 rollback): the transceiver `add_track` created, one a remote
 //! offer created and `add_track` then took, and one whose offer was rolled back (glare)
@@ -7,25 +7,25 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -259,8 +259,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: pt,
                             sequence_number: 1000 + n,

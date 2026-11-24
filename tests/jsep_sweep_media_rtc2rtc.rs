@@ -1,4 +1,4 @@
-//! Rows of the sweep (jsep12) that need media between two connected `rtc` peers in virtual
+//! Rows of the sweep (jsep12) that need media between two connected `rtci` peers in virtual
 //! time: what the sender puts on the wire follows the negotiated formats of its own section
 //! (RFC 3264 sections 8.3.2, 8.3.4; RFC 9143 section 9.1).
 
@@ -7,11 +7,11 @@ mod dtls_sdp_common;
 use anyhow::Result;
 use bytes::Bytes;
 use dtls_sdp_common::{Peer, World, keep};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MIME_TYPE_VP9};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MIME_TYPE_VP9};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use std::time::Duration;
@@ -102,8 +102,8 @@ fn write(
         let mut s = world.peers[0].pc.rtp_sender(sender).expect("the sender");
         s.write_rtp(
             now,
-            rtc::rtp::Packet {
-                header: rtc::rtp::header::Header {
+            rtci::rtp::Packet {
+                header: rtci::rtp::header::Header {
                     version: 2,
                     payload_type,
                     sequence_number: first + n,
@@ -172,7 +172,7 @@ fn the_sender_follows_a_new_answer(codec: RTCRtpCodec) -> Result<()> {
     if named {
         // An encoding that names a codec makes it the transceiver's preference; the
         // application lists VP9 too, so that an answer without VP8 still has a format.
-        let codecs: Vec<rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters> = world.peers[0]
+        let codecs: Vec<rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters> = world.peers[0]
             .pc
             .rtp_sender(sender)
             .expect("the sender")
@@ -186,7 +186,7 @@ fn the_sender_follows_a_new_answer(codec: RTCRtpCodec) -> Result<()> {
                     .any(|m| c.mime_type.eq_ignore_ascii_case(m))
             })
             .map(
-                |rtp_codec| rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                |rtp_codec| rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
                     rtp_codec,
                     payload_type: 0,
                 },
@@ -194,7 +194,7 @@ fn the_sender_follows_a_new_answer(codec: RTCRtpCodec) -> Result<()> {
             .collect();
         world.peers[0]
             .pc
-            .rtp_transceiver(rtc::rtp_transceiver::RTCRtpTransceiverId::from(sender))
+            .rtp_transceiver(rtci::rtp_transceiver::RTCRtpTransceiverId::from(sender))
             .expect("the transceiver")
             .set_codec_preferences(codecs)?;
     }
@@ -378,8 +378,8 @@ fn a_rejected_stream_gets_neither_media_nor_rtcp() -> Result<()> {
         if let Some(mut s) = world.peers[0].pc.rtp_sender(sender) {
             let _ = s.write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: vp8,
                         sequence_number: 300 + n,
@@ -418,7 +418,7 @@ fn rtcp_datagrams(peer: &Peer, from: usize) -> usize {
 /// inactive both ways, RTCP keeps going out from both peers.
 #[test]
 fn recvonly_and_inactive_endpoints_still_send_rtcp() -> Result<()> {
-    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
     let mut world = World::new(
         Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
         Peer::new("10.0.0.2:5000", SettingEngineBuilder::new().build())?,
@@ -560,8 +560,8 @@ fn no_rtp_goes_out_for_a_simulcast_layer_the_answer_removed() -> Result<()> {
             let mut s = world.peers[0].pc.rtp_sender(sender).expect("the sender");
             let _ = s.write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: vp8,
                         sequence_number: 100 + n,

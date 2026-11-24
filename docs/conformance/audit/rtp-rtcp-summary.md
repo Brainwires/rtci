@@ -136,10 +136,10 @@ MUSTs and items 2, 6 and 7 build on it.
 Each spec file ends with its own "Bugs found" list with `path:line` and a reproduction idea. None
 was reproduced by running. The ones a conformant peer can trigger:
 
-- `rtc-rtcp/src/source_description/mod.rs:72-82,170`: an SDES item type above 8 ends the chunk and
+- `rtci-rtcp/src/source_description/mod.rs:72-82,170`: an SDES item type above 8 ends the chunk and
   the datagram fails to parse.
-- `rtc-rtcp/src/extended_report/mod.rs:285`: a padded XR fails the whole compound packet.
-- `rtc-sdp/src/util/mod.rs:182-194`: `a=rtcp-fb:* ...` is dropped.
+- `rtci-rtcp/src/extended_report/mod.rs:285`: a padded XR fails the whole compound packet.
+- `rtci-sdp/src/util/mod.rs:182-194`: `a=rtcp-fb:* ...` is dropped.
 - `src/peer_connection/sdp/mod.rs:941-942`: `a=rtcp-mux` and `a=rtcp-rsize` written whatever was
   offered, never read; `RTCRtcpMuxPolicy` is dead configuration.
 - `src/peer_connection/sdp/mod.rs:1241`, `handler/interceptor.rs:261-272`: CNAME is the stream id.
@@ -147,29 +147,29 @@ was reproduced by running. The ones a conformant peer can trigger:
   first packet only (a PLI after an empty RR is dropped, or tagged with another track).
 - `src/peer_connection/handler/interceptor.rs:425-452`: repair SSRCs are bound with the primary's
   feedback, so the receiver NACKs gaps between RTX padding probes; NACKs also continue after BYE.
-- `rtc-interceptor/src/nack/responder.rs:323`: RTX sequence numbers restart at 0 on re-bind and
+- `rtci-interceptor/src/nack/responder.rs:323`: RTX sequence numbers restart at 0 on re-bind and
   collide with SRTP's sent index.
-- `rtc-interceptor/src/rtpfb/history.rs:136-157`: a lost TWCC feedback counts its packets as lost.
-- `rtc-rtcp/src/transport_feedbacks/transport_layer_cc/mod.rs`: a valid feedback with an even
+- `rtci-interceptor/src/rtpfb/history.rs:136-157`: a lost TWCC feedback counts its packets as lost.
+- `rtci-rtcp/src/transport_feedbacks/transport_layer_cc/mod.rs`: a valid feedback with an even
   chunk count and no deltas is rejected; reference time not unwrapped.
-- `rtc-interceptor/src/flexfec/coverage.rs:5`: 110 packets allowed in a 109-bit mask; FEC encoder
+- `rtci-interceptor/src/flexfec/coverage.rs:5`: 110 packets allowed in a 109-bit mask; FEC encoder
   runs before the TWCC sender rewrites the packet.
-- `rtc-rtp/src/header/mod.rs:147-176,446-468`: appbits, ID 0 with length, `set_extension` above
+- `rtci-rtp/src/header/mod.rs:147-176,446-468`: appbits, ID 0 with length, `set_extension` above
   ID 14 (reachable from the TWCC sender).
-- `rtc-rtp/src/codec/vp8/mod.rs:136-157,207`: packets under 4 octets refused, stale X/I/L/T/K,
+- `rtci-rtp/src/codec/vp8/mod.rs:136-157,207`: packets under 4 octets refused, stale X/I/L/T/K,
   S bit alone taken as frame start.
-- `rtc-rtp/src/codec/vp9/mod.rs:109-117,149,410`: F flips mid-stream, flexible mode P=0, F
+- `rtci-rtp/src/codec/vp9/mod.rs:109-117,149,410`: F flips mid-stream, flexible mode P=0, F
   honoured with I=0; `fmtp/generic/mod.rs:8-23`: absent `profile-id` matches any profile.
-- `rtc-rtp/src/codec/h265/mod.rs:1157,968-977`: depacketize returns the payload unchanged; TSCI
-  misread. `rtc-rtp/src/codec/h264/mod.rs:174-180,347-357`: parameter sets reordered or lost,
+- `rtci-rtp/src/codec/h265/mod.rs:1157,968-977`: depacketize returns the payload unchanged; TSCI
+  misread. `rtci-rtp/src/codec/h264/mod.rs:174-180,347-357`: parameter sets reordered or lost,
   one-byte NAL units and empty FU-A refused.
-- `rtc-rtp/src/codec/av1/leb128.rs:9-24`, `depacketizer.rs:227-240`: malformed or oversized
+- `rtci-rtp/src/codec/av1/leb128.rs:9-24`, `depacketizer.rs:227-240`: malformed or oversized
   leb128 accepted, W not checked, Z=0 mid-unit packet taken as a frame start.
-- `rtc-interceptor/src/report/sender.rs:300`, `sender_stream.rs:102`,
+- `rtci-interceptor/src/report/sender.rs:300`, `sender_stream.rs:102`,
   `receiver_stream.rs:142-164`: SR for a silent stream, saturating RTP time, late packets and
   duplicates miscounted.
-- `rtc-rtp/src/packetizer/mod.rs:137,144`: MTU below 12 underflows; marker set on every audio
-  packet. `rtc-shared/src/util.rs:63`: payload types 64 to 95 are classified as RTCP.
+- `rtci-rtp/src/packetizer/mod.rs:137,144`: MTU below 12 underflows; marker set on every audio
+  packet. `rtci-shared/src/util.rs:63`: payload types 64 to 95 are classified as RTCP.
 - `src/peer_connection/configuration/media_engine.rs:1178-1218`: the answer echoes the offer's
   fmtp; H.264 payload type 127 is registered twice in the defaults.
 

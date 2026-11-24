@@ -4,13 +4,13 @@
 //! otherwise), and the `url` it was gathered from; any other candidate has no relayProtocol,
 //! and a host candidate no url.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::{
     RTCIceCandidate, RTCIceCandidateInit, RTCIceServerTransportProtocol,
 };
-use rtc::sansio::Protocol;
+use rtci::sansio::Protocol;
 use std::time::Instant;
 
 const RELAY: &str =
@@ -147,7 +147,7 @@ fn under_the_relay_policy_only_relay_candidates_are_surfaced() {
         )
         .build(Instant::now())
         .expect("a peer connection");
-    let surfaced = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+    let surfaced = |pc: &mut rtci::peer_connection::RTCPeerConnection| {
         let mut candidates = vec![];
         while let Some(event) = pc.poll_event() {
             if let RTCPeerConnectionEvent::OnIceCandidateEvent(event) = event
@@ -175,6 +175,6 @@ fn under_the_relay_policy_only_relay_candidates_are_surfaced() {
     assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates[0].typ,
-        rtc::peer_connection::transport::RTCIceCandidateType::Relay
+        rtci::peer_connection::transport::RTCIceCandidateType::Relay
     );
 }

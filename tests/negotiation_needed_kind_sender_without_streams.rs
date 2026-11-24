@@ -5,13 +5,13 @@
 //! negotiate. Comparing the empty set with `-` kept negotiation-needed raised after every
 //! exchange, and an application that honours the event re-offered forever.
 
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters};
-use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters};
+use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use sansio::Protocol;
 use std::time::Instant;
 

@@ -2,7 +2,7 @@
 //! connects; framed messages cross both ways whatever segmentation the kernel applies, the
 //! write window is honoured, and a close and a reset reach the other side.
 
-use rtc_stream_driver::{DriverInput, StreamDriver};
+use rtci_stream_driver::{DriverInput, StreamDriver};
 use shared::stream::{Framing, StreamCommand, StreamConfig, StreamNotice, StreamTable};
 use std::time::Duration;
 

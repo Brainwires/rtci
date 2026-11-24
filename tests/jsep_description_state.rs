@@ -7,8 +7,8 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, video_track};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::shared::error::Error;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::shared::error::Error;
 use sansio::Protocol;
 
 #[test]

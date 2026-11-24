@@ -10,27 +10,27 @@
 //! gives a deadline, and after `handle_timeout` at each deadline `poll_read()` is still
 //! `None` and the connection is still connected.
 //!
-//! Two `rtc` peers on a simulated network, virtual time, no sockets, no interceptors beyond
+//! Two `rtci` peers on a simulated network, virtual time, no sockets, no interceptors beyond
 //! the RTCP session every connection runs (RFC 8834 4.1): the reports it exchanges are its own
 //! and never reach `poll_read`, so any RTCP a sender read would be invented.
 
 use anyhow::{Result, bail};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 

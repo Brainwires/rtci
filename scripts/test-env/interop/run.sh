@@ -22,7 +22,7 @@ ip netns exec open-b "$PEER" --listen 203.0.113.51:8080 --ice-ip 203.0.113.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer.log" 2>&1 &
 PEER_PID=$!
 # The mDNS peer logs every mDNS packet it parses and each answer it takes or refuses.
-RUST_LOG=${RTC_INTEROP_MDNS_LOG:-error,rtc_mdns=trace,rtc_ice::agent=debug} \
+RUST_LOG=${RTC_INTEROP_MDNS_LOG:-error,rtci_mdns=trace,rtci_ice::agent=debug} \
   ip netns exec lan-b "$PEER" --listen 10.99.0.51:8080 --ice-ip 10.99.0.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer-mdns.log" 2>&1 &
 MDNS_PEER_PID=$!

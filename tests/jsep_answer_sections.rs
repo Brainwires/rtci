@@ -12,9 +12,9 @@ use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, mid_of, port_of,
     video_track,
 };
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
 
 fn audio(mid: &str, proto: &str, extra: &str) -> String {
     format!(

@@ -3,14 +3,14 @@
 //! both peer connections report it, whichever side is the DTLS client. A peer that uses no
 //! ALPN (`with_dtls_alpn(false)`) connects all the same, with no protocol selected.
 //!
-//! Two `rtc` peers on a simulated network; virtual time, no sockets.
+//! Two `rtci` peers on a simulated network; virtual time, no sockets.
 
 mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
 
 fn peer(addr: &str, alpn: bool, answering_role: Option<RTCDtlsRole>) -> Result<Peer> {
     let mut setting_engine = SettingEngineBuilder::new().with_dtls_alpn(alpn);

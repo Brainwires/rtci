@@ -7,12 +7,12 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf};
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
 };
 
@@ -203,9 +203,9 @@ a=rtcp-fb:96 nack pli
 /// A PLI goes; a FIR, not negotiated, is refused, unless the departure is configured.
 #[test]
 fn application_feedback_the_section_did_not_negotiate_is_refused() -> TestResult {
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    use rtc::rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
-    use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
+    use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
     let answered = |pc: &mut RTCPeerConnection| -> TestResult {
         pc.set_remote_description(
@@ -216,13 +216,13 @@ fn application_feedback_the_section_did_not_negotiate_is_refused() -> TestResult
         pc.set_local_description(Instant::now(), answer)?;
         Ok(())
     };
-    let pli = || -> Vec<Box<dyn rtc::rtcp::Packet>> {
+    let pli = || -> Vec<Box<dyn rtci::rtcp::Packet>> {
         vec![Box::new(PictureLossIndication {
             sender_ssrc: 0,
             media_ssrc: 1234,
         })]
     };
-    let fir = || -> Vec<Box<dyn rtc::rtcp::Packet>> {
+    let fir = || -> Vec<Box<dyn rtci::rtcp::Packet>> {
         vec![Box::new(FullIntraRequest {
             sender_ssrc: 0,
             media_ssrc: 1234,

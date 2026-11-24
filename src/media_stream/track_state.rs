@@ -22,7 +22,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```
-/// use rtc::media_stream::MediaStreamTrackState;
+/// use rtci::media_stream::MediaStreamTrackState;
 ///
 /// let state = MediaStreamTrackState::Live;
 /// assert_eq!(state.to_string(), "live");

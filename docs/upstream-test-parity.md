@@ -20,9 +20,9 @@ The upstream names are committed in [`upstream-tests/`](upstream-tests/) (one
 `scripts/check-test-parity.py` (the `Test inventory` job in `cargo.yml`) checks that every
 upstream test is accounted for, that every mapped name is a fork test, and that no row is stale
 (a row for a test that has gained a same-named fork test, or that upstream no longer has, fails).
-Crate `.` is the fork's top-level `rtc` crate (`src/`, `tests/`); upstream's `webrtc` crate maps
-to it, and its sub-crates to the `rtc-*` crate of the same protocol (`data` to `rtc-datachannel`,
-`util` to `rtc-shared`).
+Crate `.` is the fork's top-level `rtci` crate (`src/`, `tests/`); upstream's `webrtc` crate maps
+to it, and its sub-crates to the `rtci-*` crate of the same protocol (`data` to `rtci-datachannel`,
+`util` to `rtci-shared`).
 
 Judgements per test, written down: when a mapping is coarse (one fork test covering several
 upstream ones), the fork test still has to fail if the behaviour breaks.

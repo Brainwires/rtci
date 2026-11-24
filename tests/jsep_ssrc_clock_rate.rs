@@ -7,11 +7,11 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::SSRC;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::SSRC;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 

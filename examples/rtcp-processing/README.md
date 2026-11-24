@@ -173,7 +173,7 @@ finishes the walk normally and the terminus reads the mark.
 To send RTCP packets (e.g., PLI for keyframe requests):
 
 ```rust
-use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
 if let Some( mut receiver) = peer_connection.rtp_receiver(receiver_id) {
 receiver.write_rtcp(vec ! [Box::new(PictureLossIndication {

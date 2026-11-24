@@ -4,19 +4,19 @@
 #![allow(dead_code)]
 
 use bytes::BytesMut;
-use rtc::crypto::SignatureScheme;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::certificate::{CertificateParams, RTCCertificate};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{
+use rtci::crypto::SignatureScheme;
+use rtci::interceptor::Registry;
+use rtci::peer_connection::certificate::{CertificateParams, RTCCertificate};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -33,7 +33,7 @@ static CERTIFICATES: OnceLock<Option<[RTCCertificate; 2]>> = OnceLock::new();
 
 pub fn certificate(which: usize) -> Option<RTCCertificate> {
     let certificates = CERTIFICATES.get_or_init(|| {
-        let provider = rtc::crypto::default_provider().ok()?;
+        let provider = rtci::crypto::default_provider().ok()?;
         let make = || {
             RTCCertificate::generate(
                 provider.crypto(),
@@ -54,7 +54,7 @@ pub fn peer(which: usize, seed: u64, answering_role: RTCDtlsRole) -> Option<RTCP
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().ok()?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine).ok()?;
-    let provider = rtc::crypto::fuzzing::deterministic_provider(seed, false).ok()?;
+    let provider = rtci::crypto::fuzzing::deterministic_provider(seed, false).ok()?;
     RTCPeerConnectionBuilder::new()
         .with_configuration(
             RTCConfigurationBuilder::new()
@@ -115,7 +115,7 @@ pub fn deliver(
 /// keeps producing cannot hang the target. Calls `on_event` for each event.
 pub fn drain(
     pc: &mut RTCPeerConnection,
-    mut on_event: impl FnMut(&rtc::peer_connection::event::RTCPeerConnectionEvent),
+    mut on_event: impl FnMut(&rtci::peer_connection::event::RTCPeerConnectionEvent),
 ) {
     let mut budget = 4096;
     while budget > 0 {

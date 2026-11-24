@@ -15,10 +15,10 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values, keep, replace_lines};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCDtlsTransportState;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCDtlsTransportState;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -91,11 +91,11 @@ fn the_tls_id_sits_on_the_first_section_of_each_transport() -> Result<()> {
     let mut world = world()?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange(0)?;
@@ -195,7 +195,7 @@ fn a_new_association_gets_new_tls_ids() -> Result<()> {
     let mut world = world()?;
     let audio = world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let (offer, answer) = world.exchange(0)?;
     let ids = [tls_id(&offer), tls_id(&answer)];
@@ -218,7 +218,7 @@ fn a_new_association_gets_new_tls_ids() -> Result<()> {
 
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let first_try = tls_id(&world.peers[0].pc.create_offer(None)?.sdp);
     assert_ne!(first_try, ids[0], "the offer asks for a new association");
@@ -278,7 +278,7 @@ fn a_malformed_tls_id_is_refused() -> Result<()> {
     let mut offerer = peer("10.0.0.1:5000")?;
     offerer.pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     offerer.pc.create_data_channel("data", None)?;
     let offer = offerer.pc.create_offer(None)?.sdp;

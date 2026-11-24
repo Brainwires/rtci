@@ -1,12 +1,12 @@
 //! RFC 8839 rows of the sweep (jsep13): what the ICE SDP attributes do and do not mean between
-//! two connected `rtc` peers in virtual time.
+//! two connected `rtci` peers in virtual time.
 
 mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values, keep, replace_lines, with_session_line};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
 
 fn world() -> Result<World> {
     Ok(World::new(
@@ -77,8 +77,8 @@ fn credentials_moved_to_the_session_level_are_not_a_restart() -> Result<()> {
 /// the same `c=` lines an offer had just before, while it was `sendrecv`.
 #[test]
 fn hold_is_a_direction_not_a_connection_address() -> Result<()> {
-    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
     let mut world = world()?;
     let transceiver = world.peers[0]
         .pc

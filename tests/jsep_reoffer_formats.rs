@@ -10,7 +10,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
 
 /// The `a=rtpmap` lines of the video section, as `(payload type, encoding name)`.
 fn video_formats(sdp: &str) -> Vec<(u8, String)> {

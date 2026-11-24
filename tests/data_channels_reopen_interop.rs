@@ -18,16 +18,16 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
 
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -142,7 +142,7 @@ async fn a_channel_reopened_on_the_stream_of_one_closed_mid_transfer_gets_every_
     }
     .new_candidate_host()?;
     rtc_pc.add_local_candidate(
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
     )?;
     let offer = rtc_pc.create_offer(None)?;
     rtc_pc.set_local_description(Instant::now(), offer.clone())?;
@@ -161,7 +161,7 @@ async fn a_channel_reopened_on_the_stream_of_one_closed_mid_transfer_gets_every_
         .expect("local description should be set");
     rtc_pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp.clone())?,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp.clone())?,
     )?;
 
     let mut buf = vec![0u8; 2000];

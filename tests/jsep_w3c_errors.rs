@@ -10,7 +10,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 fn video(mid: &str, transport: &str) -> String {
     format!(
@@ -38,7 +38,7 @@ fn a_description_that_fails_the_semantic_checks_is_an_invalid_access_error() -> 
     ] {
         let mut offerer = default_peer()?;
         offerer.add_transceiver_from_kind(
-            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+            rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
             None,
         )?;
         let offer = offerer.create_offer(None)?;

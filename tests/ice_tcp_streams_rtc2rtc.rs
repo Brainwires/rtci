@@ -1,4 +1,4 @@
-//! ICE-TCP built into the engine (RFC 6544, RFC 4571): two `rtc` peers whose application adds
+//! ICE-TCP built into the engine (RFC 6544, RFC 4571): two `rtci` peers whose application adds
 //! only a UDP host candidate and serves the stream interface; the engine gathers the TCP
 //! candidates, opens, frames, reuses and closes the connections. On `tests/stream_net`, an
 //! in-memory network on a virtual clock that cuts every write into random pieces, delays,
@@ -8,16 +8,16 @@ mod stream_net;
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCIceGatheringState;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{StreamCommand, StreamEvent};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCIceGatheringState;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{StreamCommand, StreamEvent};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
 use std::time::{Duration, Instant};
 use stream_net::{Net, Peer, udp_host};
 
@@ -41,7 +41,7 @@ fn peers(net: &Net, settings: impl Fn() -> SettingEngine) -> Vec<Peer> {
 }
 
 /// Offer from peer 0, answer from peer 1, each adds its UDP host candidate.
-fn negotiate(peers: &mut [Peer], net: &Net) -> Result<rtc::data_channel::RTCDataChannelId> {
+fn negotiate(peers: &mut [Peer], net: &Net) -> Result<rtci::data_channel::RTCDataChannelId> {
     let now = net.now;
     let channel = peers[0].pc.create_data_channel("tcp", None)?.id();
     let offer = peers[0].pc.create_offer(None)?;
@@ -62,7 +62,7 @@ fn negotiate(peers: &mut [Peer], net: &Net) -> Result<rtc::data_channel::RTCData
 fn exchange(
     peers: &mut [Peer],
     net: &mut Net,
-    channel: rtc::data_channel::RTCDataChannelId,
+    channel: rtci::data_channel::RTCDataChannelId,
     messages: &[Vec<u8>],
     deadline: Duration,
     mut each: impl FnMut(&mut Net, &mut [Peer]),
@@ -179,7 +179,7 @@ fn reads_cut_into_single_bytes_and_slow_writes_change_nothing() -> Result<()> {
     net.latency = Duration::from_millis(40);
     let mut peers = peers(&net, || {
         SettingEngineBuilder::new()
-            .with_stream_limits(rtc::shared::stream::StreamConfig {
+            .with_stream_limits(rtci::shared::stream::StreamConfig {
                 window: 4096,
                 ..Default::default()
             })
@@ -228,7 +228,7 @@ fn an_ice_restart_does_not_close_the_selected_tcp_connection() -> Result<()> {
     for p in peers.iter_mut() {
         assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("tcp"));
     }
-    let selected: Vec<(usize, rtc::shared::stream::StreamId)> = net
+    let selected: Vec<(usize, rtci::shared::stream::StreamId)> = net
         .conns
         .iter()
         .filter(|c| c.open)
@@ -505,7 +505,7 @@ fn simultaneous_open_candidates_connect_when_passive_ones_cannot() -> Result<()>
         assert_eq!(local.protocol, "tcp");
         assert_eq!(
             local.tcp_type,
-            rtc::peer_connection::transport::RTCIceTcpCandidateType::SimultaneousOpen,
+            rtci::peer_connection::transport::RTCIceTcpCandidateType::SimultaneousOpen,
             "the S-O / S-O pair (RFC 6544 6.2)"
         );
     }
@@ -534,7 +534,7 @@ fn a_refused_connection_fails_its_pair_at_once() -> Result<()> {
         .candidate_pairs()
         .filter(|p| {
             p.state
-                == rtc::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState::Failed
+                == rtci::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState::Failed
         })
         .count();
     assert!(
@@ -573,7 +573,7 @@ fn a_frame_that_is_neither_stun_dtls_nor_rtp_resets_its_connection() -> Result<(
 
 #[test]
 fn no_stream_command_when_tcp_gathering_is_off_or_the_policy_is_relay() -> Result<()> {
-    use rtc::peer_connection::configuration::RTCIceTransportPolicy;
+    use rtci::peer_connection::configuration::RTCIceTransportPolicy;
     let off = SettingEngineBuilder::new()
         .with_tcp_candidate_gathering(false)
         .build();
@@ -670,12 +670,12 @@ fn an_application_that_never_serves_streams_gets_no_tcp_candidate_and_ends_gathe
     Ok(())
 }
 
-/// `with_nat_1to1_ips` (a server behind a 1:1 NAT, rtc-ice's external IP mapper) reaches the
+/// `with_nat_1to1_ips` (a server behind a 1:1 NAT, rtci-ice's external IP mapper) reaches the
 /// engine's own TCP candidates: with the `Host` type they are announced on the external
 /// address, with `Srflx` a server-reflexive candidate is added beside each.
 #[test]
 fn nat_1to1_addresses_apply_to_the_engines_tcp_candidates() -> Result<()> {
-    use rtc::peer_connection::transport::RTCIceCandidateType;
+    use rtci::peer_connection::transport::RTCIceCandidateType;
     for (kind, expect_host, expect_srflx) in [
         (RTCIceCandidateType::Host, true, false),
         (RTCIceCandidateType::Srflx, false, true),
@@ -735,10 +735,10 @@ fn nat_1to1_addresses_apply_to_the_engines_tcp_candidates() -> Result<()> {
 fn negotiate_two_transports(
     peers: &mut [Peer],
     net: &Net,
-) -> Result<rtc::data_channel::RTCDataChannelId> {
-    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-    use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+) -> Result<rtci::data_channel::RTCDataChannelId> {
+    use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
     let now = net.now;
     peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
@@ -759,7 +759,7 @@ fn negotiate_two_transports(
         .collect();
     peers[1].pc.set_remote_description(
         now,
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(unbundled)?,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(unbundled)?,
     )?;
     let answer = peers[1].pc.create_answer(None)?;
     peers[1].pc.set_local_description(now, answer.clone())?;
@@ -785,8 +785,8 @@ fn negotiate_two_transports(
 }
 
 fn max_compat_peers(net: &Net, settings: impl Fn() -> SettingEngine) -> Result<Vec<Peer>> {
-    use rtc::peer_connection::configuration::RTCBundlePolicy;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::RTCBundlePolicy;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
     let mut peers = vec![];
     for (i, policy) in [RTCBundlePolicy::MaxCompat, RTCBundlePolicy::Balanced]
         .into_iter()
@@ -865,7 +865,7 @@ fn every_transport_of_an_unbundled_connection_gathers_and_connects_over_tcp() ->
     Ok(())
 }
 
-/// A driver that shares one passive ICE-TCP port (`rtc-stream-driver`'s `shared_passive`)
+/// A driver that shares one passive ICE-TCP port (`rtci-stream-driver`'s `shared_passive`)
 /// gives both transports' passive candidates the same address and reports every accept on
 /// one listener. The engine gives each accepted connection to the transport its first check
 /// names (RFC 8445 section 7.2.2) and answers on it; with simultaneous open off, every pair is
@@ -919,11 +919,11 @@ fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check(
 #[test]
 fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
     use bytes::Bytes;
-    use rtc::interceptor::Registry;
-    use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-    use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    use rtci::interceptor::Registry;
+    use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+    use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
     let mut net = Net::new();
     let mut peers = vec![];
@@ -992,7 +992,7 @@ fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
                 if !ssrcs.contains(&ssrc) {
                     ssrcs.push(ssrc);
                 }
-                let header = rtc::rtp::header::Header {
+                let header = rtci::rtp::header::Header {
                     version: 2,
                     payload_type,
                     sequence_number: seq,
@@ -1003,7 +1003,7 @@ fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
                 };
                 peers[0].pc.rtp_sender(*sender).expect("sender").write_rtp(
                     net.now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header,
                         payload: Bytes::from(vec![0x10u8; 100]),
                     },
@@ -1047,7 +1047,7 @@ fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
     )
 }
 
-/// Two transports behind one shared passive port (`rtc-stream-driver`'s `shared_passive`),
+/// Two transports behind one shared passive port (`rtci-stream-driver`'s `shared_passive`),
 /// their selected connections broken: each active side reopens its transport's connection
 /// (RFC 6544 section 11.1) with the next write, which can be DTLS rather than a check. On the
 /// shared port nothing but a check names which transport such a connection carries (RFC 8445
@@ -1117,7 +1117,7 @@ fn a_reopened_connection_on_a_shared_port_waits_for_a_check_to_name_its_transpor
 /// of the candidates provided in the most recent candidate exchange"): it is not closed before
 /// both peers have selected the new pair. Closed by the first to select (RFC 6544 section 8
 /// applied at once), whatever the other side sent on it meanwhile was lost: one RTP packet per
-/// SRTP re-keying over ICE-TCP in `rtc-stream-driver`'s re-keying test.
+/// SRTP re-keying over ICE-TCP in `rtci-stream-driver`'s re-keying test.
 #[test]
 fn moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched() -> Result<()> {
     let mut net = Net::new();
@@ -1140,7 +1140,7 @@ fn moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched() -
     for p in peers.iter_mut() {
         assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("tcp"));
     }
-    let selected: Vec<(usize, rtc::shared::stream::StreamId)> = net
+    let selected: Vec<(usize, rtci::shared::stream::StreamId)> = net
         .conns
         .iter()
         .filter(|c| c.open)

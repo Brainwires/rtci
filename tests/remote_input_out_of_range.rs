@@ -1,17 +1,17 @@
 //! A remote description or trickled candidate carries numbers the peer chooses. Values at the
 //! ends of their types used to panic later: a candidate component above 256 underflowed its
 //! priority, and a numeric mid of `isize::MAX` overflowed the next mid a local offer assigned.
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodec;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodec;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use std::time::Instant;
 
 fn make_media_engine() -> MediaEngine {
@@ -33,7 +33,7 @@ fn make_media_engine() -> MediaEngine {
     me
 }
 
-fn build_pc(dtls_role: RTCDtlsRole) -> rtc::peer_connection::RTCPeerConnection {
+fn build_pc(dtls_role: RTCDtlsRole) -> rtci::peer_connection::RTCPeerConnection {
     let se = SettingEngineBuilder::new()
         .with_answering_dtls_role(dtls_role)
         .build();
@@ -61,13 +61,13 @@ fn build_pc(dtls_role: RTCDtlsRole) -> rtc::peer_connection::RTCPeerConnection {
 }
 
 /// The answerer holds the offerer's description, with `mid` rewritten to `remote_mid`.
-fn negotiated_with_remote_mid(remote_mid: &str) -> rtc::peer_connection::RTCPeerConnection {
+fn negotiated_with_remote_mid(remote_mid: &str) -> rtci::peer_connection::RTCPeerConnection {
     let mut offer_pc = build_pc(RTCDtlsRole::Server);
     let mut answer_pc = build_pc(RTCDtlsRole::Client);
     offer_pc
         .add_transceiver_from_kind(
             RtpCodecKind::Audio,
-            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
         )
         .unwrap();
     let offer = offer_pc.create_offer(None).unwrap();
@@ -95,7 +95,7 @@ fn test_remote_mid_at_isize_max_does_not_panic_a_later_offer() {
     // A new transceiver has no mid yet, so the offer must pick one above every mid in use.
     pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )
     .unwrap();
     let err = pc

@@ -11,11 +11,11 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, media_sections, port_of, video_track};
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 const BUNDLE_ATTRIBUTES: [&str; 5] = [
     "a=ice-ufrag:",
@@ -42,7 +42,7 @@ fn tagged_only_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
 fn add_media(pc: &mut RTCPeerConnection) -> TestResult {
     pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     pc.add_track(video_track("first", 0x0101_0101))?;
     pc.add_track(video_track("second", 0x0202_0202))?;
@@ -254,7 +254,7 @@ fn a_tagged_data_section_carries_rtcp_mux_for_the_rtp_sections() -> TestResult {
 /// attributes, `a=ice-ufrag` among them, stay in the tagged section.
 #[test]
 fn the_applied_answer_keeps_the_bundle_attributes_in_the_tagged_section_only() -> TestResult {
-    use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+    use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
     let mut a = tagged_only_peer()?;
     let mut b = tagged_only_peer()?;
     add_media(&mut a)?;

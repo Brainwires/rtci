@@ -107,13 +107,13 @@ Thirty-seven in all, each with a reproduction idea in its file. The ones that ca
 association with a conforming peer:
 
 - RFC 9260 B1: Gap Ack Blocks are wrong across the TSN wrap, and a peer running this engine then
-  closes the association (`rtc-sctp/src/queue/payload_queue.rs:205-236`).
+  closes the association (`rtci-sctp/src/queue/payload_queue.rs:205-236`).
 - RFC 9260 B6: a late copy of the peer's INIT closes an established association
-  (`rtc-sctp/src/association/mod.rs:1139-1146`, `632-634`).
+  (`rtci-sctp/src/association/mod.rs:1139-1146`, `632-634`).
 - RFC 9260 B10 with B2: DATA on a stream beyond the (crosswise) negotiated count is never
   acknowledged (`mod.rs:1446-1457`, `1149-1152`).
 - RFC 9260 B3 / B5: an unknown chunk or an unhandled standard parameter drops the packet
-  (`rtc-sctp/src/packet.rs:155`, `rtc-sctp/src/param/mod.rs:74-78`).
+  (`rtci-sctp/src/packet.rs:155`, `rtci-sctp/src/param/mod.rs:74-78`).
 - RFC 9260 B4: a zero-length `write` consumes a stream sequence number (`stream.rs:553-617`).
 - RFC 6525 bug 1: the answering stream reset is never retransmitted (`mod.rs:2457-2474`).
 - RFC 6525 bug 5: data written after `Stream::stop` keeps the old SSN sequence.

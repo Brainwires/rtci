@@ -79,8 +79,8 @@ impl RTCRemoteStreamsChange {
 ///
 /// ```
 /// // Note: accessing the receiver requires `&mut RTCPeerConnection`
-/// use rtc::peer_connection::RTCPeerConnection;
-/// use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+/// use rtci::peer_connection::RTCPeerConnection;
+/// use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 ///
 /// fn handle_event(peer_connection: &mut RTCPeerConnection, event: RTCPeerConnectionEvent) {
 ///     if let RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) = event {
@@ -156,7 +156,7 @@ pub struct RTCTrackEventInit {
 /// ## Handling track lifecycle
 ///
 /// ```
-/// use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+/// use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -188,10 +188,10 @@ pub struct RTCTrackEventInit {
 /// in scope.
 ///
 /// ```
-/// use rtc::peer_connection::RTCPeerConnection;
-/// use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-/// use rtc::sansio::Protocol;
+/// use rtci::peer_connection::RTCPeerConnection;
+/// use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+/// use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtci::sansio::Protocol;
 ///
 /// fn handle_events(peer_connection: &mut RTCPeerConnection) {
 ///     // Poll events

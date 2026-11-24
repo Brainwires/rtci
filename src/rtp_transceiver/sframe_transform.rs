@@ -1,10 +1,10 @@
 //! W3C webrtc-encoded-transform section 3, the SFrame transforms: `RTCRtpSFrameEncryptor` and
 //! `RTCRtpSFrameDecryptor` (and, being the same objects without an owner, `SFrameEncryptorStream`
-//! and `SFrameDecryptorStream`), over [`rtc::sframe`](crate::sframe).
+//! and `SFrameDecryptorStream`), over [`rtci::sframe`](crate::sframe).
 //!
 //! The engine has no encoder or decoder, so the frames are the application's: a sender's
 //! application runs [`RTCRtpSFrameEncryptor::transform`] on each encoded frame and sends the
-//! result with the SFrame payload format (`rtc::rtp::codec::sframe::SFramePayloader`), a
+//! result with the SFrame payload format (`rtci::rtp::codec::sframe::SFramePayloader`), a
 //! receiver's application reassembles (`SFrameReassembler`) and runs
 //! [`RTCRtpSFrameDecryptor::transform`]. Setting such a transform on a sender or a receiver is
 //! [`RTCRtpTransceiver::set_transform_use_sframe`](crate::rtp_transceiver::RTCRtpTransceiver::set_transform_use_sframe)

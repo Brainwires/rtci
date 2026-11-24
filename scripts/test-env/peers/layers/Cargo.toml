@@ -1,5 +1,5 @@
-# Layer interop tests (scripts/test-env/peers/README.md, "Layers"): rtc-dtls against dimpl,
-# rtc-ice against librice's sans-I/O agent (rice-proto). A workspace of its own, so neither
+# Layer interop tests (scripts/test-env/peers/README.md, "Layers"): rtci-dtls against dimpl,
+# rtci-ice against librice's sans-I/O agent (rice-proto). A workspace of its own, so neither
 # stack reaches the engine's dependency graph; built and run in the test image (entry.sh,
 # stage unit).
 [package]
@@ -15,10 +15,10 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
-dtls = { path = "../../../../rtc-dtls", package = "rtc-dtls" }
-ice = { path = "../../../../rtc-ice", package = "rtc-ice" }
-crypto = { path = "../../../../rtc-crypto", package = "rtc-crypto", features = ["crypto-ring"] }
-shared = { path = "../../../../rtc-shared", package = "rtc-shared" }
+dtls = { path = "../../../../rtci-dtls", package = "rtci-dtls" }
+ice = { path = "../../../../rtci-ice", package = "rtci-ice" }
+crypto = { path = "../../../../rtci-crypto", package = "rtci-crypto", features = ["crypto-ring"] }
+shared = { path = "../../../../rtci-shared", package = "rtci-shared" }
 sansio = "1"
 bytes = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }

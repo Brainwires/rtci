@@ -13,17 +13,17 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, video_track,
 };
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::{
     RTCPeerConnectionEvent, RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::{
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId,
     RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
+use rtci::sansio::Protocol;
 
 /// The track events `pc` has queued, other events dropped.
 fn track_events(pc: &mut RTCPeerConnection) -> Vec<RTCTrackEvent> {
@@ -411,8 +411,8 @@ fn a_rollback_ends_the_track_of_a_transceiver_it_removes_and_restores_streams() 
 /// as they were; a local track takes them.
 #[test]
 fn a_remote_track_refuses_constraints_on_its_video_properties() -> TestResult {
-    use rtc::media_stream::{Constrain, MediaTrackConstraintSet, MediaTrackConstraints};
-    use rtc::shared::error::Error;
+    use rtci::media_stream::{Constrain, MediaTrackConstraintSet, MediaTrackConstraints};
+    use rtci::shared::error::Error;
     let (_offerer, mut answerer, _) = negotiated(&["s"])?;
     let id = answerer.get_transceivers().next().expect("a transceiver");
     let mut receiver = answerer.rtp_receiver(id.into()).expect("receiver");
@@ -549,7 +549,7 @@ fn a_remote_video_tracks_settings_follow_the_frames_received() -> TestResult {
 /// joined, each carrying the track.
 #[test]
 fn a_stream_change_gives_the_media_stream_track_events() -> TestResult {
-    use rtc::media_stream::{MediaStreamTrackEvent, MediaStreamTrackEventKind};
+    use rtci::media_stream::{MediaStreamTrackEvent, MediaStreamTrackEventKind};
     let (mut offerer, mut answerer, sender) = negotiated(&["a"])?;
     let answerer_id = answerer.get_transceivers().next().expect("a transceiver");
     let (track_id, _) = receiver_track(&mut answerer, answerer_id);

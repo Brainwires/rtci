@@ -7,8 +7,8 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpReceiverId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 #[test]
 fn add_transceiver_takes_inactive() -> TestResult {

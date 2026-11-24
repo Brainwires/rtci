@@ -4,11 +4,11 @@
 //! via add_local_candidate(), the OnIceCandidateEvent is properly emitted
 //! and can be retrieved via poll_event().
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::sansio::Protocol;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::sansio::Protocol;
 use std::time::Instant;
 
 #[test]
@@ -57,7 +57,7 @@ fn test_host_candidate_event_emission() {
             println!("   Foundation: {}", candidate.foundation);
             assert_eq!(
                 candidate.typ,
-                rtc::peer_connection::transport::RTCIceCandidateType::Host
+                rtci::peer_connection::transport::RTCIceCandidateType::Host
             );
             found_event = true;
         }
@@ -117,7 +117,7 @@ fn test_srflx_candidate_event_emission() {
             println!("   URL: {:?}", ice_event.url);
             assert_eq!(
                 candidate.typ,
-                rtc::peer_connection::transport::RTCIceCandidateType::Srflx
+                rtci::peer_connection::transport::RTCIceCandidateType::Srflx
             );
             assert_eq!(ice_event.url.as_deref(), Some("stun:stun.example.com:3478"));
             found_event = true;
@@ -190,8 +190,8 @@ fn test_multiple_candidates_events() {
             );
 
             match candidate.typ {
-                rtc::peer_connection::transport::RTCIceCandidateType::Host => host_found = true,
-                rtc::peer_connection::transport::RTCIceCandidateType::Srflx => srflx_found = true,
+                rtci::peer_connection::transport::RTCIceCandidateType::Host => host_found = true,
+                rtci::peer_connection::transport::RTCIceCandidateType::Srflx => srflx_found = true,
                 _ => {}
             }
         }
@@ -216,7 +216,7 @@ fn test_multiple_candidates_events() {
 /// TURN URL names ("udp", "tcp", "tls"); a host candidate has neither member.
 #[test]
 fn a_local_relay_candidate_carries_its_relay_protocol_and_url() {
-    use rtc::peer_connection::transport::{RTCIceCandidateType, RTCIceServerTransportProtocol};
+    use rtci::peer_connection::transport::{RTCIceCandidateType, RTCIceServerTransportProtocol};
 
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(RTCConfigurationBuilder::new().build())
@@ -292,8 +292,8 @@ fn a_local_relay_candidate_carries_its_relay_protocol_and_url() {
 /// `icecandidate` event; a relay one does.
 #[test]
 fn under_the_relay_policy_only_relay_candidates_are_surfaced() {
-    use rtc::peer_connection::configuration::RTCIceTransportPolicy;
-    use rtc::peer_connection::transport::RTCIceCandidateType;
+    use rtci::peer_connection::configuration::RTCIceTransportPolicy;
+    use rtci::peer_connection::transport::RTCIceCandidateType;
 
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(
@@ -304,7 +304,7 @@ fn under_the_relay_policy_only_relay_candidates_are_surfaced() {
         .build(Instant::now())
         .expect("a peer connection");
     while pc.poll_event().is_some() {}
-    let surfaced = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+    let surfaced = |pc: &mut rtci::peer_connection::RTCPeerConnection| {
         std::iter::from_fn(|| pc.poll_event())
             .filter_map(|event| match event {
                 RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate.map(|c| c.typ),

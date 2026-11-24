@@ -13,12 +13,12 @@ mod common;
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
-use rtc::interceptor::{
+use rtci::interceptor::{
     FlexFec03Decoder, FlexFec03Encoder, FlexFecDecoder, FlexFecDecoderConfig, FlexFecEncoder,
     FlexFecProtection,
 };
-use rtc::rtp::header::Header;
-use rtc::shared::marshal::{Marshal, MarshalSize, Unmarshal};
+use rtci::rtp::header::Header;
+use rtci::shared::marshal::{Marshal, MarshalSize, Unmarshal};
 use std::time::Duration;
 
 const MEDIA_SSRC: u32 = 0x1111_1111;
@@ -41,14 +41,14 @@ fn take_arg<'a>(data: &mut &'a [u8]) -> &'a [u8] {
     arg
 }
 
-fn wire(packet: &rtc::rtp::packet::Packet) -> Vec<u8> {
+fn wire(packet: &rtci::rtp::packet::Packet) -> Vec<u8> {
     let mut buffer = vec![0u8; packet.marshal_size()];
     let _ = packet.marshal_to(&mut buffer);
     buffer
 }
 
-fn source(ssrc: u32, sequence_number: u16, arg: &[u8]) -> rtc::rtp::packet::Packet {
-    rtc::rtp::packet::Packet {
+fn source(ssrc: u32, sequence_number: u16, arg: &[u8]) -> rtci::rtp::packet::Packet {
+    rtci::rtp::packet::Packet {
         header: Header {
             version: 2,
             marker: byte(arg, 0) & 1 != 0,
@@ -64,7 +64,7 @@ fn source(ssrc: u32, sequence_number: u16, arg: &[u8]) -> rtc::rtp::packet::Pack
     }
 }
 
-fn repair(arg: &[u8]) -> rtc::rtp::packet::Packet {
+fn repair(arg: &[u8]) -> rtci::rtp::packet::Packet {
     let csrc = match byte(arg, 2) & 0x07 {
         0 => vec![],
         1 | 2 | 3 => vec![MEDIA_SSRC],
@@ -73,7 +73,7 @@ fn repair(arg: &[u8]) -> rtc::rtp::packet::Packet {
         6 => vec![0xDEAD_BEEF],
         _ => vec![MEDIA_SSRC; 15],
     };
-    rtc::rtp::packet::Packet {
+    rtci::rtp::packet::Packet {
         header: Header {
             version: 2,
             marker: byte(arg, 2) & 0x08 != 0,
@@ -197,7 +197,7 @@ fuzz_target!(|data: &[u8]| {
         match op % 6 {
             // A source packet as the peer framed it.
             0 => {
-                if let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
+                if let Ok(mut packet) = rtci::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
                     packet.header.ssrc = if op & 0x80 == 0 {
                         MEDIA_SSRC
                     } else {

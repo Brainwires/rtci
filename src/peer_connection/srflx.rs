@@ -5,7 +5,7 @@
 //! - Over UDP, from every UDP host candidate the application adds: the request leaves through
 //!   `poll_write` from the candidate's address and the response is taken out of `handle_read`
 //!   before ICE sees it (by its transaction id). Retransmissions follow RFC 8489 section
-//!   6.2.1 (`rtc_stun::client`).
+//!   6.2.1 (`rtci_stun::client`).
 //! - Over TCP and TLS (`stun:` and `stuns:`, RFC 7064), from the engine's passive and
 //!   simultaneous-open ICE-TCP candidates: a connection from the listener's own port
 //!   (`reuse_address`, RFC 6544 Appendix B) carries one Binding request, sent once and

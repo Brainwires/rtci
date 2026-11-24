@@ -1,35 +1,35 @@
 //! TURN over DTLS in the engine (RFC 7350, RFC 8656 section 3.1): a `turns:...?transport=udp`
 //! server is reached with a client-role DTLS association from the application's UDP host
-//! candidate, demultiplexed before ICE. The server here is an `rtc-dtls` server endpoint with
+//! candidate, demultiplexed before ICE. The server here is an `rtci-dtls` server endpoint with
 //! a TURN server scripted by the test behind it.
 
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::dtls::config::ConfigBuilder;
-use rtc::dtls::crypto::Certificate;
-use rtc::dtls::endpoint::{Endpoint, EndpointEvent};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCIceGatheringState;
-use rtc::peer_connection::transport::{RTCIceCandidateInit, RTCIceServerTransportProtocol};
-use rtc::peer_connection::turn_tls::TurnTlsConfig;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM};
-use rtc::stun::error_code::{CODE_UNAUTHORIZED, ErrorCodeAttribute};
-use rtc::stun::fingerprint::FINGERPRINT;
-use rtc::stun::integrity::MessageIntegrity;
-use rtc::stun::message::{
+use rtci::dtls::config::ConfigBuilder;
+use rtci::dtls::crypto::Certificate;
+use rtci::dtls::endpoint::{Endpoint, EndpointEvent};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCIceGatheringState;
+use rtci::peer_connection::transport::{RTCIceCandidateInit, RTCIceServerTransportProtocol};
+use rtci::peer_connection::turn_tls::TurnTlsConfig;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM};
+use rtci::stun::error_code::{CODE_UNAUTHORIZED, ErrorCodeAttribute};
+use rtci::stun::fingerprint::FINGERPRINT;
+use rtci::stun::integrity::MessageIntegrity;
+use rtci::stun::message::{
     CLASS_ERROR_RESPONSE, CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, Getter, METHOD_ALLOCATE, Message,
     MessageType, Setter,
 };
-use rtc::stun::textattrs::{Nonce, Realm};
-use rtc::stun::xoraddr::XorMappedAddress;
-use rtc::turn::proto::lifetime::Lifetime;
-use rtc::turn::proto::relayaddr::RelayedAddress;
-use rtc::turn::proto::reqtrans::RequestedTransport;
+use rtci::stun::textattrs::{Nonce, Realm};
+use rtci::stun::xoraddr::XorMappedAddress;
+use rtci::turn::proto::lifetime::Lifetime;
+use rtci::turn::proto::relayaddr::RelayedAddress;
+use rtci::turn::proto::reqtrans::RequestedTransport;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,7 +49,7 @@ fn a(s: &str) -> SocketAddr {
 
 /// A self-signed certificate for `name` and the roots that vouch for it.
 fn certificate(name: &str) -> Result<(Certificate, rustls::RootCertStore)> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let cert = Certificate::generate_self_signed(vec![name.to_owned()], provider.crypto())?;
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.certificate[0].clone())?;
@@ -70,7 +70,7 @@ struct Server {
 
 impl Server {
     fn new(cert: Certificate) -> Result<Self> {
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let config = ConfigBuilder::default()
             .with_crypto_provider(provider.clone())
             .with_certificates(vec![cert])
@@ -95,7 +95,7 @@ impl Server {
     /// the relayed address to a signed one.
     fn answer(&self, request: &Message, client: SocketAddr) -> Result<Vec<u8>> {
         let signed = request.contains(ATTR_MESSAGE_INTEGRITY);
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let mut setters: Vec<Box<dyn Setter>> = vec![Box::new(request.transaction_id)];
         if !signed {
             setters.push(Box::new(MessageType::new(
@@ -343,7 +343,7 @@ fn a_turns_udp_server_is_reached_over_dtls_and_its_relayed_candidate_announced()
         transport.get_from(allocate)?;
         assert_eq!(
             transport.protocol,
-            rtc::turn::proto::PROTO_UDP,
+            rtci::turn::proto::PROTO_UDP,
             "no TCP allocation over DTLS"
         );
     }
@@ -365,14 +365,14 @@ fn a_turns_udp_server_is_reached_over_dtls_and_its_relayed_candidate_announced()
 /// candidate.
 /// The SOFTWARE of the engine's TURN client over DTLS (RFC 8656 section 5, RFC 8489 section
 /// 16.1.2: "Implementers SHOULD make usage of the SOFTWARE attribute a configurable option"):
-/// `rtc-turn` and its version by default, the text `with_ice_software` names, and with
+/// `rtci-turn` and its version by default, the text `with_ice_software` names, and with
 /// `with_ice_software(None)` none in any request over the association.
 #[test]
 fn the_engine_dtls_turn_client_sends_the_software_with_ice_software_names() -> Result<()> {
-    use rtc::stun::attributes::ATTR_SOFTWARE;
-    use rtc::stun::textattrs::Software;
+    use rtci::stun::attributes::ATTR_SOFTWARE;
+    use rtci::stun::textattrs::Software;
     for (setting, expected) in [
-        (None, Some(rtc::turn::client::DEFAULT_SOFTWARE.to_owned())),
+        (None, Some(rtci::turn::client::DEFAULT_SOFTWARE.to_owned())),
         (Some(None), None),
         (Some(Some("app 1.0".to_owned())), Some("app 1.0".to_owned())),
     ] {

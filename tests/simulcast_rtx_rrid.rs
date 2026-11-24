@@ -8,25 +8,25 @@
 ///    correctly associated them with the base stream's receiver.
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtp;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtp;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RTCRtpHeaderExtensionCapability,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -96,9 +96,9 @@ async fn test_simulcast_rtx_rrid_association() -> Result<()> {
         .with_answering_dtls_role(RTCDtlsRole::Server)
         .build();
     let mut answerer_me = make_media_engine()?;
-    let answerer_registry = rtc::interceptor::Registry::new();
+    let answerer_registry = rtci::interceptor::Registry::new();
     let answerer_registry =
-        rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+        rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
             answerer_registry,
             &mut answerer_me,
         )?;
@@ -133,9 +133,9 @@ async fn test_simulcast_rtx_rrid_association() -> Result<()> {
         .with_answering_dtls_role(RTCDtlsRole::Server)
         .build();
     let mut offerer_me = make_media_engine()?;
-    let offerer_registry = rtc::interceptor::Registry::new();
+    let offerer_registry = rtci::interceptor::Registry::new();
     let offerer_registry =
-        rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+        rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
             offerer_registry,
             &mut offerer_me,
         )?;

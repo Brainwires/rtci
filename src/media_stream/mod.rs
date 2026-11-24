@@ -22,10 +22,10 @@
 //! ## Creating a media stream with tracks
 //!
 //! ```
-//! use rtc::media_stream::{MediaStream, MediaStreamId};
-//! use rtc::media_stream::MediaStreamTrack;
-//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+//! use rtci::media_stream::{MediaStream, MediaStreamId};
+//! use rtci::media_stream::MediaStreamTrack;
+//! use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+//! use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create audio track
@@ -75,9 +75,9 @@
 //! ## Filtering tracks by type
 //!
 //! ```
-//! # use rtc::media_stream::{MediaStream, MediaStreamId};
-//! # use rtc::media_stream::MediaStreamTrack;
-//! # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+//! # use rtci::media_stream::{MediaStream, MediaStreamId};
+//! # use rtci::media_stream::MediaStreamTrack;
+//! # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
 //! # fn example(stream: MediaStream) {
 //! // Get all audio tracks
 //! for audio_track in stream.get_audio_tracks() {
@@ -94,10 +94,10 @@
 //! ## Managing tracks
 //!
 //! ```
-//! # use rtc::media_stream::{MediaStream, MediaStreamId};
-//! # use rtc::media_stream::MediaStreamTrack;
-//! # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-//! # use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+//! # use rtci::media_stream::{MediaStream, MediaStreamId};
+//! # use rtci::media_stream::MediaStreamTrack;
+//! # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+//! # use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut stream = MediaStream::new("stream-id".to_string(), vec![]);
 //!
@@ -214,10 +214,10 @@ pub type MediaStreamId = String;
 /// # Examples
 ///
 /// ```
-/// use rtc::media_stream::{MediaStream, MediaStreamId};
-/// use rtc::media_stream::MediaStreamTrack;
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+/// use rtci::media_stream::{MediaStream, MediaStreamId};
+/// use rtci::media_stream::MediaStreamTrack;
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let track = MediaStreamTrack::new(
@@ -262,10 +262,10 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// use rtc::media_stream::MediaStreamTrack;
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// use rtci::media_stream::MediaStreamTrack;
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let track = MediaStreamTrack::new(
@@ -354,9 +354,9 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(stream: MediaStream) {
     /// for track in stream.get_audio_tracks() {
     ///     println!("Audio track: {} ({})", track.label(), track.track_id());
@@ -389,9 +389,9 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(stream: MediaStream) {
     /// for track in stream.get_video_tracks() {
     ///     println!("Video track: {} ({})", track.label(), track.track_id());
@@ -424,9 +424,9 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(stream: MediaStream) {
     /// println!("Stream has {} tracks", stream.get_tracks().count());
     /// # }
@@ -462,9 +462,9 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(stream: MediaStream) {
     /// if let Some(track) = stream.get_track_by_id(&"track-id".to_string()) {
     ///     println!("Found track: {}", track.label());
@@ -517,10 +517,10 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// # use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut stream = MediaStream::new("stream-id".to_string(), vec![]);
     ///
@@ -569,10 +569,10 @@ impl MediaStream {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::{MediaStream, MediaStreamId};
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// # use rtci::media_stream::{MediaStream, MediaStreamId};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut stream = MediaStream::new("stream-id".to_string(), vec![]);
     /// # let track = MediaStreamTrack::new(

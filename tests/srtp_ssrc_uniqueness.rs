@@ -7,12 +7,12 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, video_track};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpRtxParameters, RtpCodecKind,
 };
-use rtc::shared::error::Error;
+use rtci::shared::error::Error;
 use std::collections::HashSet;
 
 const SSRC: u32 = 0x5151_0001;

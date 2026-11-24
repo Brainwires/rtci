@@ -1,4 +1,4 @@
-//! ECN for RTP is for UDP (RFC 6679): between two `rtc` peers with ECN on that connect over
+//! ECN for RTP is for UDP (RFC 6679): between two `rtci` peers with ECN on that connect over
 //! ICE-TCP (RFC 6544), on a simulated network, no RTP packet is ECN-marked and no description
 //! made after nomination says `a=ecn-capable-rtp`.
 //!
@@ -8,26 +8,26 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::ice::network_type::NetworkType;
-use rtc::ice::tcp_type::TcpType;
-use rtc::interceptor::{EcnInitiation, Registry};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::ice::network_type::NetworkType;
+use rtci::ice::tcp_type::TcpType;
+use rtci::interceptor::{EcnInitiation, Registry};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_rtcp_reports,
 };
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,7 @@ impl Peer {
         (self.tcp_type == TcpType::Passive).then(|| format!("{}:5000", self.ip).parse().unwrap())
     }
 
-    fn candidate(&self) -> Result<rtc::peer_connection::transport::RTCIceCandidateInit> {
+    fn candidate(&self) -> Result<rtci::peer_connection::transport::RTCIceCandidateInit> {
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
                 network: "tcp".to_owned(),
@@ -204,7 +204,7 @@ struct World {
     now: Instant,
     /// The RTP packets the sender wrote to the network (SRTP: the header is in the clear),
     /// by SSRC, with the ECN codepoint it asked for.
-    rtp_written: Vec<(u32, Option<rtc::shared::EcnCodepoint>)>,
+    rtp_written: Vec<(u32, Option<rtci::shared::EcnCodepoint>)>,
 }
 
 impl World {
@@ -369,8 +369,8 @@ fn rtp_over_an_ice_tcp_pair_is_not_ecn_marked_nor_offered_ecn() -> Result<()> {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: VP8_PT,
                         sequence_number: 1000 + n,

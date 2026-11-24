@@ -9,11 +9,11 @@
 //! Each rtx format accompanies one primary (RFC 4588 `apt`), so the order that means anything is
 //! the primaries' own: rtx-for-VP8 belongs ahead of rtx-for-VP9 exactly when VP8 leads VP9.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MIME_TYPE_VP9, MediaEngine,
 };
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 use std::time::Instant;
 
 const VP9_FMTP: &str = "profile-id=0";
@@ -70,7 +70,7 @@ fn answer_formats() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .build(Instant::now())?;
     offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     let offer = offerer.create_offer(None)?;

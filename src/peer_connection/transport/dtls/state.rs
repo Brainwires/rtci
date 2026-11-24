@@ -26,7 +26,7 @@ use std::fmt;
 /// ## Monitoring DTLS State
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsTransportState;
+/// use rtci::peer_connection::transport::RTCDtlsTransportState;
 ///
 /// fn handle_dtls_state(state: RTCDtlsTransportState) {
 ///     match state {
@@ -53,7 +53,7 @@ use std::fmt;
 /// ## Checking for Secure Connection
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsTransportState;
+/// use rtci::peer_connection::transport::RTCDtlsTransportState;
 ///
 /// fn is_encrypted(dtls_state: RTCDtlsTransportState) -> bool {
 ///     dtls_state == RTCDtlsTransportState::Connected
@@ -66,7 +66,7 @@ use std::fmt;
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsTransportState;
+/// use rtci::peer_connection::transport::RTCDtlsTransportState;
 ///
 /// let state = RTCDtlsTransportState::Connected;
 /// assert_eq!(state.to_string(), "connected");

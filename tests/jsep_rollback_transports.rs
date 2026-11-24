@@ -1,6 +1,6 @@
 //! A rolled-back remote offer leaves the ICE and DTLS transports as they were (RFC 9429
 //! section 5.7: "any media that is received is processed according to the previous local and
-//! remote descriptions"), between two `rtc` peers on a simulated UDP network in virtual time.
+//! remote descriptions"), between two `rtci` peers on a simulated UDP network in virtual time.
 //!
 //! Applying a remote offer used to start the transports (the first offer), restart ICE (an
 //! offer with new credentials) or replace the DTLS association (an offer with another
@@ -9,19 +9,19 @@
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 

@@ -50,26 +50,26 @@ jobs:
       # is a criterion flag that libtest (the lib/test targets `cargo bench` also
       # runs) rejects. The bencher lines on stdout are what `tool: cargo` parses;
       # cargo's own stderr stays in the log only.
-      - name: Run benchmarks (rtc-rtp)
-        run: cargo bench -p rtc-rtp --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-rtp)
+        run: cargo bench -p rtci-rtp --bench bench -- --output-format bencher | tee -a bench-all.txt
 
-      - name: Run benchmarks (rtc-rtcp)
-        run: cargo bench -p rtc-rtcp --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-rtcp)
+        run: cargo bench -p rtci-rtcp --bench bench -- --output-format bencher | tee -a bench-all.txt
 
-      - name: Run benchmarks (rtc-stun)
-        run: cargo bench -p rtc-stun --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-stun)
+        run: cargo bench -p rtci-stun --bench bench -- --output-format bencher | tee -a bench-all.txt
 
-      - name: Run benchmarks (rtc-sdp)
-        run: cargo bench -p rtc-sdp --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-sdp)
+        run: cargo bench -p rtci-sdp --bench bench -- --output-format bencher | tee -a bench-all.txt
 
-      - name: Run benchmarks (rtc-srtp)
-        run: cargo bench -p rtc-srtp --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-srtp)
+        run: cargo bench -p rtci-srtp --bench bench -- --output-format bencher | tee -a bench-all.txt
 
-      - name: Run benchmarks (rtc-turn)
-        run: cargo bench -p rtc-turn --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-turn)
+        run: cargo bench -p rtci-turn --bench bench -- --output-format bencher | tee -a bench-all.txt
 
-      - name: Run benchmarks (rtc-media)
-        run: cargo bench -p rtc-media --bench bench -- --output-format bencher | tee -a bench-all.txt
+      - name: Run benchmarks (rtci-media)
+        run: cargo bench -p rtci-media --bench bench -- --output-format bencher | tee -a bench-all.txt
 
       - name: Keep the results for the publishing job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
