@@ -127,6 +127,7 @@ impl<'a> DtlsHandler<'a> {
             None => dtls_handshake_config,
         };
         self.ctx.dtls_transport.flight_interval = Some(dtls_handshake_config.flight_interval());
+        self.ctx.dtls_transport.handshake_began = Some(now);
         let dtls_endpoint = self
             .ctx
             .dtls_transport
@@ -382,6 +383,14 @@ impl<'a>
             let mut dtls_version_for_stats = None;
             let mut application_protocol = None;
 
+            // The server's handshake begins with the first datagram it reads for the
+            // association (the client's begins with its first flight, `connect_client`).
+            if self.ctx.dtls_transport.state != RTCDtlsTransportState::Connected
+                && self.ctx.dtls_transport.handshake_began.is_none()
+            {
+                self.ctx.dtls_transport.handshake_began = Some(msg.now);
+            }
+            let round_trip_time = self.selected_pair_round_trip_time();
             let srtp_required = self.ctx.dtls_transport.srtp_required;
             let dtls_endpoint = self
                 .ctx
@@ -495,6 +504,16 @@ impl<'a>
             }
 
             if let Some(srtp_contexts) = handshake_complete {
+                // What a re-keying needs, measured on this handshake
+                // (`DtlsTransport::rekeying_handshake_time`).
+                if let Some(began) = self.ctx.dtls_transport.handshake_began.take() {
+                    let dtls = &mut self.ctx.dtls_transport;
+                    dtls.rekeying_handshake_time = Some(
+                        msg.now.saturating_duration_since(began)
+                            + round_trip_time.unwrap_or_default() * 2
+                            + dtls.flight_interval_rule.initial(round_trip_time),
+                    );
+                }
                 self.ctx.dtls_transport.srtp_negotiated = Some(srtp_contexts.is_some());
                 self.ctx
                     .dtls_transport

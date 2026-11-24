@@ -28,7 +28,7 @@ use rtci::peer_connection::message::RTCMessage;
 use rtci::peer_connection::sdp::{RTCSdpType, RTCSessionDescription};
 use rtci::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
 use rtci::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, RTCDtlsTransportState, RTCIceCandidate,
+    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidateInit,
 };
 use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
@@ -175,6 +175,8 @@ struct Scenario {
     /// DTLS datagrams to this peer, once first connected, arrive this much later than the
     /// rest (a path that delays the handshake's last flight behind the media).
     delay_dtls_to: Option<(usize, Duration)>,
+    /// One-way delay of every datagram, both ways, from the start (a slow path).
+    path_delay: Duration,
 }
 
 impl Default for Scenario {
@@ -188,6 +190,7 @@ impl Default for Scenario {
             policy: RTCBundlePolicy::Balanced,
             tracks: 1,
             delay_dtls_to: None,
+            path_delay: Duration::ZERO,
         }
     }
 }
@@ -220,6 +223,8 @@ struct World {
     /// `Scenario::delay_dtls_to`, active once first connected.
     delay_dtls_to: Option<(usize, Duration)>,
     delay_active: bool,
+    /// `Scenario::path_delay`.
+    path_delay: Duration,
     /// Delayed datagrams: (due, peer, datagram).
     delayed: Vec<(Instant, usize, TaggedBytesMut)>,
 }
@@ -279,6 +284,7 @@ impl World {
             collisions_at_connection: [0; 2],
             delay_dtls_to: scenario.delay_dtls_to,
             delay_active: false,
+            path_delay: scenario.path_delay,
             delayed: vec![],
         };
         for i in 0..2 {
@@ -566,11 +572,15 @@ impl World {
                 .message
                 .first()
                 .is_some_and(|b| (20..=63).contains(b));
-            match self.delay_dtls_to {
-                Some((peer, delay)) if self.delay_active && peer == target && dtls => {
-                    self.delayed.push((self.now + delay, target, delivered));
-                }
-                _ => self.peers[target].inbox.push(delivered),
+            let delay = self.path_delay
+                + match self.delay_dtls_to {
+                    Some((peer, delay)) if self.delay_active && peer == target && dtls => delay,
+                    _ => Duration::ZERO,
+                };
+            if delay.is_zero() {
+                self.peers[target].inbox.push(delivered);
+            } else {
+                self.delayed.push((self.now + delay, target, delivered));
             }
         }
         Ok(())
@@ -1076,6 +1086,32 @@ fn a_dtls_server_alone_with_a_short_lifetime_re_keys_in_time_on_a_slow_path() ->
         polite: 1,
         signal_delay: Duration::from_millis(1200),
         packets: 3400,
+        ..Default::default()
+    };
+    let packets = scenario.packets;
+    let outcome = run(scenario)?;
+    check_call(&outcome, packets, 1);
+    Ok(())
+}
+
+/// A short key lifetime on a slow path (250 ms each way, so a 500 ms round trip): a re-keying
+/// takes the ICE checks on the new candidates and a whole DTLS handshake at that round trip,
+/// about 2.5 s, while a sixteenth of A's 960-packet lifetime at 50 packets a second lasts
+/// 1.2 s. The margin is measured in time too: the handshake that keyed the session took its
+/// round trips at this delay, and A, the DTLS client, re-keys when its key has no more packets
+/// left than it protects in that time (with the ICE checks and one retransmission timer),
+/// which here is about three times the sixteenth. Without it the key runs out before the new
+/// association is up and the transport fails. Every packet arrives across the renewal.
+#[test]
+fn a_short_lifetime_on_a_slow_path_re_keys_by_the_margin_the_handshake_measured() -> Result<()> {
+    let scenario = Scenario {
+        settings: [
+            short(960),
+            SettingEngineBuilder::new().with_answering_dtls_role(RTCDtlsRole::Server),
+        ],
+        polite: 1,
+        path_delay: Duration::from_millis(250),
+        packets: 1200,
         ..Default::default()
     };
     let packets = scenario.packets;

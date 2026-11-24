@@ -74,6 +74,12 @@ pub(crate) struct SrtpHandlerContext {
     /// When the current keys were installed (the handshake that exported them completed):
     /// with their usage, the packet rate the re-keying margin is measured against.
     pub(crate) keys_since: Option<Instant>,
+    /// The time a re-keying needs, measured on the handshake that keyed the current
+    /// contexts (`DtlsTransport::rekeying_handshake_time`), set by the peer connection when
+    /// a handshake completes.
+    pub(crate) rekeying_time: Option<Duration>,
+    /// [`RTCEventInternal::SrtpRekeyingMarginReached`] was raised for the current keys.
+    pub(crate) rekeying_margin_reported: bool,
     /// A new DTLS association replaced the one that keyed the current contexts and its
     /// handshake has not completed: the peer may already protect with its keys.
     pub(crate) awaiting_new_keys: bool,
@@ -209,6 +215,43 @@ impl SrtpHandlerContext {
             Duration::from_secs_f64(limit.saturating_sub(used) as f64 / rate)
         })
         .min()
+    }
+
+    /// Whether the current keys have reached the re-keying margin measured in time: a key
+    /// (either direction, SRTP or SRTCP) has no more packets left than it protects, at the
+    /// rate it has been used since the keys were installed, in the time a re-keying needs
+    /// ([`Self::rekeying_time`]), and that is more packets than the sixteenth of its lifetime
+    /// the lifetime warning leaves (`ContextEvent::KeyLifetimeExpiring`): the margin is the
+    /// larger of the two. The rate is taken once the keys have been in use for that time at
+    /// least, so that a first burst does not stand for it.
+    pub(crate) fn rekeying_margin_reached(&self, now: Instant) -> bool {
+        let (Some(needed), Some(since)) = (self.rekeying_time, self.keys_since) else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(since);
+        if elapsed.is_zero() || elapsed < needed {
+            return false;
+        }
+        let share = needed.as_secs_f64() / elapsed.as_secs_f64();
+        [
+            self.local_srtp_context.as_ref(),
+            self.remote_srtp_context.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|context| {
+            let usage = context.key_usage();
+            [
+                (usage.srtp_packets, usage.lifetime.srtp_packets),
+                (usage.srtcp_packets, usage.lifetime.srtcp_packets),
+            ]
+        })
+        .any(|(used, limit)| {
+            // Rounded down: at the very rate that makes it equal to the sixteenth, the
+            // lifetime warning alone keeps its timing.
+            let needed_packets = (used as f64 * share).floor() as u64;
+            needed_packets > (limit / 16).max(1) && limit.saturating_sub(used) <= needed_packets
+        })
     }
 
     /// Records the header extensions the session encrypts (RFC 6904) and applies them to the
@@ -422,6 +465,12 @@ impl<'a> SrtpHandler<'a> {
             self.ctx.rekeying_due_reported = true;
             events.push(RTCEventInternal::SrtpRekeyingDue);
         }
+        // The re-keying margin measured in time, where it is larger than the lifetime
+        // warning's sixteenth (a short lifetime on a slow path), once per key set.
+        if !self.ctx.rekeying_margin_reported && self.ctx.rekeying_margin_reached(now) {
+            self.ctx.rekeying_margin_reported = true;
+            events.push(RTCEventInternal::SrtpRekeyingMarginReached);
+        }
         for event in events {
             self.ctx
                 .event_outs
@@ -559,12 +608,14 @@ impl<'a>
                 !matches!(
                     queued.event,
                     RTCEventInternal::SrtpRekeyingDue
+                        | RTCEventInternal::SrtpRekeyingMarginReached
                         | RTCEventInternal::RTCPeerConnectionEvent(
                             RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring { .. }
                         )
                 )
             });
             self.ctx.rekeying_due_reported = false;
+            self.ctx.rekeying_margin_reported = false;
             self.ctx.keys_since = Some(evt.now);
             self.ctx.awaiting_new_keys = false;
 

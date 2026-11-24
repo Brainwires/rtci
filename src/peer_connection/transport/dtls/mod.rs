@@ -167,6 +167,16 @@ pub(crate) struct DtlsTransport {
     /// (`SettingEngineBuilder::with_dtls_flight_interval`).
     pub(crate) flight_interval_rule:
         crate::peer_connection::configuration::setting_engine::DtlsFlightInterval,
+    /// When the current association's handshake began on this side: the client's first
+    /// flight, or the first handshake datagram the server read. `None` once it completed.
+    pub(crate) handshake_began: Option<std::time::Instant>,
+    /// The time a re-keying of this transport needs, measured on the handshake of the
+    /// current association: its duration (its round trips and flights, and any
+    /// retransmission it took), the ICE checks of the restart a new association comes with
+    /// (two round trips of the selected pair: a check and its nomination), and one DTLS
+    /// retransmission timer for a lost flight. The SRTP re-keying margin is at least the
+    /// packets the keys protect in that time (`SrtpHandlerContext::rekeying_margin_reached`).
+    pub(crate) rekeying_handshake_time: Option<std::time::Duration>,
 
     // From SettingEngine
     pub(crate) answering_dtls_role: RTCDtlsRole,
@@ -330,6 +340,8 @@ impl DtlsTransport {
             srtp_negotiated: None,
             flight_interval: None,
             flight_interval_rule: Default::default(),
+            handshake_began: None,
+            rekeying_handshake_time: None,
 
             answering_dtls_role,
             srtp_protection_profiles,
@@ -386,6 +398,7 @@ impl DtlsTransport {
             self.fingerprint_mismatch
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             self.failure = None;
+            self.handshake_began = None;
         }
         self.state = state;
     }
