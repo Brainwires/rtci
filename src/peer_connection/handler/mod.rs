@@ -131,6 +131,17 @@ impl PipelineContext {
     }
 }
 
+/// The longest a DTLS server waits for the client's SRTP re-keying offer before asking itself
+/// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`): long enough for an offer
+/// made at the same packet count to reach it over a usual signalling path, short against the
+/// time a re-keying takes on a slow one.
+pub(crate) const SRTP_REKEYING_SERVER_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// A re-keying margin under this, at the lifetime warning, is logged: an offer and answer, ICE
+/// checks and a DTLS handshake may not fit (seconds through TURN or with loss).
+const SRTP_REKEYING_TIGHT_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl RTCPeerConnection {
     /*
      Pipeline Flow (Read Path):
@@ -758,22 +769,88 @@ impl RTCPeerConnection {
     /// new association is wanted, and asked for as `renew_dtls_association` does (new
     /// `tls-id`, ICE restart, negotiation-needed).
     ///
-    /// At the sixteenth the DTLS server of the association waits
-    /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`): the client asks, and two
-    /// peers with the same lifetime do not both offer. At the thirty-second either side asks.
+    /// At the sixteenth the DTLS server of the association waits a little
+    /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`): for at most
+    /// [`SRTP_REKEYING_SERVER_WAIT`] and an eighth of the time the keys have left at the rate
+    /// they are used, for the client's offer, so that two peers with the same lifetime do not
+    /// both offer. Lifetimes are local, so the server cannot know the client re-keys at all:
+    /// the wait is bounded in time, never a share of the margin a slow path needs (a
+    /// handshake through TURN takes seconds, whatever the packet rate). Without an estimate of
+    /// that time (no packet yet under these keys) the server does not wait. At the
+    /// thirty-second either side asks at once.
     fn renew_before_the_key_lifetime_ends(&mut self, due: bool) {
         if self.setting_engine.srtp_automatic_rekeying_off || self.is_closed() {
             return;
         }
         let client_first = !self.setting_engine.srtp_rekeying_both_at_warning;
+        let now = self.pipeline_context.now;
+        let time_left = self
+            .pipeline_context
+            .transports
+            .active()
+            .srtp_handler_context
+            .key_time_left(now);
+        if let Some(left) = time_left.filter(|left| *left < SRTP_REKEYING_TIGHT_MARGIN) {
+            log::warn!(
+                "an SRTP key has {left:?} left at its packet rate: a re-keying may not complete \
+                 in time (see SettingEngineBuilder::with_srtp_key_lifetime)"
+            );
+        }
         let dtls = self.dtls_transport_mut();
-        dtls.srtp_rekeying = match dtls.srtp_rekeying {
-            SrtpRekeying::Wanted => SrtpRekeying::Wanted,
+        let wait = time_left
+            .map(|left| (left / 8).min(SRTP_REKEYING_SERVER_WAIT))
+            .filter(|_| client_first && dtls.dtls_role == RTCDtlsRole::Server);
+        dtls.srtp_rekeying = match (dtls.srtp_rekeying, wait) {
+            (SrtpRekeying::Wanted, _) => SrtpRekeying::Wanted,
             _ if due => SrtpRekeying::Wanted,
-            _ if client_first && dtls.dtls_role == RTCDtlsRole::Server => SrtpRekeying::Deferred,
+            (SrtpRekeying::Deferred, _) => SrtpRekeying::Deferred,
+            (_, Some(wait)) if !wait.is_zero() => {
+                dtls.srtp_rekeying_deferred_until = Some(now + wait);
+                SrtpRekeying::Deferred
+            }
             _ => SrtpRekeying::Wanted,
         };
         self.request_wanted_srtp_rekeying();
+    }
+
+    /// A DTLS server that waited for the client's re-keying offer
+    /// ([`SrtpRekeying::Deferred`]) and did not get it in time asks itself.
+    pub(crate) fn end_srtp_rekeying_waits(&mut self, now: Instant) {
+        let mut ended = false;
+        for id in self.pipeline_context.transports.ids() {
+            ended |= self.with_transport(id, |pc| {
+                let dtls = pc.dtls_transport_mut();
+                if dtls.srtp_rekeying == SrtpRekeying::Deferred
+                    && dtls
+                        .srtp_rekeying_deferred_until
+                        .is_some_and(|until| until <= now)
+                {
+                    dtls.srtp_rekeying = SrtpRekeying::Wanted;
+                    dtls.srtp_rekeying_deferred_until = None;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        if ended {
+            self.request_wanted_srtp_rekeying();
+        }
+    }
+
+    /// The earliest instant a server's wait for the client's re-keying offer ends.
+    fn srtp_rekeying_wait_timeout(&self) -> Option<Instant> {
+        self.pipeline_context
+            .transports
+            .ids()
+            .into_iter()
+            .filter_map(|id| {
+                let dtls = self.dtls_transport_of(id);
+                (dtls.srtp_rekeying == SrtpRekeying::Deferred)
+                    .then_some(dtls.srtp_rekeying_deferred_until)
+                    .flatten()
+            })
+            .min()
     }
 
     /// Asks for the new association the SRTP re-keying of a transport wants
@@ -1216,6 +1293,7 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // requests to STUN servers.
         self.turn_handle_timeout(now);
         self.srflx_handle_timeout(now);
+        self.end_srtp_rekeying_waits(now);
         Ok(())
     }
 
@@ -1253,6 +1331,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }
         if let Some(srflx) = self.srflx_poll_timeout() {
             eto = Some(eto.map_or(srflx, |curr| curr.min(srflx)));
+        }
+        if let Some(wait) = self.srtp_rekeying_wait_timeout() {
+            eto = Some(eto.map_or(wait, |curr| curr.min(wait)));
         }
         eto
     }

@@ -2851,6 +2851,15 @@ impl SettingEngineBuilder {
     /// (RFC 5764 section 4.4); at the limit nothing more is protected with the key and the
     /// DTLS transport fails (`dtls-failure`, RFC 3711 section 9.2: re-key, or end the session).
     ///
+    /// The re-keying has the last sixteenth of the lifetime to complete: an offer and its
+    /// answer through the application's signalling, ICE checks on new candidates and a DTLS
+    /// handshake, which takes seconds on a relayed path or with loss (the DTLS retransmission
+    /// timer starts at 1 s). A lifetime short enough that a sixteenth of it lasts less than
+    /// that at the stream's packet rate ends the session instead (a 9600-packet lifetime at 188
+    /// packets a second leaves 3.2 s); the connection logs a warning when the margin it has is
+    /// under 2 seconds. Lifetimes shorter than the profile's are for tests and constrained
+    /// deployments; size them as `16 x packet rate x re-keying time` at least.
+    ///
     /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
     /// fail.
     pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
@@ -2913,22 +2922,23 @@ impl SettingEngineBuilder {
 
     /// Which side starts the automatic SRTP re-keying ([`Self::with_srtp_automatic_rekeying`])
     /// when both could. The default is `true`: the DTLS client of the current association asks
-    /// for the new association at the lifetime warning (a sixteenth of a key's lifetime left),
-    /// the DTLS server only once a thirty-second is left, if no new association has come by
-    /// then.
+    /// for the new association at the lifetime warning (a sixteenth of a key's lifetime left);
+    /// the DTLS server waits a little first, for the client's offer: at most 500 ms, and at
+    /// most an eighth of the time the keys have left at the rate they are used. If no new
+    /// association has come by then (or a thirty-second of the lifetime is left, if that comes
+    /// first), it asks itself.
     ///
     /// Two peers with the same key lifetime reach the warning at about the same packet count:
-    /// if both asked at once, their re-keying offers would cross (glare). RFC 9429 section 4.1.10
-    /// has that resolved by a rollback, which this engine supports, but it costs a round trip
-    /// and part of the margin before the key runs out. The DTLS roles are fixed for an
-    /// association and known to both sides, so with this tie-break two `rtc` peers do not
-    /// collide: the client's offer arrives, the server answers it, and the new association's
-    /// fresh keys never reach the server's later threshold. A peer that does not re-key by itself
-    /// (a browser, or rekeying turned off) leaves the server the second half of the margin.
-    /// Either way a glare that still happens (an application's own offer, or lifetimes that
-    /// differ) is resolved by the usual rollback.
+    /// if both asked at once, their re-keying offers would cross (glare), which RFC 9429
+    /// section 4.1.10 has resolved by a rollback (this engine does it), at the cost of an offer
+    /// made for nothing. With the short wait the client's offer usually reaches the server
+    /// first and the server answers it. Lifetimes are local: the server cannot know that the
+    /// client re-keys at all (a browser does not, nor an engine with re-keying off or a longer
+    /// lifetime), so the wait is bounded in time and never takes more than an eighth of the
+    /// margin from a re-keying that has to cross a slow path. Without packets to measure the
+    /// rate by, the server does not wait.
     ///
-    /// `false`: both sides ask at the warning (the behaviour before this setting).
+    /// `false`: both sides ask at the warning.
     pub fn with_srtp_rekeying_dtls_client_first(mut self, client_first: bool) -> Self {
         self.0.srtp_rekeying_both_at_warning = !client_first;
         self

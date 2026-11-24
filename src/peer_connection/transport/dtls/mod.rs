@@ -151,6 +151,8 @@ pub(crate) struct DtlsTransport {
     /// Where the automatic SRTP re-keying of the current association stands
     /// (`RTCPeerConnection::renew_before_the_key_lifetime_ends`).
     pub(crate) srtp_rekeying: SrtpRekeying,
+    /// Until when a [`SrtpRekeying::Deferred`] server waits for the client's re-keying offer.
+    pub(crate) srtp_rekeying_deferred_until: Option<std::time::Instant>,
 
     /// Whether the session has an RTP media section, which needs SRTP keys from the
     /// association (RFC 5764; RFC 8827 section 6.5: no media without SRTP).
@@ -235,8 +237,10 @@ pub(crate) enum SrtpRekeying {
     /// No key of the association is near its lifetime.
     #[default]
     Idle,
-    /// The lifetime warning came and this side is the DTLS server: it waits for the client's
-    /// re-keying offer until a thirty-second of the lifetime is left
+    /// The lifetime warning came and this side is the DTLS server: it waits briefly for the
+    /// client's re-keying offer (`DtlsTransport::srtp_rekeying_deferred_until`, at most
+    /// `SRTP_REKEYING_SERVER_WAIT` and an eighth of the time the keys have left), or until a
+    /// thirty-second of the lifetime is left if that comes first
     /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`).
     Deferred,
     /// A new association is wanted: asked for as soon as none is being negotiated or
@@ -321,6 +325,7 @@ impl DtlsTransport {
             renewal_requested: false,
             renewal_for_srtp_rekeying: false,
             srtp_rekeying: SrtpRekeying::Idle,
+            srtp_rekeying_deferred_until: None,
             srtp_required: false,
             srtp_negotiated: None,
             flight_interval: None,
@@ -720,6 +725,7 @@ impl DtlsTransport {
         self.renewal_for_srtp_rekeying = false;
         // The new association brings new keys.
         self.srtp_rekeying = SrtpRekeying::Idle;
+        self.srtp_rekeying_deferred_until = None;
         Ok(DtlsAssociationUpdate::New)
     }
 

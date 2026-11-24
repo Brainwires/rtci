@@ -71,6 +71,9 @@ pub(crate) struct SrtpHandlerContext {
     pub(crate) rtcp_reduced_size: bool,
     /// [`RTCEventInternal::SrtpRekeyingDue`] was raised for the current keys.
     pub(crate) rekeying_due_reported: bool,
+    /// When the current keys were installed (the handshake that exported them completed):
+    /// with their usage, the packet rate the re-keying margin is measured against.
+    pub(crate) keys_since: Option<Instant>,
     /// A new DTLS association replaced the one that keyed the current contexts and its
     /// handshake has not completed: the peer may already protect with its keys.
     pub(crate) awaiting_new_keys: bool,
@@ -177,6 +180,37 @@ impl SrtpHandlerContext {
 }
 
 impl SrtpHandlerContext {
+    /// How long the current keys last at the rate they have been used: the packets left of the
+    /// key nearest its lifetime (either direction, SRTP or SRTCP), at the rate that key's
+    /// packets came since the keys were installed. `None` before any packet or without keys.
+    pub(crate) fn key_time_left(&self, now: Instant) -> Option<Duration> {
+        let elapsed = now
+            .saturating_duration_since(self.keys_since?)
+            .as_secs_f64();
+        if elapsed <= 0.0 {
+            return None;
+        }
+        [
+            self.local_srtp_context.as_ref(),
+            self.remote_srtp_context.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|context| {
+            let usage = context.key_usage();
+            [
+                (usage.srtp_packets, usage.lifetime.srtp_packets),
+                (usage.srtcp_packets, usage.lifetime.srtcp_packets),
+            ]
+        })
+        .filter(|(used, _)| *used > 0)
+        .map(|(used, limit)| {
+            let rate = used as f64 / elapsed;
+            Duration::from_secs_f64(limit.saturating_sub(used) as f64 / rate)
+        })
+        .min()
+    }
+
     /// Records the header extensions the session encrypts (RFC 6904) and applies them to the
     /// contexts in place, in both directions.
     pub(crate) fn set_encrypted_header_extensions(&mut self, ids: EncryptedHeaderExtensions) {
@@ -531,6 +565,7 @@ impl<'a>
                 )
             });
             self.ctx.rekeying_due_reported = false;
+            self.ctx.keys_since = Some(evt.now);
             self.ctx.awaiting_new_keys = false;
 
             self.ctx.local_srtp_context = local_srtp_context.take();
