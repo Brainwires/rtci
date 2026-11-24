@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **FEC statistics.** The receiver's webrtc-stats now count all the FEC received for a
+  stream (8.5): `fecPacketsReceived` and `fecBytesReceived` include the FEC blocks of the
+  stream's RED packets (RFC 5109 section 14.2) and the packets of a FEC session of its own
+  (section 14.1; those also count in `packetsReceived` / `bytesReceived`, webrtc-stats 7.1),
+  besides a FEC SSRC's; `fecPacketsDiscarded` is measured for ULPFEC (FEC whose packets all
+  arrived or were rebuilt, FEC the recovery window left behind or that arrived outside it,
+  malformed FEC). `RTCPeerConnection::fec_stats()` (`FecStats`, `FecSentStats`,
+  `FecReceivedStats`) has what webrtc-stats has no member for: the FEC each outbound stream
+  sent (packets and payload octets, any carriage, ULPFEC and FlexFEC), the media packets FEC
+  rebuilt, and the discards by reason. In the interceptor crate: `UlpfecDecoderStats` gains
+  `discarded_unneeded`, `discarded_expired` and `discarded()`; `UlpfecReceiveInterceptor`
+  passes `UlpfecReceiveStats` application-ward on an empty RTCP carrier when its counts change
+  (and `receive_stats(ssrc)`); every packet a ULPFEC or FlexFEC encoder puts FEC into carries
+  a `FecSent` mark. An application that drives a chain itself sees the carriers (empty RTCP
+  packets with that attribute) on the read leg.
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
   the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a

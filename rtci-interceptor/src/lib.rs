@@ -232,6 +232,7 @@ pub(crate) mod adaptive_jitter_buffer;
 pub(crate) mod audio_red;
 pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
+pub(crate) mod fec_sent;
 pub(crate) mod fec_session;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
@@ -287,6 +288,7 @@ pub use circuit_breaker::{
     DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
     PacketSize as CircuitBreakerPacketSize,
 };
+pub use fec_sent::FecSent;
 pub use fec_session::FecSessionSsrcMap;
 pub use flexfec::bit_array::BitArray;
 pub use flexfec::coverage::{MAX_FEC_PACKETS, MAX_MEDIA_PACKETS, ProtectionCoverage};
@@ -429,8 +431,8 @@ pub use ulpfec::{
     ProtectionLevel as UlpfecProtectionLevel, RedFecPayload, RedPlacement,
     SHORT_MASK_BITS as ULPFEC_SHORT_MASK_BITS, UlpfecDecoder, UlpfecDecoderStats, UlpfecEncoder,
     UlpfecError, UlpfecLevel, UlpfecPacket, UlpfecReceiveBuilder, UlpfecReceiveInterceptor,
-    UlpfecRepair, UlpfecSendBuilder, UlpfecSendInterceptor, UlpfecStreamPacketizer,
-    depacketize_red as depacketize_red_for_ulpfec,
+    UlpfecReceiveStats, UlpfecRepair, UlpfecSendBuilder, UlpfecSendInterceptor,
+    UlpfecStreamPacketizer, depacketize_red as depacketize_red_for_ulpfec,
     one_level_only_from_fmtp as ulpfec_one_level_only_from_fmtp,
     validate_scheme as validate_ulpfec_scheme,
 };

@@ -3,9 +3,9 @@
 
 use bytes::Bytes;
 use rtci_interceptor::{
-    Attribute, AttributedPacket, Interceptor, NackGeneratorBuilder, Packet, RTCPFeedback,
+    Attribute, AttributedPacket, FecSent, Interceptor, NackGeneratorBuilder, Packet, RTCPFeedback,
     RedPlacement, Registry, Slot, StreamInfo, TaggedPacket, UlpfecPacket, UlpfecReceiveBuilder,
-    UlpfecRepair, UlpfecSendBuilder, depacketize_red_for_ulpfec,
+    UlpfecReceiveStats, UlpfecRepair, UlpfecSendBuilder, depacketize_red_for_ulpfec,
 };
 use sansio::Protocol;
 use shared::TransportContext;
@@ -93,8 +93,21 @@ fn send(chain: &mut impl Interceptor, now: Instant, packets: &[rtp::Packet]) -> 
     wire
 }
 
-/// Read `wire` through a receive chain and return what comes out of its far end.
+/// Read `wire` through a receive chain and return what comes out of its far end, but for the
+/// carriers of [`UlpfecReceiveStats`] (empty RTCP packets: [`receive_with_reports`] has them).
 fn receive(
+    chain: &mut impl Interceptor,
+    now: Instant,
+    wire: &[rtp::Packet],
+) -> Vec<AttributedPacket> {
+    receive_with_reports(chain, now, wire)
+        .into_iter()
+        .filter(|message| matches!(message.packet, Packet::Rtp(_)))
+        .collect()
+}
+
+/// [`receive`], the carriers of [`UlpfecReceiveStats`] included.
+fn receive_with_reports(
     chain: &mut impl Interceptor,
     now: Instant,
     wire: &[rtp::Packet],
@@ -107,6 +120,43 @@ fn receive(
         }
     }
     delivered
+}
+
+/// The last [`UlpfecReceiveStats`] a receive chain passed on.
+fn last_report(delivered: &[AttributedPacket]) -> UlpfecReceiveStats {
+    let reports: Vec<UlpfecReceiveStats> = delivered
+        .iter()
+        .filter_map(|message| message.custom::<UlpfecReceiveStats>().copied())
+        .collect();
+    for message in delivered {
+        if message.custom::<UlpfecReceiveStats>().is_some() {
+            assert!(
+                matches!(&message.packet, Packet::Rtcp(packets) if packets.is_empty()),
+                "a report travels on an empty carrier, never on media"
+            );
+        }
+    }
+    *reports.last().expect("the receiver reported its FEC")
+}
+
+/// Write `packets` through a send chain and return each packet put on the wire with the
+/// [`FecSent`] mark it carries, if any.
+fn send_marked(
+    chain: &mut impl Interceptor,
+    now: Instant,
+    packets: &[rtp::Packet],
+) -> Vec<(rtp::Packet, Option<FecSent>)> {
+    let mut wire = Vec::new();
+    for packet in packets {
+        chain.handle_write(tagged(now, packet.clone())).unwrap();
+        while let Some(out) = chain.poll_write() {
+            let mark = out.message.custom::<FecSent>().copied();
+            if let Packet::Rtp(packet) = out.message.packet {
+                wire.push((packet, mark));
+            }
+        }
+    }
+    wire
 }
 
 fn rtp_of(message: &AttributedPacket) -> &rtp::Packet {
@@ -1280,5 +1330,115 @@ fn the_carriage_is_the_one_the_description_negotiated() {
         ],
         shapes(&wire, RED_PT),
         "RED"
+    );
+}
+
+// --- What is counted: the marks the statistics are built from ---
+
+/// The receiver reports, per protected stream, the FEC blocks that came in RED packets and
+/// their octets, and what its decoder did with them: rebuilt a packet, or not needed because
+/// every packet they protect arrived (webrtc-stats `fecPacketsReceived`, `fecBytesReceived`,
+/// `fecPacketsDiscarded`, which count FEC "received for this SSRC").
+#[test]
+fn the_fec_that_arrived_in_red_is_reported_with_what_became_of_it() {
+    let packets = rfc_packets();
+    let now = Instant::now();
+    let mut sender = red_sender(red_builder().with_num_media_packets(4));
+    let wire = send(&mut sender, now, &packets[..4]);
+    assert_eq!(5, wire.len());
+    let block = depacketize_red_for_ulpfec(&wire[4].payload, FEC_PT).unwrap();
+    let fec_bytes = block.fec[0].len() as u64;
+
+    // Packet B lost: the FEC rebuilds it.
+    let arriving: Vec<_> = wire
+        .iter()
+        .filter(|p| p.header.sequence_number != 9)
+        .cloned()
+        .collect();
+    let mut receiver = red_receiver(UlpfecReceiveBuilder::red(RED_PT, FEC_PT));
+    let report = last_report(&receive_with_reports(&mut receiver, now, &arriving));
+    assert_eq!(MEDIA_SSRC, report.media_ssrc);
+    assert_eq!(1, report.fec_packets_in_red);
+    assert_eq!(fec_bytes, report.fec_bytes_in_red);
+    assert_eq!(1, report.decoder.recovered);
+    assert_eq!(0, report.decoder.discarded());
+
+    // Nothing lost: the FEC was received and not needed.
+    let mut receiver = red_receiver(UlpfecReceiveBuilder::red(RED_PT, FEC_PT));
+    let report = last_report(&receive_with_reports(&mut receiver, now, &wire));
+    assert_eq!(1, report.fec_packets_in_red);
+    assert_eq!(0, report.decoder.recovered);
+    assert_eq!(1, report.decoder.discarded_unneeded);
+    assert_eq!(1, report.decoder.discarded());
+}
+
+/// A separate FEC stream is counted where it is read off the wire (it is a flow of its own);
+/// the receiver reports no RED FEC for it, and still what its decoder did.
+#[test]
+fn the_fec_of_a_separate_stream_is_reported_as_decoded_and_not_as_red() {
+    let packets = rfc_packets();
+    let (mut sender, mut receiver) = stream_chains(4);
+    let now = Instant::now();
+    let mut wire = send(&mut sender, now, &packets[..4]);
+    wire.remove(2);
+    let report = last_report(&receive_with_reports(&mut receiver, now, &wire));
+    assert_eq!(0, report.fec_packets_in_red);
+    assert_eq!(1, report.decoder.fec_packets);
+    assert_eq!(1, report.decoder.recovered);
+}
+
+/// Every packet the encoder puts FEC into says how much: a FEC packet of its own (RED or a
+/// separate stream) one payload, a media packet FEC rides with in RED the blocks it carries.
+/// Media without FEC carries no mark.
+#[test]
+fn every_packet_that_carries_fec_is_marked_with_the_fec_it_carries() {
+    let packets = rfc_packets();
+    let now = Instant::now();
+
+    let mut sender = red_sender(red_builder().with_num_media_packets(4));
+    let wire = send_marked(&mut sender, now, &packets[..4]);
+    assert_eq!(5, wire.len());
+    assert!(wire[..4].iter().all(|(_, mark)| mark.is_none()));
+    let block = depacketize_red_for_ulpfec(&wire[4].0.payload, FEC_PT).unwrap();
+    assert_eq!(
+        Some(FecSent {
+            media_ssrc: MEDIA_SSRC,
+            packets: 1,
+            bytes: block.fec[0].len() as u64,
+        }),
+        wire[4].1
+    );
+
+    let mut sender = red_sender(
+        red_builder()
+            .with_num_media_packets(4)
+            .with_red_placement(RedPlacement::WithNextMedia),
+    );
+    let wire = send_marked(&mut sender, now, &packets);
+    assert_eq!(5, wire.len());
+    assert!(wire[..4].iter().all(|(_, mark)| mark.is_none()));
+    let block = depacketize_red_for_ulpfec(&wire[4].0.payload, FEC_PT).unwrap();
+    assert!(block.primary.is_some(), "E rides with it");
+    assert_eq!(
+        Some(FecSent {
+            media_ssrc: MEDIA_SSRC,
+            packets: 1,
+            bytes: block.fec[0].len() as u64,
+        }),
+        wire[4].1
+    );
+
+    let (mut sender, _) = stream_chains(4);
+    let wire = send_marked(&mut sender, now, &packets[..4]);
+    assert_eq!(5, wire.len());
+    assert!(wire[..4].iter().all(|(_, mark)| mark.is_none()));
+    assert_eq!(FEC_SSRC, wire[4].0.header.ssrc);
+    assert_eq!(
+        Some(FecSent {
+            media_ssrc: MEDIA_SSRC,
+            packets: 1,
+            bytes: wire[4].0.payload.len() as u64,
+        }),
+        wire[4].1
     );
 }

@@ -7,7 +7,7 @@ use crate::Interceptor;
 use crate::cc::fec_rate::FecRate;
 use crate::stream_info::StreamInfo;
 use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
-use crate::{AttributedPacket, Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, FecSent, Packet, TaggedPacket};
 use bytes::Bytes;
 use sansio::Protocol;
 use shared::error::Error;
@@ -492,6 +492,9 @@ impl UlpfecSendInterceptor {
             ) {
                 rtp_packet.payload = payload;
                 rtp_packet.header.payload_type = red_payload_type;
+                if let Some(sent) = fec_riding_along(ssrc, &pending) {
+                    msg.message.add(sent);
+                }
             }
         }
 
@@ -633,6 +636,7 @@ impl UlpfecSendInterceptor {
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
+        // Each packet with the FEC octets it carries (none: an empty block in a reserved slot).
         let mut packets = Vec::new();
         match stream.carriage {
             Carriage::Stream => {
@@ -640,7 +644,7 @@ impl UlpfecSendInterceptor {
                     if let Some(packetizer) = stream.packetizer.as_mut()
                         && let Ok(parsed) = super::header::UlpfecPacket::parse(&fec)
                     {
-                        packets.push(packetizer.packetize(&parsed, now));
+                        packets.push((packetizer.packetize(&parsed, now), fec.len()));
                     }
                 }
             }
@@ -664,29 +668,47 @@ impl UlpfecSendInterceptor {
                     let Ok(payload) = red::write(&[], fec_payload_type, &fec) else {
                         continue;
                     };
-                    packets.push(rtp::Packet {
-                        header: rtp::header::Header {
-                            version: 2,
-                            marker: false,
-                            payload_type: red_payload_type,
-                            sequence_number,
-                            timestamp: end.timestamp,
-                            ssrc,
-                            ..Default::default()
+                    packets.push((
+                        rtp::Packet {
+                            header: rtp::header::Header {
+                                version: 2,
+                                marker: false,
+                                payload_type: red_payload_type,
+                                sequence_number,
+                                timestamp: end.timestamp,
+                                ssrc,
+                                ..Default::default()
+                            },
+                            payload,
                         },
-                        payload,
-                    });
+                        fec.len(),
+                    ));
                 }
             }
         }
-        for packet in packets {
+        for (packet, fec_bytes) in packets {
+            let mut message = AttributedPacket::new(Packet::Rtp(packet));
+            if fec_bytes > 0 {
+                message.add(FecSent::one(ssrc, fec_bytes));
+            }
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport,
-                message: AttributedPacket::new(Packet::Rtp(packet)),
+                message,
             });
         }
     }
+}
+
+/// The [`FecSent`] mark for a media packet in RED that FEC blocks ride with, if any do.
+fn fec_riding_along(media_ssrc: u32, blocks: &[Bytes]) -> Option<Attribute> {
+    (!blocks.is_empty()).then(|| {
+        Attribute::Custom(Arc::new(FecSent {
+            media_ssrc,
+            packets: blocks.len() as u32,
+            bytes: blocks.iter().map(|block| block.len() as u64).sum(),
+        }))
+    })
 }
 
 impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
@@ -793,6 +815,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             ) {
                 rtp_packet.payload = payload;
                 rtp_packet.header.payload_type = red_payload_type;
+                if let Some(sent) = fec_riding_along(ssrc, &pending) {
+                    msg.message.add(sent);
+                }
             }
         }
 
@@ -821,6 +846,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             return Ok(());
         };
         for fec in fec_payloads {
+            let fec_bytes = fec.len();
             let packet = match stream.carriage {
                 Carriage::Stream => {
                     let Some(packetizer) = stream.packetizer.as_mut() else {
@@ -867,7 +893,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport,
-                message: AttributedPacket::new(Packet::Rtp(packet)),
+                message: AttributedPacket::new(Packet::Rtp(packet))
+                    .with(FecSent::one(ssrc, fec_bytes)),
             });
         }
         Ok(())

@@ -2106,6 +2106,15 @@ impl<'a> InterceptorHandler<'a> {
                     debug!("FEC session packet for SSRC {media_ssrc}, not a protected stream");
                     return Ok(());
                 }
+                // FEC received for the stream it protects, counted on what the wire carried
+                // as a FEC SSRC's packet is (webrtc-stats 7.1, 8.5 `fecPacketsReceived`).
+                let payload_bytes = rtp_packet.payload.len();
+                self.stats.on_fec_session_received(
+                    media_ssrc,
+                    rtp_packet.marshal_size() - payload_bytes,
+                    payload_bytes,
+                    now,
+                );
                 map.map_rtp(&mut rtp_packet);
                 let chain_ssrc = rtp_packet.header.ssrc;
                 if !self
@@ -2425,6 +2434,10 @@ impl<'a>
                                 value.downcast_ref::<interceptor::PacerDiscard>()
                             {
                                 self.announce_pacer_discard(packet.now, discard);
+                            } else if let Some(fec) =
+                                value.downcast_ref::<interceptor::UlpfecReceiveStats>()
+                            {
+                                self.stats.on_ulpfec_receive_stats(*fec);
                             }
                         }
                         _ => {}
@@ -2468,6 +2481,9 @@ impl<'a>
                     // Media on its way to the application: its sources are the receiver's
                     // synchronization and contributing sources from now on.
                     Packet::Rtp(rtp_packet) => {
+                        if packet.message.has(&Attribute::RecoveredByFec) {
+                            self.stats.on_recovered_by_fec(rtp_packet.header.ssrc);
+                        }
                         self.record_sources(packet.now, &rtp_packet.header);
                     }
                     _ => {}
@@ -2542,6 +2558,11 @@ impl<'a>
                             retransmission,
                             packet.now,
                         );
+                        // The FEC an encoder put in it, counted for the stream it protects
+                        // (the packet's own SSRC may be a FEC SSRC or a FEC session's alias).
+                        if let Some(sent) = packet.message.custom::<interceptor::FecSent>() {
+                            self.stats.on_fec_sent(*sent);
+                        }
                     }
                     _ => {}
                 }

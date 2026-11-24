@@ -5181,6 +5181,15 @@ impl RTCPeerConnection {
             .snapshot_with_selector(now, selector)
     }
 
+    /// The FEC counts webrtc-stats has no member for: per outbound stream the FEC it sent,
+    /// per inbound stream the FEC it received, the packets FEC rebuilt and why FEC was
+    /// discarded ([`FecStats`](crate::statistics::FecStats)). The webrtc-stats members
+    /// (`fecPacketsReceived`, `fecBytesReceived`, `fecPacketsDiscarded`) are in
+    /// [`get_stats`](Self::get_stats).
+    pub fn fec_stats(&self) -> crate::statistics::FecStats {
+        self.pipeline_context.stats.fec_stats()
+    }
+
     /// [`get_stats`](Self::get_stats), refusing a selector that is not this connection's.
     ///
     /// W3C `getStats(selector)` rejects with `InvalidAccessError` when the selector matches no

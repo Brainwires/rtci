@@ -12,7 +12,7 @@ use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 use rtci::interceptor::{
     Attribute, AttributedPacket, FecSessionSsrcMap, FecSessionStream, Interceptor, Packet,
-    Registry, Slot, StreamInfo, TaggedPacket, ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW, UlpfecDecoder, UlpfecReceiveBuilder, UlpfecRepair,
+    Registry, Slot, StreamInfo, TaggedPacket, ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW, UlpfecDecoder, UlpfecReceiveBuilder, UlpfecReceiveStats, UlpfecRepair,
 };
 use rtci::rtp::header::Header;
 use rtci::shared::TransportContext;
@@ -69,6 +69,15 @@ fn feed(
             break;
         };
         budget -= 1;
+        // The decoder's counts travel on an empty carrier, never on media. FEC reaches the
+        // RED chain's decoder only from RED packets: it cannot discard more than came in them.
+        if let Some(report) = out.message.custom::<UlpfecReceiveStats>() {
+            assert!(matches!(&out.message.packet, Packet::Rtcp(packets) if packets.is_empty()));
+            assert_eq!(MEDIA_SSRC, report.media_ssrc);
+            if !binds_fec_stream {
+                assert!(report.decoder.discarded() <= report.fec_packets_in_red);
+            }
+        }
         if let Packet::Rtp(delivered) = &out.message.packet {
             if foreign {
                 assert_eq!(packet, delivered, "a foreign packet passes through untouched");
@@ -129,6 +138,7 @@ fuzz_target!(|data: &[u8]| {
         ..info(false)
     });
     let mut decoder = UlpfecDecoder::new(MEDIA_SSRC).with_one_level_only(config & 0x04 != 0);
+    let mut fed_fec = 0u64;
 
     let now = Instant::now();
     let mut sequence_number = u16::from(config) << 8;
@@ -210,10 +220,13 @@ fuzz_target!(|data: &[u8]| {
         }
 
         let recovered = if op % 6 == 2 || op % 6 == 4 {
+            fed_fec += 1;
             decoder.push_fec(payload).unwrap_or_default()
         } else {
             decoder.push_media(&packet)
         };
+        // Every FEC payload fed is held, used, or discarded once: never counted twice.
+        assert!(decoder.stats().discarded() + decoder.held_fec_packets() as u64 <= fed_fec);
         for packet in &recovered {
             assert_eq!(MEDIA_SSRC, packet.header.ssrc);
             assert_eq!(2, packet.header.version);

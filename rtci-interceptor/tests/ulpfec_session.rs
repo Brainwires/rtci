@@ -251,8 +251,11 @@ fn a_media_packet_lost_in_its_session_is_rebuilt_from_the_fec_session() {
     assert_eq!(fec.header.ssrc, MEDIA_SSRC);
     map().map_rtp(&mut fec);
     chain.handle_read(on(fec_transport, start, fec)).unwrap();
+    // The media, not the carriers of the decoder's counts (empty RTCP).
     while let Some(out) = chain.poll_read() {
-        delivered.push(out);
+        if matches!(out.message.packet, Packet::Rtp(_)) {
+            delivered.push(out);
+        }
     }
 
     assert_eq!(delivered.len(), 5, "four that arrived and the rebuilt one");

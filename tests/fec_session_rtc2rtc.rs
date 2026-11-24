@@ -33,6 +33,7 @@ use rtci::rtp_transceiver::{
 };
 use rtci::sansio::Protocol;
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -778,6 +779,102 @@ fn the_fec_travels_in_its_own_session_under_the_media_ssrc_and_repairs_a_loss() 
         "RTCP of the FEC session under the media SSRC: {:?}",
         world.rtcp
     );
+    Ok(())
+}
+
+/// webrtc-stats 7.1: "FEC streams do not show up as separate RTCInboundRtpStreamStats
+/// objects but affect the packetsReceived, bytesReceived, fecPacketsReceived and
+/// fecBytesReceived counters of the relevant RTCInboundRtpStreamStats objects". A FEC session's
+/// stream is such a stream: its packets count for the media stream they protect, the one
+/// that rebuilt nothing counts as discarded (8.5 `fecPacketsDiscarded`: "all the source
+/// packets protected by the FEC packet were received"), and the engine's own counts say what
+/// was sent and rebuilt.
+#[test]
+fn the_fec_of_a_session_is_counted_for_the_stream_it_protects() -> Result<()> {
+    let mut world = World::with_chains(true, FecChain::FixedAmount, FecChain::FixedAmount)?;
+    let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
+    let (offer, _) = world.negotiate()?;
+    let mids: Vec<String> = sections(&offer)
+        .iter()
+        .filter_map(|section| value(section, "mid").map(str::to_owned))
+        .collect();
+    world.gather()?;
+    world.run("connect", |p| p[0].connected && p[1].connected)?;
+    let media_from = world.peers[0].addr_of(&mids[0])?;
+    let fec_from = world.peers[0].addr_of(&mids[1])?;
+
+    let ssrc = world.sender_ssrc(sender);
+    let media_payload_type = world.media_payload_type(sender);
+    // Four frames of five packets, one packet of each of the first three lost for good.
+    for sequence_number in [1u16, 8, 14] {
+        world.lose.insert((media_from, sequence_number));
+    }
+    world.only_first_transmissions = Some((media_from, media_payload_type));
+    for sequence_number in 0..20u16 {
+        world.send_video(
+            sender,
+            sequence_number,
+            u32::from(sequence_number / 5),
+            sequence_number % 5 == 4,
+        )?;
+        world.advance(Duration::from_millis(2))?;
+    }
+    world.advance(Duration::from_millis(300))?;
+    let fec_on_the_wire = world
+        .srtp
+        .iter()
+        .filter(|packet| packet.from == fec_from)
+        .count();
+    assert_eq!(fec_on_the_wire, 4, "{:?}", world.srtp);
+
+    let now = world.now;
+    let report = world.peers[1].pc.get_stats(now, StatsSelector::None);
+    let inbound = report
+        .inbound_rtp_streams()
+        .find(|stream| stream.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+        .context("an inbound-rtp for the media stream")?;
+    assert_eq!(
+        inbound.fec_packets_received, 4,
+        "every FEC packet of the session"
+    );
+    assert!(inbound.fec_bytes_received > 0);
+    assert!(inbound.fec_bytes_received < inbound.bytes_received);
+    assert_eq!(
+        inbound.received_rtp_stream_stats.packets_received,
+        17 + 4,
+        "the media that arrived and the FEC"
+    );
+    assert_eq!(
+        inbound.fec_packets_discarded,
+        Some(1),
+        "the last frame lost nothing: its FEC was not needed"
+    );
+    assert_eq!(
+        report
+            .inbound_rtp_streams()
+            .filter(|stream| stream.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+            .count(),
+        1,
+        "no object of its own"
+    );
+
+    let received = world.peers[1].pc.fec_stats().received;
+    assert_eq!(received.len(), 1, "{received:?}");
+    assert_eq!(received[0].ssrc, ssrc);
+    assert_eq!(received[0].fec_packets_received, 4);
+    assert_eq!(received[0].fec_packets_in_red, 0);
+    assert_eq!(received[0].packets_recovered, 3);
+    assert_eq!(received[0].discarded_unneeded, 1);
+    assert_eq!(received[0].fec_packets_discarded, 1);
+
+    let sent = world.peers[0].pc.fec_stats().sent;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].ssrc, ssrc,
+        "counted for the media stream, not the alias"
+    );
+    assert_eq!(sent[0].fec_packets_sent, 4);
+    assert_eq!(sent[0].fec_bytes_sent, inbound.fec_bytes_received);
     Ok(())
 }
 

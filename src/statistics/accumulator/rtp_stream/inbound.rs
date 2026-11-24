@@ -147,6 +147,11 @@ pub struct InboundRtpStreamAccumulator {
     pub fec_packets_received: u64,
     /// FEC bytes received.
     pub fec_bytes_received: u64,
+    /// What the chain's ULPFEC decoder last reported for the stream: the FEC that came in its
+    /// RED packets, and what it rebuilt and discarded. `None` while no decoder has.
+    pub ulpfec: Option<interceptor::UlpfecReceiveStats>,
+    /// Media packets of the stream rebuilt by FEC (any decoder) that left the chain.
+    pub packets_recovered_by_fec: u64,
 
     // Retransmission
     /// Retransmitted packets received (RTX).
@@ -531,11 +536,22 @@ impl InboundRtpStreamAccumulator {
                 .map(SystemInstant::now),
             header_bytes_received: self.header_bytes_received,
             packets_discarded: decoder.packets_discarded,
+            // FEC in the stream's RED packets is FEC received for this SSRC as well; its
+            // octets are a subset of `bytesReceived` (they arrived in the RED packets).
             fec_bytes_received: self.fec_bytes_received
+                + self.ulpfec.map_or(0, |ulpfec| ulpfec.fec_bytes_in_red)
                 + receiver.in_band_fec_bytes_received.unwrap_or(0),
             fec_packets_received: self.fec_packets_received
+                + self.ulpfec.map_or(0, |ulpfec| ulpfec.fec_packets_in_red)
                 + receiver.in_band_fec_packets_received.unwrap_or(0),
-            fec_packets_discarded: receiver.fec_packets_discarded,
+            // The engine's decoder discards; the application's (in-band FEC) on top. Absent
+            // while neither has anything to say.
+            fec_packets_discarded: match (self.ulpfec, receiver.fec_packets_discarded) {
+                (None, supplied) => supplied,
+                (Some(ulpfec), supplied) => {
+                    Some(ulpfec.decoder.discarded() + supplied.unwrap_or(0))
+                }
+            },
             bytes_received: self.bytes_received,
             nack_count: self.nack_count,
             // FIR and PLI ask for a video key frame: the members exist for video only.
