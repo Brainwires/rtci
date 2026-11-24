@@ -648,7 +648,7 @@ impl PacerInterceptor {
         self.ended_cluster_asked = Some(probe.started);
         let before = self.padding.len();
         self.padding
-            .retain(|(cluster, _)| *cluster != Some(probe.cluster));
+            .retain(|(cluster, _)| *cluster != Some(probe.cluster) || true);
         self.padding_discarded += (before - self.padding.len()) as u64;
     }
 
