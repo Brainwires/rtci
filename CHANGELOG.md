@@ -272,6 +272,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ubuntu runner, release build, best of 15: a 30 KB one-slice frame 14.0 us to 0.57 us, a 1 MB
   eight-slice frame 500 us to 27 us, SPS + PPS + a 100 B slice 106 ns to 92 ns; 1000 NAL units
   of 5 B each 19.8 us to 21.5 us (+8%). Same change as webrtc-rs/rtc#336 by @g4lb.
+- **tooling** (up-watch): `scripts/upstream-watch.py` lists what webrtc-rs did since the fork last
+  looked: `webrtc-rs/rtc` commits after the merged one, its pull requests and issues opened or
+  updated since the triage day, and `webrtc-rs/webrtc` commits (`master`, `v0.17.x`). Both
+  points are FORK.md's (new row "Open upstream work last triaged"). Read-only GitHub API
+  calls; no workflow runs it.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
