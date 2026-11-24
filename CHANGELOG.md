@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **RFC 7164: no RTCP timestamps around a possible leap second.** Taking up section 5.1's
+  assumption of a positive leap second at the end of every month, the RTCP session sends no
+  sender report and no XR receiver reference time stamped in the last second of a month's last
+  day or the second after it (UTC): the SSRC reports with a receiver report there, keeping its
+  schedule. A sender report received with such a timestamp is not used for LSR / DLSR or the
+  remote-outbound timestamps (its counts are). New: `rtci_shared::time::near_leap_second`.
+  Engine behaviour change (report content on the wire, two seconds a month). Rows:
+  RFC7164-5.1-1 to 5.1-5 (`missing` -> `tested`), 5-3 (`missing` -> `partial`: the RFC 8888
+  report timestamp and the NTP header extensions are still written there).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

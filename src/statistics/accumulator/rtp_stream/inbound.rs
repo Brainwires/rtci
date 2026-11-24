@@ -277,6 +277,13 @@ impl InboundRtpStreamAccumulator {
         }
     }
 
+    /// The packet and octet counts of a sender report whose timestamps are not taken (RFC
+    /// 7164 section 5.1: it was generated near a leap second).
+    pub fn on_rtcp_sr_counts(&mut self, packets_sent: u64, bytes_sent: u64) {
+        self.remote_packets_sent = packets_sent;
+        self.remote_bytes_sent = bytes_sent;
+    }
+
     /// The RTP timestamp of the sender report `on_rtcp_sr_received` took.
     pub fn on_rtcp_sr_rtp_time(&mut self, rtp_time: u32) {
         self.remote_rtp_time = Some(rtp_time);
