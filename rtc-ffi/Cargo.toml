@@ -30,6 +30,16 @@ serde_json.workspace = true
 tokio = { workspace = true, optional = true }
 stream-driver = { workspace = true, optional = true }
 
+# The tests of the driven layer need it; with default features off (the workspace's crypto and
+# coverage jobs) they are skipped, not built against a library without `rtc_driven_*`.
+[[test]]
+name = "driven"
+required-features = ["driver"]
+
+[[test]]
+name = "c_loopback"
+required-features = ["driver"]
+
 [dev-dependencies]
 serde_json.workspace = true
 # Compiles the C test program (tests/c/loopback.c) against the static library.
