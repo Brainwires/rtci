@@ -311,10 +311,16 @@ fn encode(args: &[String]) -> Result<bool, String> {
         y4m_pictures(&data, n)?
     };
     let (w, h) = (pictures[0].width, pictures[0].height);
-    let mut enc: Box<dyn VideoEncoder> = match codec.as_str() {
-        "vp8" => Box::new(Vp8Encoder::new(w, h, fps, bitrate).map_err(|e| e.to_string())?),
-        "av1" => Box::new(Av1Encoder::new(w, h, fps, bitrate, speed).map_err(|e| e.to_string())?),
+    let (mut vp8, mut av1) = (None, None);
+    match codec.as_str() {
+        "vp8" => vp8 = Some(Vp8Encoder::new(w, h, fps, bitrate).map_err(|e| e.to_string())?),
+        "av1" => av1 = Some(Av1Encoder::new(w, h, fps, bitrate, speed).map_err(|e| e.to_string())?),
         other => return Err(format!("unknown codec {other}")),
+    }
+    let enc: &mut dyn VideoEncoder = match (&mut vp8, &mut av1) {
+        (Some(e), _) => e,
+        (_, Some(e)) => e,
+        _ => unreachable!(),
     };
     let mut encoded: Vec<(usize, Vec<u8>, bool)> = Vec::new();
     let mut encode_time = Duration::ZERO;
@@ -326,8 +332,15 @@ fn encode(args: &[String]) -> Result<bool, String> {
         encode_time += took;
         slowest = slowest.max(took);
         if let Some(e) = out {
-            encoded.push((i, e.data, e.keyframe));
+            encoded.push((e.source_index as usize, e.data, e.keyframe));
         }
+    }
+    if let Some(e) = &mut av1 {
+        let t = Instant::now();
+        for p in e.flush().map_err(|e| e.to_string())? {
+            encoded.push((p.source_index as usize, p.data, p.keyframe));
+        }
+        encode_time += t.elapsed();
     }
     let bytes: usize = encoded.iter().map(|e| e.1.len()).sum();
     let seconds = pictures.len() as f64 / f64::from(fps);

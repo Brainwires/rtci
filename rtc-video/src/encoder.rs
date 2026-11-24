@@ -15,6 +15,9 @@ pub struct EncodedPicture {
     pub temporal_id: u8,
     /// The quantizer used, in the codec's own scale, when known (W3C `qpSum`).
     pub qp: Option<u32>,
+    /// Which input picture this is (0 for the first given to `encode`): an encoder with
+    /// look-ahead returns a picture some calls after it went in.
+    pub source_index: u64,
 }
 
 /// Why a picture could not be encoded.
@@ -31,8 +34,10 @@ pub enum EncodeError {
     Failed(String),
 }
 
-/// A video encoder: synchronous, one picture in, at most one encoded picture out (no
-/// reordering: WebRTC is real time). `Send`, so the application runs it where it likes.
+/// A video encoder: synchronous, one picture in, at most one encoded picture out, in input
+/// order (no reordering: WebRTC is real time). An encoder may hold pictures back for
+/// look-ahead (rav1e does, docs/video-pipeline.md 4.6): `source_index` says which input each
+/// output is. `Send`, so the application runs it where it likes.
 pub trait VideoEncoder: Send {
     /// Encodes `picture`; `keyframe` forces a key frame (PLI, FIR). `Ok(None)` when the
     /// encoder dropped the picture to hold its rate.

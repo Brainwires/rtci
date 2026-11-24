@@ -98,6 +98,7 @@ impl VideoDecoder for Vp8Decoder {
 pub struct Vp8Encoder {
     inner: vp8_encoder::Encoder,
     fps: u32,
+    frames_in: u64,
 }
 
 impl Vp8Encoder {
@@ -110,7 +111,11 @@ impl Vp8Encoder {
         let config = vp8_encoder::EncoderConfig::new(width, height, fps, bitrate_bps);
         let inner = vp8_encoder::Encoder::new(config)
             .map_err(|e| EncodeError::InvalidConfig(e.to_string()))?;
-        Ok(Self { inner, fps })
+        Ok(Self {
+            inner,
+            fps,
+            frames_in: 0,
+        })
     }
 }
 
@@ -129,8 +134,11 @@ impl VideoEncoder for Vp8Encoder {
             y_stride: picture.y_stride,
             uv_stride: picture.uv_stride,
         };
+        let source_index = self.frames_in;
+        self.frames_in += 1;
         match self.inner.encode(&p, keyframe) {
             Ok(Some(f)) => Ok(Some(EncodedPicture {
+                source_index,
                 keyframe: f.keyframe,
                 temporal_id: f.temporal_id,
                 qp: Some(u32::from(f.q_index)),

@@ -10,7 +10,7 @@ mod common {
     pub mod md5;
 }
 
-use rtc_video::codec::av1::{Av1Decoder, Av1Encoder};
+use rtc_video::codec::av1::{AV1_ENCODER_DELAY, Av1Decoder, Av1Encoder};
 use rtc_video::codec::vp8::{Vp8Decoder, Vp8Encoder};
 use rtc_video::decoder::VideoDecoder;
 use rtc_video::encoder::VideoEncoder;
@@ -112,32 +112,39 @@ fn vp8_at_640x360_and_600_kbits_reaches_32_db() {
 }
 
 /// The same operating point for AV1 at rav1e's fastest preset: reported, with a floor that
-/// says the stream is usable.
+/// says the stream is usable. rav1e holds `AV1_ENCODER_DELAY` pictures back; each output
+/// names its input, against which its PSNR is taken.
 #[test]
 fn av1_at_640x360_and_600_kbits_is_reported() {
     let (w, h, fps, rate) = (640, 360, 30, 600_000);
     let mut source = TestSource::new(w, h);
     let mut enc = Av1Encoder::new(w, h, fps, rate, 10).expect("encoder");
     let mut dec = Av1Decoder::new().expect("decoder");
-    let (mut sum, mut n, mut bytes) = (0.0, 0, 0usize);
     let frames = 30;
-    for i in 0..frames {
-        let pic = source.next_picture();
-        if let Some(tu) = enc.encode(&pic.view(), i == 0).expect("encode") {
-            bytes += tu.data.len();
-            dec.decode_bytes(&tu.data, tu.keyframe)
-                .expect("decode")
-                .expect("a picture");
-            sum += psnr(&pic.view(), &dec.picture().expect("picture")).expect("size");
-            n += 1;
-        }
+    let pictures: Vec<_> = (0..frames).map(|_| source.next_picture()).collect();
+    let mut out = Vec::new();
+    for (i, pic) in pictures.iter().enumerate() {
+        out.extend(enc.encode(&pic.view(), i == 0).expect("encode"));
     }
-    let mean = sum / f64::from(n);
-    let kbps = bytes as f64 * 8.0 / (f64::from(frames) / f64::from(fps)) / 1000.0;
+    assert_eq!(out.len() as u64, frames as u64 - AV1_ENCODER_DELAY);
+    out.extend(enc.flush().expect("flush"));
+    let (mut sum, mut bytes) = (0.0, 0usize);
+    for tu in &out {
+        bytes += tu.data.len();
+        dec.decode_bytes(&tu.data, tu.keyframe)
+            .expect("decode")
+            .expect("a picture");
+        let src = &pictures[tu.source_index as usize];
+        sum += psnr(&src.view(), &dec.picture().expect("picture")).expect("size");
+    }
+    let mean = sum / out.len() as f64;
+    let kbps = bytes as f64 * 8.0 / (frames as f64 / f64::from(fps)) / 1000.0;
     println!(
-        "MEASURE av1 640x360 600 kbit/s synthetic speed 10: {n} frames, PSNR {mean:.2} dB, {kbps:.0} kbit/s"
+        "MEASURE av1 640x360 600 kbit/s synthetic speed 10: {} pictures, PSNR {mean:.2} dB, \
+         {kbps:.0} kbit/s, {AV1_ENCODER_DELAY} pictures of encoder delay",
+        out.len()
     );
-    assert_eq!(n, frames, "one picture per picture in (low latency)");
+    assert_eq!(out.len(), frames);
     assert!(mean >= 30.0, "PSNR {mean:.2} dB");
 }
 
@@ -151,15 +158,15 @@ fn hostile_frames_never_panic_the_decoders() {
     let vp8 = ivf_frames(&test_data("output_vp8.ivf"));
     let mut av1_enc = Av1Encoder::new(96, 64, 30, 150_000, 10).expect("encoder");
     let mut source = TestSource::new(96, 64);
-    let av1: Vec<Vec<u8>> = (0..12)
-        .map(|i| {
-            av1_enc
-                .encode(&source.next_picture().view(), i == 0)
-                .expect("encode")
-                .expect("low latency")
-                .data
-        })
-        .collect();
+    let mut av1: Vec<Vec<u8>> = Vec::new();
+    for i in 0..12 {
+        let tu = av1_enc
+            .encode(&source.next_picture().view(), i == 0)
+            .expect("encode");
+        av1.extend(tu.map(|t| t.data));
+    }
+    av1.extend(av1_enc.flush().expect("flush").into_iter().map(|t| t.data));
+    assert_eq!(av1.len(), 12);
     let mut rng = Rng(0x5eed_f00d);
     let (mut panics, mut errors, mut cases) = (0, 0, 0);
     for case in 0..1500 {

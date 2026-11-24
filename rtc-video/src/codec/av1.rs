@@ -27,6 +27,10 @@ fn eagain() -> i32 {
     -libc::EAGAIN
 }
 
+/// How many pictures rav1e 0.8 holds back in low-latency mode with one picture of RDO
+/// look-ahead (measured: the first output follows the fifth input).
+pub const AV1_ENCODER_DELAY: u64 = 4;
+
 /// The largest picture the decoder accepts by default (`frame_size_limit`): 1920x1088.
 pub const DEFAULT_MAX_PIXELS: u32 = 1920 * 1088;
 
@@ -249,6 +253,11 @@ impl VideoDecoder for Av1Decoder {
 
 /// The AV1 encoder: `rav1e` in low-latency mode (no frame reordering), one thread, a speed
 /// preset (0 slowest, 10 fastest; real time needs the fastest, docs/video-pipeline.md 4.6).
+///
+/// rav1e holds pictures back even in low-latency mode (its key-frame look-ahead,
+/// `keyframe_lookahead_distance` = reordering latency + 1, and one picture of RDO look-ahead):
+/// the first output comes [`AV1_ENCODER_DELAY`] calls after its input, and every output names
+/// its input in `source_index`. [`Av1Encoder::flush`] drains what it holds.
 pub struct Av1Encoder {
     ctx: rav1e::Context<u8>,
     width: usize,
@@ -298,6 +307,33 @@ impl Av1Encoder {
     }
 }
 
+impl Av1Encoder {
+    /// Ends the stream and returns every picture still held back, in order. The encoder takes
+    /// no picture after this.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::Failed`] when rav1e fails.
+    pub fn flush(&mut self) -> Result<Vec<EncodedPicture>, EncodeError> {
+        self.ctx.flush();
+        let mut out = Vec::new();
+        loop {
+            match self.ctx.receive_packet() {
+                Ok(p) => out.push(EncodedPicture {
+                    source_index: p.input_frameno,
+                    keyframe: p.frame_type == rav1e::prelude::FrameType::KEY,
+                    temporal_id: 0,
+                    qp: Some(u32::from(p.qp)),
+                    data: p.data,
+                }),
+                Err(rav1e::EncoderStatus::Encoded) => continue,
+                Err(rav1e::EncoderStatus::LimitReached) => return Ok(out),
+                Err(e) => return Err(EncodeError::Failed(e.to_string())),
+            }
+        }
+    }
+}
+
 impl VideoEncoder for Av1Encoder {
     fn encode(
         &mut self,
@@ -333,6 +369,7 @@ impl VideoEncoder for Av1Encoder {
             match self.ctx.receive_packet() {
                 Ok(p) => {
                     return Ok(Some(EncodedPicture {
+                        source_index: p.input_frameno,
                         keyframe: p.frame_type == rav1e::prelude::FrameType::KEY,
                         temporal_id: 0,
                         qp: Some(u32::from(p.qp)),
@@ -367,23 +404,28 @@ mod tests {
         let mut source = TestSource::new(w, h);
         let mut enc = Av1Encoder::new(w, h, 30, 200_000, 10).expect("encoder");
         let mut dec = Av1Decoder::new().expect("decoder");
-        let mut decoded = 0;
-        for i in 0..10 {
-            let pic = source.next_picture();
-            let Some(tu) = enc.encode(&pic.view(), i == 0).expect("encode") else {
-                continue;
-            };
-            assert_eq!(tu.keyframe, i == 0, "frame {i}");
-            let out = dec
+        let pictures: Vec<_> = (0..10).map(|_| source.next_picture()).collect();
+        let mut out = Vec::new();
+        for (i, pic) in pictures.iter().enumerate() {
+            let tu = enc.encode(&pic.view(), i == 0).expect("encode");
+            // The look-ahead: nothing comes out for the first AV1_ENCODER_DELAY pictures.
+            assert_eq!(tu.is_some(), i as u64 >= AV1_ENCODER_DELAY, "picture {i}");
+            out.extend(tu);
+        }
+        out.extend(enc.flush().expect("flush"));
+        assert_eq!(out.len(), pictures.len());
+        for (k, tu) in out.iter().enumerate() {
+            assert_eq!(tu.source_index, k as u64);
+            assert_eq!(tu.keyframe, k == 0, "picture {k}");
+            let dp = dec
                 .decode_bytes(&tu.data, tu.keyframe)
                 .expect("decode")
                 .expect("a picture per temporal unit");
-            assert_eq!((out.width, out.height), (w, h));
-            let q = psnr(&pic.view(), &dec.picture().expect("a picture")).expect("same size");
-            assert!(q > 25.0, "frame {i}: {q:.1} dB");
-            decoded += 1;
+            assert_eq!((dp.width, dp.height), (w, h));
+            let q =
+                psnr(&pictures[k].view(), &dec.picture().expect("a picture")).expect("same size");
+            assert!(q > 25.0, "picture {k}: {q:.1} dB");
         }
-        assert_eq!(decoded, 10);
     }
 
     #[test]
