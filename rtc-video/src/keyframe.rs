@@ -43,6 +43,9 @@ pub enum KeyFrameReason {
     Repeat,
     /// A frame did not depacketize.
     Unparsable,
+    /// Pictures waited longer than the repair window for packets that retransmission did not
+    /// bring (RFC 4588 6.3: a packet is useful only while it can still be played).
+    RepairWindow,
 }
 
 /// The waits, derived from the sender's `rtx-time` as libwebrtc does
@@ -199,6 +202,23 @@ impl KeyFramePolicy {
         if self.active(now) && !self.receiving_keyframe(now) {
             self.request(now, KeyFrameReason::Timeout);
         }
+    }
+
+    /// Frames are held that cannot be decoded, and nothing was released for `window`: the
+    /// packets they wait for are past repair. Asks at once, at most once per key-frame wait.
+    pub fn on_stalled(&mut self, now: Instant, window: Duration) {
+        let stalled = now.saturating_duration_since(self.waiting_since) >= window;
+        let due = self
+            .last_request
+            .is_none_or(|t| now >= t + self.wait_for_key_frame);
+        if stalled && due && self.active(now) && !self.receiving_keyframe(now) {
+            self.request(now, KeyFrameReason::RepairWindow);
+        }
+    }
+
+    /// When the decode timeout started (the last release, or the start).
+    pub fn waiting_since(&self) -> Instant {
+        self.waiting_since
     }
 
     /// When the decode timeout runs out.

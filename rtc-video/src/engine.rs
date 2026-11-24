@@ -65,6 +65,7 @@ pub struct VideoReceiver {
     playout_delay_id: Option<u8>,
     streams: HashMap<u32, Stream>,
     plis_sent: u32,
+    rtt: Option<Duration>,
 }
 
 impl VideoReceiver {
@@ -110,6 +111,7 @@ impl VideoReceiver {
             streams: HashMap::new(),
             config,
             plis_sent: 0,
+            rtt: None,
         })
     }
 
@@ -142,9 +144,16 @@ impl VideoReceiver {
             return;
         };
         let config = self.config.clone();
-        let stream = self.streams.entry(h.ssrc).or_insert_with(|| Stream {
-            pipeline: ReceivePipeline::new(codec, now, config),
-            descriptors: DependencyDescriptorReader::new(),
+        let rtt = self.rtt;
+        let stream = self.streams.entry(h.ssrc).or_insert_with(|| {
+            let mut pipeline = ReceivePipeline::new(codec, now, config);
+            if let Some(rtt) = rtt {
+                pipeline.set_rtt(rtt);
+            }
+            Stream {
+                pipeline,
+                descriptors: DependencyDescriptorReader::new(),
+            }
         });
         let mut dependency_descriptor = None;
         if let Some(id) = self.dd_id
@@ -251,6 +260,7 @@ impl VideoReceiver {
 
     /// The round-trip time, for the jitter estimate.
     pub fn set_rtt(&mut self, rtt: Duration) {
+        self.rtt = Some(rtt);
         for s in self.streams.values_mut() {
             s.pipeline.set_rtt(rtt);
         }

@@ -45,7 +45,14 @@ pub struct ReceiveConfig {
     /// as a retransmission (the engine folds RTX back before the application sees it, so the
     /// arrival pattern is all there is). `None`: never.
     pub retransmission_lateness: Option<Duration>,
+    /// How long frames that cannot be decoded may wait for retransmissions before a key frame
+    /// is asked for, in round-trip times, at least [`MIN_REPAIR_WINDOW`]. `None`: libwebrtc's
+    /// behaviour, only the decode timeout (3 s, or three times `rtx-time`).
+    pub repair_window_rtts: Option<f64>,
 }
+
+/// The shortest repair window.
+pub const MIN_REPAIR_WINDOW: Duration = Duration::from_millis(300);
 
 impl Default for ReceiveConfig {
     fn default() -> Self {
@@ -56,6 +63,7 @@ impl Default for ReceiveConfig {
             max_pending_decodes: 2,
             min_freeze_samples: 1,
             retransmission_lateness: Some(Duration::from_millis(50)),
+            repair_window_rtts: Some(3.0),
         }
     }
 }
@@ -66,6 +74,7 @@ impl ReceiveConfig {
     pub fn chrome() -> Self {
         Self {
             min_freeze_samples: CHROME_MIN_FREEZE_SAMPLES,
+            repair_window_rtts: None,
             ..Self::default()
         }
     }
@@ -135,6 +144,7 @@ pub struct ReceivePipeline {
     /// dropped): the NACK horizon.
     released_to: Option<i64>,
     frames_dropped_by_finder: u64,
+    rtt: Option<Duration>,
 }
 
 impl ReceivePipeline {
@@ -157,6 +167,7 @@ impl ReceivePipeline {
             sync_delay: None,
             released_to: None,
             frames_dropped_by_finder: 0,
+            rtt: None,
             codec,
             config,
         }
@@ -183,9 +194,18 @@ impl ReceivePipeline {
         self.released_to.map(|s| s + 1)
     }
 
-    /// The round-trip time, for the jitter estimate's retransmission term.
+    /// The round-trip time, for the jitter estimate's retransmission term and the repair
+    /// window.
     pub fn set_rtt(&mut self, rtt: Duration) {
+        self.rtt = Some(rtt);
         self.timing.update_rtt(rtt);
+    }
+
+    /// The repair window in use, if any.
+    pub fn repair_window(&self) -> Option<Duration> {
+        let k = self.config.repair_window_rtts?;
+        let rtt = self.rtt.unwrap_or(Duration::from_millis(100));
+        Some(rtt.mul_f64(k).max(MIN_REPAIR_WINDOW))
     }
 
     /// The application's `jitterBufferTarget` (W3C webrtc-extensions), raising the minimum
@@ -438,12 +458,26 @@ impl ReceivePipeline {
     /// Runs the timers due at `now`.
     pub fn handle_timeout(&mut self, now: Instant) {
         self.keyframes.on_timeout(now);
+        if let Some(window) = self.repair_window()
+            && (!self.frames.is_empty() || !self.packets.is_empty())
+            && self
+                .frames
+                .next_decodable(self.keyframes.keyframe_required())
+                .is_none()
+        {
+            self.keyframes.on_stalled(now, window);
+        }
     }
 
     /// When the pipeline next needs [`handle_timeout`](Self::handle_timeout) or
     /// [`poll_frame`](Self::poll_frame).
     pub fn poll_timeout(&self, now: Instant) -> Instant {
         let mut t = self.keyframes.deadline();
+        if let Some(window) = self.repair_window()
+            && (!self.frames.is_empty() || !self.packets.is_empty())
+        {
+            t = t.min((self.keyframes.waiting_since() + window).max(now));
+        }
         if self.pending.len() < self.config.max_pending_decodes
             && let Some(unit) = self
                 .frames
