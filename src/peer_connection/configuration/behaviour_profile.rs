@@ -978,6 +978,20 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.gcc_received_rate_bound,
     },
     {
+        id: "cc.recovery-probing",
+        setting: "DefaultInterceptorOptions::cc_recovery_probing",
+        clause: "RFC 8836 2 (1f)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: false => "false",
+        performance: true => "true",
+        performance_note: "RFC 8836 2 (1f): the flow \"should also react quickly to regain its previous share of the bandwidth when the local bottleneck or link is cleared\"; no RFC or draft names probing for it (RFC 8836 4a names \"probing during setup with dummy data\" for start-up only; draft-ietf-rmcat-gcc-02 and RFC 8888 have no probing), so it is not a default. Measured: tests/capacity_cap_video_rtc2rtc.rs, default chain, 2.5 Mbit/s capped to 300 kbit/s for 20 s, six seeds on three wall clocks: mean target 15 to 25 s after the cap 646-2500 -> 2500 kbit/s on every cell, freeze, oldest picture and retransmissions unchanged; after a 4 s outage and an ICE restart the picture is back after 4.3-4.5 s instead of 8.4-8.8 s (target 10 s after the switch 2.5 Mbit/s instead of 0.5-0.7); rtci-interceptor/tests/rfc8836_multi_flow.rs: 2 -> 0.5 -> 2 Mbit/s back at 80 % in 4.2 s instead of 19.6 s. Cost: probes while the drop lasts (one cluster every 5 to 40 s): lowest median target under the cap 122 -> 108 kbit/s, p95 queueing delay at 0.5 Mbit/s 49 -> 82 ms; a flow joining late gets 0.40 of the path instead of 0.50; beside a TCP-like transfer with a 0.05 s buffer the transfer keeps 0.60 instead of 0.75 (0.75 vs 0.78 with 0.2 s)",
+        chrome_source: "libwebrtc modules/congestion_controller/goog_cc/probe_controller.cc::ProbeController::Process @ a222406d (lines 498-520): after the initial probes a probe is asked only by TimeForNextRepeatedInitialProbe, TimeForAlrProbe (application-limited periods, enable_periodic_alr_probing_) or TimeForNetworkStateProbe (a network-state estimate's link_capacity_upper, its intervals infinite by default); RequestProbe after a large drop is gated on ALR. No probe for a sender at its target after a drop that lasted",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.cc_recovery_probing = v,
+        read: |o: &DefaultInterceptorOptions| o.cc_recovery_probing,
+    },
+    {
         id: "pacer.queue-overflow",
         setting: "DefaultInterceptorOptions::pacer_queue_overflow",
         clause: "RFC 8836 2, RFC 8083 4",
@@ -1470,11 +1484,6 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::pacer_immediate_release",
         class: NotGovernedClass::Same,
         note: "a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget and lets a burst build up over send_burst_interval (modules/pacing/pacing_controller.h @ a222406d), which Chromium sets to 40 ms (rtc_peer_connection_handler.cc pacer_burst_interval @ Chromium 8dafa8bc)",
-    },
-    NotGoverned {
-        setting: "DefaultInterceptorOptions::cc_recovery_probing",
-        class: NotGovernedClass::Same,
-        note: "off, as libwebrtc: modules/congestion_controller/goog_cc/probe_controller.cc::ProbeController::Process @ a222406d asks a probe after the initial ones only for an application-limited period (TimeForAlrProbe), a network-state estimate (TimeForNetworkStateProbe, intervals infinite by default) or a repeated initial probe; nothing for a sender at its target after a drop that lasted",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::bandwidth_probing",

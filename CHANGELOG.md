@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- **congestion control, recovery probing** (`conf/cc-recovery-probing`, opt-in):
+  `ProbeController::with_recovery_probing`, `CongestionControlBuilder::with_recovery_probing`,
+  `DefaultInterceptorOptions::cc_recovery_probing` (`false`; `true` in the `Performance`
+  profile, row `cc.recovery-probing`). Once a sender follows its target no probing rule fires,
+  so after a capacity drop that lasts and then goes the estimate climbs back at 8 % a second
+  from wherever the drop left it. With this, a target that has stayed below two thirds of its
+  high of the last ten seconds for two seconds makes that high the one to come back to: while
+  the target is below 85 % of it and has not fallen for a second, a cluster at twice the
+  target (at most the high) goes out every 5 s, the wait doubling up to 40 s after each result
+  below the target and a confirming result allowing further probes. RFC 8836 section 2 asks a
+  flow to "react quickly to regain its previous share of the bandwidth when the local
+  bottleneck or link is cleared" (1f) without naming a means; it names probing only for
+  start-up (4a), and draft-ietf-rmcat-gcc-02 and RFC 8888 have none: a `Performance` row, not
+  a default (libwebrtc does not probe a sender at its target either). Measured (hosted run
+  45429388160): `tests/capacity_cap_video_rtc2rtc.rs`, default chain, six seeds on three wall
+  clocks, the mean target 15 to 25 s after a 20 s cap 2500 kbit/s on every cell (646 to 2500
+  without), freeze, picture age and retransmissions unchanged; after a 4 s outage and an ICE
+  restart a usable frame 4.3 to 4.5 s after the switch (8.4 to 8.8); multi-flow 2 -> 0.5 ->
+  2 Mbit/s back at 80 % in 4.2 s (19.6). Cost: the probes during the drop (lowest median
+  target under the cap 108 kbit/s against 122, p95 queueing delay at 0.5 Mbit/s 82 ms against
+  49), a late-joining flow's share 0.40 (0.50), and a TCP-like transfer behind a 0.05 s buffer
+  keeps 0.60 of the path (0.75). Tests: `probe.rs` recovery tests,
+  `rfc8836_multi_flow.rs::recovery_probing_meets_the_same_bounds`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

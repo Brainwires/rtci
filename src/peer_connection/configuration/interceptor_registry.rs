@@ -367,7 +367,8 @@ pub struct DefaultInterceptorOptions {
     /// With bandwidth probing, whether the rate the target had before a drop that lasted is
     /// probed for until the target is back near it. `false` by default: no RFC or draft asks
     /// for it (RFC 8836 section 2, requirement 1f, asks a flow to "react quickly to regain its
-    /// previous share", without naming a means). See
+    /// previous share", without naming a means); `true` in the `Performance` profile
+    /// (`cc.recovery-probing`, with what it measured and costs). See
     /// [`CongestionControlBuilder::with_recovery_probing`](interceptor::CongestionControlBuilder::with_recovery_probing).
     pub cc_recovery_probing: bool,
     /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
