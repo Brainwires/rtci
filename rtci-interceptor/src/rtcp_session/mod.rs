@@ -471,8 +471,10 @@ impl RtcpSessionBuilder {
     /// session bandwidth): the regular interval computed with what the feedback leaves becomes
     /// a `T_rr_interval` (RFC 4585 section 3.5.3, which suppresses regular reports inside it
     /// and lets feedback through), no longer than five seconds. Regular reports become rarer
-    /// at low media rates and nothing else changes. Part of the `Performance` behaviour
-    /// profile.
+    /// at low media rates and nothing else changes. A peer connection's session has `true`
+    /// (`DefaultInterceptorOptions::rtcp_congestion_feedback_in_budget`: RFC 4585 section 3.2
+    /// makes feedback "subject to the RTCP bandwidth constraints"); the `Chrome` behaviour
+    /// profile has `false`, as libwebrtc.
     pub fn with_congestion_feedback_in_budget(mut self, in_budget: bool) -> Self {
         self.congestion_feedback_in_budget = in_budget;
         self
@@ -1742,13 +1744,12 @@ impl RtcpSessionInterceptor {
             .map(|packet| packet.marshal_size())
             .sum();
         if feedback > 0 {
-            // A reduced-size packet's SRTCP fields are the feedback's own.
-            let reduced = !packets.iter().any(|packet| {
-                let any = packet.as_any();
-                any.is::<SenderReport>() || any.is::<ReceiverReport>()
-            });
-            let overhead = if reduced { self.srtcp_overhead } else { 0 };
-            self.congestion_feedback_rate.add(now, feedback + overhead);
+            // The peer sends its congestion control feedback in a packet of its own (reduced-size,
+            // or a minimal compound one), outside its regular reports: the whole datagram is the
+            // feedback's, as this session counts its own (`send`), lower layers and SRTCP
+            // included (RFC 3550 section 6.2 counts the lower layers in RTCP's bandwidth).
+            self.congestion_feedback_rate
+                .add(now, wire_size(packets) + self.srtcp_overhead);
         }
 
         for packet in packets {
