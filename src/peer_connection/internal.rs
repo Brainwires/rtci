@@ -183,6 +183,13 @@ pub(crate) fn ice_agent_config(
         multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
         multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
         multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
+        multicast_dns_fail_closed: setting_engine.multicast_dns.fail_closed,
+        multicast_dns_expose_known_public_addresses: setting_engine
+            .multicast_dns
+            .expose_known_public_addresses,
+        multicast_dns_expose_temporary_ipv6_addresses: setting_engine
+            .multicast_dns
+            .expose_temporary_ipv6_addresses,
         local_ufrag: setting_engine.candidates.username_fragment.clone(),
         local_pwd: setting_engine.candidates.password.clone(),
         allow_loopback_remote_candidates: setting_engine
@@ -193,6 +200,7 @@ pub(crate) fn ice_agent_config(
             .allow_link_local_remote_candidates,
         remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
         tie_breaker: setting_engine.ice.tie_breaker,
+        new_tie_breaker_on_restart: setting_engine.ice.new_tie_breaker_on_restart,
         nomination_acceptance: setting_engine.ice.nomination_acceptance,
         failed_nomination: setting_engine.ice.failed_nomination,
         nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
@@ -478,6 +486,8 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
+            mdns_publishing: Default::default(),
+            temporary_ipv6_addresses: Vec::new(),
             ssrc_history: HashSet::new(),
             local_description_was_set: false,
             sctp_closed_by_answer: false,
@@ -491,6 +501,7 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
+            dscp_fallback: Default::default(),
             streams: super::streams::EngineStreams::new(
                 streams_settings,
                 engine_turn,

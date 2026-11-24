@@ -206,6 +206,12 @@ pub struct MulticastDNS {
     pub unicast_response: bool,
     /// See [`SettingEngineBuilder::with_multicast_dns_rate_limit`].
     pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_fail_closed`].
+    pub fail_closed: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_expose_known_public_addresses`].
+    pub expose_known_public_addresses: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses`].
+    pub expose_temporary_ipv6_addresses: bool,
 }
 
 impl Default for MulticastDNS {
@@ -226,6 +232,9 @@ impl Default for MulticastDNS {
             destination_reported: false,
             unicast_response: false,
             rate_limit: None,
+            fail_closed: false,
+            expose_known_public_addresses: false,
+            expose_temporary_ipv6_addresses: false,
         }
     }
 }
@@ -287,6 +296,8 @@ pub struct Candidates {
 pub struct IceBehaviour {
     /// See [`SettingEngineBuilder::with_ice_tie_breaker`].
     pub tie_breaker: Option<u64>,
+    /// See [`SettingEngineBuilder::with_ice_new_tie_breaker_on_restart`].
+    pub new_tie_breaker_on_restart: bool,
     /// See [`SettingEngineBuilder::with_ice_nomination_acceptance`].
     pub nomination_acceptance: NominationAcceptance,
     /// See [`SettingEngineBuilder::with_ice_failed_nomination`].
@@ -526,6 +537,8 @@ pub struct SettingEngine {
     pub(crate) data_channel_send_before_ack: bool,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
+    /// [`SettingEngineBuilder::with_dscp_marking`].
+    pub(crate) dscp_marking: crate::peer_connection::priority::RTCDscpMarking,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     /// [`SettingEngineBuilder::with_dtls_connection_id`].
@@ -690,6 +703,7 @@ impl SettingEngine {
             data_channel_max_buffer_size: Default::default(),
             data_channel_send_before_ack: Default::default(),
             non_interactive_video: Default::default(),
+            dscp_marking: Default::default(),
             srtp_key_lifetime: Default::default(),
             srtp_automatic_rekeying_off: Default::default(),
             srtp_rekeying_both_at_warning: Default::default(),
@@ -1713,11 +1727,99 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// With mDNS `QueryAndGather`: what a host candidate becomes when the name of its address
+    /// cannot be registered, because the application can send no mDNS for the address's
+    /// family (`RTCPeerConnection::set_multicast_dns_publishing`) or the agent holds the most
+    /// names it can (64).
+    ///
+    /// Off, the default, is draft-ietf-mmusic-mdns-ice-candidates section 3.1.1: "the ICE
+    /// agent SHOULD still provide mDNS candidates in step 6 even if the local network does not
+    /// support mDNS or mDNS registration fails in step 4". The candidate goes out under a
+    /// `<uuid>.local` name that is never published: its address is not written, and a page
+    /// cannot tell from the candidates whether mDNS works on the host.
+    ///
+    /// On, the connection fails closed: no host candidate for that address at all (UDP or
+    /// TCP), so nothing the peer cannot resolve is offered; the server-reflexive and relayed
+    /// candidates of the address are still gathered. The literal address is written in
+    /// neither case.
+    pub fn with_multicast_dns_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.0.multicast_dns.fail_closed = fail_closed;
+        self
+    }
+
+    /// With mDNS `QueryAndGather`: leave unwrapped a host address that the gathering before
+    /// the current ICE generation showed to be public. Off by default, in every behaviour
+    /// profile; in the other mDNS modes it changes nothing.
+    ///
+    /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2: "If the STUN response returns
+    /// the same value as the local IP address, this indicates the address is in fact public
+    /// [...] once an address has been identified as public, the ICE agent MAY cache this
+    /// information and skip mDNS protection for that address in future ICE gathering phases.
+    /// Note that if the set of STUN servers changes, any cached information SHOULD be
+    /// discarded". The address is shown public when a server-reflexive candidate (the
+    /// engine's or the application's) has its base's address, that base is a host candidate
+    /// of the transport (an interface address: a STUN server cannot name another), and the
+    /// address is a global unicast one (`ice::mdns::is_global_unicast`: never a private,
+    /// loopback, link-local, unique-local or CGNAT address, whatever the server said). The
+    /// gathering that shows it is not changed (its `.local` candidate went out first, the
+    /// server-reflexive candidate follows with raddr `0.0.0.0` / `::` rport 9); from the next
+    /// ICE restart, host candidates on the address carry it, as long as each restart's
+    /// gathering shows it again. Per transport, never shared between connections; a change of
+    /// the ICE servers (`set_configuration`) forgets it.
+    ///
+    /// What it exposes, and to whom: an address the remote peer and the application (a web
+    /// page, in a browser) already received as the server-reflexive candidate; the later host
+    /// candidates add that it is the host's own interface address. Chrome's own form (it
+    /// writes host addresses for a page with media permission) is a browser consent policy,
+    /// not the engine's: the `Chrome` behaviour profile leaves this off.
+    pub fn with_multicast_dns_expose_known_public_addresses(mut self, expose: bool) -> Self {
+        self.0.multicast_dns.expose_known_public_addresses = expose;
+        self
+    }
+
+    /// With mDNS `QueryAndGather`: leave unwrapped the host addresses the application marked
+    /// as RFC 4941 temporary IPv6 addresses (`RTCPeerConnection::set_temporary_ipv6_addresses`;
+    /// `rtci-stream-driver`'s `PeerDriver` marks them from the operating system's interface
+    /// list where it reports the flag). Off by default, in every behaviour profile; in the
+    /// other mDNS modes it changes nothing.
+    ///
+    /// Through `PeerDriver` it has an effect on Linux / Android (`IFA_F_TEMPORARY`, shown on
+    /// a runner) and macOS / iOS (`IN6_IFF_TEMPORARY`; the kernel request is shown to work, a
+    /// temporary address was not observed on a runner). **On Windows it has no effect**: no
+    /// address flag there has been shown to tell a temporary address from the stable one, so
+    /// the driver marks nothing and every address stays hidden.
+    ///
+    /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3: "the [RFC4941] IPv6 addresses
+    /// recommended for WebRTC have inherent privacy protections, namely a short lifetime and
+    /// the lack of any stateful information. Accordingly, implementations MAY choose to not
+    /// conceal [RFC4941] addresses with mDNS names as a tradeoff for improved peer-to-peer
+    /// connectivity." The engine cannot tell a temporary address by its bits: an address not
+    /// marked stays hidden, and a marked one is unwrapped only if it is a global unicast
+    /// address (`ice::mdns::is_global_unicast`).
+    ///
+    /// What it exposes, and to whom: the temporary address, to the remote peer and the
+    /// application (a web page, in a browser), for the address's lifetime; not the stable
+    /// IPv6 address, nor any IPv4 one. The `Chrome` behaviour profile leaves this off (a
+    /// browser's choice of what to write is its consent policy, not the engine's).
+    pub fn with_multicast_dns_expose_temporary_ipv6_addresses(mut self, expose: bool) -> Self {
+        self.0.multicast_dns.expose_temporary_ipv6_addresses = expose;
+        self
+    }
+
     /// Fixes the ICE tiebreaker (RFC 8445 section 5.2), which is random otherwise. It decides
     /// who keeps the controlling role when both agents claim it (section 7.3.1.1): the larger
     /// one. For reproducible sessions and tests.
     pub fn with_ice_tie_breaker(mut self, tie_breaker: u64) -> Self {
         self.0.ice.tie_breaker = Some(tie_breaker);
+        self
+    }
+
+    /// Draws a new ICE tiebreaker at every ICE restart (RFC 8445 section 16.1: "The agent MAY
+    /// change the number when an ICE restart occurs"). Off by default: the tiebreaker stays
+    /// for the peer connection's life, as in libwebrtc. A restart that is rolled back
+    /// (RFC 9429 section 5.7) gives back the tiebreaker it replaced.
+    pub fn with_ice_new_tie_breaker_on_restart(mut self, new_tie_breaker: bool) -> Self {
+        self.0.ice.new_tie_breaker_on_restart = new_tie_breaker;
         self
     }
 
@@ -2917,6 +3019,31 @@ impl SettingEngineBuilder {
     /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
     pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
         self.0.non_interactive_video = non_interactive;
+        self
+    }
+
+    /// How [`RTCPeerConnection::dscp`] and the codepoint of each stream transmit
+    /// ([`StreamTransmit::dscp`](shared::stream::StreamTransmit::dscp)) mark what the
+    /// connection sends.
+    ///
+    /// [`RTCDscpMarking::Rfc8837`], the default, marks by RFC 8837 Table 1 (RFC 8835 section
+    /// 4.2: implementations "SHOULD attempt to set QoS on the packets sent") and turns a media
+    /// flow whose marked packets the network blocks back to Default Forwarding (RFC 8835
+    /// section 4.2: "MAY turn off use of DSCP markings if it detects symptoms of unexpected
+    /// behavior such as ... blocking of packets with certain DSCP markings"; see the enum).
+    /// [`RTCDscpMarking::WithoutFallback`] marks and never turns back; [`RTCDscpMarking::Off`]
+    /// marks nothing (Default Forwarding, DSCP 0, for every datagram), for a platform where
+    /// marking is not implemented or a network known to misbehave.
+    ///
+    /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
+    /// [`RTCDscpMarking::Rfc8837`]: crate::peer_connection::priority::RTCDscpMarking::Rfc8837
+    /// [`RTCDscpMarking::WithoutFallback`]: crate::peer_connection::priority::RTCDscpMarking::WithoutFallback
+    /// [`RTCDscpMarking::Off`]: crate::peer_connection::priority::RTCDscpMarking::Off
+    pub fn with_dscp_marking(
+        mut self,
+        marking: crate::peer_connection::priority::RTCDscpMarking,
+    ) -> Self {
+        self.0.dscp_marking = marking;
         self
     }
 

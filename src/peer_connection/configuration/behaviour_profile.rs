@@ -1014,6 +1014,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.pacer_queue_overflow,
     },
     {
+        id: "cb.packet-size",
+        setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
+        clause: "RFC 8083 3, 4.3",
+        rfc: interceptor::CircuitBreakerPacketSize::SendingWindow => "SendingWindow",
+        chrome: interceptor::CircuitBreakerPacketSize::SendingWindow => "SendingWindow",
+        strict_rfc: interceptor::CircuitBreakerPacketSize::LastFrames => "LastFrames",
+        chrome_source: "libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow and the engine's value stands (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556). Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.circuit_breaker_packet_size = v,
+        read: |o: &DefaultInterceptorOptions| o.circuit_breaker_packet_size,
+    },
+    {
         id: "nack.max-requests-per-packet",
         setting: "DefaultInterceptorOptions::nack_max_nacks_per_packet",
         clause: "RFC 4588 6.3, Appendix A",
@@ -1070,6 +1082,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_sctp_zero_checksum",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 9653 zero checksum, used only when the peer announces it too; dcsctp has it but libwebrtc leaves zero_checksum_alternate_error_detection_method at None (net/dcsctp/public/dcsctp_options.h @ a222406d), so it announces none",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dscp_marking",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8837 marking with the RFC 8835 4.2 fallback (a media flow the peer never reports on goes back to DSCP 0) in every profile. libwebrtc marks by default too (media/base/media_config.h @ a222406d: MediaConfig::enable_dscp = true; Chromium's rtc_peer_connection_handler.cc @ 8dafa8bc does not change it) and has no fallback (media/base/media_channel_impl.cc @ a222406d: UpdateDscp sets the preferred codepoint, or DSCP_DEFAULT only when enable_dscp is off, on the RTP and RTCP sockets alike); the fallback changes nothing until a flow is blocked",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_weighted_fair_queueing",
@@ -1180,6 +1197,21 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_multicast_dns_mode",
         class: NotGovernedClass::Same,
         note: "QueryOnly: remote .local candidates resolved, host addresses written as they are. Chrome hides them behind mDNS names only for a page without media permission; with it (what an application is) it writes them",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_fail_closed",
+        class: NotGovernedClass::Same,
+        note: "off: the draft form already (draft-ietf-mmusic-mdns-ice-candidates 3.1.1: a host candidate whose name cannot be registered still goes out under a .local name, unpublished). On (no host candidate at all) departs from that SHOULD and is an embedder's choice in every profile; only with QueryAndGather, which no profile turns on",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_expose_known_public_addresses",
+        class: NotGovernedClass::Same,
+        note: "off: every host address hidden in QueryAndGather, the draft's form without its MAY (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.2: an address a STUN answer shows public \"MAY\" go unwrapped in later gatherings). On is an embedder's choice in every profile; only with QueryAndGather, which no profile turns on. Chrome writes host addresses for a page with media permission, a browser consent policy, not this rule: the Chrome profile does not follow it",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses",
+        class: NotGovernedClass::Same,
+        note: "off: RFC 4941 temporary IPv6 addresses hidden like any other in QueryAndGather (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.3: they \"MAY\" go unconcealed). On is an embedder's choice in every profile, acting only on addresses the application marks temporary; only with QueryAndGather, which no profile turns on. Chrome's own exposure is a browser consent policy: the Chrome profile does not follow it",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_sdp_media_level_fingerprints",
@@ -1388,6 +1420,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "a fixed tiebreaker for tests",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_new_tie_breaker_on_restart",
+        class: NotGovernedClass::Same,
+        note: "RFC 8445 section 16.1 MAY; off in every profile, libwebrtc keeps its tiebreaker across restarts too",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_remote_address_filter",
         class: NotGovernedClass::Input,
         note: "the host's network policy",
@@ -1529,11 +1566,6 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_dtls_connection_id",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further",
-    },
-    NotGoverned {
-        setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
-        class: NotGovernedClass::EngineOnly,
-        note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556)",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_new_association_on_previous_addresses",

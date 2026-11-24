@@ -1,3 +1,6 @@
+pub mod exposure;
+#[cfg(test)]
+mod mdns_exposure_test;
 #[cfg(test)]
 mod mdns_local_name_test;
 #[cfg(test)]
@@ -5,6 +8,7 @@ mod mdns_name_test;
 #[cfg(test)]
 mod mdns_test;
 
+pub use exposure::is_global_unicast;
 use mdns::Mdns;
 use mdns::MdnsConfig;
 /// The limit on mDNS messages one or several agents share (`AgentConfig::multicast_dns_rate_limit`).
@@ -31,6 +35,38 @@ pub enum MulticastDnsMode {
     /// under `multicast_dns_local_name`; without it, every local address (IPv4 and IPv6) under
     /// a `<uuid>.local` name of its own, as browsers do.
     QueryAndGather,
+}
+
+/// Whether the application can send the agent's mDNS messages, per address family: an mDNS
+/// socket of that family is open (the agent writes its announcements and answers from port
+/// 5353 to 224.0.0.251 or ff02::fb). Both by default. An application that has none for a
+/// family tells the agent ([`Agent::set_multicast_dns_publishing`](crate::Agent::set_multicast_dns_publishing))
+/// before it adds the host candidates of that family: a name of such an address cannot be
+/// registered on the network (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.1 step 4),
+/// and [`AgentConfig::multicast_dns_fail_closed`](crate::agent::agent_config::AgentConfig::multicast_dns_fail_closed)
+/// says what its candidates become.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct MulticastDnsPublishing {
+    /// mDNS can be sent over IPv4.
+    pub ipv4: bool,
+    /// mDNS can be sent over IPv6.
+    pub ipv6: bool,
+}
+
+impl Default for MulticastDnsPublishing {
+    fn default() -> Self {
+        Self {
+            ipv4: true,
+            ipv6: true,
+        }
+    }
+}
+
+impl MulticastDnsPublishing {
+    /// Whether a name of `ip` can be published.
+    pub fn covers(&self, ip: IpAddr) -> bool {
+        if ip.is_ipv4() { self.ipv4 } else { self.ipv6 }
+    }
 }
 
 pub(crate) fn generate_multicast_dns_name() -> String {

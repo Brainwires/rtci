@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
+  `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
+  `new_tie_breaker_on_restart` (both off by default, see "Added"). A struct literal of either
+  adds `..Default::default()` or the field set to `false`.
 - **workspace**: the version on `master` is `0.2.0-dev` (every crate, and every requirement on
   a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
   cannot take without a change of their own. Each such change is listed here. Git dependents
@@ -16,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **interceptor** (fec-1): `StreamInfo` has a new public field, `fec_session` (ULPFEC in an RTP
   session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
   or `fec_session: None`.
+
+- **ice / jsep** (mdns-5): new public fields `AgentConfig::multicast_dns_expose_known_public_addresses` and `AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`, `MulticastDNS::expose_known_public_addresses` and `MulticastDNS::expose_temporary_ipv6_addresses` (see "Added"). Migration: a struct literal of `AgentConfig` or `MulticastDNS` adds `..Default::default()` (or the fields set to `false`).
 
 - **rtci-sdp** (jsep-79, pass2): `MediaDescription::connection_information` is a
   `Vec<ConnectionInformation>`, every `c=` line of the media description in order (RFC 8866
@@ -27,7 +33,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `vec![]`; read `connection_information.first()` where one address was read, and
   `is_empty()` for `is_none()`.
 
+- **interceptor** (rtp-1): `RtcpSessionEvent` has a new variant, `ReportingSsrc`, before
+  `RoundTripTime`, so the implicit discriminants of the later variants moved
+  (cargo-semver-checks `enum_no_repr_variant_discriminant_changed`). The enum is
+  `#[non_exhaustive]` and its variants carry data, so no code could cast it with `as`; a `match`
+  already needed a wildcard arm. Nothing to change in practice.
+
+- **stream-driver**: `PeerDriverConfig` has a new public field `mdns_rate_limit` (`None`: the process's budget). Migration: a configuration written as a struct literal adds `mdns_rate_limit: None`, or builds on `..PeerDriverConfig::on(addresses)`.
+- **stream-driver** (runtime-1): **the driver runs on an injected async runtime** (`runtime::Runtime`,
+  an object-safe trait used as `Arc<dyn Runtime>`: spawn, the clock and timers, UDP sockets
+  multicast included, TCP listen / connect, name resolution, `block_on`). It is given per driver
+  (`StreamDriver::with_runtime`, `PeerDriver::with_runtime`); there is no global or default
+  runtime. Built-in runtime types are features: `runtime-tokio` (default) gives `TokioRuntime`.
+  Changes for users:
+  - `StreamDriver::new`, `StreamDriver::default` and `PeerDriver::new` need `runtime-tokio`
+    (on by default) and are otherwise unchanged. Migration: none with default features; with
+    `default-features = false` add `features = ["runtime-tokio"]` or call `with_runtime`.
+  - `sockets::bind_tcp_listener_in_range(ip, range, reuse)` takes the runtime first and returns
+    `Arc<dyn runtime::AsyncTcpListener>`; `sockets::accept_by_ufrag(&listener, timeout)` is
+    `accept_by_ufrag(runtime, listener, timeout)` over a `dyn AsyncTcpListener`;
+    `SharedAccept::stream` is an `Arc<dyn runtime::AsyncTcpStream>`;
+    `nat_mapping::map_port` takes the runtime first. Migration: pass `&TokioRuntime::new()` and
+    make listeners with `runtime.listen_tcp(addr, false)`.
+  - `dns-records` turns `runtime-tokio` on: the per-family and SRV / NAPTR lookups are
+    `TokioRuntime`'s (`Runtime::resolve_family`, `Runtime::resolve_records`; another runtime
+    answers the default: both families together, no records).
+  - The datagram marking of ccrows-7 is the socket's (`runtime::Transmit::traffic_class`,
+    `AsyncUdpSocket::unmarked`, `runtime::TrafficClassMarker`); `PeerDriver`'s counters are
+    unchanged.
+  - (runtime-2) With `default-features = false` the crate has no async runtime in its normal
+    dependency tree (no tokio, mio, smol, async-io, hickory): CI checks it
+    (`tests/dependency_tree.rs`, the `cargo.yml` step "Stream driver without a built-in
+    runtime").
+  - (runtime-3) `runtime-smol` gives `SmolRuntime` (smol's global executor, async-io's reactor
+    and timers, smol's resolver). Several runtime features can be on at once; drivers on
+    different runtimes live in one process (`tests/runtimes.rs`: a peer on tokio and a peer on
+    smol connect and exchange data-channel messages).
+  - (runtime-4) `examples/custom-runtime` (package `rtci-custom-runtime-example`, not
+    published): `Runtime` implemented over async-executor and async-io, the driver with
+    `default-features = false`; CI checks its tree has no tokio and runs it (two peer
+    connections on it exchange data-channel messages). New public helpers for such runtimes:
+    `runtime::{std_udp, std_multicast, std_tcp_listener, std_tcp_bound, std_tcp_connect_start,
+    set_and_read_traffic_class, reset_on_close, TrafficClassMarker}`.
+  - (runtime-5) `runtime-mock` gives `MockRuntime`: a virtual clock (`MockClock::advance`, and
+    `MockRuntime::run` moves it to the next timer whenever nothing can run, panicking on a
+    deadlock instead of hanging) and an in-memory network (`MockNet`: UDP, multicast and TCP
+    between mock sockets; per-direction `LinkConfig` delay, seeded loss and blocking; a datagram
+    filter; a log with each datagram's traffic class and fate; a host table). Two
+    `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
+    data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
+    a lost DTLS ClientHello retransmitted after its timer).
+- **`StreamTransmit` has a new public field, `dscp`** (rtci-shared): the codepoint the driver
+  sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
+  flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
+- **ice / jsep / stream-driver** (mdns-4): new public fields `AgentConfig::multicast_dns_fail_closed` and `AgentConfig::multicast_dns_publishing`, `MulticastDNS::fail_closed` (the setting engine's mDNS settings) and `PeerDriverConfig::mdns_sockets` (see "Added"). Migration: a struct literal of `AgentConfig` or `MulticastDNS` adds `..Default::default()` (or `multicast_dns_fail_closed: false, multicast_dns_publishing: Default::default()` / `fail_closed: false`); one of `PeerDriverConfig` adds `mdns_sockets: true`, or builds on `..PeerDriverConfig::on(addresses)`.
+
 ### Behaviour changes
+
+- **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
+  section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
+  the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
+  the sending window's mean (libwebrtc has no RTP circuit breaker). Measured
+  (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
+  and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
+  section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
+  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`. Returned in
+  `conf/ccrows-8r-cb-last-frames-test` after train 24 took it out: with the RTP/RTCP family
+  (rtp-1, -2, -3, -5, -6, -8) its test, then one seed's first 15 s, saw no trip. The breaker
+  read every report as before (each block matched to the flow, same report rate); the link's
+  seeded loss is drawn per SRTP and SRTCP datagram, so the changed RTCP moved where the losses
+  fell. The test now states the measurement's requirement: a 60 s call, seeds 11, 1 and 2 at
+  40 and 100 ms jitter, ceased with section 3's s every time, never with the default (on the
+  train's tree, seeds 1 to 10: ceased after 1.5 to 12.6 s, hosted run 45455917556).
+- **jsep** (mdns-5): **servers given by `set_configuration` reach the engine's own STUN and TURN
+  gathering** (W3C webrtc-pc "set the configuration": "Set the ICE Agent's ICE servers list to
+  iceServers. As defined in [RFC9429], if a new list of servers replaces the ICE Agent's
+  existing ICE servers list, no action will be taken until the next gathering phase"; RFC 9429
+  section 4.1.18). They kept the servers the connection was built with. Now each ICE
+  generation of each transport gathers from the list in force when it began: a generation
+  already gathering keeps its list, the next one (an ICE restart, a new transport) asks the
+  new STUN servers and allocates on the new TURN servers, and the allocations on servers that
+  left the list are deleted then. Tests: `tests/srflx_gathering.rs::servers_set_by_set_configuration_are_asked_from_the_next_gathering_phase`,
+  `tests/turn_udp.rs::turn_servers_set_by_set_configuration_are_allocated_on_from_the_next_gathering_phase`.
+- **jsep** (mdns-5): **in mDNS `QueryAndGather`, a STUN answer equal to its base is a
+  server-reflexive candidate** (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2,
+  MDNSICE-3.1.2.2-1: "a server-reflexive candidate will be generated; [...] and as such MUST
+  NOT be considered redundant per the guidance in [RFC8445], Section 5.1.3"). The engine's STUN
+  gathering dropped it as redundant with the host candidate, which in this mode carries only
+  its `.local` name: a host with a public address offered no usable candidate to a peer that
+  cannot resolve the name. It is now provided with raddr `0.0.0.0` / `::` and rport 9
+  (MDNSICE-3.1.2.2-2), as libwebrtc keeps it under mDNS obfuscation
+  (p2p/base/stun_port.cc, `UDPPort::OnStunBindingRequestSucceeded`). Other modes unchanged
+  (redundant, dropped). Test: `tests/ice_mdns_exposure.rs::in_hiding_mode_a_stun_answer_equal_to_its_base_is_a_candidate_with_the_base_hidden`.
+- **stream-driver** (mdns-4): with mDNS `QueryAndGather` the driver binds the host's mDNS sockets when its connection begins gathering, before the first host candidates (before: at the first mDNS datagram), and tells the connection for which address families it has none (`RTCPeerConnection::set_multicast_dns_publishing`). The names of host addresses of such a family are not registered: their candidates go out under a `.local` name that is not published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1), or not at all with `with_multicast_dns_fail_closed(true)`. Before, the name was registered and announced into a socket that did not exist.
+- **ice** (mdns-4): a host candidate whose mDNS name cannot be registered keeps one unpublished name per address (its UDP and TCP candidates share it, section 3.1.1 steps 2 and 5); before, each candidate past the cap of 64 names got a name of its own. No `QueryAndGather` path writes the literal address any more except the fixed-IP mode's other addresses (the agent without an mDNS connection used to, a path that `Agent::new` never takes).
+- **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
 
 - **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
   candidate it is (RFC 6544 section 5.4): type preference 75 (section 4.2,
@@ -46,6 +146,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resumption_test.rs::a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate`,
   `a_server_with_a_check_resumes_no_session_that_carries_no_certificate`.
 
+- **stream-driver** (mdns-4): with mDNS `QueryAndGather` the driver binds the host's mDNS sockets when its connection begins gathering, before the first host candidates (before: at the first mDNS datagram), and tells the connection for which address families it has none (`RTCPeerConnection::set_multicast_dns_publishing`). The names of host addresses of such a family are not registered: their candidates go out under a `.local` name that is not published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1), or not at all with `with_multicast_dns_fail_closed(true)`. Before, the name was registered and announced into a socket that did not exist.
+- **ice** (mdns-4): a host candidate whose mDNS name cannot be registered keeps one unpublished name per address (its UDP and TCP candidates share it, section 3.1.1 steps 2 and 5); before, each candidate past the cap of 64 names got a name of its own. No `QueryAndGather` path writes the literal address any more except the fixed-IP mode's other addresses (the agent without an mDNS connection used to, a path that `Agent::new` never takes).
+- **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
+- **`rtci-stream-driver` marks what it sends (RFC 8835 section 4.2 SHOULD, RFC 8837).**
+  `PeerDriver` sets `IP_TOS` / `IPV6_TCLASS` on its UDP socket before each datagram whose byte
+  differs from the last (the new `RTCPeerConnection::traffic_class`: the RFC 8837 DSCP with the
+  datagram's ECN bits), and `StreamDriver` sets each TCP connection's from
+  `StreamTransmit::dscp`. Linux, macOS and the BSDs mark; Windows accepts `IP_TOS` and leaves the
+  packets unmarked (marking there needs qWAVE or a Group Policy QoS rule; the driver uses
+  neither). New: `sockets::set_traffic_class` / `traffic_class`,
+  `PeerDriver::socket_traffic_class`, `PeerDriver::unmarked_sockets`,
+  `StreamDriver::socket_traffic_class`.
+- **A media flow whose DSCP the network blocks goes back to DSCP 0 (RFC 8835 section 4.2
+  MAY).** Under the default `RTCDscpMarking::Rfc8837`, a flow sent with a codepoint other than
+  DF that the peer's sender and receiver reports on its transport never name (three of them, at
+  least two seconds after the flow began) is marked DF from then on, its RTX and FEC streams
+  too; the other flows keep theirs. `RTCPeerConnection::dscp_blocked_flows` lists them.
+  `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
+  `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
+  packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
@@ -324,6 +444,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later handshake in place); `rtci-dtls` server-side re-check tests in DTLS 1.3 and 1.2
   (`the_server_runs_its_peer_certificate_check_again_on_a_resumed_client`).
 
+- **mDNS may leave two kinds of host address unwrapped, each an opt-in setting, off by default
+  (mdns-5; MDNSICE-3.1.2.2-4, -3.1.2.2-5, -3.1.2.3-1).** Only in `QueryAndGather`; in every
+  behaviour profile off; neither ever unwraps an address `ice::mdns::is_global_unicast`
+  refuses (private, loopback, link-local, unique-local `fc00::/7`, CGNAT `100.64.0.0/10`,
+  documentation, IPv4-mapped, NAT64, ...), whatever a STUN server answered or the application
+  marked.
+  - `SettingEngineBuilder::with_multicast_dns_expose_known_public_addresses(true)`
+    (`AgentConfig::multicast_dns_expose_known_public_addresses`), draft section 3.1.2.2: an
+    address is shown public when a server-reflexive candidate's address is its base's ("the
+    STUN response returns the same value as the local IP address") and the base is one of the
+    transport's own host candidates. The gathering that shows it is unchanged (the `.local`
+    candidate first, then the server-reflexive one, raddr `0.0.0.0` rport 9); host candidates
+    of the next ICE generation carry the address ("skip mDNS protection for that address in
+    future ICE gathering phases"), kept candidates included, as long as each restart's
+    gathering shows it again. Per agent; `Agent::set_ice_servers` (called by
+    `RTCPeerConnection::set_configuration`) discards it when the set of STUN / TURN servers
+    changes (the section's SHOULD). The evidence is the server-reflexive candidate equal to
+    its base, which `QueryAndGather` now always provides (see "Behaviour changes").
+  - `SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses(true)`
+    (`AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`), draft section 3.1.2.3:
+    the addresses the application marks as RFC 4941 temporary
+    (`RTCPeerConnection::set_temporary_ipv6_addresses`, `Agent::set_temporary_ipv6_addresses`)
+    go out as they are; an unmarked address stays hidden. `rtci-shared` has
+    `ifaces::temporary_ipv6_addresses()` (Linux / Android `/proc/net/if_inet6`
+    `IFA_F_TEMPORARY`; macOS / iOS `SIOCGIFAFLAG_IN6` `IN6_IFF_TEMPORARY`, not observed on a
+    runner; Windows and elsewhere `Unsupported`: on Windows no flag has been shown to tell a
+    temporary address from the stable one, so the setting has no effect there), and
+    `rtci-stream-driver`'s `PeerDriver` marks its addresses from it at each gathering.
+
+  What each exposes, and to whom: the first, an address the remote peer and the application
+  (a web page, in a browser) already received as the server-reflexive candidate, now also
+  as the host's own interface address; the second, the temporary address, to the same two,
+  for its lifetime. Tests: `rtci-ice/src/agent/agent_mdns_exposure_test.rs`,
+  `rtci-ice/src/mdns/mdns_exposure_test.rs`, `tests/ice_mdns_exposure.rs`,
+  `stream-driver/tests/mdns_temporary.rs` (Linux, a temporary address made as root).
+
+- **mDNS host candidates can fail closed (mdns-4, MDNSICE-3.1.1-6).** With mDNS
+  `QueryAndGather`, a host candidate whose name cannot be registered (the application has no
+  mDNS socket for its address family, or the agent holds the most names it can, 64) goes out,
+  by default, under a `.local` name that is not published: draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1, "the ICE agent SHOULD still provide mDNS candidates in step 6 even if the
+  local network does not support mDNS or mDNS registration fails in step 4".
+  `SettingEngineBuilder::with_multicast_dns_fail_closed(true)` (`AgentConfig::multicast_dns_fail_closed`)
+  provides no host candidate for such an address instead, UDP or TCP, for an embedder that
+  must never offer a candidate its peer cannot resolve; its server-reflexive candidates are
+  still gathered (raddr `0.0.0.0` rport 9). The literal address is written in neither case.
+  An application with sockets of its own says which families it can send mDNS on with
+  `RTCPeerConnection::set_multicast_dns_publishing(MulticastDnsPublishing { ipv4, ipv6 })`
+  (`Agent::set_multicast_dns_publishing`) before it adds host candidates;
+  `RTCPeerConnection::multicast_dns_mode` reads the mode; `Agent::multicast_dns_withholds`
+  says whether an address's host candidates were withheld. `rtci-stream-driver`'s
+  `PeerDriver` does it by itself, and `PeerDriverConfig::mdns_sockets` (`true` by default)
+  turns its mDNS sockets off.
 - **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
   section 6.2): `FlexFec03Encoder` builds no repair packet larger than
   `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
@@ -391,6 +564,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ticket keys (and the record of used tickets) several configurations share, so that a ticket
   one issued is accepted, once, by another. `Tls13Session::peer_certificates` and
   `Dtls12Session::peer_certificates`.
+- **turn** (`conf/transport3-mays`): `ClientConfig::software_in_indications` puts the
+  client's SOFTWARE in its Send indications too (RFC 8489 section 6.1: "Indications MAY include
+  a SOFTWARE attribute"). Off by default, so nothing changes on the wire: Send indications are
+  the relayed data path. Test: `rtci-turn`
+  `client_software_mtu_test.rs::test_send_indications_carry_software_only_when_configured`.
+  RFC8489-6.1-3 is `tested`.
+- **ice** (`conf/transport3-mays`): `AgentConfig::new_tie_breaker_on_restart` and
+  `SettingEngineBuilder::with_ice_new_tie_breaker_on_restart` draw a new tiebreaker at each
+  ICE restart (RFC 8445 section 16.1: "The agent MAY change the number when an ICE restart
+  occurs"); a restart that is rolled back gives the old one back. Off by default: the
+  tiebreaker stays for the agent's life, as before and as in libwebrtc. Test: `rtci-ice`
+  `agent_rfc8445_test.rs::test_ice_restart_draws_a_new_tie_breaker_only_when_configured`.
+  RFC8445-16.1-4 is `tested`.
+- **mDNS host candidates can fail closed (mdns-4, MDNSICE-3.1.1-6).** With mDNS
+  `QueryAndGather`, a host candidate whose name cannot be registered (the application has no
+  mDNS socket for its address family, or the agent holds the most names it can, 64) goes out,
+  by default, under a `.local` name that is not published: draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1, "the ICE agent SHOULD still provide mDNS candidates in step 6 even if the
+  local network does not support mDNS or mDNS registration fails in step 4".
+  `SettingEngineBuilder::with_multicast_dns_fail_closed(true)` (`AgentConfig::multicast_dns_fail_closed`)
+  provides no host candidate for such an address instead, UDP or TCP, for an embedder that
+  must never offer a candidate its peer cannot resolve; its server-reflexive candidates are
+  still gathered (raddr `0.0.0.0` rport 9). The literal address is written in neither case.
+  An application with sockets of its own says which families it can send mDNS on with
+  `RTCPeerConnection::set_multicast_dns_publishing(MulticastDnsPublishing { ipv4, ipv6 })`
+  (`Agent::set_multicast_dns_publishing`) before it adds host candidates;
+  `RTCPeerConnection::multicast_dns_mode` reads the mode; `Agent::multicast_dns_withholds`
+  says whether an address's host candidates were withheld. `rtci-stream-driver`'s
+  `PeerDriver` does it by itself, and `PeerDriverConfig::mdns_sockets` (`true` by default)
+  turns its mDNS sockets off.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,

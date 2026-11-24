@@ -1,5 +1,6 @@
 //! The reference driver for the stream half of WebRTC.rs's sans-I/O engine
-//! (`rtci_shared::stream`): it owns the TCP sockets, on tokio, and does what the engine asks.
+//! (`rtci_shared::stream`): it owns the TCP sockets, on the async runtime it is given
+//! ([`runtime`]), and does what the engine asks.
 //!
 //! # Engine and driver
 //!
@@ -44,6 +45,14 @@
 //! `stream-driver-loopback` example of the `rtci` crate (`cargo run --example
 //! stream-driver-loopback`); the test environment runs it.
 //!
+//! # Marking (DSCP)
+//!
+//! Each TCP connection's packets carry the codepoint of its transmits ([`StreamTransmit::dscp`],
+//! one per connection, RFC 8837 section 5), and [`peer::PeerDriver`] marks each UDP datagram
+//! with the byte `RTCPeerConnection::traffic_class` gives it (RFC 8837 Table 1 with the ECN
+//! bits). [`sockets::set_traffic_class`] says what each platform does: Windows leaves the
+//! packets unmarked.
+//!
 //! # Server choices
 //!
 //! [`sockets`] has what a server decides and the engine does not: port ranges
@@ -65,36 +74,52 @@
 //! (`OnLocalCandidatesNeeded`: a new DTLS association runs on a new 3-tuple, RFC 8842 section
 //! 5.1), closing the previous sockets once a pair on the new ones is selected.
 //!
+//! # Runtime
+//!
+//! The driver's sockets, tasks, timers and name lookups belong to the [`runtime::Runtime`] it
+//! is given ([`StreamDriver::with_runtime`], [`peer::PeerDriver::with_runtime`]): there is no
+//! global or default runtime. The [`runtime`] module says what is injected and what is not,
+//! and how to bring your own.
+//!
 //! # Features
 //!
+//! - `runtime-tokio` (default): `runtime::TokioRuntime`, and `StreamDriver::new` /
+//!   `default` and `PeerDriver::new` on it.
+//! - `runtime-smol`: `runtime::SmolRuntime`.
+//! - `runtime-mock`: `runtime::MockRuntime`, virtual time and an in-memory network.
 //! - `peer` (default): [`peer`], with a dependency on `rtci`.
 //! - `dns-records`: SRV and NAPTR lookups (RFC 5928, RFC 8489 section 8) and AAAA / A answered
-//!   apart (RFC 8305 section 3), with hickory-resolver (MIT OR Apache-2.0). Without it, names go
-//!   to the system resolver and record queries are answered with none (the engine then uses
-//!   the host and the scheme's default port).
+//!   apart (RFC 8305 section 3) in `TokioRuntime`, with hickory-resolver (MIT OR Apache-2.0);
+//!   it turns `runtime-tokio` on. Without it, names go to the runtime's resolver and record
+//!   queries are answered with none (the engine then uses the host and the scheme's default
+//!   port).
 //!
-//! Each connection has a reader task and a writer task. Sockets are created on the thread that
-//! calls [`StreamDriver::execute`] inside a tokio runtime, so a current-thread runtime on a
-//! thread that entered a network namespace keeps them there.
+//! With `default-features = false` and no runtime feature the crate has no async runtime in
+//! its dependency tree.
+//!
+//! Each connection has a reader task and a writer task. With `TokioRuntime::new()` sockets are
+//! created on the thread that calls [`StreamDriver::execute`] inside a tokio runtime, so a
+//! current-thread runtime on a thread that entered a network namespace keeps them there.
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "peer")]
+mod mdns_io;
 pub mod nat_mapping;
 #[cfg(feature = "peer")]
 pub mod peer;
+pub mod runtime;
 pub mod sockets;
 
+use runtime::{AsyncTcpListener, AsyncTcpStream, JoinHandle, Runtime};
 use shared::stream::{ListenerId, StreamCommand, StreamEvent, StreamId, StreamTransmit};
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 /// What the driver has for the engine.
 #[derive(Debug)]
@@ -122,7 +147,7 @@ pub struct Accepted {
     pub local: SocketAddr,
     /// The peer's address.
     pub remote: SocketAddr,
-    stream: TcpStream,
+    stream: Arc<dyn AsyncTcpStream>,
 }
 
 /// The driver's settings.
@@ -156,27 +181,56 @@ impl Default for DriverConfig {
 
 enum WriterMessage {
     Data(Vec<u8>),
+    /// Set the socket's TOS / Traffic Class byte to this before the data that follows.
+    Mark(u8),
     Close,
     Reset,
 }
 
 struct Connection {
-    writer: mpsc::UnboundedSender<WriterMessage>,
-    task: JoinHandle<()>,
+    writer: async_channel::Sender<WriterMessage>,
+    task: Box<dyn JoinHandle>,
     established: Arc<AtomicBool>,
+    /// The DSCP last asked for on this connection (a new socket's is 0).
+    dscp: u8,
+    /// What the operating system reported for the socket's TOS / Traffic Class after the
+    /// writer last set it; [`NO_TRAFFIC_CLASS`] before that, or when it was refused.
+    traffic_class: Arc<AtomicU32>,
+}
+
+/// [`Connection::traffic_class`] with nothing read back.
+const NO_TRAFFIC_CLASS: u32 = u32::MAX;
+
+impl Connection {
+    fn new(
+        writer: async_channel::Sender<WriterMessage>,
+        task: Box<dyn JoinHandle>,
+        established: Arc<AtomicBool>,
+        traffic_class: Arc<AtomicU32>,
+    ) -> Self {
+        Self {
+            writer,
+            task,
+            established,
+            dscp: 0,
+            traffic_class,
+        }
+    }
 }
 
 /// Owns the sockets of one engine (see the [crate documentation](crate)).
 pub struct StreamDriver {
+    runtime: Arc<dyn Runtime>,
     config: DriverConfig,
-    inputs_tx: mpsc::UnboundedSender<DriverInput>,
-    inputs: mpsc::UnboundedReceiver<DriverInput>,
-    listeners: HashMap<ListenerId, JoinHandle<()>>,
+    inputs_tx: async_channel::Sender<DriverInput>,
+    inputs: async_channel::Receiver<DriverInput>,
+    listeners: HashMap<ListenerId, Box<dyn JoinHandle>>,
     connections: HashMap<StreamId, Connection>,
     /// The engine's listener answered with the shared passive address.
     shared_listener: Option<ListenerId>,
 }
 
+#[cfg(feature = "runtime-tokio")]
 impl Default for StreamDriver {
     fn default() -> Self {
         Self::new(DriverConfig::default())
@@ -195,10 +249,18 @@ impl Drop for StreamDriver {
 }
 
 impl StreamDriver {
-    /// A driver with no sockets.
+    /// A driver with no sockets, on tokio ([`runtime::TokioRuntime::new`]: the tokio runtime
+    /// [`execute`](Self::execute) is called in). Feature `runtime-tokio` (on by default).
+    #[cfg(feature = "runtime-tokio")]
     pub fn new(config: DriverConfig) -> Self {
-        let (inputs_tx, inputs) = mpsc::unbounded_channel();
+        Self::with_runtime(Arc::new(runtime::TokioRuntime::new()), config)
+    }
+
+    /// A driver with no sockets, on `runtime`.
+    pub fn with_runtime(runtime: Arc<dyn Runtime>, config: DriverConfig) -> Self {
+        let (inputs_tx, inputs) = async_channel::unbounded();
         Self {
+            runtime,
             config,
             inputs_tx,
             inputs,
@@ -208,7 +270,13 @@ impl StreamDriver {
         }
     }
 
-    /// Carries out a command of the engine. Must be called inside a tokio runtime.
+    /// The runtime the driver runs on.
+    pub fn runtime(&self) -> &Arc<dyn Runtime> {
+        &self.runtime
+    }
+
+    /// Carries out a command of the engine. With `runtime::TokioRuntime::new()` it must be
+    /// called inside a tokio runtime.
     pub fn execute(&mut self, command: StreamCommand) {
         match command {
             StreamCommand::Listen {
@@ -232,10 +300,13 @@ impl StreamDriver {
                 local,
                 reuse_address,
             } => match match self.config.tcp_port_range {
-                Some(range) if local.port() == 0 => {
-                    sockets::bind_tcp_listener_in_range(local.ip(), range, reuse_address)
-                }
-                _ => bind_listener(local, reuse_address),
+                Some(range) if local.port() == 0 => sockets::bind_tcp_listener_in_range(
+                    self.runtime.as_ref(),
+                    local.ip(),
+                    range,
+                    reuse_address,
+                ),
+                _ => self.runtime.listen_tcp(local, reuse_address),
             } {
                 Ok(socket) => {
                     let bound = socket.local_addr().unwrap_or(local);
@@ -244,7 +315,12 @@ impl StreamDriver {
                         local: bound,
                     }));
                     let tx = self.inputs_tx.clone();
-                    let task = tokio::spawn(accept_loop(listener, socket, tx));
+                    let task = self.runtime.spawn(Box::pin(accept_loop(
+                        self.runtime.clone(),
+                        listener,
+                        socket,
+                        tx,
+                    )));
                     if let Some(old) = self.listeners.insert(listener, task) {
                         old.abort();
                     }
@@ -262,43 +338,44 @@ impl StreamDriver {
                 remote,
                 reuse_address,
             } => {
-                let (writer, rx) = mpsc::unbounded_channel();
+                let (writer, rx) = async_channel::unbounded();
                 let established = Arc::new(AtomicBool::new(false));
                 let tx = self.inputs_tx.clone();
                 let config = self.config;
                 let flag = established.clone();
-                let task = tokio::spawn(async move {
-                    let connected = tokio::time::timeout(
+                let traffic_class = Arc::new(AtomicU32::new(NO_TRAFFIC_CLASS));
+                let marked = traffic_class.clone();
+                let rt = self.runtime.clone();
+                let task = self.runtime.spawn(Box::pin(async move {
+                    let connected = runtime::timeout(
+                        rt.as_ref(),
                         config.connect_timeout,
-                        connect(local, remote, reuse_address),
+                        connect(rt.as_ref(), local, remote, reuse_address),
                     )
                     .await;
                     match connected {
                         Ok(Ok(stream)) => {
                             let local = stream.local_addr().unwrap_or(local);
                             flag.store(true, Ordering::SeqCst);
-                            let _ =
-                                tx.send(DriverInput::Event(StreamEvent::Connected { id, local }));
-                            run_connection(id, stream, rx, tx, config).await;
+                            let _ = tx
+                                .try_send(DriverInput::Event(StreamEvent::Connected { id, local }));
+                            run_connection(rt, id, stream, rx, tx, config, marked).await;
                         }
                         _ => {
-                            let _ = tx.send(DriverInput::Event(StreamEvent::ConnectFailed { id }));
+                            let _ =
+                                tx.try_send(DriverInput::Event(StreamEvent::ConnectFailed { id }));
                         }
                     }
-                });
+                }));
                 self.connections.insert(
                     id,
-                    Connection {
-                        writer,
-                        task,
-                        established,
-                    },
+                    Connection::new(writer, task, established, traffic_class),
                 );
             }
             StreamCommand::Close { id } => {
                 if let Some(connection) = self.connections.remove(&id) {
                     if connection.established.load(Ordering::SeqCst) {
-                        let _ = connection.writer.send(WriterMessage::Close);
+                        let _ = connection.writer.try_send(WriterMessage::Close);
                     } else {
                         connection.task.abort();
                     }
@@ -307,62 +384,60 @@ impl StreamDriver {
             StreamCommand::Reset { id } => {
                 if let Some(connection) = self.connections.remove(&id) {
                     if connection.established.load(Ordering::SeqCst) {
-                        let _ = connection.writer.send(WriterMessage::Reset);
+                        let _ = connection.writer.try_send(WriterMessage::Reset);
                     } else {
                         connection.task.abort();
                     }
                 }
             }
-            #[cfg(not(feature = "dns-records"))]
             StreamCommand::Resolve { query, host, port } => {
-                let tx = self.inputs_tx.clone();
-                tokio::spawn(async move {
+                match (
+                    self.runtime.resolve_family(&host, port, true),
+                    self.runtime.resolve_family(&host, port, false),
+                ) {
+                    // AAAA and A asked together, each answered as it arrives (RFC 8305 section
+                    // 3): the engine starts on the first.
+                    (Some(v6), Some(v4)) => {
+                        for (ipv6, lookup) in [(true, v6), (false, v4)] {
+                            let tx = self.inputs_tx.clone();
+                            self.runtime.spawn(Box::pin(async move {
+                                let addresses = lookup.await;
+                                let _ =
+                                    tx.try_send(DriverInput::Event(StreamEvent::ResolvedFamily {
+                                        query,
+                                        ipv6,
+                                        addresses,
+                                    }));
+                            }));
+                        }
+                    }
                     // Both families at once (RFC 8305 section 3): the system resolver asks for
                     // AAAA and A together.
-                    let addresses = match tokio::net::lookup_host((host.as_str(), port)).await {
-                        Ok(found) => found.collect(),
-                        Err(_) => vec![],
-                    };
-                    let _ = tx.send(DriverInput::Event(StreamEvent::Resolved {
-                        query,
-                        addresses,
-                    }));
-                });
-            }
-            #[cfg(feature = "dns-records")]
-            StreamCommand::Resolve { query, host, port } => {
-                // AAAA and A asked together, each answered as it arrives (RFC 8305 section 3):
-                // the engine starts on the first.
-                for ipv6 in [true, false] {
-                    let tx = self.inputs_tx.clone();
-                    let host = host.clone();
-                    tokio::spawn(async move {
-                        let addresses = dns::addresses(&host, port, ipv6).await;
-                        let _ = tx.send(DriverInput::Event(StreamEvent::ResolvedFamily {
-                            query,
-                            ipv6,
-                            addresses,
+                    _ => {
+                        let tx = self.inputs_tx.clone();
+                        let lookup = self.runtime.resolve_host(&host, port);
+                        self.runtime.spawn(Box::pin(async move {
+                            let addresses = lookup.await.unwrap_or_default();
+                            let _ = tx.try_send(DriverInput::Event(StreamEvent::Resolved {
+                                query,
+                                addresses,
+                            }));
                         }));
-                    });
+                    }
                 }
             }
             StreamCommand::ResolveRecords { query, name, kind } => {
                 let tx = self.inputs_tx.clone();
-                tokio::spawn(async move {
-                    #[cfg(feature = "dns-records")]
-                    let records = dns::records(&name, kind).await;
-                    // Without the feature there is no record lookup: none, and the engine
-                    // takes the host's addresses (RFC 5928 section 3).
-                    #[cfg(not(feature = "dns-records"))]
-                    let records = {
-                        let _ = (&name, kind);
-                        vec![]
-                    };
-                    let _ = tx.send(DriverInput::Event(StreamEvent::ResolvedRecords {
+                // Without record lookups (the runtime's default) the answer is none, and the
+                // engine takes the host's addresses (RFC 5928 section 3).
+                let lookup = self.runtime.resolve_records(&name, kind);
+                self.runtime.spawn(Box::pin(async move {
+                    let records = lookup.await;
+                    let _ = tx.try_send(DriverInput::Event(StreamEvent::ResolvedRecords {
                         query,
                         records,
                     }));
-                });
+                }));
             }
             _ => {}
         }
@@ -370,17 +445,22 @@ impl StreamDriver {
 
     /// Takes the engine's id for an accepted connection and starts serving it.
     pub fn adopt(&mut self, id: StreamId, accepted: Accepted) {
-        let (writer, rx) = mpsc::unbounded_channel();
+        let (writer, rx) = async_channel::unbounded();
         let tx = self.inputs_tx.clone();
         let config = self.config;
-        let task = tokio::spawn(run_connection(id, accepted.stream, rx, tx, config));
+        let traffic_class = Arc::new(AtomicU32::new(NO_TRAFFIC_CLASS));
+        let task = self.runtime.spawn(Box::pin(run_connection(
+            self.runtime.clone(),
+            id,
+            accepted.stream,
+            rx,
+            tx,
+            config,
+            traffic_class.clone(),
+        )));
         self.connections.insert(
             id,
-            Connection {
-                writer,
-                task,
-                established: Arc::new(AtomicBool::new(true)),
-            },
+            Connection::new(writer, task, Arc::new(AtomicBool::new(true)), traffic_class),
         );
     }
 
@@ -411,11 +491,31 @@ impl StreamDriver {
         );
     }
 
-    /// Writes a transmit of the engine, after the earlier ones of its connection.
+    /// Writes a transmit of the engine, after the earlier ones of its connection. When the
+    /// transmit's DSCP ([`StreamTransmit::dscp`]: one per TCP connection, RFC 8837 section 5)
+    /// differs from the connection's, the socket's `IP_TOS` / `IPV6_TCLASS` is set to it first
+    /// ([`sockets::set_traffic_class`], which says what each platform does).
     pub fn write(&mut self, transmit: StreamTransmit) {
-        if let Some(connection) = self.connections.get(&transmit.id) {
-            let _ = connection.writer.send(WriterMessage::Data(transmit.data));
+        if let Some(connection) = self.connections.get_mut(&transmit.id) {
+            if connection.dscp != transmit.dscp {
+                connection.dscp = transmit.dscp;
+                let _ = connection
+                    .writer
+                    .try_send(WriterMessage::Mark(transmit.dscp << 2));
+            }
+            let _ = connection
+                .writer
+                .try_send(WriterMessage::Data(transmit.data));
         }
+    }
+
+    /// The TOS / Traffic Class byte the operating system reported for connection `id`'s
+    /// socket (`getsockopt` of `IP_TOS` / `IPV6_TCLASS`) after the driver last set it, once it
+    /// has: `None` for an unknown connection, one never marked, or a platform that refused.
+    pub fn socket_traffic_class(&self, id: StreamId) -> Option<u32> {
+        let connection = self.connections.get(&id)?;
+        let value = connection.traffic_class.load(Ordering::SeqCst);
+        (value != NO_TRAFFIC_CLASS).then_some(value)
     }
 
     /// The next input for the engine.
@@ -438,38 +538,17 @@ impl StreamDriver {
     }
 
     fn send(&self, input: DriverInput) {
-        let _ = self.inputs_tx.send(input);
+        let _ = self.inputs_tx.try_send(input);
     }
-}
-
-fn new_socket(addr: SocketAddr, reuse_address: bool) -> io::Result<TcpSocket> {
-    let socket = if addr.is_ipv4() {
-        TcpSocket::new_v4()?
-    } else {
-        TcpSocket::new_v6()?
-    };
-    if reuse_address {
-        socket.set_reuseaddr(true)?;
-        #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
-        socket.set_reuseport(true)?;
-    }
-    Ok(socket)
-}
-
-pub(crate) fn bind_listener(local: SocketAddr, reuse_address: bool) -> io::Result<TcpListener> {
-    let socket = new_socket(local, reuse_address)?;
-    socket.bind(local)?;
-    socket.listen(128)
 }
 
 async fn connect(
+    runtime: &dyn Runtime,
     local: SocketAddr,
     remote: SocketAddr,
     reuse_address: bool,
-) -> io::Result<TcpStream> {
-    let socket = new_socket(local, reuse_address)?;
-    socket.bind(local)?;
-    let stream = socket.connect(remote).await?;
+) -> io::Result<Arc<dyn AsyncTcpStream>> {
+    let stream = runtime.connect_tcp(local, remote, reuse_address).await?;
     // A connection whose two ends are the same address is the socket connected to itself, not
     // to a peer: connecting from an ephemeral port to a loopback port nothing listens on, the
     // system can pick that very port as the source, and TCP's simultaneous open (RFC 9293
@@ -481,7 +560,6 @@ async fn connect(
             format!("{remote}: the socket connected to itself"),
         ));
     }
-    stream.set_nodelay(true)?;
     Ok(stream)
 }
 
@@ -491,20 +569,20 @@ fn is_self_connection(local: SocketAddr, peer: SocketAddr) -> bool {
 }
 
 async fn accept_loop(
+    runtime: Arc<dyn Runtime>,
     listener: ListenerId,
-    socket: TcpListener,
-    tx: mpsc::UnboundedSender<DriverInput>,
+    socket: Arc<dyn AsyncTcpListener>,
+    tx: async_channel::Sender<DriverInput>,
 ) {
     loop {
         match socket.accept().await {
             Ok((stream, remote)) => {
-                let _ = stream.set_nodelay(true);
                 let local = match stream.local_addr() {
                     Ok(local) => local,
                     Err(_) => continue,
                 };
                 if tx
-                    .send(DriverInput::Accepted(Accepted {
+                    .try_send(DriverInput::Accepted(Accepted {
                         listener,
                         local,
                         remote,
@@ -516,31 +594,39 @@ async fn accept_loop(
                 }
             }
             // Out of descriptors, say: try again shortly rather than spin.
-            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(_) => runtime::sleep(runtime.as_ref(), Duration::from_millis(50)).await,
         }
     }
 }
 
+/// What the writer of a connection waits for next.
+enum Next {
+    Message(Option<WriterMessage>),
+    ReaderEnded,
+}
+
 async fn run_connection(
+    runtime: Arc<dyn Runtime>,
     id: StreamId,
-    stream: TcpStream,
-    mut rx: mpsc::UnboundedReceiver<WriterMessage>,
-    tx: mpsc::UnboundedSender<DriverInput>,
+    stream: Arc<dyn AsyncTcpStream>,
+    rx: async_channel::Receiver<WriterMessage>,
+    tx: async_channel::Sender<DriverInput>,
     config: DriverConfig,
+    traffic_class: Arc<AtomicU32>,
 ) {
-    let (mut read_half, mut write_half) = stream.into_split();
     let reader_tx = tx.clone();
-    let mut reader = tokio::spawn(async move {
+    let read_half = stream.clone();
+    let mut reader = runtime.spawn(Box::pin(async move {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             match read_half.read(&mut buf).await {
                 Ok(0) => {
-                    let _ = reader_tx.send(DriverInput::Event(StreamEvent::Closed { id }));
+                    let _ = reader_tx.try_send(DriverInput::Event(StreamEvent::Closed { id }));
                     return;
                 }
                 Ok(n) => {
                     if reader_tx
-                        .send(DriverInput::Read {
+                        .try_send(DriverInput::Read {
                             id,
                             data: buf[..n].to_vec(),
                         })
@@ -550,47 +636,61 @@ async fn run_connection(
                     }
                 }
                 Err(_) => {
-                    let _ = reader_tx.send(DriverInput::Event(StreamEvent::Reset { id }));
+                    let _ = reader_tx.try_send(DriverInput::Event(StreamEvent::Reset { id }));
                     return;
                 }
             }
         }
-    });
+    }));
     loop {
-        tokio::select! {
-            message = rx.recv() => match message {
-                Some(WriterMessage::Data(data)) => {
-                    if write_half.write_all(&data).await.is_err() {
-                        let _ = tx.send(DriverInput::Event(StreamEvent::Reset { id }));
-                        reader.abort();
-                        return;
-                    }
-                    let _ = tx.send(DriverInput::Event(StreamEvent::Written {
-                        id,
-                        bytes: data.len(),
-                    }));
+        let next = {
+            let mut message = std::pin::pin!(rx.recv());
+            std::future::poll_fn(|cx| {
+                if let std::task::Poll::Ready(message) = message.as_mut().poll(cx) {
+                    return std::task::Poll::Ready(Next::Message(message.ok()));
                 }
-                Some(WriterMessage::Close) => {
-                    let _ = write_half.shutdown().await;
-                    // The reader reports Closed at the peer's end of stream; one that never
-                    // comes is given up on.
-                    if tokio::time::timeout(config.close_linger, &mut reader).await.is_err() {
-                        reader.abort();
-                        let _ = tx.send(DriverInput::Event(StreamEvent::Closed { id }));
-                    }
-                    return;
-                }
-                Some(WriterMessage::Reset) | None => {
-                    // SO_LINGER 0: closing sends RST instead of FIN.
-                    let _ = socket2::SockRef::from(write_half.as_ref())
-                        .set_linger(Some(Duration::ZERO));
-                    write_half.forget();
+                // The peer closed or the connection broke: the reader has reported it.
+                reader.poll_join(cx).map(|()| Next::ReaderEnded)
+            })
+            .await
+        };
+        match next {
+            Next::Message(Some(WriterMessage::Mark(value))) => {
+                let read_back = stream.set_traffic_class(value).unwrap_or(NO_TRAFFIC_CLASS);
+                traffic_class.store(read_back, Ordering::SeqCst);
+            }
+            Next::Message(Some(WriterMessage::Data(data))) => {
+                if stream.write_all(&data).await.is_err() {
+                    let _ = tx.try_send(DriverInput::Event(StreamEvent::Reset { id }));
                     reader.abort();
                     return;
                 }
-            },
-            // The peer closed or the connection broke: the reader has reported it.
-            _ = &mut reader => return,
+                let _ = tx.try_send(DriverInput::Event(StreamEvent::Written {
+                    id,
+                    bytes: data.len(),
+                }));
+            }
+            Next::Message(Some(WriterMessage::Close)) => {
+                let _ = stream.shutdown_write();
+                // The reader reports Closed at the peer's end of stream; one that never
+                // comes is given up on.
+                if runtime::timeout(runtime.as_ref(), config.close_linger, reader.join())
+                    .await
+                    .is_err()
+                {
+                    reader.abort();
+                    let _ = tx.try_send(DriverInput::Event(StreamEvent::Closed { id }));
+                }
+                return;
+            }
+            Next::Message(Some(WriterMessage::Reset) | None) => {
+                // SO_LINGER 0: closing sends RST instead of FIN, once the reader's reference
+                // is dropped with it.
+                let _ = stream.reset_on_close();
+                reader.abort();
+                return;
+            }
+            Next::ReaderEnded => return,
         }
     }
 }

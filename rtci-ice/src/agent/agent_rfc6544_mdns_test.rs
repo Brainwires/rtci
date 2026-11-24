@@ -93,6 +93,34 @@ fn test_relay_candidate_is_not_paired_with_a_remote_mdns_candidate() {
     assert_eq!(a.candidate_pairs.len(), 3);
 }
 
+/// mDNS draft Section 3.3.2: "the converse is not an issue; the ICE agent MAY form candidate
+/// pairs between its own mDNS candidates and remote relay candidates, as in this situation
+/// host IPs will not be sent directly to the TURN server". A host candidate hidden behind its
+/// mDNS name pairs with a remote relay candidate.
+#[test]
+fn test_mdns_host_candidate_is_paired_with_a_remote_relay_candidate() {
+    let cfg = AgentConfig {
+        multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryAndGather,
+        ..config(true)
+    };
+    let mut a = bare_agent(Instant::now(), cfg);
+    assert_eq!(a.local_candidates.len(), 1);
+    assert!(a.local_candidates[0].address().ends_with(".local"));
+
+    a.add_remote_candidate(relay("203.0.113.9")).unwrap();
+    assert_eq!(a.candidate_pairs.len(), 1);
+    let pair = a.candidate_pairs[0];
+    assert!(
+        a.local_candidates[pair.local_index]
+            .address()
+            .ends_with(".local")
+    );
+    assert_eq!(
+        a.remote_candidates[pair.remote_index].candidate_type(),
+        CandidateType::Relay
+    );
+}
+
 /// mDNS draft Section 3.2.1, step 2: with the relay-only policy a remote mDNS candidate is
 /// ignored: no query for its name leaves the host.
 #[test]

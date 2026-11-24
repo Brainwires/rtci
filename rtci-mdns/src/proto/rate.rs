@@ -100,8 +100,10 @@ impl MdnsRateLimit {
         f(&mut bucket)
     }
 
-    /// Takes one message of the budget; `false` when none is left.
-    pub(crate) fn take(&self, now: Instant) -> bool {
+    /// Takes one message of the budget at `now`; `false` when none is left. For a driver that
+    /// sends mDNS of several sources through one budget (the `Mdns` of a connection takes from
+    /// its own limit by itself).
+    pub fn take(&self, now: Instant) -> bool {
         self.with(|bucket| {
             bucket.refill(now);
             if bucket.tokens == 0 {
@@ -113,7 +115,7 @@ impl MdnsRateLimit {
     }
 
     /// When the next message may go: `now` when the budget has one.
-    pub(crate) fn ready_at(&self, now: Instant) -> Instant {
+    pub fn ready_at(&self, now: Instant) -> Instant {
         self.with(|bucket| {
             bucket.refill(now);
             if bucket.tokens > 0 {
