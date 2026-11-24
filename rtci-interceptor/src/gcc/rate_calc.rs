@@ -173,3 +173,100 @@ mod tests {
         );
     }
 }
+
+/// libwebrtc's acknowledged-bitrate estimator (`modules/congestion_controller/goog_cc/
+/// bitrate_estimator.cc` at a222406d): the acknowledged octets are summed over windows of
+/// 150 ms of arrival time (500 ms for the first sample), and each window's rate updates a
+/// Bayesian estimate whose sample uncertainty is ten times the sample's distance from the
+/// estimate, relative to it, and whose own variance grows by 5 (kbit/s)^2 per update:
+/// "The bitrate estimate uncertainty is increased with each update to model that the bitrate
+/// changes over time." draft-ietf-rmcat-gcc-02 section 5.5 measures R_hat over "a T seconds
+/// window ... A window between 0.5 and 1 second is RECOMMENDED"; this one is shorter and
+/// smoothed, so it follows a sudden drop of the path's rate sooner.
+#[derive(Debug, Clone)]
+pub struct AcknowledgedRateEstimator {
+    sum: usize,
+    current_window_ms: i64,
+    prev_time_ms: Option<i64>,
+    /// kbit/s; negative until the first window closed.
+    estimate_kbps: f64,
+    estimate_var: f64,
+    /// The instant the arrival times are counted from.
+    epoch: Option<Instant>,
+}
+
+impl Default for AcknowledgedRateEstimator {
+    fn default() -> Self {
+        Self {
+            sum: 0,
+            current_window_ms: 0,
+            prev_time_ms: None,
+            estimate_kbps: -10.0,
+            estimate_var: 50.0,
+            epoch: None,
+        }
+    }
+}
+
+/// libwebrtc's `kInitialRateWindowMs` and `kRateWindowMs`.
+const INITIAL_RATE_WINDOW_MS: i64 = 500;
+const RATE_WINDOW_MS: i64 = 150;
+/// libwebrtc's `uncertainty_scale_`.
+const UNCERTAINTY_SCALE: f64 = 10.0;
+
+impl AcknowledgedRateEstimator {
+    /// `size` octets arrived at `at` (on this endpoint's reading of the receiver's clock).
+    pub fn add(&mut self, at: Instant, size: usize) {
+        let epoch = *self.epoch.get_or_insert(at);
+        let now_ms = at.saturating_duration_since(epoch).as_millis() as i64;
+        let window = if self.estimate_kbps < 0.0 {
+            INITIAL_RATE_WINDOW_MS
+        } else {
+            RATE_WINDOW_MS
+        };
+        let Some(sample) = self.update_window(now_ms, size, window) else {
+            return;
+        };
+        if self.estimate_kbps < 0.0 {
+            self.estimate_kbps = sample;
+            return;
+        }
+        let uncertainty =
+            UNCERTAINTY_SCALE * (self.estimate_kbps - sample).abs() / self.estimate_kbps.max(1e-9);
+        let sample_var = uncertainty * uncertainty;
+        let predicted_var = self.estimate_var + 5.0;
+        self.estimate_kbps = (sample_var * self.estimate_kbps + predicted_var * sample)
+            / (sample_var + predicted_var);
+        self.estimate_kbps = self.estimate_kbps.max(0.0);
+        self.estimate_var = sample_var * predicted_var / (sample_var + predicted_var);
+    }
+
+    /// The estimate, bits per second, once a window has closed.
+    pub fn rate_bits_per_second(&self) -> Option<f64> {
+        (self.estimate_kbps >= 0.0).then_some(self.estimate_kbps * 1000.0)
+    }
+
+    fn update_window(&mut self, now_ms: i64, size: usize, window_ms: i64) -> Option<f64> {
+        if self.prev_time_ms.is_some_and(|prev| now_ms < prev) {
+            self.prev_time_ms = None;
+            self.sum = 0;
+            self.current_window_ms = 0;
+        }
+        if let Some(prev) = self.prev_time_ms {
+            self.current_window_ms += now_ms - prev;
+            if now_ms - prev > window_ms {
+                self.sum = 0;
+                self.current_window_ms %= window_ms;
+            }
+        }
+        self.prev_time_ms = Some(now_ms);
+        let mut sample = None;
+        if self.current_window_ms >= window_ms {
+            sample = Some(8.0 * self.sum as f64 / window_ms as f64);
+            self.current_window_ms -= window_ms;
+            self.sum = 0;
+        }
+        self.sum += size;
+        sample
+    }
+}

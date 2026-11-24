@@ -3,7 +3,7 @@
 use super::loss::LossController;
 use super::overuse::{OveruseDetector, Usage};
 use super::queue_limit::QueueLimitDetector;
-use super::rate_calc::RateCalculator;
+use super::rate_calc::{AcknowledgedRateEstimator, RateCalculator};
 use super::rate_control::{RateController, ReceivedRateBound};
 use super::slope::SlopeEstimator;
 use super::threshold::ThresholdTimeBase;
@@ -96,6 +96,9 @@ pub struct Gcc {
     slope: SlopeEstimator,
     detector: OveruseDetector,
     rate: RateCalculator,
+    /// libwebrtc's acknowledged-bitrate estimator, when R_hat is read from it
+    /// ([`Gcc::with_acknowledged_rate_estimator`]).
+    acknowledged: Option<AcknowledgedRateEstimator>,
     delay_control: RateController,
     loss_control: LossController,
     min: f64,
@@ -175,6 +178,7 @@ impl Gcc {
             slope: SlopeEstimator::new(),
             detector: OveruseDetector::new(),
             rate: RateCalculator::default(),
+            acknowledged: None,
             delay_control: RateController::new(initial, min, max),
             loss_control: LossController::new(initial, min, max),
             min,
@@ -251,6 +255,16 @@ impl Gcc {
     /// halved (and halved again each time the same period passes).
     pub fn with_feedback_timeout(mut self, feedback_timeout: Duration) -> Self {
         self.feedback_timeout = feedback_timeout;
+        self
+    }
+
+    /// Whether R_hat, the received rate the delay-based controller's decrease is taken from
+    /// (`A_hat = beta * R_hat`) and its increase bounded by, is libwebrtc's acknowledged-bitrate
+    /// estimate ([`AcknowledgedRateEstimator`]: 150 ms windows, Bayesian smoothing) instead of
+    /// the draft's sliding window of 0.5 s (draft-ietf-rmcat-gcc-02 section 5.5: "A window
+    /// between 0.5 and 1 second is RECOMMENDED"). Off by default.
+    pub fn with_acknowledged_rate_estimator(mut self, enabled: bool) -> Self {
+        self.acknowledged = enabled.then(AcknowledgedRateEstimator::default);
         self
     }
 
@@ -370,6 +384,9 @@ impl BandwidthEstimator for Gcc {
             {
                 let at = self.place_arrival(now, arrival);
                 self.rate.add(at, report.size);
+                if let Some(acknowledged) = self.acknowledged.as_mut() {
+                    acknowledged.add(at, report.size);
+                }
                 self.newest_arrival = Some(self.newest_arrival.map_or(at, |newest| newest.max(at)));
             }
             if let Some(trend) = self.slope.accumulate(report) {
@@ -385,6 +402,10 @@ impl BandwidthEstimator for Gcc {
         let received = self
             .newest_arrival
             .and_then(|newest| self.rate.rate_bits_per_second(newest));
+        let received = match self.acknowledged.as_ref() {
+            Some(acknowledged) => acknowledged.rate_bits_per_second().or(received),
+            None => received,
+        };
         // A loss out of a queue at its limit: the queue would be growing, had it room.
         if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
             usage = Usage::Over;
@@ -519,6 +540,9 @@ impl BandwidthEstimator for Gcc {
         self.slope = SlopeEstimator::new();
         self.detector = OveruseDetector::new().with_threshold_time_base(self.threshold_time_base);
         self.rate = RateCalculator::default();
+        if self.acknowledged.is_some() {
+            self.acknowledged = Some(AcknowledgedRateEstimator::default());
+        }
         self.deltas = 0;
         self.arrival_anchor = None;
         self.newest_arrival = None;
