@@ -1042,6 +1042,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   judges Rust's decoding, and the interop peer reports what arrived (payload sizes and types,
   the browser's RFC 6464 levels, the first payloads) and the encoder's bitrate; all of it is
   the cell's `pipeline-diagnostics` annotation.
+- **test-env** (`conf/ffi-mp-5`): interop-peer's pipeline no longer spins while its sender
+  cannot be built yet (connected, but no SSRC or no codec it encodes): it retried with its
+  wake-up time left in the past, so the session loop slept 0 ms. It retries every 10 ms.
 - **test-env**: coturn 4.6.3 built from its release tag (`conf/testenv-2-coturn-aiortc`;
   `https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
   `dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`) instead of the base

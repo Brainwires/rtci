@@ -1535,7 +1535,12 @@ impl Session {
                 },
             ) {
                 Ok(s) => p.sender = Some(s),
-                Err(_) => return,
+                Err(_) => {
+                    // Retry in 10 ms: the session loop wakes at `p.next`, and one left in the
+                    // past would have it spin until the sender can be built.
+                    p.next = Instant::now() + Duration::from_millis(10);
+                    return;
+                }
             }
             p.next = Instant::now();
         }
