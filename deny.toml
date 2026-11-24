@@ -2,15 +2,21 @@
 # dev-dependencies and examples included. Run by .github/workflows/audit.yml after
 # `cargo generate-lockfile`, so it sees what a fresh build would resolve today.
 #
-# The library's own graph (normal and build dependencies, every feature) is checked separately
-# against .github/deny-library.toml, which ignores nothing: an advisory there always fails CI.
-# Every ignore below must say why it cannot reach the library.
+# The library's own graph (the published crates' normal and build dependencies, every feature) is
+# checked separately against .github/deny-library.toml, which ignores nothing: an advisory there
+# always fails CI. Every ignore below must say why it cannot reach the library.
+
+# Every feature: the unpublished crates' optional backends (rtci-video's AV1) are checked here,
+# since the library check leaves those crates out.
+[graph]
+all-features = true
 
 [advisories]
 version = 2
 ignore = [
     { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained (no vulnerability). Dev-dependency only, interop tests: webrtc 0.17.3 -> webrtc-util -> nix 0.26; not in the library's dependency graph." },
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no vulnerability, no fixed release). Dev-dependency only: log timestamps in examples and tests; not in the library's dependency graph." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained (no vulnerability, no safe upgrade): unmaintained build-time proc-macro, no known vulnerability; via rav1d/rav1e in the unpublished rtci-video crate's opt-in AV1 features; remove when those drop it. Not in a published crate's graph (.github/deny-library.toml would fail)." },
 ]
 
 # Permissive licences only: no GPL, LGPL or AGPL anywhere in the graph (dev-dependencies and

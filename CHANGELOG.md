@@ -605,6 +605,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Test environment and documentation
 
+- **audit**: the library's advisory check (`.github/deny-library.toml`, no ignores) covers the
+  published crates (`exclude-unpublished`); the whole-workspace check (`deny.toml`) now resolves
+  every feature, so the unpublished crates' optional backends are still checked there. It
+  ignores RUSTSEC-2024-0436 (`paste` 1.0.15 unmaintained, no vulnerability, no safe upgrade):
+  an unmaintained build-time proc-macro reached only through `rav1d` / `rav1e` in the
+  unpublished `rtci-video` crate's opt-in AV1 features; remove when those drop it. Recorded in
+  `FORK.md` "Dependency audit".
+
 - **docs**: `docs/video-pipeline.md`, the design of the video half of the media pipeline
   (`conf/vp-1-design`): what the engine already gives video, what a complete receiver and
   sender need beyond it, each element against libwebrtc (`a222406d`) and the RFCs / W3C
