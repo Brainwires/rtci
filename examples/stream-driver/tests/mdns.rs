@@ -12,7 +12,7 @@
 #![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use rtci::ice::mdns::MulticastDnsMode;
-use rtci::mdns::{MDNS_MULTICAST_IPV4, MDNS_PORT, MdnsRateLimit};
+use rtci::mdns::MdnsRateLimit;
 use rtci::peer_connection::RTCPeerConnectionBuilder;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
@@ -33,13 +33,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// The tests share the host's mDNS group: one at a time, so that what a test counts is its own.
 static MDNS_GROUP_IN_USE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The address of the interface multicast to the mDNS group leaves by: the one a UDP socket
-/// connected to the group sends from. An mDNS answer leaves from it, and the resolver believes
-/// an A record only from the address it names, so the candidates are gathered there.
+/// The address of the host's default-route interface (a UDP socket connected to a
+/// documentation address sends nothing): the drivers' candidates are gathered there, and the
+/// driver sends and joins mDNS on that address's interface. (Asking which interface a socket
+/// connected to the mDNS group would use gave loopback on Windows once a test of this binary had
+/// joined the group on loopback.)
 fn mdns_egress_ip() -> Option<IpAddr> {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
-            socket.connect((MDNS_MULTICAST_IPV4, MDNS_PORT))?;
+            socket.connect("192.0.2.1:9")?;
             socket.local_addr()
         })
         .ok()
