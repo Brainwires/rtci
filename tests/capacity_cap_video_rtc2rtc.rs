@@ -302,6 +302,10 @@ struct Peer {
     /// number): the difference never reached the wire (dropped by a pacer).
     video_written: BTreeSet<u16>,
     video_left: BTreeSet<u16>,
+    /// The video packets written from 1 s on (the first key frame, written as the connection
+    /// comes up, is not the pacer's to lose), and the call's time at the current write.
+    video_written_late: BTreeSet<u16>,
+    media_elapsed: Duration,
     audio: RTCRtpSenderId,
     video: RTCRtpSenderId,
     audio_packetizer: Option<Box<dyn Packetizer>>,
@@ -522,6 +526,8 @@ impl Peer {
             handles,
             video_written: BTreeSet::new(),
             video_left: BTreeSet::new(),
+            video_written_late: BTreeSet::new(),
+            media_elapsed: Duration::ZERO,
             audio,
             video,
             audio_packetizer: None,
@@ -601,6 +607,10 @@ impl Peer {
         for packet in packetizer.packetize(now, &Bytes::copy_from_slice(data), samples)? {
             if video {
                 self.video_written.insert(packet.header.sequence_number);
+                if self.media_elapsed >= Duration::from_secs(1) {
+                    self.video_written_late
+                        .insert(packet.header.sequence_number);
+                }
             }
             sender.write_rtp(now, packet)?;
         }
@@ -842,6 +852,7 @@ impl World {
             self.next_video =
                 self.start + Duration::from_micros(self.frame * 1_000_000 / u64::from(VIDEO_FPS));
             for peer in self.peers.iter_mut() {
+                peer.media_elapsed = at;
                 let key = std::mem::take(&mut peer.force_key);
                 let frame = peer
                     .model
@@ -1018,8 +1029,10 @@ struct Outcome {
     rtx_dropped: u64,
     /// Opus packets dropped at the capped link's queue.
     audio_dropped: u64,
-    /// Video packets the caller's application wrote that never left its host.
+    /// Video packets the caller's application wrote that never left its host, and those of
+    /// them written from 1 s on.
     pacer_dropped: usize,
+    pacer_dropped_late: usize,
     /// The caller's `OnPacerDiscard` events (time, frames, packets), and the key-frame requests
     /// it was handed (the callee's and the pacer's).
     pacer_discards: Vec<(Duration, u32, usize)>,
@@ -1067,6 +1080,10 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
     let estimate_after = world.peers[0].estimate().unwrap_or(0);
     let caller = &world.peers[0];
     let pacer_dropped = caller.video_written.difference(&caller.video_left).count();
+    let pacer_dropped_late = caller
+        .video_written_late
+        .difference(&caller.video_left)
+        .count();
     if std::env::var("RTC_CAP_TRACE").is_ok() {
         for line in &world.trace {
             println!("TRACE seed {seed} {line}");
@@ -1090,6 +1107,7 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
         rtx_dropped: world.uplinks[0].rtx_dropped,
         audio_dropped: world.uplinks[0].audio_dropped,
         pacer_dropped,
+        pacer_dropped_late,
         pacer_discards: caller.pacer_discards.clone(),
         key_requests_received: caller.key_requests_received,
         unusable: callee.unusable,
@@ -1183,6 +1201,14 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 /// (`OnPacerDiscard`) and asked for a key frame. Every video packet that never left the host
 /// was announced that way, every discard comes in the seconds after the cap, and the video
 /// does not freeze for more than 2 s.
+///
+/// Not yet true (run 45300292535): one discard of 120 to 202 frames 4.5 to 7.2 s after the cap,
+/// and freezes of 4.3 to 10.3 s on six seeds. The discarded packets leave a gap in the stream's
+/// sequence numbers that nothing fills (the NACK responder no longer resends them), and the
+/// receiver's sample builder (256 packets late at most, ParolNet's) holds every later frame,
+/// the key frame included, until 256 sequence numbers have passed the gap: the freezes end 8.5 s
+/// after the discard, 256 packets at about 30 a second. With the discarded packets still resent
+/// (mutation branch `mut/gcc-2-frame-discard-1`, run 45300304592) the freezes are 1.8 to 2.8 s.
 #[test]
 fn a_sender_following_the_lowered_target_loses_only_frames_discarded_at_the_cap() -> Result<()> {
     DEFAULT_CHAIN.with(|d| d.set(true));
@@ -1198,8 +1224,12 @@ fn a_sender_following_the_lowered_target_loses_only_frames_discarded_at_the_cap(
     for (seed, outcome) in &outcomes {
         let announced: usize = outcome.pacer_discards.iter().map(|d| d.2).sum();
         assert_eq!(
-            outcome.pacer_dropped, announced,
+            outcome.pacer_dropped_late, announced,
             "seed {seed}: every video packet that never left was announced: {outcome:?}"
+        );
+        assert!(
+            outcome.key_requests_received as usize >= 2 + outcome.pacer_discards.len(),
+            "seed {seed}: a key frame asked for with each discard: {outcome:?}"
         );
         for (at, ..) in &outcome.pacer_discards {
             assert!(

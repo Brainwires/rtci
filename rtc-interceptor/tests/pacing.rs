@@ -1089,8 +1089,10 @@ fn padding_never_raises_the_pacing_rate() {
 
 /// Padding that has waited longer than the queue time bound is sent late, not dropped and not
 /// forced out ahead of media: with a source above the target behind it for four seconds, the
-/// queued padding leaves only once the media queue is empty, every packet of it, and the media
-/// still waits no longer than the bound.
+/// queued padding leaves only once the media queue is empty (here when the frames that waited
+/// the bound are discarded, or after the last media), every packet of it: no media packet that
+/// was waiting when a padding packet left leaves after it. And the media still waits no longer
+/// than the bound.
 #[test]
 fn padding_older_than_the_queue_time_limit_waits_for_spare_budget() {
     let mut harness = Harness::new();
@@ -1112,24 +1114,29 @@ fn padding_older_than_the_queue_time_limit_waits_for_spare_budget() {
         .filter(|packet| packet.sequence_number >= 60_000)
         .collect();
     assert_eq!(10, padding.len(), "no padding is dropped");
-    let last_media = released
+    let media: Vec<&Released> = released
         .iter()
         .filter(|packet| packet.sequence_number < 60_000)
-        .map(|packet| packet.at)
-        .max()
-        .expect("media left");
+        .collect();
+    assert!(!media.is_empty(), "media left");
     // The burst let the first five go at once; the other five waited out the media.
     assert_eq!(
         5,
         padding.iter().filter(|packet| packet.at == ms(0)).count()
     );
-    assert!(
-        padding
+    for late in padding.iter().filter(|packet| packet.at > ms(0)) {
+        // Media packet `n` was written at 5n ms: one written before the padding left was
+        // waiting then, unless it had left already.
+        let overtaken: Vec<&&Released> = media
             .iter()
-            .filter(|packet| packet.at > ms(0))
-            .all(|packet| packet.at >= last_media),
-        "padding went ahead of media: {padding:?}, last media at {last_media:?}"
-    );
+            .filter(|packet| ms(5 * u64::from(packet.sequence_number)) < late.at)
+            .filter(|packet| packet.at > late.at)
+            .collect();
+        assert!(
+            overtaken.is_empty(),
+            "padding {late:?} went ahead of waiting media {overtaken:?}"
+        );
+    }
     let longest = released
         .iter()
         .filter(|packet| packet.sequence_number < 60_000)
