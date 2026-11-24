@@ -1,0 +1,38 @@
+[package]
+name = "rtc-video-interop"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The interop peer (examples/interop-peer) with the video pipeline scenario: the browser's video through rtc-video and its codecs"
+publish = false
+
+# The `rtc` crate does not depend on `rtc-video` (the pipeline depends on the engine, not the
+# reverse), so the interop peer's `pipeline` scenario is built here, from the same source file,
+# with the feature on: `cargo build -p rtc-video-interop --features pipeline`. Without the
+# feature nothing is built (the binary requires it), so the workspace's ordinary builds and
+# tests compile no codec.
+[features]
+pipeline = ["dep:rtc-video", "rtc-video/vp8", "rtc-video/av1"]
+
+[[bin]]
+name = "interop-peer-video"
+path = "../../examples/interop-peer/interop-peer.rs"
+required-features = ["pipeline"]
+test = false
+bench = false
+
+[dependencies]
+rtc = { path = "../.." }
+rtc-video = { path = "..", optional = true }
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+stream-driver.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true

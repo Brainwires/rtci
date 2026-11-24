@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Browser interop stage (entry.sh calls it inside the test container): builds and starts
-# examples/interop-peer in the "open-b" namespace (203.0.113.51), runs the Playwright suite in
+# examples/interop-peer (as interop-peer-video) in the "open-b" namespace (203.0.113.51), runs the Playwright suite in
 # "open-a" (203.0.113.50) against it, and writes /artifacts/interop-matrix.md,
 # interop-summary.json and interop-gate.txt (gate.mjs: a failure or an uncited n/a fails it).
 # The "-mdns" projects run apart, with a second peer in "lan-b" (10.99.0.51) and the browsers
@@ -15,8 +15,12 @@ A=${RTC_TESTENV_ARTIFACTS_DIR:-/artifacts}
 export RTC_INTEROP_PEERS_DIR=$(cd "$HERE/../peers" && pwd)
 export RTC_INTEROP_PEER_BIN=/run/rtc-env/peers
 
-cargo build --example interop-peer > "$A/interop-build.log" 2>&1 || { echo "interop-peer build failed"; tail -30 "$A/interop-build.log"; exit 1; }
-PEER=${CARGO_TARGET_DIR:-/src/target}/debug/examples/interop-peer
+# examples/interop-peer built by the rtc-video-interop package with its `pipeline` feature: the
+# same peer plus the video pipeline scenario (the browser's video through rtc-video and its
+# pure-Rust codecs), which the `rtc` crate's own build of the example leaves out (rtc does not
+# depend on rtc-video).
+cargo build -p rtc-video-interop --features pipeline --bin interop-peer-video > "$A/interop-build.log" 2>&1 || { echo "interop-peer build failed"; tail -30 "$A/interop-build.log"; exit 1; }
+PEER=${CARGO_TARGET_DIR:-/src/target}/debug/interop-peer-video
 
 ip netns exec open-b "$PEER" --listen 203.0.113.51:8080 --ice-ip 203.0.113.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer.log" 2>&1 &
