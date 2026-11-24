@@ -976,7 +976,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 
         // A flow the circuit breaker ceased or restarted (it sits wire-ward of here).
         if let Some(notice) = msg.message.custom::<crate::CircuitBreakerNotice>() {
-            if notice.ceased.is_some() {
+            if notice.ceased.is_some() && notice.ssrc == u32::MAX {
                 self.ceased.insert(notice.ssrc);
             } else {
                 self.ceased.remove(&notice.ssrc);
