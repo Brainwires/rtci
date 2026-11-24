@@ -5,10 +5,12 @@
 //!
 //! `cargo run --release -p rtci-stream-driver --example udp_receive_bench`
 //!
-//! A sender thread writes `DATAGRAMS` datagrams of 1200 bytes over loopback as fast as it can;
-//! the receiver hands each to a channel, as the driver does. Each line is one trial: what
-//! arrived (loopback drops what the receiver's buffer cannot hold) and the receive rate between
-//! the first and the last datagram. The median of the trials is printed last for each batch.
+//! `SENDERS` threads write `DATAGRAMS` datagrams of 1200 bytes between them over loopback as
+//! fast as they can, more than one receiver keeps up with, so that the receive side is what is
+//! measured; the receiver hands each datagram to a channel, as the driver does. Each line is one
+//! trial: what arrived (loopback drops what the receiver's buffer cannot hold) and the receive
+//! rate between the first and the last datagram. The median of the trials is printed last for
+//! each batch.
 
 use rtci_stream_driver::runtime::{self, Runtime, TokioRuntime};
 use std::net::SocketAddr;
@@ -16,7 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const DATAGRAMS: usize = 200_000;
+const DATAGRAMS: usize = 400_000;
+const SENDERS: usize = 4;
 const SIZE: usize = 1200;
 const TRIALS: usize = 5;
 
@@ -56,14 +59,20 @@ async fn trial(runtime: Arc<dyn Runtime>, batch: usize) -> (usize, f64) {
             .await;
         }))
     };
-    let sender = std::thread::spawn(move || {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let payload = [7u8; SIZE];
-        for _ in 0..DATAGRAMS {
-            let _ = socket.send_to(&payload, to);
-        }
-    });
-    let _ = sender.join();
+    let senders: Vec<_> = (0..SENDERS)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let payload = [7u8; SIZE];
+                for _ in 0..DATAGRAMS / SENDERS {
+                    let _ = socket.send_to(&payload, to);
+                }
+            })
+        })
+        .collect();
+    for sender in senders {
+        let _ = sender.join();
+    }
     // Whatever was going to arrive has arrived once the count stops moving.
     let mut seen = usize::MAX;
     loop {
@@ -94,8 +103,9 @@ fn main() {
     let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime::with_handle(tokio.handle().clone()));
     let socket = runtime.bind_udp("127.0.0.1:0".parse().unwrap()).unwrap();
     println!(
-        "{} datagrams of {} bytes per trial, {} trials; the socket takes up to {} per receive",
+        "{} datagrams of {} bytes per trial from {} sender threads, {} trials; the socket takes up to {} per receive",
         DATAGRAMS,
+        SENDERS,
         SIZE,
         TRIALS,
         socket.max_receive_batch()
