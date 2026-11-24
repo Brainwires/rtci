@@ -56,46 +56,10 @@ struct OnTheWire {
     sequence_number: u16,
     marker: bool,
     lost: bool,
-    /// The transport-wide sequence number the packet carries in a one-byte header extension
-    /// element of id [`TRANSPORT_CC_ID`] (RFC 8285 section 4.2; the header is in the clear,
-    /// RFC 3711 section 3.1).
-    transport_wide_sequence_number: Option<u16>,
 }
 
 /// The id a FEC session's offer gives the transport-wide sequence number extension.
 const TRANSPORT_CC_ID: u8 = 1;
-
-/// The value of the one-byte header extension element `id` of an RTP packet, when it has one.
-fn one_byte_extension(data: &[u8], id: u8) -> Option<&[u8]> {
-    if data[0] & 0x10 == 0 {
-        return None;
-    }
-    let start = 12 + 4 * usize::from(data[0] & 0x0F);
-    let header = data.get(start..start + 4)?;
-    if header[..2] != [0xBE, 0xDE] {
-        return None;
-    }
-    let length = 4 * usize::from(u16::from_be_bytes([header[2], header[3]]));
-    let elements = data.get(start + 4..start + 4 + length)?;
-    let mut at = 0;
-    while at < elements.len() {
-        let byte = elements[at];
-        if byte == 0 {
-            at += 1;
-            continue;
-        }
-        let (element, len) = (byte >> 4, usize::from(byte & 0x0F) + 1);
-        if element == 15 {
-            return None;
-        }
-        let value = elements.get(at + 1..at + 1 + len)?;
-        if element == id {
-            return Some(value);
-        }
-        at += 1 + len;
-    }
-    None
-}
 
 /// What a peer's chain read of the per-packet congestion feedback about its own FEC streams.
 #[derive(Debug, Default)]
@@ -106,6 +70,10 @@ struct FeedbackSeen {
     transport_cc: usize,
     /// RFC 8888 reports with a block for one of them.
     ccfb: usize,
+    /// For each FEC packet this peer sent, as it left the chain (after the transport-wide
+    /// sequence number was written; the wire may encrypt the extension, RFC 9335), the
+    /// transport-wide sequence number it carries.
+    sent: Vec<Option<u16>>,
 }
 
 /// Records, wire-most in the chain, the congestion feedback that arrives about this peer's
@@ -154,6 +122,17 @@ impl rtci::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FeedbackRecorder
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> std::result::Result<(), Error> {
+        if let Packet::Rtp(packet) = &msg.message.packet {
+            let mut seen = self.seen.lock().unwrap();
+            if seen.fec_streams.contains(&packet.header.ssrc) {
+                let number = packet
+                    .header
+                    .get_extension(TRANSPORT_CC_ID)
+                    .filter(|value| value.len() == 2)
+                    .map(|value| u16::from_be_bytes([value[0], value[1]]));
+                seen.sent.push(number);
+            }
+        }
         self.write_queue.push_back(msg);
         Ok(())
     }
@@ -413,9 +392,6 @@ impl World {
                     sequence_number,
                     marker: data[1] & 0x80 != 0,
                     lost,
-                    transport_wide_sequence_number: one_byte_extension(&data, TRANSPORT_CC_ID)
-                        .filter(|value| value.len() == 2)
-                        .map(|value| u16::from_be_bytes([value[0], value[1]])),
                 });
                 if lost {
                     continue;
@@ -1682,7 +1658,8 @@ fn extmaps(section: &[&str]) -> Vec<String> {
 
 /// Two peers with `congestion_feedback` and a FEC session from the offerer, `check`ed on the
 /// offer and the answer; twenty frames, one FEC packet each. Returns the feedback the offerer's
-/// chain read about its FEC stream and the transport-wide sequence number of each FEC packet.
+/// chain read about its FEC stream and the transport-wide sequence number each FEC packet left
+/// the chain with.
 fn fec_session_feedback(
     congestion_feedback: CongestionFeedback,
     check: impl Fn(&str, &str),
@@ -1716,14 +1693,15 @@ fn fec_session_feedback(
         world.advance(Duration::from_millis(10))?;
     }
     world.advance(Duration::from_secs(1))?;
-    let numbers: Vec<Option<u16>> = world
+    let on_the_wire = world
         .srtp
         .iter()
         .filter(|packet| packet.from == fec_from)
-        .map(|packet| packet.transport_wide_sequence_number)
-        .collect();
-    assert_eq!(numbers.len(), 20, "one FEC packet per frame");
-    let seen = std::mem::take(&mut *world.peers[0].feedback.lock().unwrap());
+        .count();
+    assert_eq!(on_the_wire, 20, "one FEC packet per frame");
+    let mut seen = std::mem::take(&mut *world.peers[0].feedback.lock().unwrap());
     assert_eq!(seen.fec_streams.len(), 1, "{seen:?}");
+    assert_eq!(seen.sent.len(), 20, "{seen:?}");
+    let numbers = std::mem::take(&mut seen.sent);
     Ok((seen, numbers))
 }
