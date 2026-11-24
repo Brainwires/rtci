@@ -97,7 +97,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-42 rows: 10 of class B, 15 of class C, 3 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+46 rows: 10 of class B, 15 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -127,6 +127,10 @@ Sorted by class, then owner, size and ID.
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | C | tested |
 | RFC9335-9.1-1 | `rfc9335.md` | a=cryptex: property attribute, no value, mux category TRANSPORT | C | tested |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | D | n/a |
+| RFC5109-14.1-2 | `rfc5109.md` | SSRC of a separate FEC stream equals the protected stream's SSRC | D | tested |
+| RFC5109-14.1-5 | `rfc5109.md` | Separate-stream SDP: own m= line, a=rtpmap:<pt> ulpfec/<rate>, ... | D | tested |
+| RFC5109-14.3-1 | `rfc5109.md` | Offerer of a separate FEC stream implements RFC 3388 grouping and RFC ... | D | tested |
+| RFC5109-7.2-2 | `rfc5109.md` | FEC packet SSRC SHALL equal the SSRC of the media stream it protects | D | tested |
 | RFC8835-3.5-3 | `rfc8835.md` | SCTP I-DATA (RFC 8260) | D | tested |
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | D | tested |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | E | n/a |
