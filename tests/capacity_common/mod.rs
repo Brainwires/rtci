@@ -197,19 +197,21 @@ pub enum Perturbation {
     Draws(u32),
 }
 
+/// A SOFTWARE text of 27 bytes: the length of the fork's text before the crate rename (the
+/// rename moved one seed's figures by changing this length, so the measurement reproduces
+/// it). Only the length matters to the simulation; the bytes are neutral filler.
+pub const SOFTWARE_27: &str = "pre-rename SOFTWARE length.";
+/// A SOFTWARE text of 40 bytes, longer than any the engine has sent.
+pub const SOFTWARE_40: &str = "rtci-ice 0.2.0-dev (perturbation: 40 B).";
+const _: () = assert!(SOFTWARE_27.len() == 27 && SOFTWARE_40.len() == 40);
+
 /// The perturbations of the measurement, by name. The engine's own SOFTWARE text is
-/// `rtci-ice 0.2.0-dev` (18 bytes); 27 bytes is the fork's text before the crate rename.
+/// `rtci-ice 0.2.0-dev` (18 bytes).
 pub const PERTURBATIONS: [(&str, Perturbation); 6] = [
     ("none", Perturbation::None),
     ("nosw", Perturbation::NoSoftware),
-    (
-        "sw27",
-        Perturbation::Software("rtc-ice 0.22.0+brainwires.6"),
-    ),
-    (
-        "sw40",
-        Perturbation::Software("rtci-ice 0.2.0-dev (perturbation: 40 B)."),
-    ),
+    ("sw27", Perturbation::Software(SOFTWARE_27)),
+    ("sw40", Perturbation::Software(SOFTWARE_40)),
     ("draw1", Perturbation::Draws(1)),
     ("draw2", Perturbation::Draws(2)),
 ];
