@@ -34,3 +34,9 @@ socket2.workspace = true
 hickory-resolver = { version = "0.25", optional = true, default-features = false, features = ["tokio", "system-config"] }
 rtc = { version = "0.22.0", path = "../..", optional = true }
 bytes = { workspace = true, optional = true }
+
+# The `peer` module's tests need the feature (on by default; off in the workspace jobs that
+# build with `--no-default-features`).
+[[test]]
+name = "peer"
+required-features = ["peer"]
