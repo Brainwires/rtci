@@ -17,6 +17,7 @@ members = [
     "rtci-srtp",
     "rtci-stun",
     "rtci-turn",
+    "examples/custom-runtime",
 ]
 resolver = "2"
 

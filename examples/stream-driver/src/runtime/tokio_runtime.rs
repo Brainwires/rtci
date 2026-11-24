@@ -257,7 +257,7 @@ impl AsyncTcpStream for TokioTcp {
     }
 
     fn reset_on_close(&self) -> io::Result<()> {
-        SockRef::from(&self.0).set_linger(Some(std::time::Duration::ZERO))
+        super::reset_on_close(SockRef::from(&self.0))
     }
 
     fn set_traffic_class(&self, value: u8) -> io::Result<u32> {

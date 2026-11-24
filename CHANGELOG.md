@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and timers, smol's resolver). Several runtime features can be on at once; drivers on
     different runtimes live in one process (`tests/runtimes.rs`: a peer on tokio and a peer on
     smol connect and exchange data-channel messages).
+  - (runtime-4) `examples/custom-runtime` (package `rtci-custom-runtime-example`, not
+    published): `Runtime` implemented over async-executor and async-io, the driver with
+    `default-features = false`; CI checks its tree has no tokio and runs it (two peer
+    connections on it exchange data-channel messages). New public helpers for such runtimes:
+    `runtime::{std_udp, std_multicast, std_tcp_listener, std_tcp_bound, std_tcp_connect_start,
+    set_and_read_traffic_class, reset_on_close, TrafficClassMarker}`.
 
 ### Behaviour changes
 

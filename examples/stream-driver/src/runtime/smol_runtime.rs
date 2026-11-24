@@ -242,7 +242,7 @@ impl AsyncTcpStream for SmolTcp {
     }
 
     fn reset_on_close(&self) -> io::Result<()> {
-        SockRef::from(self.0.get_ref()).set_linger(Some(std::time::Duration::ZERO))
+        super::reset_on_close(SockRef::from(self.0.get_ref()))
     }
 
     fn set_traffic_class(&self, value: u8) -> io::Result<u32> {

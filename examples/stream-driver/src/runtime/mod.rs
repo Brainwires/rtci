@@ -615,6 +615,16 @@ fn connect_in_progress(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::WouldBlock
 }
 
+/// Makes `socket`'s close abortive (`SO_LINGER` 0: RST instead of FIN), for
+/// [`AsyncTcpStream::reset_on_close`].
+///
+/// # Errors
+///
+/// The socket refused.
+pub fn reset_on_close(socket: SockRef<'_>) -> io::Result<()> {
+    socket.set_linger(Some(Duration::ZERO))
+}
+
 /// Sets `socket`'s TOS / Traffic Class and reads it back (for [`AsyncTcpStream::set_traffic_class`]).
 ///
 /// # Errors
