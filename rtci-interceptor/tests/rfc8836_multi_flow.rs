@@ -1058,7 +1058,7 @@ fn the_draft_threshold_time_base_meets_the_same_bounds() {
 /// Recovery probing (`ProbeController::with_recovery_probing`, off by default) on the
 /// scenarios above and on a capacity drop that lasts (2 -> 0.5 -> 2 Mbit/s, 20 s at the
 /// lower rate): it holds the bounds those tests hold the default to, and the estimate is
-/// back at 80 % of the capacity no later than without it. Each run prints the comparison.
+/// back at 80 % of the capacity in at most half the time it takes without it. Each run prints the comparison.
 #[test]
 fn recovery_probing_meets_the_same_bounds() {
     const CAPACITY: f64 = 2_000_000.0;
@@ -1128,5 +1128,6 @@ fn recovery_probing_meets_the_same_bounds() {
         assert!(p95_after < Duration::from_millis(100), "{p95_after:?}");
         up_within.push(back.expect("the estimate climbs back"));
     }
-    assert!(up_within[1] <= up_within[0], "{up_within:?}");
+    // Measured (hosted run 45429388160): 4.2 s with recovery probing, 19.6 s without.
+    assert!(up_within[1] * 2 <= up_within[0], "{up_within:?}");
 }
