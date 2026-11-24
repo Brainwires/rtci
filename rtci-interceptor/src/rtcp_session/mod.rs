@@ -437,7 +437,7 @@ impl RtcpSessionBuilder {
     /// first local media SSRC, and none about the co-located SSRCs, as libwebrtc does and as
     /// RFC 8861 reporting groups allow where they are signalled; the larger compound packets
     /// of the RFC form were measured to cost the video through a capacity cap
-    /// (`report_blocks_from_every_ssrc_measured_against_once` in the root crate's tests).
+    /// (`measure_report_blocks_from_every_ssrc_against_once` in the root crate's tests).
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self
