@@ -191,7 +191,8 @@ async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() ->
 /// draft-ietf-mmusic-mdns-ice-candidates section 7.1: one rate limit over all mDNS queries and
 /// responses. Two connections whose drivers share a small budget (1 at once, then 1 a second)
 /// send together no more than it allows over the whole exchange (probes, announcements,
-/// queries and answers of both), and still connect: what the budget refused waited.
+/// queries and answers of both), and still connect: what the budget refused waited, and
+/// leaves later at the budget's rate.
 #[tokio::test]
 async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Result<()> {
     const BURST: u32 = 1;
@@ -205,6 +206,12 @@ async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Re
     let mut a = Side::new(ip, Some(limit.clone()))?;
     let mut b = Side::new(ip, Some(limit))?;
     let up = connect(&mut a, &mut b, Duration::from_secs(40)).await?;
+    // The drivers bind their mDNS sockets when gathering begins, so each may take the other's
+    // first announcement into its cache and connect after a single datagram: the exchange
+    // goes on for a while, and what the budget held leaves at its rate.
+    while start.elapsed() < Duration::from_secs(4) {
+        round(&mut a, &mut b).await?;
+    }
     let elapsed = start.elapsed();
     let sent = a.driver.mdns_datagrams_sent() + b.driver.mdns_datagrams_sent();
     let allowed = u64::from(BURST) + (elapsed.as_secs_f64() * f64::from(PER_SECOND)).ceil() as u64;
@@ -214,7 +221,7 @@ async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Re
     );
     assert!(
         sent > u64::from(BURST),
-        "the exchange needed more than the burst: {sent}"
+        "the held mDNS left after the burst: {sent}"
     );
     assert!(up, "connected, the held mDNS sent as the budget allowed");
     Ok(())
