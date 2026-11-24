@@ -567,8 +567,8 @@ fn a_path_change_is_passed_to_the_estimator() {
 /// The peer connection's word that it selected another candidate pair (`PathChanged`, on the
 /// read leg) is a path change also when every packet keeps its addresses (a TURN relay that
 /// keeps them, an application that hands datagrams over with one placeholder pair): the
-/// estimator is told once. Packets that then arrive between other addresses are the new
-/// path's, not a second change.
+/// estimator is told once. Packets that then arrive between other addresses than before are
+/// the new path's, not a second change.
 #[test]
 fn the_peer_connections_path_change_reaches_the_estimator_with_the_same_addresses() {
     let told = Told::default();
@@ -583,12 +583,10 @@ fn the_peer_connections_path_change_reaches_the_estimator_with_the_same_addresse
     harness.drain();
     assert_eq!(1, *told.path_changes.lock().unwrap(), "told");
 
-    for index in 0..5u64 {
-        harness.receive(ms(320 + index * 20), remb(1e6, vec![LOCAL]));
-    }
+    // The new pair's packets, from another address than before: the same change.
     for index in 0..5u64 {
         let mut message = harness.tagged(
-            ms(420 + index * 20),
+            ms(320 + index * 20),
             Packet::Rtcp(vec![remb(1e6, vec![LOCAL])]),
         );
         message.transport.peer_addr = std::net::SocketAddr::from(([192, 0, 2, 7], 6000));
