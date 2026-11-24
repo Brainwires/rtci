@@ -45,9 +45,9 @@ fn a_separate_fec_session_is_refused_with_its_group() -> TestResult {
     Ok(())
 }
 
-/// A section that lists nothing but `ulpfec` is a FEC session's (RFC 5109 section 14.1), not a
-/// negotiation of the video formats: listed ahead of the media section, it does not decide
-/// what "video" is for the session, and the media section is answered with its codec.
+/// A FEC session's section listed ahead of the media section it protects (the group names the
+/// sections, their order in the description is free): the FEC session is refused as by
+/// default, and the media section is answered with its codec.
 #[test]
 fn a_fec_section_ahead_of_its_media_section_leaves_the_video_formats_alone() -> TestResult {
     let offer = crlf(&format!(

@@ -2451,7 +2451,9 @@ impl<'a>
 
                 // What was read on a FEC session's transport (RFC 5109 section 14.1) and no
                 // interceptor took: FEC with no decoder in the chain, or that session's RTCP.
-                // Neither is a receiver's media or feedback for the application.
+                // Neither is a receiver's media or feedback for the application. (The
+                // endpoint would find no receiver for such a packet today; this keeps it so
+                // whatever the endpoint does with an SSRC it does not know.)
                 if interceptor::RtpSession::of(&packet.message)
                     .is_some_and(|session| self.ctx.fec_session_transports.contains_key(&session))
                 {

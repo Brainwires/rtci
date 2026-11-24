@@ -57,9 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer did not have) gets a transport of its own, as the method's documentation says; it
   was put on the BUNDLE transport. A section a description leaves outside every group is
   never written `a=bundle-only`.
-- Codec negotiation skips a remote m= section that lists nothing but `ulpfec` (a FEC
-  session's): it no longer counts as the kind's first section, which decides the kind's
-  formats.
 
 ## [0.1.0] - 2026-11-24
 
