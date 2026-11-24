@@ -434,25 +434,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **congestion control, default (paced) chain: a sudden capacity drop can freeze the video for
   more than 2 s** (`tests/capacity_cap_video_rtc2rtc.rs`, the 300 kbit/s cap arriving at
   2.5 Mbit/s). Over 108 runs (six seeds, three wall clocks, six perturbations of incidental wire
-  sizes and seeded draws) the longest freeze is 0.89 to 2.28 s (median 1.38 s), and 4 runs
-  (3.7 %) are over the 2 s the test requires; one of them is a seed `RTC_CAP_FULL` runs, so the
-  full matrix fails on this line. Not a regression of train 23: `conf/jsep-75-session-version`
-  draws the `o=` session id from the crypto provider, which the test seeds, and that one draw
-  moved every seeded figure (with the draw removed every cell is train 22's again). The freeze
-  is the repair of the drop's losses inside the pacer's pause; `conf/rtx-2r-smooth-limiter`
-  (with `conf/rtx-1r-duplicate-repairs`) brings all 108 runs to 0.74 to 1.10 s.
+  sizes and seeded draws) the longest freeze is 0.88 to 2.31 s (median 1.35 s) and 1 run is
+  over the 2 s the test requires (4 of 108, 2.10 to 2.28 s, before train 24; one of them a seed
+  `RTC_CAP_FULL` runs, so the full matrix failed then). Not a regression of train 23:
+  `conf/jsep-75-session-version` draws the `o=` session id from the crypto provider, which the
+  test seeds, and that one draw moved every seeded figure (with the draw removed every cell is
+  train 22's again). The freeze is the repair of the drop's losses inside the pacer's pause;
+  `conf/rtx-2r-smooth-limiter` (with `conf/rtx-1r-duplicate-repairs`) brings all 108 runs to
+  0.75 to 1.28 s.
 
 ### Testing
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
-  bytes; one or two seeded draws dropped first), `RTC_CAP_RULES=default` and runs side by side;
-  each bound of the paced test says whether it is a requirement (the 2 s freeze: unchanged) or
-  a tripwire set at the ensemble's most measured and a stated margin (retransmissions 130 ->
-  127; the cap after 20 s without a pacer: oldest picture 5.5 -> 5.4 s, retransmissions 130 ->
-  116); the paced test's recovery is measured from the lowest target of the first second after
-  the lift; its ordinary seeds are 1 and 4 (the ensemble's medians; seed 2 was its mildest), and
-  it reports every failing seed, not the first.
+  bytes; one or two seeded draws dropped first), `RTC_CAP_RULES=default` and runs side by side.
+  Each bound says whether it is a requirement (the 2 s freeze: unchanged everywhere) or a
+  tripwire, set at the ensemble's most measured and some 15 %: without a pacer at a 1 Mbit/s
+  target, oldest picture 3.5 s (4 s under `UpToTarget`) -> 2.9 s and retransmissions 100 -> 63;
+  the cap after 20 s, oldest picture 5.5 -> 6.1 s (one draw per seed had put it 4 % over the
+  most measured) and retransmissions 130 -> 122; the paced test, retransmissions 130 -> 127.
+  The paced test's recovery is measured from the lowest target of the first second after the
+  lift; its ordinary seeds are 1 and 4 (the ensemble's medians; seed 2 was among its mildest),
+  and it reports every failing seed, not the first.
 
 ## [0.1.0] - 2026-11-24
 
