@@ -309,6 +309,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+- **ice** (`conf/ice-25-mdns-tcp-candidate`, also in 0.1.0): a TCP host candidate whose
+  address is an mDNS name was built as a UDP candidate (`CandidateHostConfig::new_candidate_host`
+  gave every `.local` candidate `NetworkType::Udp4`), so the agent's own ICE-TCP candidates
+  under `QueryAndGather` were signalled `… 1 udp … <uuid>.local 35225 typ host tcptype passive`
+  and a peer's `tcp … .local` candidate was taken for UDP: two publishing peers had no ICE-TCP
+  path. It now keeps its transport (RFC 6544 section 4.5; draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1 step 6 replaces only the address), and resolves to `Tcp4` / `Tcp6`. Tests
+  `candidate_test.rs::test_tcp_host_candidate_under_an_mdns_name_is_signalled_as_tcp`,
+  `to_json_of_a_tcp_candidate_under_an_mdns_name_says_tcp`. Engine behaviour change (SDP).
 
 ### Changed
 
