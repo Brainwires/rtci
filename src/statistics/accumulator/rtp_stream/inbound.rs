@@ -570,10 +570,20 @@ impl InboundRtpStreamAccumulator {
             estimated_playout_timestamp: receiver
                 .estimated_playout_timestamp
                 .map(|sender_clock| SystemInstant::at(now, sender_clock)),
-            jitter_buffer_delay: receiver.jitter_buffer_delay,
-            jitter_buffer_target_delay: receiver.jitter_buffer_target_delay,
-            jitter_buffer_emitted_count: receiver.jitter_buffer_emitted_count,
-            jitter_buffer_minimum_delay: receiver.jitter_buffer_minimum_delay,
+            // The jitter buffer members apply to either kind (webrtc-stats defines them for
+            // audio and video alike): a video
+            // pipeline supplies them with its decoder update, an audio one with its receiver
+            // update; the decoder update's value wins when both did.
+            jitter_buffer_delay: decoder.jitter_buffer_delay.or(receiver.jitter_buffer_delay),
+            jitter_buffer_target_delay: decoder
+                .jitter_buffer_target_delay
+                .or(receiver.jitter_buffer_target_delay),
+            jitter_buffer_emitted_count: decoder
+                .jitter_buffer_emitted_count
+                .or(receiver.jitter_buffer_emitted_count),
+            jitter_buffer_minimum_delay: decoder
+                .jitter_buffer_minimum_delay
+                .or(receiver.jitter_buffer_minimum_delay),
             total_samples_received: audio.the(receiver.total_samples_received),
             concealed_samples: audio.the(receiver.concealed_samples),
             silent_concealed_samples: audio.the(receiver.silent_concealed_samples),

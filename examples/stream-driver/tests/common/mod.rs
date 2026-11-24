@@ -12,7 +12,7 @@ use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtci::peer_connection::message::RTCMessage;
 use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::transport::{RTCIceCandidateInit, RTCIceCandidateType};
 use rtci::sansio::Protocol;
 use rtci_stream_driver::peer::{PeerDriver, PeerDriverConfig};
 use rtci_stream_driver::runtime::Runtime;
@@ -49,12 +49,21 @@ impl Peer {
         ip: IpAddr,
         settings: SettingEngineBuilder,
     ) -> Result<Self> {
+        Self::with_config(runtime, settings, PeerDriverConfig::on(vec![ip]))
+    }
+
+    /// A peer on `runtime` with `settings`, its driver configured by `config`.
+    pub fn with_config(
+        runtime: Arc<dyn Runtime>,
+        settings: SettingEngineBuilder,
+        config: PeerDriverConfig,
+    ) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(settings.build())
             .build(runtime.now())?;
         Ok(Self {
-            driver: PeerDriver::with_runtime(runtime, pc, PeerDriverConfig::on(vec![ip])),
+            driver: PeerDriver::with_runtime(runtime, pc, config),
             outgoing: vec![],
             open: None,
             received: vec![],
@@ -96,6 +105,18 @@ impl Peer {
                 self.received.push(message.data.to_vec());
             }
         }
+    }
+
+    /// The type of the remote candidate of the first transport's selected pair: `Host` once
+    /// a `.local` candidate of the peer resolved and carries the pair, `Prflx` when the pair
+    /// was learnt from the peer's checks instead.
+    pub fn selected_remote_type(&self) -> Option<RTCIceCandidateType> {
+        let transports = self.driver.pc().dtls_transports();
+        let pair = transports
+            .first()?
+            .ice_transport()
+            .get_selected_candidate_pair()?;
+        Some(pair.remote().typ)
     }
 
     pub fn connected(&self) -> bool {

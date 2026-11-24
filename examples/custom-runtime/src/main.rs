@@ -23,7 +23,7 @@ use rtci::sansio::Protocol;
 use rtci_stream_driver::peer::{PeerDriver, PeerDriverConfig};
 use rtci_stream_driver::runtime::{
     self, AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, BoxFuture, JoinHandle, MulticastConfig,
-    RecvMeta, Runtime, TrafficClassMarker, Transmit,
+    MulticastInterfaceSelector, RecvMeta, Runtime, TrafficClassMarker, Transmit,
 };
 use std::future::Future;
 use std::io::{self, IoSliceMut, Read, Write};
@@ -171,6 +171,7 @@ struct Udp {
     socket: Async<UdpSocket>,
     ipv6: bool,
     marker: TrafficClassMarker,
+    interface: MulticastInterfaceSelector,
 }
 
 impl Udp {
@@ -180,6 +181,7 @@ impl Udp {
             socket: Async::new(socket)?,
             ipv6,
             marker: TrafficClassMarker::default(),
+            interface: MulticastInterfaceSelector::default(),
         }))
     }
 }
@@ -189,6 +191,10 @@ impl AsyncUdpSocket for Udp {
         let socket = self.socket.get_ref();
         self.marker
             .apply(socket.into(), self.ipv6, transmit.traffic_class);
+        // An mDNS datagram leaves by the interface of the address the engine names for it.
+        if let Err(e) = self.interface.apply(socket.into(), transmit) {
+            return Poll::Ready(Err(e));
+        }
         loop {
             match socket.send_to(transmit.contents, transmit.destination) {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {

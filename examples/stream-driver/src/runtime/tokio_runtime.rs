@@ -2,7 +2,7 @@
 
 use super::{
     AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, BoxFuture, JoinHandle, MulticastConfig,
-    RecvMeta, Runtime, TrafficClassMarker, Transmit,
+    MulticastInterfaceSelector, RecvMeta, Runtime, TrafficClassMarker, Transmit,
 };
 use shared::stream::{DnsRecord, RecordKind};
 use socket2::SockRef;
@@ -169,6 +169,7 @@ struct TokioUdp {
     socket: tokio::net::UdpSocket,
     ipv6: bool,
     marker: TrafficClassMarker,
+    interface: MulticastInterfaceSelector,
 }
 
 impl TokioUdp {
@@ -178,12 +179,17 @@ impl TokioUdp {
             socket: tokio::net::UdpSocket::from_std(socket)?,
             ipv6,
             marker: TrafficClassMarker::default(),
+            interface: MulticastInterfaceSelector::default(),
         }))
     }
 }
 
 impl AsyncUdpSocket for TokioUdp {
     fn poll_send(&self, cx: &mut Context<'_>, transmit: &Transmit<'_>) -> Poll<io::Result<usize>> {
+        // A multicast datagram leaves by the interface of its source (RFC 6762 section 14).
+        if let Err(e) = self.interface.apply(SockRef::from(&self.socket), transmit) {
+            return Poll::Ready(Err(e));
+        }
         self.marker.apply(
             SockRef::from(&self.socket),
             self.ipv6,

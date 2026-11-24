@@ -927,6 +927,8 @@ pub struct RTCPeerConnection {
     /// ([`Self::set_multicast_dns_publishing`]); given to every transport's agent, those made
     /// later included.
     pub(crate) mdns_publishing: ice::mdns::MulticastDnsPublishing,
+    /// `set_multicast_dns_destination_reported`, for the transports made later.
+    pub(crate) mdns_destination_reported: Option<bool>,
     /// The local addresses the application marked as RFC 4941 temporary
     /// ([`Self::set_temporary_ipv6_addresses`]); given to every transport's agent, those made
     /// later included.
