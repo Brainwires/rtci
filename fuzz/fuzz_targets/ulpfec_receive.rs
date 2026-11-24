@@ -2,15 +2,17 @@
 //! Stateful target: the ULPFEC decoder and the receive interceptor (RFC 5109 section 9, 14) fed
 //! what a peer sends. Each op is an RTP packet with fuzzed header fields and payload: media, RED
 //! (media, FEC, or broken), bare FEC, or a packet of a separate FEC stream. Both carriages run
-//! side by side on the same input. Oracles: whatever the interceptors deliver belongs to the
+//! side by side on the same input, with a third chain whose FEC stream runs in an RTP session of
+//! its own (RFC 5109 section 14.1): its FEC packets arrive under the media SSRC and pass the
+//! boundary map (`FecSessionSsrcMap`), as does whatever of the input parses as RTCP. Oracles: whatever the interceptors deliver belongs to the
 //! media stream; a packet marked recovered was never an arrival of that sequence number in RED
 //! form; the decoder's stores stay within their bounds.
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 use rtci::interceptor::{
-    Attribute, AttributedPacket, Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket,
-    ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW, UlpfecDecoder, UlpfecReceiveBuilder, UlpfecRepair,
+    Attribute, AttributedPacket, FecSessionSsrcMap, FecSessionStream, Interceptor, Packet,
+    Registry, Slot, StreamInfo, TaggedPacket, ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW, UlpfecDecoder, UlpfecReceiveBuilder, UlpfecRepair,
 };
 use rtci::rtp::header::Header;
 use rtci::shared::TransportContext;
@@ -109,6 +111,23 @@ fuzz_target!(|data: &[u8]| {
         )
         .build();
     stream.bind_remote_stream(&info(true));
+    // The FEC stream in an RTP session of its own: on the wire it has the media SSRC, in the
+    // chain the mapped one. The builder asks for RED; the stream's FEC session decides.
+    let map = FecSessionSsrcMap::new(u32::from(config).wrapping_mul(0x0101_0101));
+    let mut session = Registry::new()
+        .with(
+            Slot::FecDecoder,
+            UlpfecReceiveBuilder::red(RED_PT, FEC_PT).build(),
+        )
+        .build();
+    session.bind_remote_stream(&StreamInfo {
+        fec_session: Some(FecSessionStream {
+            ssrc: map.map(MEDIA_SSRC),
+            payload_type: FEC_PT,
+            one_level_only: config & 0x01 != 0,
+        }),
+        ..info(false)
+    });
     let mut decoder = UlpfecDecoder::new(MEDIA_SSRC).with_one_level_only(config & 0x04 != 0);
 
     let now = Instant::now();
@@ -171,6 +190,24 @@ fuzz_target!(|data: &[u8]| {
 
         feed(&mut red, now, &packet, false);
         feed(&mut stream, now, &packet, true);
+        if op % 6 == 4 {
+            // The same FEC data as the FEC session's transport delivers it: under the media
+            // SSRC, taken into the chain by the map.
+            let mut of_session = packet.clone();
+            of_session.header.ssrc = MEDIA_SSRC;
+            map.map_rtp(&mut of_session);
+            feed(&mut session, now, &of_session, true);
+        } else {
+            feed(&mut session, now, &packet, true);
+        }
+        // RTCP of the FEC session crosses the same boundary: the map keeps or drops whole
+        // packets, and what it kept maps back packet for packet.
+        if let Ok(compound) = rtci::rtcp::packet::unmarshal(&mut &payload[..]) {
+            let mapped = map.map_rtcp(&compound);
+            assert!(mapped.len() <= compound.len());
+            assert_eq!(map.map_rtcp(&mapped).len(), mapped.len());
+            let _ = rtci::rtcp::packet::marshal(&mapped);
+        }
 
         let recovered = if op % 6 == 2 || op % 6 == 4 {
             decoder.push_fec(payload).unwrap_or_default()

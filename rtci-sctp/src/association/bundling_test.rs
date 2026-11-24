@@ -186,6 +186,7 @@ fn one_packet_answers_one_received_packet() {
     let rsn = a.peer_rsn_window.expect("known from the INIT").1;
     a.create_stream(1, true, PPI);
     a.streams.get_mut(&1).unwrap().state = RecvSendState::Closed;
+    a.streams.get_mut(&1).unwrap().outgoing_reset_started = true;
     let reset = chunk_bytes(&ChunkReconfig {
         param_a: Some(Box::new(ParamOutgoingResetRequest {
             reconfig_request_sequence_number: rsn,

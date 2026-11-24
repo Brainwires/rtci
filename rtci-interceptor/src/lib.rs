@@ -232,6 +232,7 @@ pub(crate) mod adaptive_jitter_buffer;
 pub(crate) mod audio_red;
 pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
+pub(crate) mod fec_session;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
 pub(crate) mod intervalpli;
@@ -286,6 +287,7 @@ pub use circuit_breaker::{
     DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
     PacketSize as CircuitBreakerPacketSize,
 };
+pub use fec_session::FecSessionSsrcMap;
 pub use flexfec::bit_array::BitArray;
 pub use flexfec::coverage::{MAX_FEC_PACKETS, MAX_MEDIA_PACKETS, ProtectionCoverage};
 pub use flexfec::draft03::decoder::{FlexFec03Decoder, ParseError as FlexFecParseError};
@@ -415,7 +417,7 @@ pub use rtp_session::{PathChanged, PerRtpSession, RtpSession, RtpSessionAssignme
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;
-pub use stream_info::{RTCPFeedback, RTPHeaderExtension, StreamInfo};
+pub use stream_info::{FecSessionStream, RTCPFeedback, RTPHeaderExtension, StreamInfo};
 pub use tst::{TstnResponderBuilder, TstnResponderInterceptor, TstrCommands, VbcmCommands};
 pub use twcc::receiver::{TwccReceiverBuilder, TwccReceiverInterceptor};
 pub use twcc::sender::{RetransmissionsReported, TwccSenderBuilder, TwccSenderInterceptor};

@@ -767,3 +767,73 @@ fn test_a_wrong_cookie_does_not_end_the_flight() {
         assert!(conn.outgoing_raw_packet().is_none(), "no alert is sent");
     }
 }
+
+/// `datagram` (one ClientHello record that offers only
+/// TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256) offering only TLS_NULL_WITH_NULL_NULL (0x0000)
+/// instead: the suite list's bytes, length 2 and the one suite, are rewritten in place.
+fn offering_only_the_null_suite(mut datagram: Vec<u8>) -> Vec<u8> {
+    let list = [0x00, 0x02, 0xc0, 0x2b];
+    let at = datagram
+        .windows(list.len())
+        .position(|w| w == list)
+        .expect("the cipher suite list");
+    datagram[at + 2..at + 4].copy_from_slice(&[0x00, 0x00]);
+    datagram
+}
+
+/// RFC 8122 section 7 (RFC 4572 section 6.2): TLS_NULL_WITH_NULL_NULL, which protects
+/// nothing, is not to be negotiated. A ClientHello that offers it alone is answered with a
+/// fatal handshake_failure (RFC 5246 section 7.4.1.3: no acceptable set of parameters), never
+/// with a ServerHello.
+#[test]
+fn a_client_hello_offering_only_the_null_cipher_suite_is_refused() -> Result<()> {
+    use crate::alert::AlertDescription;
+    use crate::cipher_suite::CipherSuiteId;
+    use crate::config::ConfigBuilder;
+    use crate::crypto::Certificate;
+
+    let provider = crypto::default_provider().map_err(|err| Error::Crypto(err.to_string()))?;
+    let config = Arc::new(
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256])
+            .with_certificates(vec![Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )?])
+            .build(false, None)?,
+    );
+    let now = Instant::now();
+    let mut server = DTLSConn::new(config, false, None);
+
+    let mut cookie = vec![];
+    let mut alert = None;
+    for sequence_number in 0..2u64 {
+        let hello = offering_only_the_null_suite(client_hello_record(
+            cookie.clone(),
+            sequence_number,
+            false,
+        )?);
+        let _ = server.read(&hello);
+        let _ = server.handshake(now);
+        while let Some(datagram) = server.outgoing_raw_packet() {
+            match first_record(&datagram)?.content {
+                Content::Handshake(h) => match h.handshake_message {
+                    HandshakeMessage::HelloVerifyRequest(hvr) => cookie = hvr.cookie,
+                    HandshakeMessage::ServerHello(_) => {
+                        panic!("a ServerHello answers a NULL-only ClientHello")
+                    }
+                    other => panic!("unexpected handshake message {other:?}"),
+                },
+                Content::Alert(a) => alert = Some(a.alert_description),
+                other => panic!("unexpected content {other:?}"),
+            }
+        }
+        if alert.is_some() {
+            break;
+        }
+    }
+    assert_eq!(alert, Some(AlertDescription::HandshakeFailure));
+    assert!(server.is_failed());
+    Ok(())
+}

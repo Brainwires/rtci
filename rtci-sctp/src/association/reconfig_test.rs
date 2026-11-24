@@ -13,7 +13,7 @@ use crate::param::param_ssn_tsn_reset_request::ParamSsnTsnResetRequest;
 
 const PPI: PayloadProtocolIdentifier = PayloadProtocolIdentifier::Binary;
 
-fn chunk_of(param: impl Param + 'static) -> ChunkReconfig {
+pub(super) fn chunk_of(param: impl Param + 'static) -> ChunkReconfig {
     ChunkReconfig {
         param_a: Some(Box::new(param)),
         param_b: None,
@@ -33,7 +33,7 @@ fn u32_at(value: &[u8], offset: usize) -> u32 {
 }
 
 /// The (response sequence number, result) of each Re-configuration Response in `packets`.
-fn responses(packets: &[Packet]) -> Vec<(u32, u32)> {
+pub(super) fn responses(packets: &[Packet]) -> Vec<(u32, u32)> {
     let raw: Vec<Bytes> = packets.iter().map(|p| p.marshal().unwrap()).collect();
     reconfig_params(&raw)
         .into_iter()
@@ -50,7 +50,7 @@ fn requests_sent(a: &mut Association, now: Instant) -> Vec<(u16, Vec<u8>)> {
         .collect()
 }
 
-fn ack_everything(a: &mut Association, now: Instant) {
+pub(super) fn ack_everything(a: &mut Association, now: Instant) {
     let last = a.my_next_tsn.wrapping_sub(1);
     if sna32gt(last, a.cumulative_tsn_ack_point) {
         a.handle_sack(
@@ -66,7 +66,7 @@ fn ack_everything(a: &mut Association, now: Instant) {
     }
 }
 
-fn ordered(tsn: u32, stream: u16, ssn: u16, payload: &'static [u8]) -> ChunkPayloadData {
+pub(super) fn ordered(tsn: u32, stream: u16, ssn: u16, payload: &'static [u8]) -> ChunkPayloadData {
     ChunkPayloadData {
         tsn,
         stream_identifier: stream,
@@ -485,6 +485,7 @@ fn a_request_older_than_the_ones_remembered_is_not_performed_again() -> Result<(
     for rsn in 0..=200u32 {
         a.create_stream(4, true, PPI);
         a.streams.get_mut(&4).unwrap().state = RecvSendState::Closed;
+        a.streams.get_mut(&4).unwrap().outgoing_reset_started = true;
         let reply = a.handle_reconfig(&reset_request_chunk(rsn, a.peer_last_tsn, vec![4]))?;
         assert_eq!(vec![(rsn, 1)], responses(&reply));
     }
@@ -602,6 +603,7 @@ fn both_parameters_of_a_chunk_are_processed() -> Result<()> {
     a.open_stream(1, PPI)?.stop(now)?;
     a.create_stream(2, true, PPI);
     a.streams.get_mut(&2).unwrap().state = RecvSendState::Closed;
+    a.streams.get_mut(&2).unwrap().outgoing_reset_started = true;
     let sent = requests_sent(&mut a, now);
     let rsn = u32_at(&sent[0].1, 0);
 
@@ -755,6 +757,7 @@ fn an_incoming_reset_request_of_this_side_is_answered_by_the_peers_reset() -> Re
     a.peer_rsn_window = Some((40, 40));
     a.create_stream(3, true, PPI);
     a.streams.get_mut(&3).unwrap().state = RecvSendState::Closed;
+    a.streams.get_mut(&3).unwrap().outgoing_reset_started = true;
 
     a.request_incoming_stream_reset(&[3])?;
     let sent = requests_sent(&mut a, now);

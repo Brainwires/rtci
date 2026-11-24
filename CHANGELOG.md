@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **workspace**: the version on `master` is `0.2.0-dev` (every crate, and every requirement on
+  a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
+  cannot take without a change of their own. Each such change is listed here. Git dependents
+  that need the 0.1 API pin the tag `v0.1.0` or use the crates.io release.
+- **interceptor** (fec-1): `StreamInfo` has a new public field, `fec_session` (ULPFEC in an RTP
+  session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
+  or `fec_session: None`.
+
 ### Test environment and documentation
 
 - **capacity-cap test, receiver gap policy**: `measure_the_ice_restart` runs over the wall
@@ -80,6 +90,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for first). This narrows two known limits of 0.1.0 (the 1.4 Mbit/s cliff's cause (2),
   and the picture's age after a sudden drop with the pacer). Tests:
   `rtci-interceptor/tests/nack_repeat_repairs.rs`.
+
+- **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
+  did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
+  as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
+  RFC7798-4.4.3-12 (`SampleBuilder` never depacketizes across a missing packet, now tested)
+  and RFC7798-4.3-1 are `tested`.
+
+### Added
+
+- **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
+  `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
+  the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
+  stream's FEC runs in a second RTP session. `UlpfecSendInterceptor` then sends the stream's
+  FEC as a stream of its own under that SSRC and `UlpfecReceiveInterceptor` reads it there,
+  whatever carriage the builder names and whatever the media section lists (section 14: the
+  multiplexing is "indicated out of band"); the media stream is left as it is, not wrapped in
+  RED. `FecSessionSsrcMap` is the boundary between the chain, which keys what it keeps on the
+  SSRC, and the FEC session's transport, where "the SSRC value SHALL be the same as the SSRC
+  value of the media stream it protects": every SSRC of the session's RTP and RTCP is the wire
+  SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
+  rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
+  has a new public field (`..Default::default()` in a struct literal covers it).
+
+### Fixed
+
+- **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
+  arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
+  performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
+  TSN; it was then never answered with this side's own reset (RFC 8831 6.7), so the peer's
+  channel stayed "closing" and the stream id stayed taken there, and the reset of a stream with
+  no state here was not reported. It is now answered as a reset performed at once is. (2)
+  Whether this side has reset its direction of a stream (so that the peer's reset is not
+  answered with a second one) was the Readable bit of the stream's `RecvSendState`, which the
+  peer's Incoming SSN Reset Request cleared: the stream stopped being readable although the
+  peer had not reset its direction (RFC 6525 5.2.3), and its unread messages were dropped when
+  the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
+  the peer resets it. Engine behaviour change. Tests:
+  `rtci-sctp/src/association/reset_answer_test.rs`.
 
 ## [0.1.0] - 2026-11-24
 
