@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC7798-4.4.3-12 (`SampleBuilder` never depacketizes across a missing packet, now tested)
   and RFC7798-4.3-1 are `tested`.
 
+### Added
+
+- **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
+  `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
+  the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
+  stream's FEC runs in a second RTP session. `UlpfecSendInterceptor` then sends the stream's
+  FEC as a stream of its own under that SSRC and `UlpfecReceiveInterceptor` reads it there,
+  whatever carriage the builder names and whatever the media section lists (section 14: the
+  multiplexing is "indicated out of band"); the media stream is left as it is, not wrapped in
+  RED. `FecSessionSsrcMap` is the boundary between the chain, which keys what it keeps on the
+  SSRC, and the FEC session's transport, where "the SSRC value SHALL be the same as the SSRC
+  value of the media stream it protects": every SSRC of the session's RTP and RTCP is the wire
+  SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
+  rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
+  has a new public field (`..Default::default()` in a struct literal covers it).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
