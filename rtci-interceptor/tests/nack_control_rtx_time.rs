@@ -109,19 +109,20 @@ fn the_generator_stops_asking_at_the_remote_rtx_time() {
     let mut chain = generator(Some(RTX_PAYLOAD_TYPE), None);
     assert_eq!(50, times_asked(&mut chain, base));
 
-    // The remote sender keeps packets for half a second: found missing at the first cycle,
-    // asked for then and for the half second after.
+    // The remote sender keeps packets for half a second: missing from the arrival of 3 (its
+    // first request leaves with the first cycle's), asked for at the cycles of the half
+    // second after.
     let mut chain = generator(Some(RTX_PAYLOAD_TYPE), None);
     remote_rtx_time(&mut chain, base, RTX_PAYLOAD_TYPE, 500);
-    assert_eq!(6, times_asked(&mut chain, base));
+    assert_eq!(5, times_asked(&mut chain, base));
 
     // The shorter of the announced time and the configured age.
     let mut chain = generator(Some(RTX_PAYLOAD_TYPE), Some(Duration::from_millis(300)));
     remote_rtx_time(&mut chain, base, RTX_PAYLOAD_TYPE, 500);
-    assert_eq!(4, times_asked(&mut chain, base));
+    assert_eq!(3, times_asked(&mut chain, base));
     let mut chain = generator(Some(RTX_PAYLOAD_TYPE), Some(Duration::from_millis(1000)));
     remote_rtx_time(&mut chain, base, RTX_PAYLOAD_TYPE, 500);
-    assert_eq!(6, times_asked(&mut chain, base));
+    assert_eq!(5, times_asked(&mut chain, base));
 }
 
 #[test]

@@ -217,7 +217,9 @@ impl NackGeneratorBuilder {
     /// after it arrives; with no delay and no reordering it is asked for then (RFC 4588 6.3:
     /// "in environments where packet reordering is rare or does not take place ... the delay
     /// may be extremely low or even take the value zero"), and otherwise when the delay has
-    /// passed, not at the next generation cycle. A retransmission teaches nothing about
+    /// passed, not at the next generation cycle; on a stream that can carry FEC (a FEC flow,
+    /// or ULPFEC, FlexFEC or RED among its formats) at least one generation interval after,
+    /// for the frame's repair packets. A retransmission teaches nothing about
     /// reordering: one that arrived as RTX is marked (`Attribute::Retransmitted`), and on a
     /// stream without RTX a packet asked for counts as one unless it came sooner than half a
     /// measured round trip after the request.
@@ -275,6 +277,9 @@ pub struct NackGeneratorInterceptor {
     max_packet_age: Option<Duration>,
     /// The retransmission payload type of each bound stream that has one, by SSRC.
     rtx_payload_types: HashMap<u32, u8>,
+    /// The bound streams that can carry forward error correction (a FEC flow of their own,
+    /// or ULPFEC / FlexFEC / RED among their section's formats).
+    fec_streams: std::collections::HashSet<u32>,
     /// The `rtx-time` the remote endpoint announced, by retransmission payload type
     /// ([`NackControl::RemoteRtxTime`](super::NackControl::RemoteRtxTime)).
     remote_rtx_times: HashMap<u8, Duration>,
@@ -306,6 +311,7 @@ impl NackGeneratorInterceptor {
             receive_logs: HashMap::new(),
             max_packet_age: None,
             rtx_payload_types: HashMap::new(),
+            fec_streams: std::collections::HashSet::new(),
             remote_rtx_times: HashMap::new(),
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
@@ -404,13 +410,20 @@ impl NackGeneratorInterceptor {
 
 impl NackGeneratorInterceptor {
     /// How long a first request for a packet of `ssrc` waits after it went missing: the set
-    /// reordering delay or the stream's learned allowance, the longer.
+    /// reordering delay or the stream's learned allowance, the longer; on a stream that can
+    /// carry FEC at least one generation interval, for the repair packets of the frame to
+    /// arrive (a packet FEC rebuilds needs no request).
     fn first_request_delay(&self, ssrc: u32, now: Instant) -> Duration {
-        self.reorder_delay.max(
+        let delay = self.reorder_delay.max(
             self.reordering
                 .get(&ssrc)
                 .map_or(Duration::ZERO, |reordering| reordering.allowance(now)),
-        )
+        );
+        if self.fec_streams.contains(&ssrc) {
+            delay.max(self.interval)
+        } else {
+            delay
+        }
     }
 
     /// When the earliest packet not yet asked for is due its first request.
@@ -602,6 +615,24 @@ impl Interceptor for NackGeneratorInterceptor {
             && let Some(receive_log) = ReceiveLog::new(self.size)
         {
             self.receive_logs.insert(info.ssrc, receive_log);
+            let fec_format = |mime: &str| {
+                mime.split_once('/').is_some_and(|(_, subtype)| {
+                    ["ulpfec", "flexfec", "flexfec-03", "red"]
+                        .iter()
+                        .any(|fec| subtype.eq_ignore_ascii_case(fec))
+                })
+            };
+            if info.ssrc_fec.is_some()
+                || info.payload_type_fec.is_some()
+                || info
+                    .section_mime_types
+                    .iter()
+                    .any(|(_, mime)| fec_format(mime))
+            {
+                self.fec_streams.insert(info.ssrc);
+            } else {
+                self.fec_streams.remove(&info.ssrc);
+            }
             match info.payload_type_rtx {
                 Some(payload_type_rtx) => {
                     self.rtx_payload_types.insert(info.ssrc, payload_type_rtx)
@@ -616,6 +647,7 @@ impl Interceptor for NackGeneratorInterceptor {
         self.requests.remove(&info.ssrc);
         self.reordering.remove(&info.ssrc);
         self.rtx_payload_types.remove(&info.ssrc);
+        self.fec_streams.remove(&info.ssrc);
     }
 
     fn bind_local_stream(&mut self, _info: &StreamInfo) {}

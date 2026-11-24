@@ -817,7 +817,16 @@ fn the_nack_generator_asks_for_neither_the_fec_packet_nor_what_it_rebuilt() {
                 .build(),
         )
         .build();
-    receiver.bind_remote_stream(&stream_info("video/VP8", false));
+    // The section's formats, as the peer connection's binder lists them: the generator
+    // leaves a stream that can carry FEC time for the repair before its first request.
+    receiver.bind_remote_stream(&StreamInfo {
+        section_mime_types: vec![
+            (MEDIA_PT, "video/VP8".to_owned()),
+            (RED_PT, "video/red".to_owned()),
+            (FEC_PT, "video/ulpfec".to_owned()),
+        ],
+        ..stream_info("video/VP8", false)
+    });
     receive(&mut receiver, now, &wire);
     receiver.handle_timeout(now + NACK_INTERVAL * 2).unwrap();
 
