@@ -32,12 +32,15 @@ use std::time::{Duration, Instant};
 pub struct ReceiverReportBuilder {
     /// Interval between receiver reports.
     interval: Duration,
+    /// The wall-clock anchor NTP times derive from (`None`: the process-wide one).
+    wall_clock: Option<SystemInstant>,
 }
 
 impl Default for ReceiverReportBuilder {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(1),
+            wall_clock: None,
         }
     }
 }
@@ -70,6 +73,15 @@ impl ReceiverReportBuilder {
         self
     }
 
+    /// The wall-clock anchor the receiver reference times' NTP timestamps (RFC 3611 section
+    /// 4.4) derive from. Default: the process-wide [`SystemInstant::shared`]. Give one per
+    /// peer connection for reproducible virtual-time runs: two runs in one process otherwise
+    /// map the same instants to NTP times as far apart as the real time between them.
+    pub fn with_wall_clock(mut self, anchor: SystemInstant) -> Self {
+        self.wall_clock = Some(anchor);
+        self
+    }
+
     /// Create a builder function for use with Registry.
     ///
     /// This returns a closure that can be passed to `Registry::with()`.
@@ -83,7 +95,9 @@ impl ReceiverReportBuilder {
     ///     .with(Slot::ReceiverReport, ReceiverReportBuilder::new().build());
     /// ```
     pub fn build(self) -> ReceiverReportInterceptor {
-        ReceiverReportInterceptor::new(self.interval)
+        let mut interceptor = ReceiverReportInterceptor::new(self.interval);
+        interceptor.time_baseline = self.wall_clock;
+        interceptor
     }
 }
 

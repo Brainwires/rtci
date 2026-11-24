@@ -609,6 +609,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+- **interceptors, peer connection**: a wall-clock anchor per peer connection
+  (`conf/det-1-wall-clock`). Every interceptor that writes NTP times takes
+  `with_wall_clock(SystemInstant)`: `RtcpSessionBuilder` (sender reports, XR receiver reference
+  times), `SenderReportBuilder`, `ReceiverReportBuilder`, `Rfc8888Builder` (report timestamps)
+  and `NtpTimestampBuilder` (the RFC 6051 header extension); `DefaultInterceptorOptions::wall_clock`
+  gives one anchor to all of them in the default set. Without it nothing changes: the
+  process-wide `SystemInstant::shared`, taken at its first use, which is right for a process with
+  one clock. Under virtual time it is not: a second run in the same process mapped its instants
+  to NTP times later by the real time since the first run, with different fractions of a
+  second, so two runs of one seed could differ (`circuit_breaker_reordering_rtc2rtc::the_same_seed_gives_the_same_run`
+  failed 3 of 6 times on a branch whose NACK retransmission rule is sensitive to the round trip
+  the reports give; with a per-run anchor 6 of 6 passed). The seeded harnesses
+  (`circuit_breaker_reordering_rtc2rtc`, `gcc_rate_limited_link_rtc2rtc`) anchor each run at
+  its start. `the_same_seed_gives_the_same_bytes_after_a_pause` runs one seed twice, 1.5 s of
+  real time apart, and compares every RTP and RTCP packet both peers' chains hand to SRTP,
+  byte for byte; with the process-wide anchor it fails.
 
 ### Bug Fixes
 

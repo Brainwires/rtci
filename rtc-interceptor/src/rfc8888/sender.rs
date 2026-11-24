@@ -49,6 +49,8 @@ pub struct Rfc8888Builder {
     adaptive_interval: bool,
     max_report_size: usize,
     sender_ssrc: Option<u32>,
+    /// The wall-clock anchor report timestamps derive from (`None`: the process-wide one).
+    wall_clock: Option<SystemInstant>,
 }
 
 impl Default for Rfc8888Builder {
@@ -58,6 +60,7 @@ impl Default for Rfc8888Builder {
             adaptive_interval: true,
             max_report_size: DEFAULT_MAX_REPORT_SIZE,
             sender_ssrc: None,
+            wall_clock: None,
         }
     }
 }
@@ -132,14 +135,26 @@ impl Rfc8888Builder {
         self
     }
 
+    /// The wall-clock anchor the reports' timestamps derive from (RFC 8888 section 3.1: the
+    /// clock of the RTCP sender reports' NTP timestamps, so give the RTCP session the same).
+    /// Default: the process-wide [`SystemInstant::shared`]. Give one per peer connection for
+    /// reproducible virtual-time runs: two runs in one process otherwise map the same instants
+    /// to NTP times as far apart as the real time between them.
+    pub fn with_wall_clock(mut self, anchor: SystemInstant) -> Self {
+        self.wall_clock = Some(anchor);
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> Rfc8888Interceptor {
-        Rfc8888Interceptor::new(
+        let mut interceptor = Rfc8888Interceptor::new(
             self.interval,
             self.adaptive_interval,
             self.max_report_size,
             self.sender_ssrc,
-        )
+        );
+        interceptor.epoch = self.wall_clock;
+        interceptor
     }
 }
 

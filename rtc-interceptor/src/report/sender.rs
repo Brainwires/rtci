@@ -8,6 +8,7 @@ use rtcp::header::PacketType;
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::error::Error;
+use shared::time::SystemInstant;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,8 @@ pub struct SenderReportBuilder {
     interval: Duration,
     /// Whether to always use the latest packet, even if out-of-order.
     use_latest_packet: bool,
+    /// The wall-clock anchor NTP times derive from (`None`: the process-wide one).
+    wall_clock: Option<SystemInstant>,
 }
 
 impl Default for SenderReportBuilder {
@@ -46,6 +49,7 @@ impl Default for SenderReportBuilder {
         Self {
             interval: Duration::from_secs(1),
             use_latest_packet: false,
+            wall_clock: None,
         }
     }
 }
@@ -103,6 +107,15 @@ impl SenderReportBuilder {
         self
     }
 
+    /// The wall-clock anchor the sender reports' NTP times derive from. Default: the
+    /// process-wide [`SystemInstant::shared`]. Give one per peer connection for reproducible
+    /// virtual-time runs: two runs in one process otherwise map the same instants to NTP times
+    /// as far apart as the real time between them.
+    pub fn with_wall_clock(mut self, anchor: SystemInstant) -> Self {
+        self.wall_clock = Some(anchor);
+        self
+    }
+
     /// Create a builder function for use with Registry.
     ///
     /// This returns a closure that can be passed to `Registry::with()`.
@@ -116,7 +129,9 @@ impl SenderReportBuilder {
     ///     .with(Slot::SenderReport, SenderReportBuilder::new().build());
     /// ```
     pub fn build(self) -> SenderReportInterceptor {
-        SenderReportInterceptor::new(self.interval, self.use_latest_packet)
+        let mut interceptor = SenderReportInterceptor::new(self.interval, self.use_latest_packet);
+        interceptor.wall_clock = self.wall_clock;
+        interceptor
     }
 }
 
@@ -157,6 +172,9 @@ pub struct SenderReportInterceptor {
     /// Whether to always use the latest packet, even if out-of-order.
     use_latest_packet: bool,
 
+    /// [`SenderReportBuilder::with_wall_clock`].
+    wall_clock: Option<SystemInstant>,
+
     streams: HashMap<u32, SenderStream>,
 
     /// The latest instant handed in, for stamping the goodbye of a stream unbound without one.
@@ -185,6 +203,8 @@ impl SenderReportInterceptor {
             next_timeout: None,
 
             use_latest_packet,
+
+            wall_clock: None,
 
             streams: HashMap::new(),
 
@@ -351,7 +371,8 @@ impl Interceptor for SenderReportInterceptor {
                 stream.set_clock_rate(info.clock_rate);
                 stream
             }
-            None => SenderStream::new(info.ssrc, info.clock_rate, self.use_latest_packet),
+            None => SenderStream::new(info.ssrc, info.clock_rate, self.use_latest_packet)
+                .with_wall_clock(self.wall_clock),
         };
         self.streams.insert(info.ssrc, stream);
     }

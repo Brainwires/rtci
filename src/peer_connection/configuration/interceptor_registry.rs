@@ -383,6 +383,15 @@ pub struct DefaultInterceptorOptions {
     /// for a run that a seeded provider makes the same every time (without it the report
     /// times, and with them everything the reports drive, differ from run to run).
     pub rtcp_random: Option<std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+    /// The wall-clock anchor the NTP times of the interceptors derive from (the RTCP sessions'
+    /// sender reports and receiver reference times, the RFC 8888 report timestamps, the RFC
+    /// 6051 NTP timestamp header extension): the process-wide
+    /// [`SystemInstant::shared`](shared::time::SystemInstant::shared) when none is given,
+    /// which is right for a process with one clock. Give one per peer connection for a run
+    /// under virtual time that is the same every time: two runs in one process otherwise map
+    /// the same instants to NTP times as far apart as the real time between the runs, and the
+    /// fractions of a second that differ reach the wire and what the reports drive.
+    pub wall_clock: Option<shared::time::SystemInstant>,
 }
 
 impl std::fmt::Debug for DefaultInterceptorOptions {
@@ -402,6 +411,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "rtcp_random",
                 &self.rtcp_random.as_ref().map(|provider| provider.name()),
             )
+            .field("wall_clock", &self.wall_clock)
             .finish()
     }
 }
@@ -417,6 +427,7 @@ impl Default for DefaultInterceptorOptions {
             rapid_synchronisation: true,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
             rtcp_random: None,
+            wall_clock: None,
         }
     }
 }
@@ -460,7 +471,11 @@ pub fn register_default_interceptors_with_options(
     // Per transport, with the congestion controller below: each transport numbers its
     // packets and is estimated on its own (the remote reports each transport's sequence).
     let registry = with_congestion_feedback_senders(registry, options.congestion_feedback, true);
-    let registry = with_congestion_feedback_recorders(registry, options.congestion_feedback);
+    let registry = with_congestion_feedback_recorders(
+        registry,
+        options.congestion_feedback,
+        options.wall_clock,
+    );
 
     // A media sender implements TMMBR (RFC 8834 section 5.1.6), and it is in use where the
     // session names it (RFC 5104 section 7.1).
@@ -541,7 +556,8 @@ pub fn register_default_interceptors_with_options(
             }),
         );
 
-    let registry = configure_rtcp_reports_from(registry, options.rtcp_random.as_ref());
+    let registry =
+        configure_rtcp_reports_from(registry, options.rtcp_random.as_ref(), options.wall_clock);
     let registry = configure_extended_reports(registry);
     let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
@@ -553,7 +569,7 @@ pub fn register_default_interceptors_with_options(
     configure_default_header_extensions(media_engine)?;
     configure_abs_send_time(media_engine)?;
     let registry = if options.rapid_synchronisation {
-        configure_rapid_synchronisation(registry, media_engine)?
+        configure_rapid_synchronisation_with(registry, media_engine, options.wall_clock)?
     } else {
         registry
     };
@@ -591,7 +607,7 @@ pub fn register_default_interceptors_without_congestion_control(
 
     let feedback = CongestionFeedback::default();
     register_congestion_feedback(media_engine, feedback)?;
-    let registry = with_congestion_feedback_recorders(registry, feedback);
+    let registry = with_congestion_feedback_recorders(registry, feedback, None);
 
     let registry = configure_rtcp_reports(registry);
     let registry = configure_extended_reports(registry);
@@ -735,6 +751,16 @@ pub fn configure_rapid_synchronisation(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
+    configure_rapid_synchronisation_with(registry, media_engine, None)
+}
+
+/// [`configure_rapid_synchronisation`] with the timestamps on `wall_clock` when one is given
+/// ([`DefaultInterceptorOptions::wall_clock`]).
+pub(crate) fn configure_rapid_synchronisation_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    wall_clock: Option<shared::time::SystemInstant>,
+) -> Result<Registry> {
     for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
         media_engine.register_header_extension(
             RTCRtpHeaderExtensionCapability {
@@ -744,9 +770,14 @@ pub fn configure_rapid_synchronisation(
             None,
         )?;
     }
+    let builder = interceptor::NtpTimestampBuilder::new();
+    let builder = match wall_clock {
+        Some(anchor) => builder.with_wall_clock(anchor),
+        None => builder,
+    };
     Ok(registry.with(
         Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
-        interceptor::NtpTimestampInterceptor::new(),
+        builder.build(),
     ))
 }
 
@@ -823,9 +854,13 @@ fn with_congestion_feedback_senders(
 /// What records the remote's packets and reports them. With both formats on offer both
 /// recorders are in the chain, and each stream is reported by exactly one of them: the one
 /// [`negotiated_congestion_feedback`](interceptor::negotiated_congestion_feedback) names.
+///
+/// `wall_clock`: the anchor of the RFC 8888 report timestamps
+/// ([`DefaultInterceptorOptions::wall_clock`]); the process-wide one when `None`.
 fn with_congestion_feedback_recorders(
     registry: Registry,
     feedback: CongestionFeedback,
+    wall_clock: Option<shared::time::SystemInstant>,
 ) -> Registry {
     // Each transport's arrivals are reported on that transport (the remote numbers each
     // transport on its own).
@@ -840,7 +875,14 @@ fn with_congestion_feedback_recorders(
     if feedback.offers_rfc8888() {
         registry.with_per_rtp_session(
             Slot::Rfc8888,
-            PerRtpSession::new(|| Rfc8888Builder::new().build()),
+            PerRtpSession::new(move || {
+                let builder = Rfc8888Builder::new();
+                match wall_clock {
+                    Some(anchor) => builder.with_wall_clock(anchor),
+                    None => builder,
+                }
+                .build()
+            }),
         )
     } else {
         registry
@@ -1005,14 +1047,20 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
 /// the session draws its random numbers (the report interval's variation, RFC 3550 section
 /// 6.3.1; the dither of early feedback, RFC 4585 section 3.5.2; its SSRC and CNAME) from
 /// `provider`'s `random()`, as ICE, DTLS and SCTP do, so a seeded provider fixes when the
-/// reports go out. Without a provider, from `rand`.
+/// reports go out. Without a provider, from `rand`. Its NTP times derive from `wall_clock`
+/// when one is given ([`DefaultInterceptorOptions::wall_clock`]).
 pub(crate) fn configure_rtcp_reports_from(
     registry: Registry,
     provider: Option<&std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+    wall_clock: Option<shared::time::SystemInstant>,
 ) -> Registry {
     let session = RtcpSessionBuilder::new().with_t_rr_interval(Duration::ZERO);
     let session = match provider {
         Some(provider) => session.with_random(ProviderRtcpRandom(provider.clone())),
+        None => session,
+    };
+    let session = match wall_clock {
+        Some(anchor) => session.with_wall_clock(anchor),
         None => session,
     };
     configure_rtcp_reports_with(registry, session)
@@ -1648,7 +1696,7 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
     // something to work with. A stream is reported by one recorder, never both.
     // One estimator for the connection (`estimator` is one instance), so one numbering.
     let registry = with_congestion_feedback_senders(registry, feedback, false);
-    Ok(with_congestion_feedback_recorders(registry, feedback))
+    Ok(with_congestion_feedback_recorders(registry, feedback, None))
 }
 
 /// Creates a [`StreamInfo`](interceptor::StreamInfo) from RTC types for interceptor binding.
