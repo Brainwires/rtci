@@ -296,6 +296,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
   section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
   Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
+### Features
+
+- **A connection can take an existing connection's RTCP CNAME (RFC 8834 section 4.9 MAY).**
+  `RTCPeerConnectionBuilder::with_rtcp_cname(existing.rtcp_cname())`: "if explicitly
+  requested at creation, an RTCPeerConnection MAY use the same CNAME as an existing
+  RTCPeerConnection", so a receiver can synchronise the streams of both. Without it each
+  connection generates its own (unchanged). A CNAME outside 1 to 255 octets fails `build`
+  with the new `Error::ErrRtcpCnameLength`. Audit: RFC8834-4.9-5 `tested`; with new tests
+  RFC8835-4.2-8 (bundling by media type), RFC8837-5-6 (AF3x for non-interactive video) and
+  the stale RFC8834-8-2 (RTCP XR generation) `tested`.
 
 ## [0.1.0] - 2026-11-24
 
