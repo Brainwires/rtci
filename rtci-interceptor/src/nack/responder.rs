@@ -553,6 +553,8 @@ pub struct NackResponderInterceptor {
     /// (below zero after a packet larger than what was left) and when it was last filled.
     smoothing_tokens: f64,
     smoothing_at: Option<Instant>,
+    /// What the bucket held at most when it was last filled.
+    smoothing_depth: f64,
     /// See [`NackResponderBuilder::with_max_reserve_fraction`].
     max_reserve_fraction: f64,
     /// The round trip the RTCP session measured last.
@@ -597,6 +599,7 @@ impl NackResponderInterceptor {
             retransmitted: RateWindow::default(),
             smoothing_tokens: 0.0,
             smoothing_at: None,
+            smoothing_depth: SMOOTHING_MIN_OCTETS as f64,
             max_reserve_fraction: MAX_RETRANSMISSION_RESERVE,
             round_trip_time: None,
             pending: VecDeque::new(),
@@ -637,20 +640,34 @@ impl NackResponderInterceptor {
             RetransmissionRateLimit::UpToTarget => target,
             RetransmissionRateLimit::Unlimited => return None,
         };
-        let smooth = self.fill_bucket(now, limit);
-        Some(limit.saturating_sub(self.retransmitted.octets).min(smooth))
+        self.fill_bucket(now, limit);
+        Some(limit.saturating_sub(self.retransmitted.octets))
     }
 
     /// The most the smoothing bucket holds when the window allows `limit` octets.
-    fn bucket_depth(limit: usize) -> f64 {
-        let share = SMOOTHING_WINDOW.as_secs_f64() / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
-        (limit as f64 * share).max(SMOOTHING_MIN_OCTETS as f64)
+    fn bucket_depth(&self, limit: usize) -> f64 {
+        (limit as f64 * self.smoothing_share()).max(SMOOTHING_MIN_OCTETS as f64)
     }
 
-    /// Fills the smoothing bucket up to `now` at `limit` octets per window; the whole octets it
-    /// holds. Full at the first use.
-    fn fill_bucket(&mut self, now: Instant, limit: usize) -> usize {
-        let depth = Self::bucket_depth(limit);
+    /// The part of the window's allowance the smoothing bucket holds.
+    fn smoothing_share(&self) -> f64 {
+        SMOOTHING_WINDOW.as_secs_f64() / RETRANSMISSION_RATE_WINDOW.as_secs_f64()
+    }
+
+    /// Whether the smoothing bucket lets a retransmission of `size` octets leave: it holds
+    /// them, or it is full and the packet is larger than it ever holds (the bucket then goes
+    /// below zero and the next one waits that much longer: a packet larger than the bucket
+    /// must not wait for ever, and the rate over time stays the limit's).
+    fn bucket_holds(&self, size: usize) -> bool {
+        self.smoothing_at.is_none()
+            || self.smoothing_tokens >= (size as f64).min(self.smoothing_depth)
+    }
+
+    /// Fills the smoothing bucket up to `now` at `limit` octets per window. Full at the first
+    /// use.
+    fn fill_bucket(&mut self, now: Instant, limit: usize) {
+        let depth = self.bucket_depth(limit);
+        self.smoothing_depth = depth;
         self.smoothing_tokens = match self.smoothing_at {
             None => depth,
             Some(at) => {
@@ -660,7 +677,6 @@ impl NackResponderInterceptor {
             }
         };
         self.smoothing_at = Some(now);
-        self.smoothing_tokens.max(0.0) as usize
     }
 
     /// Whether lowering the original media by the reserve would take it under the
@@ -814,7 +830,7 @@ impl NackResponderInterceptor {
                 break;
             }
             if let Some(left) = allowance.as_mut() {
-                if size > *left {
+                if size > *left || !self.bucket_holds(size) {
                     break;
                 }
                 *left -= size;
@@ -1024,9 +1040,11 @@ impl NackResponderInterceptor {
                     .max(Self::window_octets(self.announced_reserve)),
                 _ => target,
             };
-            let bucket = (self.smoothing_tokens < size as f64 && limit > 0).then(|| {
+            // What the bucket must hold for it: its size, or a full bucket when it is larger.
+            let needed = (size as f64).min(self.bucket_depth(limit));
+            let bucket = (self.smoothing_tokens < needed && limit > 0).then(|| {
                 let rate = limit as f64 / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
-                let wait = (size as f64 - self.smoothing_tokens) / rate;
+                let wait = (needed - self.smoothing_tokens) / rate;
                 // Rounded up, so the bucket holds the packet at that instant.
                 filled + Duration::from_secs_f64(wait) + Duration::from_micros(1)
             });
