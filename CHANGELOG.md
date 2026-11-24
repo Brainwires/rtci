@@ -231,6 +231,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **interceptor** (fec-13): the RFC 8627 FlexFEC encoder no longer takes a retransmission on
+  the media SSRC (a NACK answered without RTX, as after an answer that kept only FlexFEC, RFC
+  8627 section 1.1.7) into its current block: its old sequence number broke the run of
+  consecutive source packets, and the block went unprotected.
+
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
   performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
