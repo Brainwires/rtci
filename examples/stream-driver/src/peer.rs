@@ -133,6 +133,8 @@ pub struct PeerDriver {
     unsent: u64,
     /// Sockets on which the platform refused a TOS / Traffic Class ([`Self::unmarked_sockets`]).
     unmarked_sockets: u64,
+    /// Datagrams sent, by the TOS / Traffic Class their socket had ([`Self::sent_by_traffic_class`]).
+    sent_by_traffic_class: std::collections::BTreeMap<u8, u64>,
 }
 
 impl PeerDriver {
@@ -151,6 +153,7 @@ impl PeerDriver {
             gathered: HashSet::new(),
             unsent: 0,
             unmarked_sockets: 0,
+            sent_by_traffic_class: std::collections::BTreeMap::new(),
         }
     }
 
@@ -184,6 +187,12 @@ impl PeerDriver {
     /// platform has no `IPV6_TCLASS`; see [`sockets::set_traffic_class`]).
     pub fn unmarked_sockets(&self) -> u64 {
         self.unmarked_sockets
+    }
+
+    /// How many datagrams were sent with each TOS / Traffic Class byte set on their socket
+    /// (a socket the platform refused counts under 0).
+    pub fn sent_by_traffic_class(&self) -> &std::collections::BTreeMap<u8, u64> {
+        &self.sent_by_traffic_class
     }
 
     /// The TOS / Traffic Class byte the operating system reports for the UDP socket bound to
@@ -317,6 +326,7 @@ impl PeerDriver {
         }
         let traffic_class = self.pc.traffic_class(&datagram);
         let mut refused = false;
+        let mut applied = 0;
         let sent = self
             .sockets
             .iter_mut()
@@ -340,6 +350,7 @@ impl PeerDriver {
                         }
                     }
                 }
+                applied = host.traffic_class.unwrap_or(0);
                 // UDP: a datagram the socket cannot take now is lost, as on the wire.
                 host.socket
                     .try_send_to(&datagram.message, datagram.transport.peer_addr)
@@ -347,6 +358,9 @@ impl PeerDriver {
             });
         if refused {
             self.unmarked_sockets += 1;
+        }
+        if sent {
+            *self.sent_by_traffic_class.entry(applied).or_default() += 1;
         }
         if !sent {
             self.unsent += 1;

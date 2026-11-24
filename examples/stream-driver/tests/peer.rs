@@ -585,17 +585,16 @@ fn collide(polite: &mut Side, impolite: &mut Side) -> Result<()> {
 
 /// RFC 8837 / RFC 8835 section 4.2 through the driver: each datagram leaves its UDP socket
 /// with the DSCP (and ECN bits) the engine gives it (`RTCPeerConnection::traffic_class`), set
-/// with `IP_TOS` before the datagram. Audio at `high` is EF (46), TOS 184 as the operating
-/// system reports it (`getsockopt`) after each packet; under `RTCDscpMarking::Off` the socket
-/// is never marked. The audio arrives either way. On Windows, where `IP_TOS` does not mark
-/// (see `sockets::set_traffic_class`), what the system reported is printed, not asserted.
+/// with `IP_TOS` before the datagram when it differs from the socket's. Audio at `high` is EF
+/// (46): its packets leave a socket set to TOS 184, while STUN and RTCP leave it at 0; the
+/// operating system reports the byte set (`getsockopt`, `sockets.rs`). Under
+/// `RTCDscpMarking::Off` the socket is never marked. The audio arrives either way. On Windows,
+/// where `IP_TOS` does not mark (see `sockets::set_traffic_class`), what happened is printed,
+/// not asserted.
 #[tokio::test]
 async fn the_driver_marks_each_datagram_with_its_flows_codepoint() -> Result<()> {
     use rtci::peer_connection::priority::{RTCDscpMarking, RTCPriorityType};
-    for (marking, expected) in [
-        (RTCDscpMarking::Rfc8837, 46u32 << 2),
-        (RTCDscpMarking::Off, 0),
-    ] {
+    for marking in [RTCDscpMarking::Rfc8837, RTCDscpMarking::Off] {
         let mut a = Side::new(SettingEngineBuilder::new().with_dscp_marking(marking))?;
         let mut b = Side::new(SettingEngineBuilder::new())?;
         let audio = connected(&mut a, &mut b).await?;
@@ -610,18 +609,8 @@ async fn the_driver_marks_each_datagram_with_its_flows_codepoint() -> Result<()>
             parameters.encodings[0].priority = RTCPriorityType::High;
             sender.set_parameters(parameters, None)?;
         }
-        let locals = a.driver.local_addresses();
-        assert_eq!(locals.len(), 1, "{locals:?}");
-        let mut seen = HashSet::new();
         for seq in 1..=20 {
             write_audio(&mut a, audio, seq)?;
-            if let Ok(value) = a
-                .driver
-                .socket_traffic_class(locals[0])
-                .ok_or("the socket")?
-            {
-                seen.insert(value);
-            }
             round(&mut a, &mut b).await?;
         }
         run_until(&mut a, &mut b, Duration::from_secs(5), |_, b| {
@@ -629,16 +618,31 @@ async fn the_driver_marks_each_datagram_with_its_flows_codepoint() -> Result<()>
         })
         .await?;
         assert!(!b.rtp.is_empty(), "{marking:?}: audio arrives");
+        let sent = a.driver.sent_by_traffic_class().clone();
+        let locals = a.driver.local_addresses();
         println!(
-            "{marking:?}: read back {seen:?}, unmarked sockets {}",
-            a.driver.unmarked_sockets()
+            "{marking:?}: sent by traffic class {sent:?}, unmarked sockets {}, socket now {:?}",
+            a.driver.unmarked_sockets(),
+            locals
+                .first()
+                .and_then(|l| a.driver.socket_traffic_class(*l))
+                .map(|r| r.ok()),
         );
         #[cfg(not(windows))]
-        assert_eq!(a.driver.unmarked_sockets(), 0);
-        #[cfg(not(windows))]
-        match marking {
-            RTCDscpMarking::Off => assert_eq!(seen, HashSet::from([0]), "{marking:?}"),
-            _ => assert!(seen.contains(&expected), "{marking:?}: {seen:?}"),
+        {
+            assert_eq!(a.driver.unmarked_sockets(), 0);
+            match marking {
+                RTCDscpMarking::Off => {
+                    assert_eq!(sent.keys().copied().collect::<Vec<u8>>(), vec![0])
+                }
+                _ => {
+                    assert!(sent.get(&(46 << 2)).is_some_and(|n| *n >= 20), "{sent:?}");
+                    assert!(
+                        sent.get(&0).is_some_and(|n| *n > 0),
+                        "STUN and RTCP: {sent:?}"
+                    );
+                }
+            }
         }
     }
     Ok(())
