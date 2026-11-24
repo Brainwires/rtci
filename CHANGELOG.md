@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer does not use (BUNDLE, LS, DDP) (`conf/jsep-77-small-rows`). Offers without such lines,
   which is every browser's, are answered as before. Test:
   `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
+- **jsep**: a section an answer rejects after writing it (outside the offered BUNDLE group
+  under `must-bundle`, or beyond what the bundle policy takes from an offer without BUNDLE)
+  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6)
+  (`conf/jsep-77-small-rows`). Test:
+  `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
   RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
   lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
   `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,

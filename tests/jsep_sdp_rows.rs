@@ -1,11 +1,13 @@
-//! RFC 8866 rows about what the engine writes into its own descriptions (sdp branch, jsep-77).
+//! RFC 8866 and RFC 8839 rows about what the engine writes into its own descriptions (sdp
+//! branch, jsep-77).
 
 mod jsep_common;
 
 use std::time::Instant;
 
-use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections};
+use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, port_of};
 use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
 use rtci::rtp_transceiver::RTCRtpTransceiverInit;
 use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
@@ -59,5 +61,86 @@ fn bandwidth_lines_use_registered_modifiers_only() -> TestResult {
         answer.sdp
     );
     assert!(!answer.sdp.contains("b=X-"), "{}", answer.sdp);
+    Ok(())
+}
+
+/// RFC 8839 section 4.2.1.6: "If the port value associated with an "m=" section is set to zero
+/// ... the agent SHOULD NOT include ICE-related SDP "candidate" attributes in that "m="
+/// section". An offer without BUNDLE of two video sections is answered under the balanced
+/// policy with the second rejected (RFC 9429 section 4.1.1): after gathering, the accepted
+/// section has the candidates and the rejected one none.
+#[test]
+fn a_section_answered_with_port_zero_has_no_candidates() -> TestResult {
+    let video = |mid: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:{mid}\na=sendrecv\na=rtcp-mux\n\
+             a=rtpmap:96 VP8/90000\n"
+        )
+    };
+    let remote = crlf(&format!("{SESSION}{}{}", video("0"), video("1")));
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(remote)?)?;
+    pc.add_local_candidate(RTCIceCandidateInit {
+        candidate: "candidate:1 1 udp 2130706431 10.0.0.2 4000 typ host".to_owned(),
+        ..Default::default()
+    })?;
+    pc.add_local_candidate(RTCIceCandidateInit::default())?;
+    let answer = pc.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    assert_eq!(sections.len(), 2, "{}", answer.sdp);
+    assert_ne!(port_of(&sections[0]), 0, "{}", answer.sdp);
+    assert!(
+        sections[0].iter().any(|l| l.starts_with("a=candidate:")),
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(port_of(&sections[1]), 0, "{}", answer.sdp);
+    assert!(
+        !sections[1]
+            .iter()
+            .any(|l| l.starts_with("a=candidate:") || l == "a=end-of-candidates"),
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(Instant::now(), answer)?;
+    Ok(())
+}
+
+/// RFC 3264 section 6.1: "The answerer MAY include a non-zero ptime attribute for any media
+/// stream". An answerer whose application set a packet time (`set_audio_packet_time`) states
+/// it in the answer's audio section, and one that set none states none.
+#[test]
+fn an_answer_states_the_packet_time_the_application_set() -> TestResult {
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::{MediaEngine, RTCPacketTime};
+    let remote = crlf(&format!(
+        "{SESSION}m=audio 9 UDP/TLS/RTP/SAVPF 111\n{TRANSPORT}a=mid:0\na=sendrecv\n\
+         a=rtpmap:111 opus/48000/2\n"
+    ));
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    media_engine.set_audio_packet_time(RTCPacketTime {
+        ptime: Some(40),
+        maxptime: Some(60),
+    });
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(remote.clone())?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    assert!(answer.sdp.contains("\r\na=ptime:40\r\n"), "{}", answer.sdp);
+    assert!(
+        answer.sdp.contains("\r\na=maxptime:60\r\n"),
+        "{}",
+        answer.sdp
+    );
+
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(remote)?)?;
+    let answer = pc.create_answer(None)?;
+    assert!(!answer.sdp.contains("a=ptime"), "{}", answer.sdp);
     Ok(())
 }

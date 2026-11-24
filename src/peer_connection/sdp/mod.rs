@@ -2335,6 +2335,19 @@ pub(crate) struct RepairFlows {
     pub(crate) fec: bool,
 }
 
+/// Rejects a section of an answer that was written in full: port zero, and no `a=candidate`
+/// lines (RFC 8839 section 4.2.1.6: with the port set to zero "the agent SHOULD NOT include
+/// ICE-related SDP "candidate" attributes in that "m=" section"), nor `a=end-of-candidates`.
+fn reject_written_section(media: &mut MediaDescription) {
+    media.media_name.port = RangedPort {
+        value: 0,
+        range: None,
+    };
+    media
+        .attributes
+        .retain(|a| a.key != "candidate" && a.key != "end-of-candidates");
+}
+
 /// Makes a section of an initial offer bundle-only (RFC 9143 sections 6 and 7.2.1): port
 /// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
@@ -3004,10 +3017,7 @@ impl RTCPeerConnection {
                         // Outside the offered group under `must-bundle`: no transport but the
                         // BUNDLE one (RFC 9429 section 4.1.1).
                         if let Some(desc) = d.media_descriptions.last_mut() {
-                            desc.media_name.port = RangedPort {
-                                value: 0,
-                                range: None,
-                            }
+                            reject_written_section(desc);
                         }
                     }
                     // No BUNDLE group offered: every accepted section is a transport of its
@@ -3017,10 +3027,7 @@ impl RTCPeerConnection {
                     BundleMode::Answer(_) => {
                         if without_transport {
                             if let Some(desc) = d.media_descriptions.last_mut() {
-                                desc.media_name.port = RangedPort {
-                                    value: 0,
-                                    range: None,
-                                }
+                                reject_written_section(desc);
                             }
                         } else {
                             with_transport.push(media_type);
