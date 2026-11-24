@@ -227,9 +227,11 @@ fn a_target_under_the_encoders_minimum_keeps_the_minimum_and_drops_pictures() {
     assert!((0..30).all(|_| matches!(b.frame(), FrameOutcome::Sent(_))));
 }
 
-#[test]
-fn a_pause_stops_the_encoder_and_the_resume_starts_with_a_key_frame() {
-    let mut b = Bench::new(SendConfig::default(), 320, 240);
+/// A pause and its resume with `config`: two pictures, a pause of twenty captures (nothing
+/// encoded), a second zero target (the same pause), then a target again. Returns the first two
+/// pictures after the resume.
+fn pause_and_resume(config: SendConfig) -> (Bench, SentFrame, SentFrame) {
+    let mut b = Bench::new(config, 320, 240);
     b.target(300_000.0);
     b.sent();
     b.sent();
@@ -247,24 +249,68 @@ fn a_pause_stops_the_encoder_and_the_resume_starts_with_a_key_frame() {
         encoded,
         "nothing encoded"
     );
-    // A key-frame request during the pause is kept for the resume.
     b.target(0.0);
     b.target(280_000.0);
     assert!(!b.pipeline.is_paused());
-    let resumed = b.sent();
-    assert!(
-        resumed.keyframe,
-        "the first picture after a pause is a key frame"
-    );
-    assert!(!b.sent().keyframe);
+    let first = b.sent();
+    let second = b.sent();
     let st = b.pipeline.stats(b.now);
     assert_eq!(st.pauses, 1, "two zero targets in a row are one pause");
-    assert_eq!(st.resume_key_frames, 1);
     assert_eq!(st.frames_dropped_paused, 20);
+    (b, first, second)
 }
 
 #[test]
-fn the_chrome_profile_resumes_without_a_key_frame() {
+fn a_pause_stops_the_encoder_and_the_resume_continues_with_delta_frames() {
+    let (mut b, first, second) = pause_and_resume(SendConfig::default());
+    assert!(
+        !first.keyframe,
+        "nothing was lost in the pause: the first picture after it is a delta frame"
+    );
+    assert!(!second.keyframe);
+    assert_eq!(b.pipeline.stats(b.now).resume_key_frames, 0);
+}
+
+#[test]
+fn with_key_frame_on_resume_the_first_picture_after_a_pause_is_a_key_frame() {
+    let config = SendConfig {
+        key_frame_on_resume: true,
+        ..SendConfig::default()
+    };
+    let (mut b, first, second) = pause_and_resume(config);
+    assert!(
+        first.keyframe,
+        "the first picture after a pause is a key frame"
+    );
+    assert!(!second.keyframe);
+    assert_eq!(b.pipeline.stats(b.now).resume_key_frames, 1);
+}
+
+#[test]
+fn a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it() {
+    let mut b = Bench::new(SendConfig::default(), 320, 240);
+    b.target(300_000.0);
+    b.sent();
+    b.advance(Duration::from_secs(2));
+    b.target(0.0);
+    b.frame();
+    assert_eq!(b.request(KeyFrameTrigger::Pli), KeyFrameDecision::Served);
+    b.frame();
+    b.target(300_000.0);
+    assert!(
+        b.sent().keyframe,
+        "the PLI's key frame waited for the resume"
+    );
+    assert!(!b.sent().keyframe);
+    assert_eq!(b.pipeline.stats(b.now).resume_key_frames, 0);
+}
+
+#[test]
+fn the_chrome_profile_resumes_as_the_default_does() {
+    assert_eq!(
+        SendConfig::chrome().key_frame_on_resume,
+        SendConfig::default().key_frame_on_resume
+    );
     let mut b = Bench::new(SendConfig::chrome(), 320, 240);
     b.target(300_000.0);
     b.sent();

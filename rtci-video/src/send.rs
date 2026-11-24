@@ -23,11 +23,15 @@
 //!   the target (RFC 8834 section 7: "Endpoints have to be designed so they do not transmit
 //!   significantly more data than the network path can support").
 //! - **Pause** (a target of 0, the engine's pacer holding a second of media): no picture is
-//!   encoded until the next nonzero target. On resuming the next picture is a key frame when
-//!   [`SendConfig::key_frame_on_resume`] (the default); libwebrtc encodes the next picture as a
-//!   delta (`video/video_stream_encoder.cc` `OnBitrateUpdated`, lines 2544-2558 @ a222406d:
-//!   the frame held during the pause is encoded as it comes), which is
-//!   [`SendConfig::chrome`].
+//!   encoded until the next nonzero target. On resuming the next picture is coded as it comes,
+//!   a delta frame unless a key frame is due for another reason: nothing encoded was lost (the
+//!   pacer keeps what was written before the pause and sends it), so the receiver's references
+//!   are intact, and no RFC asks for a key frame there. libwebrtc does the same
+//!   (`video/video_stream_encoder.cc` `OnBitrateUpdated`, lines 2544-2558 @ a222406d: the frame
+//!   held during the pause is encoded as it comes), and the engine's note on
+//!   `RTCRtpSender::target_bitrates` says none is needed. A receiver that lost something asks
+//!   (PLI / FIR), and the pacer's discard of media written into a pause asks too.
+//!   [`SendConfig::key_frame_on_resume`] forces a key frame on every resume instead.
 //! - **Key-frame requests** ([`request_key_frame`](SendPipeline::request_key_frame)) from a
 //!   PLI (RFC 4585 6.3.1), a FIR (RFC 5104 4.3.1) or the pacer's discard: the next picture is a
 //!   key frame, rate-limited by [`KeyFrameRateLimit`]. The default is RFC 5104 section 3.5.1:
@@ -169,7 +173,10 @@ pub struct SendConfig {
     pub degradation_preference: DegradationPreference,
     /// How often key-frame requests are served. Default `RoundTrips` (RFC 5104 3.5.1).
     pub key_frame_rate_limit: KeyFrameRateLimit,
-    /// Whether the first picture after a pause (target 0) is a key frame. Default `true`.
+    /// Whether the first picture after a pause (target 0) is forced to be a key frame. Default
+    /// `false`: the picture is coded as it comes (nothing was lost, so the receiver's
+    /// references are intact; libwebrtc does the same). `true` spends a key frame on every
+    /// resume, for a receiver that may have dropped what it held during a long pause.
     pub key_frame_on_resume: bool,
     /// The highest frame rate encoded (the source's rate, or the encoding's `maxFramerate`).
     pub max_framerate: f64,
@@ -191,7 +198,7 @@ impl Default for SendConfig {
         Self {
             degradation_preference: DegradationPreference::Balanced,
             key_frame_rate_limit: KeyFrameRateLimit::RoundTrips,
-            key_frame_on_resume: true,
+            key_frame_on_resume: false,
             max_framerate: 30.0,
             initial_bitrate_bps: 300_000,
             upgrade_margin: 1.25,
@@ -202,12 +209,12 @@ impl Default for SendConfig {
 
 impl SendConfig {
     /// libwebrtc's choices (the `Chrome` behaviour profile): `maintain-framerate` for a camera,
-    /// one key-frame request served per 300 ms, no key frame on resuming from a pause.
+    /// one key-frame request served per 300 ms. (Resuming from a pause without a key frame is
+    /// libwebrtc's behaviour and the default's.)
     pub fn chrome() -> Self {
         Self {
             degradation_preference: DegradationPreference::MaintainFramerate,
             key_frame_rate_limit: KeyFrameRateLimit::MinInterval(CHROME_KEY_FRAME_INTERVAL),
-            key_frame_on_resume: false,
             ..Self::default()
         }
     }

@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields, `jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay` and
   `jitter_buffer_emitted_count`: a struct literal without `..Default::default()` needs them.
 
+### Behaviour changes
+
+- **video** (`conf/vp-9-no-keyframe-on-resume`): the send pipeline no longer forces a key
+  frame when sending resumes after a pause (a target of 0 from the pacer). Nothing encoded is
+  lost in a pause (the pacer keeps and sends what was written before it), so the receiver's
+  references are intact; no RFC asks for a key frame there, libwebrtc encodes the next picture
+  as it comes (`video/video_stream_encoder.cc` `OnBitrateUpdated`), and the engine's note on
+  `RTCRtpSender::target_bitrates` says none is needed. A receiver that did lose something asks
+  with a PLI or FIR, and the pacer's discards ask too; a request made during the pause is
+  served by the first picture after it. `SendConfig::key_frame_on_resume` (default now
+  `false`) keeps the forced key frame as an option; `SendConfig::chrome()` no longer sets it,
+  since libwebrtc's form is the default. Tests:
+  `a_pause_stops_the_encoder_and_the_resume_continues_with_delta_frames`,
+  `with_key_frame_on_resume_the_first_picture_after_a_pause_is_a_key_frame`,
+  `a_key_frame_asked_for_during_a_pause_is_the_first_picture_after_it`, and in the capacity
+  call `a_pacer_pause_stops_the_encoder_and_the_video_resumes_without_a_forced_key_frame`.
+
 ### Features
 
 - **video pipeline, phase 3: the send pipeline** (`conf/vp-7-send`, `docs/video-pipeline.md`
@@ -21,13 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     payloader, timestamps from the capture time). The target (`RTCRtpSender::target_bitrates`,
     the estimate less the retransmission reserve) sets the encoder's rate, never below the
     encoder's minimum (pictures dropped in the ratio target / minimum instead); a target of 0
-    (the pacer's pause) stops the encoder, and the first picture after it is a key frame;
+    (the pacer's pause) stops the encoder, and the first picture after it is coded as it
+    comes (`conf/vp-9-no-keyframe-on-resume`, below);
     PLI, FIR and the pacer's discards ask for a key frame, not served within two round trips
     of the last one (RFC 5104 3.5.1; 500 ms until a round trip is known, RFC 7728 8.1);
     resolution and frame-rate steps when the target falls under what the format needs, in the
     order of the W3C `degradationPreference` (default `balanced`), with a 5 s hold before a
-    step back up. `SendConfig::chrome()`: libwebrtc's choices (no key frame on resume, one
-    request served per 300 ms, `maintain-framerate`).
+    step back up. `SendConfig::chrome()`: libwebrtc's choices (one request served per 300 ms,
+    `maintain-framerate`).
   - `rtci_video::engine::VideoSender`: the glue to an `RTCRtpSender` (target, events, round
     trip, `update_encoder_stats` with `qualityLimitation*`).
   - `VideoEncoder::set_rates` and `min_bitrate_bps` (both with defaults), `EncoderFactory`,

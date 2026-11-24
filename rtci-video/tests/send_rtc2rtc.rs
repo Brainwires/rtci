@@ -998,17 +998,19 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
 }
 
 /// The pacer's pause in the same call (a target of 0 when the pacer holds a second of media):
-/// no picture is encoded while the target reads 0, the first picture after each pause is a key
-/// frame (the default), and the receiver renders within a second of each pause's end.
+/// no picture is encoded while the target reads 0, no key frame is made because a pause ended
+/// (the default: nothing encoded was lost, the receiver's references are intact), every
+/// picture decodes, and the receiver renders within a second of each pause's end.
 #[test]
-fn a_pacer_pause_stops_the_encoder_and_the_video_resumes_with_a_key_frame() -> Result<()> {
+fn a_pacer_pause_stops_the_encoder_and_the_video_resumes_without_a_forced_key_frame() -> Result<()>
+{
     let (call, o) = cap_run(3, SendConfig::default(), "pause")?;
     assert!(!o.pauses.is_empty(), "the pacer paused the sender");
     assert_eq!(call.sent_in_pause, 0, "nothing encoded in a pause");
     assert!(o.send.frames_dropped_paused > 0);
-    assert!(
-        o.resumed_with_key.iter().all(|k| *k),
-        "{:?}",
+    assert_eq!(
+        o.send.resume_key_frames, 0,
+        "no key frame because a pause ended (key on resume {:?})",
         o.resumed_with_key
     );
     for after in &o.resumed_after {
@@ -1017,8 +1019,6 @@ fn a_pacer_pause_stops_the_encoder_and_the_video_resumes_with_a_key_frame() -> R
             "rendered {after:?} after a pause"
         );
     }
-    assert_eq!(call.pacer_discards, 0);
-    assert_eq!(call.decode_errors, 0);
     assert_eq!(call.pacer_discards, 0);
     assert_eq!(call.decode_errors, 0);
     Ok(())
@@ -1072,9 +1072,8 @@ fn loss_is_repaired_by_nack_and_every_picture_decodes() -> Result<()> {
     Ok(())
 }
 
-/// The same call with the `Chrome` configuration (no key frame on resuming, one key-frame
-/// request served per 300 ms, `maintain-framerate`), for comparison: prints, asserts the
-/// basics only.
+/// The same call with the `Chrome` configuration (one key-frame request served per 300 ms,
+/// `maintain-framerate`), for comparison: prints, asserts the basics only.
 #[test]
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_the_pause_with_the_chrome_configuration() -> Result<()> {
