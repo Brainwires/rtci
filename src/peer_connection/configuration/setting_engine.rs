@@ -3115,21 +3115,44 @@ impl SettingEngineBuilder {
     /// such transport accepts, for its first handshake, a ticket another transport of the
     /// connection issued.
     ///
-    /// Off by default: it is an optimization (one signature and its verification saved per
-    /// extra transport), no browser issues tickets (libwebrtc sets `SSL_OP_NO_TICKET`), and a
-    /// bundled connection, every browser's, has one transport and nothing to share. Whether it
-    /// becomes the default is to be decided once this bounded-wait, DTLS 1.3-only form has
-    /// been reviewed.
+    /// Off by default, a standing departure from that SHOULD, because where it does anything
+    /// it makes the connection slower, and with most peers it cannot do anything:
     ///
-    /// What it costs: against a peer that issues no ticket, nothing beyond the leader's own
-    /// handshake (the others start when it is complete, and no ticket came before the peer
-    /// confirmed it); against one that does, the others' handshakes run after the leader's
-    /// instead of beside it. A leader whose handshake does not complete holds the others back
+    /// - **It costs connection time.** The other transports' handshakes run after the first
+    ///   one instead of beside it. Measured with three unbundled transports on links with
+    ///   latency (`tests/multi_transport_rtc2rtc.rs`,
+    ///   `the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`),
+    ///   the time until every DTLS transport is connected: at a 100 ms round trip 453 ms
+    ///   with it off, 753 ms with it on against a peer that issues no ticket (+300 ms, about
+    ///   3 round trips: the whole first handshake, and nothing is resumed) and 703 ms
+    ///   between two peers that have it on (+250 ms, about 2.5 round trips); at a 300 ms
+    ///   round trip 1.353 s, 2.253 s (+900 ms) and 2.103 s (+750 ms). What it saves is one
+    ///   signature and one signature verification per other transport, and no round trip.
+    /// - **One lost datagram delays every transport.** A datagram lost on the first
+    ///   handshake holds all the others back, where without the session it delays that
+    ///   transport alone
+    ///   (`a_datagram_lost_on_the_first_handshake_delays_every_transport_with_the_session_on`).
+    /// - **No browser can take part.** A browser issues no session ticket and offers none:
+    ///   libwebrtc (Chromium, Safari) sets `SSL_OP_NO_TICKET` and makes an `SSL_CTX` per
+    ///   transport; Firefox's `TransportLayerDtls::Setup()` turns session tickets off
+    ///   (`SSL_ENABLE_SESSION_TICKETS`, `PR_FALSE`) and the session cache too
+    ///   (`SSL_NO_CACHE`). Against a browser the setting only adds the wait.
+    /// - **With BUNDLE it does nothing.** A bundled connection (every browser's, and any
+    ///   connection whose answer bundles its sections) has one transport: nothing waits, no
+    ///   ticket is asked for or issued, and the DTLS datagrams are the same as with the
+    ///   setting off.
+    ///
+    /// So it is for an application whose both ends are this engine, whose sections are not
+    /// bundled, and for which a signature per transport matters more than about 2.5 round
+    /// trips of connection time.
+    ///
+    /// The wait is bounded. A first handshake that does not complete holds the others back
     /// at most three of their initial flight intervals (1.2 s at the RFC 9147 400 ms; 4.5
-    /// round trips where ICE measured it), after which they run full handshakes; one that
-    /// fails, is closed or cannot start holds them back no longer. (Until 0.2, on by default,
-    /// the wait had no bound, and a peer without tickets cost the others two flight intervals,
-    /// 800 ms.)
+    /// round trips where ICE measured the round trip) and never more than 3 s, after which
+    /// they run full handshakes; one that fails, is closed or cannot start holds them back
+    /// no longer; and no time is spent waiting for a ticket that does not come. (Until 0.2,
+    /// on by default, the wait had no bound, and a peer without tickets cost two flight
+    /// intervals, 800 ms, on top of the first handshake.)
     ///
     /// The certificate check is not weakened: only the first association of each transport,
     /// set up by the negotiation that set up the transports, takes part, and only when its
@@ -3142,7 +3165,9 @@ impl SettingEngineBuilder {
     /// configuration. A later association (SRTP re-keying, RFC 5764 section 4.4; an ICE
     /// restart with new DTLS parameters; a transport added later) and a server's later
     /// handshake on the same transport are always full handshakes. The client keeps tickets
-    /// at most five minutes and drops them all once every transport taking part has started.
+    /// at most five minutes and drops them all once every transport taking part has started;
+    /// closing the connection wipes whatever tickets are left and the keys the server side
+    /// seals its tickets under.
     ///
     /// `false`: every association runs a full handshake at once, and none offers or accepts
     /// a resumption. Bundled connections (one transport) are the same either way.
