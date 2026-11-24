@@ -210,14 +210,14 @@ fn congestion_window_growth_saturates() -> Result<()> {
     a.ssthresh = u32::MAX;
     a.cwnd = u32::MAX - 10;
     a.in_fast_recovery = false;
-    a.grow_congestion_window(i64::from(u32::MAX), u32::MAX, true);
+    a.grow_congestion_window(i64::from(u32::MAX), 0, u32::MAX, true);
     assert_eq!(u32::MAX, a.cwnd);
 
     // Congestion avoidance: cwnd > ssthresh.
     a.ssthresh = 1;
     a.cwnd = u32::MAX - 10;
     a.partial_bytes_acked = u32::MAX - 10;
-    a.grow_congestion_window(i64::MAX, u32::MAX, true);
+    a.grow_congestion_window(i64::MAX, 0, u32::MAX, true);
     assert_eq!(u32::MAX, a.cwnd);
     Ok(())
 }

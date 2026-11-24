@@ -9,6 +9,9 @@ use crate::endpoint::link_test::Link;
 const PPI: PayloadProtocolIdentifier = PayloadProtocolIdentifier::Binary;
 /// The payload of a full DATA chunk here: `create_association` gives 1400 bytes.
 const CHUNK: usize = 1400;
+/// The same chunk on the wire, which the congestion control counts (RFC 9260 7.2): the DATA
+/// chunk header (16 bytes) with it, no padding needed.
+const WIRE: usize = CHUNK + 16;
 
 fn config() -> TransportConfig {
     TransportConfig::default().with_heartbeat_interval(None)
@@ -72,7 +75,7 @@ fn sack(a: &mut Association, cumulative: u32, gaps: &[(u16, u16)], now: Instant)
 }
 
 fn flight(a: &Association) -> u32 {
-    a.inflight_queue.get_num_bytes() as u32
+    a.inflight_queue.get_num_wire_bytes() as u32
 }
 
 /// RFC 9260 7.2.1: the initial cwnd is min(4 x PMDCS, max(2 x PMDCS, 4404)), 4344 over
@@ -217,23 +220,23 @@ fn congestion_avoidance_grows_one_packet_per_window() {
 
     // A gap block acknowledges one chunk: counted, though the cumulative TSN stays.
     sack(&mut a, first.wrapping_sub(1), &[(2, 2)], now);
-    assert_eq!(CHUNK as u32, a.partial_bytes_acked);
+    assert_eq!(WIRE as u32, a.partial_bytes_acked);
     assert_eq!(cwnd, a.cwnd);
     let _ = send(&mut a, now);
 
     // Then one chunk per SACK, the window refilled each time. cwnd grows once a window's
     // worth has been acknowledged, by one PMDCS, and the count keeps the remainder.
-    let mut acknowledged = CHUNK as u32;
+    let mut acknowledged = WIRE as u32;
     let mut cumulative = first.wrapping_sub(1);
     let mut sacks = 0;
     while a.cwnd == cwnd {
         cumulative = cumulative.wrapping_add(1);
         // The second chunk was acknowledged by the gap block already.
         if cumulative != first.wrapping_add(1) {
-            acknowledged += CHUNK as u32;
+            acknowledged += WIRE as u32;
         }
         assert!(
-            acknowledged - (CHUNK as u32) < cwnd,
+            acknowledged - (WIRE as u32) < cwnd,
             "no growth after a full window was acknowledged"
         );
         // The receiver keeps reporting the gap-acknowledged chunk until the cumulative TSN
@@ -745,4 +748,75 @@ fn a_data_chunk_with_the_i_bit_is_acknowledged_at_once() {
     let sacks = chunks_of_type(&sent_datagrams(a, now), CT_SACK.0);
     assert_eq!(1, sacks.len());
     assert_eq!(tsn.wrapping_add(1), cumulative_of(&sacks[0]));
+}
+
+/// RFC 9260 7.2: "When calculating one of these variables [cwnd, ssthresh,
+/// partial_bytes_acked], the length of the DATA chunk, including the padding, SHOULD be used."
+/// The flight size compared with cwnd is the chunks' size on the wire: a window of 100 bytes
+/// takes five one-byte messages (16 bytes of header, 1 of data, 3 of padding each), not 100.
+#[test]
+fn the_flight_size_counts_chunk_headers_and_padding() {
+    let now = Instant::now();
+    let mut a = sender(config(), 0, now);
+    a.cwnd = 100;
+    {
+        let mut s = a.stream(1).unwrap();
+        for i in 0..10u8 {
+            s.write_sctp(now, &Bytes::from(vec![i]), PPI).unwrap();
+        }
+    }
+    let sent: usize = send(&mut a, now).iter().map(Vec::len).sum();
+    assert_eq!(
+        5, sent,
+        "20 bytes each on the wire, the fifth fills the window"
+    );
+    assert_eq!(100, flight(&a));
+    assert_eq!(
+        5,
+        a.inflight_queue.get_num_bytes(),
+        "rwnd still counts user data"
+    );
+}
+
+/// RFC 9260 7.2.2: in congestion avoidance partial_bytes_acked grows by "the total number of
+/// bytes (including the chunk header and the padding) of all new DATA chunks acknowledged in
+/// that SACK chunk ... and by the number of bytes of duplicated chunks reported in Duplicate
+/// TSNs". A chunk reported as a duplicate counts once, whatever the receiver repeats, and a TSN
+/// that was never sent and acknowledged counts nothing.
+#[test]
+fn partial_bytes_acked_counts_wire_bytes_and_duplicates_once() {
+    let now = Instant::now();
+    let mut a = sender(config(), 6, now);
+    a.ssthresh = 1000; // below cwnd: congestion avoidance
+    a.cwnd = 4 * WIRE as u32;
+    let first = a.my_next_tsn;
+    assert_eq!(4, send(&mut a, now).iter().map(Vec::len).sum::<usize>());
+
+    sack(&mut a, first, &[], now);
+    assert_eq!(
+        WIRE as u32, a.partial_bytes_acked,
+        "the chunk with its header"
+    );
+    let _ = send(&mut a, now);
+
+    let with_duplicates = |dups: Vec<u32>| ChunkSelectiveAck {
+        cumulative_tsn_ack: first,
+        advertised_receiver_window_credit: u32::MAX / 2,
+        gap_ack_blocks: vec![],
+        duplicate_tsn: dups,
+    };
+    // The first chunk again, twice in this SACK and once more in the next; and a TSN never
+    // acknowledged.
+    a.handle_sack(
+        &with_duplicates(vec![first, first, first.wrapping_add(40)]),
+        now,
+    )
+    .unwrap();
+    assert_eq!(
+        2 * WIRE as u32,
+        a.partial_bytes_acked,
+        "the duplicate, once"
+    );
+    a.handle_sack(&with_duplicates(vec![first]), now).unwrap();
+    assert_eq!(2 * WIRE as u32, a.partial_bytes_acked, "not again");
 }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **sctp** (sctp-21): the congestion control counts DATA chunks with their header and padding
+  (RFC 9260 7.2: "the length of the DATA chunk, including the padding, SHOULD be used"): the
+  flight size compared with cwnd and Max.Burst, and the bytes a SACK acknowledges for slow
+  start and partial_bytes_acked. It counted user data only, so small messages filled the
+  window with up to 16 times their size in headers. partial_bytes_acked also counts the
+  chunks a SACK reports in Duplicate TSNs (7.2.2), each chunk this side saw acknowledged
+  once. rwnd still counts user data (6.2.1). Engine behaviour change: yes (congestion
+  window); alone in a train round.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
