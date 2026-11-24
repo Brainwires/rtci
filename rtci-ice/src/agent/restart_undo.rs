@@ -29,6 +29,7 @@ pub(crate) struct RestartUndo {
     consent_unanswered_since: Option<Instant>,
     checking_duration: Instant,
     last_checking_time: Instant,
+    tie_breaker: u64,
 }
 
 impl Agent {
@@ -66,6 +67,7 @@ impl Agent {
                 consent_unanswered_since: self.consent_unanswered_since,
                 checking_duration: self.checking_duration,
                 last_checking_time: self.last_checking_time,
+                tie_breaker: self.tie_breaker,
             }),
         };
         self.apply_restart(now, keep_local_candidates)?;
@@ -132,6 +134,7 @@ impl Agent {
         self.consent_unanswered_since = undo.consent_unanswered_since;
         self.checking_duration = undo.checking_duration;
         self.last_checking_time = undo.last_checking_time;
+        self.tie_breaker = undo.tie_breaker;
 
         if let (Some(pair_index), Some((last_consent, next_consent_at))) =
             (self.selected_pair, kept_consent)

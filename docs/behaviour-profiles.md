@@ -202,7 +202,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `DefaultInterceptorOptions::circuit_breaker_packet_size` | RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: "circuit" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556) |
 | `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` | the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow |
 
-## Examined: the default is libwebrtc's too, or already the RFC's (39)
+## Examined: the default is libwebrtc's too, or already the RFC's (40)
 
 | Setting | Note |
 |---|---|
@@ -236,6 +236,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_remote_candidate_scopes` | loopback / link-local remote candidates paired only within their scope (a hardening, kept in every profile) |
 | `SettingEngineBuilder::with_multicast_dns_first_query_delay` | RFC 6762 5.2 delay on (mDNS rows are the engine's; Chrome's resolver is the platform's) |
 | `SettingEngineBuilder::with_multicast_dns_multi_question_delay` | RFC 6762 6.3 delay on |
+| `SettingEngineBuilder::with_ice_new_tie_breaker_on_restart` | RFC 8445 section 16.1 MAY; off in every profile, libwebrtc keeps its tiebreaker across restarts too |
 | `MediaEngine::set_audio_packet_time` | no a=ptime / a=maxptime, as Chromium (fixtures) |
 | `DefaultInterceptorOptions::pacer_immediate_release` | a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget and lets a burst build up over send_burst_interval (modules/pacing/pacing_controller.h @ a222406d), which Chromium sets to 40 ms (rtc_peer_connection_handler.cc pacer_burst_interval @ Chromium 8dafa8bc) |
 | `DefaultInterceptorOptions::bandwidth_probing` | probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate) |

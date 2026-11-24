@@ -193,6 +193,7 @@ pub(crate) fn ice_agent_config(
             .allow_link_local_remote_candidates,
         remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
         tie_breaker: setting_engine.ice.tie_breaker,
+        new_tie_breaker_on_restart: setting_engine.ice.new_tie_breaker_on_restart,
         nomination_acceptance: setting_engine.ice.nomination_acceptance,
         failed_nomination: setting_engine.ice.failed_nomination,
         nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,

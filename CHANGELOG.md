@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
+  `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
+  `new_tie_breaker_on_restart` (both off by default, see "Added"). A struct literal of either
+  adds `..Default::default()` or the field set to `false`.
 - **workspace**: the version on `master` is `0.2.0-dev` (every crate, and every requirement on
   a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
   cannot take without a change of their own. Each such change is listed here. Git dependents
@@ -106,6 +110,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **turn** (`conf/transport3-mays`): `ClientConfig::software_in_indications` puts the
+  client's SOFTWARE in its Send indications too (RFC 8489 section 6.1: "Indications MAY include
+  a SOFTWARE attribute"). Off by default, so nothing changes on the wire: Send indications are
+  the relayed data path. Test: `rtci-turn`
+  `client_software_mtu_test.rs::test_send_indications_carry_software_only_when_configured`.
+  RFC8489-6.1-3 is `tested`.
+- **ice** (`conf/transport3-mays`): `AgentConfig::new_tie_breaker_on_restart` and
+  `SettingEngineBuilder::with_ice_new_tie_breaker_on_restart` draw a new tiebreaker at each
+  ICE restart (RFC 8445 section 16.1: "The agent MAY change the number when an ICE restart
+  occurs"); a restart that is rolled back gives the old one back. Off by default: the
+  tiebreaker stays for the agent's life, as before and as in libwebrtc. Test: `rtci-ice`
+  `agent_rfc8445_test.rs::test_ice_restart_draws_a_new_tie_breaker_only_when_configured`.
+  RFC8445-16.1-4 is `tested`.
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
   the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a

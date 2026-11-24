@@ -352,6 +352,12 @@ pub struct ClientConfig {
     /// [`DEFAULT_SOFTWARE`] (`rtci-turn` and its version); empty sends none, for an
     /// application that would not tell its software to the path.
     pub software: String,
+    /// Whether Send indications carry [`ClientConfig::software`] too (RFC 8489 Section 6.1:
+    /// "Indications MAY include a SOFTWARE attribute"). Off by default: Send indications are
+    /// the relayed data path, and the attribute would cost its bytes on every packet sent
+    /// before a channel is bound, for no effect on the protocol. Nothing is added when
+    /// `software` is empty.
+    pub software_in_indications: bool,
     /// The initial retransmission timeout in milliseconds; each retransmission doubles the
     /// wait. `0` selects the default, the 500 ms RFC 8489 §6.2.1 asks for at least.
     pub rto_in_ms: u64,
@@ -383,6 +389,7 @@ impl Default for ClientConfig {
             password: "".to_string(),
             realm: "".to_string(),
             software: DEFAULT_SOFTWARE.to_string(),
+            software_in_indications: false,
             rto_in_ms: 0,
             retransmission: RetransmissionConfig::default(),
             password_algorithms: vec![],
@@ -411,6 +418,8 @@ pub struct Client {
     /// What the application authenticates with; each allocation has its own state of it.
     login: Arc<Login>,
     software: Software,
+    /// [`ClientConfig::software_in_indications`].
+    software_in_indications: bool,
     /// The path MTU for requests over UDP ([`Client::set_path_mtu`]); `None`: unknown.
     path_mtu: Option<usize>,
     tr_map: TransactionMap,
@@ -463,6 +472,7 @@ impl Client {
                 password_algorithms: config.password_algorithms,
             }),
             software: Software::new(ATTR_SOFTWARE, config.software),
+            software_in_indications: config.software_in_indications,
             path_mtu: None,
             tr_map: TransactionMap::new(TimerSettings {
                 initial_rto: if config.rto_in_ms != 0 {

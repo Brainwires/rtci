@@ -1376,6 +1376,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "a fixed tiebreaker for tests",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_new_tie_breaker_on_restart",
+        class: NotGovernedClass::Same,
+        note: "RFC 8445 section 16.1 MAY; off in every profile, libwebrtc keeps its tiebreaker across restarts too",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_remote_address_filter",
         class: NotGovernedClass::Input,
         note: "the host's network policy",
