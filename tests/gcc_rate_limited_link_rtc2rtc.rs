@@ -8,10 +8,10 @@
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
-use rtc::interceptor::{Gcc, Registry};
+use rtc::interceptor::{Gcc, Registry, RtcpRandom, RtcpSessionBuilder};
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    CongestionFeedback, configure_congestion_control,
+    CongestionFeedback, configure_congestion_control, configure_rtcp_reports_with,
 };
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
@@ -24,6 +24,7 @@ use rtc::rtp_transceiver::rtp_sender::{
     RtpCodecKind,
 };
 use rtc::sansio::Protocol;
+use rtc::shared::time::SystemInstant;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::statistics::StatsSelector;
 use std::collections::VecDeque;
@@ -76,6 +77,18 @@ impl RTCRandom for SeededProvider {
     }
 }
 
+/// The RTCP session's random numbers from the seeded provider, as the peer connection draws
+/// them for the session it adds itself.
+struct ProviderRtcpRandom(Arc<dyn RTCCryptoProvider>);
+
+impl RtcpRandom for ProviderRtcpRandom {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        let _ = self.0.random().fill(&mut bytes);
+        u32::from_be_bytes(bytes)
+    }
+}
+
 fn peer(seed: u64, now: Instant) -> Result<RTCPeerConnection> {
     let mut me = MediaEngine::default();
     me.register_codec(
@@ -101,6 +114,16 @@ fn peer(seed: u64, now: Instant) -> Result<RTCPeerConnection> {
         inner: default_provider()?,
         rng: Mutex::new(Rng(seed)),
     });
+    // The RTCP session the peer connection would add (`configure_rtcp_reports`, its random
+    // numbers from the provider), with its NTP times anchored to the run's start rather than
+    // the process-wide anchor: the same seed then writes the same reports in every run.
+    let registry = configure_rtcp_reports_with(
+        registry,
+        RtcpSessionBuilder::new()
+            .with_t_rr_interval(Duration::ZERO)
+            .with_random(ProviderRtcpRandom(provider.clone()))
+            .with_wall_clock(SystemInstant::at(now, Duration::from_secs(1_700_000_000))),
+    );
     Ok(RTCPeerConnectionBuilder::new()
         .with_media_engine(me)
         .with_interceptor_registry(registry)
@@ -290,6 +313,7 @@ fn targets(seed: u64) -> Result<Vec<f64>> {
     world.limited = true;
     let begin = world.now;
     let mut samples = Vec::new();
+    let mut last_target = 0.0;
     for n in 0..7500u32 {
         let now = begin + Duration::from_millis(4 * u64::from(n));
         world.advance(now)?;
@@ -318,7 +342,13 @@ fn targets(seed: u64) -> Result<Vec<f64>> {
                 .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == SSRC)
                 .and_then(|o| o.target_bitrate)
                 .unwrap_or(0.0);
-            samples.push(target);
+            // This source writes above the target whatever it is told, so the pacer tells it
+            // to pause again and again (a target of zero): the controller's target is the
+            // last one read that was not a pause.
+            if target > 0.0 {
+                last_target = target;
+            }
+            samples.push(last_target);
         }
     }
     eprintln!(

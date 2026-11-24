@@ -9,6 +9,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors (congestion control)**: one GCC estimator (`conf/gcc-4-release`). The
+  TWCC-driven interceptor (`GccInterceptorBuilder`, `GccHandle`) had an estimator of its own
+  that departed from draft-ietf-rmcat-gcc-02 in three places: the loss cut was applied to the
+  delay-based estimate (section 6 has a separate loss-based estimate, raised 5% per clean
+  feedback, the sending rate the minimum of the two), over-use multiplied the estimate by 0.85
+  (section 5.5: 0.85 of the received rate), and nothing held the estimate to one and a half
+  times the received rate (section 5.5). Under a 300 kbit/s cap its estimate was cut to the
+  floor by a second of loss and climbed back at 8% a second, and where it stood when the cap
+  went decided the recovery: caps held 14, 17, 20, 23, 26 s gave 945, 1192, 477 to 1316, 549,
+  693 kbit/s twenty seconds later, the same under either retransmission rule (and on the
+  release before). It now runs `Gcc`, the estimator of the default interceptors, behind the
+  same `GccHandle` API (`GccHandle::stats` is new; `GccShared` has a `stats` field): 988 to
+  1352 kbit/s twenty seconds after a cap of any of those lengths, 238 to 266 kbit/s of the
+  300 used under the cap (145 to 200 before), longest freeze 0.83 to 1.24 s.
+  **What an application polling the handle notices**: the estimate no longer runs ahead of
+  what is sent: it is not increased past one and a half times the rate the receiver reports
+  as arriving, and an estimate once reached is kept while less is sent (see the next
+  entry). The estimator this interceptor had before climbed 8% a second whatever was sent:
+  to 1.4 Mbit/s in twenty seconds of audio alone, and on to the maximum. Feedback that stops
+  while packets are sent halves the estimate (`Gcc::with_feedback_timeout`, 500 ms); a REMB or
+  a TMMBR from the peer bounds it.
+- **interceptors (congestion control)**: an application that sends less than the estimate
+  keeps the estimate (`conf/gcc-5-app-limited`). draft-ietf-rmcat-gcc-02 section 5.5
+  introduces `A_hat(i) < 1.5 * R_hat(i)` so that the estimate "does not diverge from the rate
+  at which the sender is actually sending", and lowers the estimate for one reason: "As soon
+  as over-use has been detected". `Gcc` applied the inequality as a clamp after every update,
+  so whenever less was sent than the estimate, with nothing lost and no over-use, the
+  estimate came down to one and a half times what was sent: on audio alone to 106 kbit/s (the
+  floor, with lighter audio: an application was told of a weak connection on a perfect path,
+  and video climbed from the floor at 8% a second every time a camera came back on); on an
+  open link by a step each time a key frame left the 500 ms window of the received rate
+  (1 Mbit/s reached after 20.3 s instead of 15.6 s); after a path change from the start rate
+  of 300 kbit/s down to 178 kbit/s within three seconds. Now an estimate at or above the
+  bound is not increased and is not lowered (`ReceivedRateBound::LimitsIncrease`, the default;
+  libwebrtc limits the increase alike, `modules/remote_bitrate_estimator/aimd_rate_control.cc`
+  lines 235 to 249 and 266); over-use, loss above 10% and feedback that stops while packets
+  are sent lower it as before. The inequality as a clamp is
+  `ReceivedRateBound::Clamps` (`Gcc::with_received_rate_bound`,
+  `GccInterceptorBuilder::with_received_rate_bound`,
+  `DefaultInterceptorOptions::gcc_received_rate_bound`; `BehaviourProfile::StrictRfc` selects
+  it). Measured in `tests/capacity_cap_video_rtc2rtc.rs`, both chains: an open link reaches
+  1 Mbit/s after 15.47 to 15.52 s without a pacer (15.82 s on v0.22.0+brainwires.6) and
+  never steps down; a call whose cameras go on and off never has an estimate under the
+  start rate, and video that comes back starts from the estimate it left (622 to 656 kbit/s
+  when the camera went off, 637 to 674 when it came back five seconds later, where it had
+  fallen to 106); after a path change the estimate does not go under the start rate.
+- **interceptors (congestion control)**: over-use lowers the estimate on every update while
+  it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it (`A_hat = beta * R_hat` in the
+  Decrease state); the default waited a round trip (10 to 200 ms) between cuts, which is
+  libwebrtc's form (`AimdRateControl::TimeToReduceFurther`) and is now the `Chrome` profile's
+  (`gcc.one-decrease-per-round-trip`: `Rfc` `false`, `Chrome` `true`;
+  `Gcc::with_one_decrease_per_round_trip(true)`,
+  `DefaultInterceptorOptions::gcc_one_decrease_per_round_trip`). Both forms hold every test
+  of the workspace. Measured, the draft's form against one decrease per round trip: a
+  300 kbit/s cap under a sender at 1 Mbit/s freezes the video 0.56 to 1.26 s (0.85 to 1.36 s)
+  and leaves the oldest picture 1.68 to 2.48 s old (2.33 to 2.61 s); two flows that share a
+  2 Mbit/s bottleneck have 0.49 / 0.49 of it (0.48 / 0.50) and keep a longer queue, 18.5 ms
+  mean and 93 ms at the 95th percentile (2.8 ms and 10.8 ms); a flow that joins late has
+  0.50 after 40 s (0.49), and 0.50 without probing (0.42); beside a TCP-like transfer the
+  share is 0.22 with a 0.2 s buffer (0.19) and 0.25 with a 0.05 s buffer (0.37)
+  (`rtc-interceptor/tests/rfc8836_multi_flow.rs`).
+- **statistics**: `availableOutgoingBitrate` keeps the congestion controller's estimate
+  through the whole of a pacer pause. While the source was paused, the NACK responder's own
+  target announcements (sent when its retransmission reserve moved) carried the zero target
+  without the estimate that the pacer's carry (`PacerPause`), and the statistic had no value
+  until the pacer next spoke. They carry it now.
+  (`a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer` reads the statistic
+  every 100 ms and counts a report without the member as zero.)
+- **interceptors (congestion control)**: `BandwidthEstimator::on_unreported_packet_sent` (a
+  provided method): the congestion control interceptor calls it, and no longer
+  `on_packet_sent`, for a packet of a stream that negotiated no per-packet feedback (no
+  transport-wide sequence numbers, no RFC 8888). `Gcc` counted such packets as "sent and
+  nothing came back": audio without transport-wide sequence numbers, sent while the video
+  that has them was off, halved the estimate every 500 ms down to the floor.
+- **interceptors (congestion control)**: `Gcc` starts over from its starting estimate on a new
+  path (another candidate pair selected) in the default interceptors too; it kept its
+  estimate and restarted only the delay measurements. libwebrtc restarts likewise
+  (`call/rtp_transport_controller_send.cc:356-357`, `restart_bwe`).
+- **interceptors (pacer)**: the pacer tells the source to pause (a target of zero on
+  `Attribute::TargetBitrateChanged`, `RTCRtpSender::target_bitrates` and the `targetBitrate`
+  stat; `availableOutgoingBitrate` keeps the estimate) while the media it holds would take
+  1 s or more to leave at the target, and what a source that follows the pause wrote is never
+  discarded for its age; the 2 s bound and the whole-frame discard
+  (`RTCPeerConnectionEvent::OnPacerDiscard`, with a key-frame request) apply to media written
+  into a pause. Retransmissions leave ahead of new media, a stream's oldest packet first, and
+  none is made for a packet whose retransmission still waits in the pacer. See "Pausing the
+  source" on `PacerInterceptor` for what a target of zero means and how an encoder resumes.
+- **interceptors (NACK)**: `RetransmissionRateLimit::WithinTarget` (RFC 4588 section 7) is the
+  default of `NackResponderBuilder` and of `DefaultInterceptorOptions::
+  nack_retransmission_rate_limit` in every behaviour profile (libwebrtc at a222406d sets no
+  retransmission rate limiter on video and lowers the encoder target by the protection
+  share: the RFC's form, see the profile table); `UpToTarget` and `Unlimited` are settings.
+  Measured without a pacer (300 kbit/s cap, six seeds, three wall clocks): `WithinTarget`
+  0.83 to 1.24 s longest freeze, 43 to 66 retransmissions of which 14 to 17 were dropped at
+  the capped link; `UpToTarget` 0.84 to 1.29 s, 42 to 78 and 17 to 27.
+
 - **peer connection, interceptors**: the `Performance` behaviour profile and the
   `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
   RFC values); `Performance` takes, for each governed behaviour, the cheaper form an RFC itself
@@ -147,6 +243,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment's case on the virtual clock (three seeds, 500 to 590 kbit/s held; 100 kbit/s with
   `Drain`). `PacerInterceptor::forced` now also counts the overdue packets `Drain` releases.
 
+- **pacer**: with `PacerQueueOverflow::Drop` (the default) the pacer discards whole frames
+  instead of single packets (`conf/gcc-2-frame-discard`). New media that waited the 2 s queue
+  time bound, or the oldest of a full queue, goes with every queued frame of its stream (a frame:
+  one SSRC, one RTP timestamp; nothing on the write path marks a key frame, so none is kept), and
+  the rest of the newest discarded frame when the application writes it later. Retransmissions
+  are still dropped one at a time; audio, audio retransmissions and padding never.
+  `PacerInterceptor::discarded_frames` counts the frames, `dropped` still the packets. Each
+  discard rides the read leg as `PacerDiscard` (exported; stream, sequence numbers, frames,
+  octets, the target then): the NACK responder takes those packets out of its retransmission
+  buffer, its waiting requests and its count of original packets, so a NACK for them is answered
+  by nothing (RFC 4588 section 7), and the peer connection emits the new
+  `RTCPeerConnectionEvent::OnPacerDiscard` ("the source is above the target"). A media stream
+  also gets a Picture Loss Indication (sender SSRC 0) delivered to the application
+  (`RTCMessage::RtcpPacket`, `OnKeyFrameRequest`), so an application that answers PLI writes a
+  key frame at the new target. The pacer's order of service is documented: audio, audio
+  retransmissions, video retransmissions, video and FEC, padding. Measured
+  (`tests/capacity_cap_video_rtc2rtc.rs`, default chain, six seeds, run 45300292535): one discard
+  of 120 to 202 frames per seed and freezes of 4.3 to 10.3 s, worse than the 2.1 to 3.0 s with
+  per-packet drops that the responder resent: the receiver's sample builder waits 256 sequence
+  numbers past a gap nothing fills. Resending the discarded packets after all gives 1.8 to 2.8 s
+  (run 45300304592). libwebrtc discards nothing in its pacer: past an expected queue time of 2 s
+  it pauses the encoder and drains the queue (`control_handler.cc`, `pacing_controller.h`
+  `kMaxExpectedQueueLength`).
+
 - **interceptors**: the NACK generator asks for a lost packet while it is missing (a round trip
   between requests) instead of giving it up after ten requests or two seconds
   (`conf/gcc-1-cap-recovery`). The limits came with v0.22.0+brainwires.6 (`ee4217b2`) and froze
@@ -161,14 +281,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NACK_SUGGESTED_*` (they are not the defaults).
 - **interceptors**: the NACK responder holds its retransmissions to the congestion controller's
   target (RFC 4588 section 7), read from `Attribute::TargetBitrateChanged` on the read leg:
-  `NackResponderBuilder::with_rate_limit(RetransmissionRateLimit)`. The default, `UpToTarget`
-  (libwebrtc's rule), keeps the retransmissions alone under the target over the last second;
-  `WithinTarget` is the RFC's form (they take what the original packets leave of it);
-  `Unlimited` is the earlier behaviour. Without a congestion controller nothing is held back.
-  Measured by `tests/capacity_cap_video_rtc2rtc.rs`: unlimited, about 300 retransmissions (five
-  times the link) of which three in four were dropped at the bottleneck; `UpToTarget`, 66 of which
-  12; the RFC form, too few to repair with while the encoder sat at the controller's floor (a
-  2.7 to 3.1 s freeze).
+  `NackResponderBuilder::with_rate_limit(RetransmissionRateLimit)`. The default is the RFC's
+  form, both halves of section 7 (`conf/gcc-2-rfc-retransmission`): `WithinTarget`, the
+  retransmissions take what the original packets leave of the target over the last second, and
+  while they wait or were sent within it the target reported for the original media is lowered
+  by a retransmission reserve (what the waiting requests need within a round trip, or the
+  retransmission rate in use, at most half the target: `with_max_reserve_fraction`,
+  `MAX_RETRANSMISSION_RESERVE`). The lowered target reaches the application as the
+  `TargetBitrateChanged` the responder passes on (lowered in place, or on a carrier of its own
+  when only the reserve moved) and through `GccHandle::target_bitrate_bps`; the estimate itself
+  is `GccHandle::estimate_bps`. A request that does not fit now waits, oldest first, and leaves
+  when the window has room (the responder's `poll_timeout` is that instant), while the receiver
+  keeps asking for it (`PENDING_REQUEST_LIFETIME`). Near the controller's floor (the target less
+  the reserve under the controller's minimum, which GCC now announces with `MinimumTarget`) the
+  retransmissions take the window's room first. `UpToTarget` (a rate limiter on the
+  retransmissions alone at the target, not lowering the original media) and `Unlimited` (the
+  earlier behaviour) are settings. Without a congestion controller nothing is held back.
+  Measured by `tests/capacity_cap_video_rtc2rtc.rs` (300 kbit/s cap, six seeds), longest
+  freeze: the default 1.33 to 1.44 s with 65 to 70 retransmissions of which 11 to 14 dropped at
+  the link; `UpToTarget` 1.31 to 1.43 s (61 to 65, 11 to 12 dropped); unlimited 1.04 to 1.58 s
+  (257 to 367, three in four dropped); the RFC sharing without the lowered target 2.46 to 2.47 s,
+  without the floor rule 2.46 to 2.47 s, with it only at the exact minimum 3.7 to 4.8 s. The test
+  now also bounds the retransmissions (at most 100 through the cap). API: `GccShared` gained
+  `estimate_bps` and `retransmission_reserve_bps` (its `target_bitrate_bps` is now the lowered
+  target); new `RetransmissionReserve`, `MinimumTarget`, `NackResponderInterceptor::next_release`.
+  A request the per-stream budget (one retransmission per original sent) refuses is still not
+  kept.
 
 - **media**: open media MUST rows (`conf/media-25-payload-rows`).
   - One SSRC across clock rates (the default since `conf/media-23-clock-rate-default`):
@@ -557,6 +695,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
 
+### Known limits
+
+- **interceptors (congestion control), a capacity drop that meets a higher rate**: without
+  the downward steps the estimate of an open link is at 1.41 Mbit/s after twenty seconds
+  where it was at 0.99, and a path that drops to 300 kbit/s at that moment costs more than
+  it did at the lower rate. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
+  (`a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`; a chain without a
+  pacer, six seeds), against v0.22.0+brainwires.6 on the same test, whose estimator met the
+  same drop at 1.38 Mbit/s: longest time without a usable frame 1.28 to 1.32 s (0.98 to
+  1.23 s), oldest picture shown 4.40 to 4.51 s (4.24 to 4.39 s), 92 to 101 retransmissions of
+  which 23 to 32 are dropped at the path's queue (62 to 67, 11 to 12); the capped path
+  carries 246 to 254 kbit/s (199 to 206) and the estimate is at 1086 to 1361 kbit/s twenty
+  seconds after the capacity is back (473 to 1501: two seeds of six at 473 and 737). So
+  three figures are behind the earlier release at this rate (the freeze by 0.1 to 0.3 s,
+  both under 2 s; the picture's age by up to 0.3 s; half again as many retransmissions) and
+  two are ahead. Cause: for some 0.45 s (the path's 300 ms of queue, its delay and a feedback
+  interval) nothing can tell the sender; the first cuts follow the received rate, whose
+  500 ms window still holds what arrived before the drop (803, then 461, then 252 kbit/s).
+  The earlier estimator cut its own estimate to the floor within a second and a half and
+  sent less into that queue, at the price of 200 kbit/s under the cap and a recovery that
+  depended on where the estimate stood when the capacity came back. The same drop met at
+  1 Mbit/s: 0.56 to 1.26 s, 1.68 to 2.48 s, 39 to 47 retransmissions. Traced repair by
+  repair (hosted runs 45341865225, 45342290711, six seeds), the extra retransmissions have
+  two causes. (1) Fresh repairs sent into a queue that is still full: 20 to 22 of the 23 to
+  32 dropped are repairs made 0.42 to 0.62 s after their original, in the first 0.2 s after
+  the first NACKs, while the path's queue still holds media sent at the old rate (the
+  delay-based detector does not read the queue filling within a feedback interval; a known
+  limit of its own). (2) Duplicate repairs: 24 to 28 of the 92 to 101 retransmissions repeat
+  a packet whose first repair was still in flight when the receiver asked again (it waits up
+  to 300 ms in the path's queue); the request waits for room in the rate limit and is
+  answered 0.01 to 0.8 s after that first repair arrived, and, oldest packet first, ahead of
+  first repairs of newer gaps. Giving up old repairs and asking for a key frame instead does
+  NOT help a receiver that plays in order (this test's, the engine's `SampleBuilder` without
+  a time bound): measured with repairs older than 1 s declined and a key frame asked for
+  (hosted run 45342372315), the video froze for 8.36 to 8.49 s and the oldest picture was
+  7.55 to 7.77 s old, because the receiver holds the gap for its whole packet window and the
+  key frame waits behind it. Planned after this release: no repeat repair of a packet whose
+  first repair transport-wide feedback reports received, and first repairs ahead of repeats.
+- **interceptors (pacer), a sudden drop of the path's capacity**: with the default
+  interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
+  after a sudden drop, though it never stops for more than 2 s. Measured in
+  `tests/capacity_cap_video_rtc2rtc.rs` (a call at 2.5 Mbit/s whose path drops to 300 kbit/s;
+  six seeds on three wall clocks): longest time without a usable frame 1.38 to 1.90 s, oldest
+  picture shown 5.95 to 8.56 s (without a pacer: 0.83 to 1.24 s and 2.26 to 3.21 s). Cause:
+  the path drops video packets before the estimate has followed it (55 to 62 are asked for
+  on six seeds); they are retransmitted inside the estimate (100 to 250 kbit/s, of which the
+  audio takes 76), ahead of the media the paused source left in the pacer, and a receiver
+  that plays in order shows each repaired frame as it completes. It is the same under every
+  retransmission rule: the pacer holds repairs to the estimate, where a chain without one
+  lets them leave in a burst while the estimate is still falling. (With over-use lowering
+  the estimate on every update, the default since: 0.97 to 1.91 s and 5.59 to 9.84 s on six
+  seeds; 5.56 to 10.23 s on six seeds and three wall clocks, the seeded runs moving with the
+  length of the ICE agent's SOFTWARE text.) Traced repair by repair (hosted runs 45341865225, 45342290711): 90 to 103
+  retransmissions, none dropped at the path, of which 35 to 41 repeat a packet whose first
+  repair had already arrived (answered 0.01 to 1.1 s after it; the request was made while
+  that repair was still in flight), and these share the estimate with the first repairs of
+  newer gaps. The figure the test printed as retransmissions in this chain (250 to 420) also
+  counted the probe clusters' padding on the RTX stream (154 to 330 packets); the test now
+  counts the two apart. Giving up old repairs and asking for a key frame instead makes it
+  worse for a receiver that plays in order (measured, hosted run 45342372315: frozen 8.03 to
+  8.53 s, oldest picture 7.15 to 7.53 s; the receiver holds the gap for its whole packet
+  window). Planned after this release: no repeat repair of a packet whose first repair
+  transport-wide feedback reports received, and first repairs ahead of repeats.
+
 ### Behaviour changes
 
 - **audio** (`conf/ffi-mp-5`): the Opus sender's ceiling, without a `maxaveragebitrate`
@@ -578,6 +780,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream). `rtc_audio::engine::AudioSender` sets it, so audio takes what its encoder can use
   and video the rest. Test:
   `an_encoders_ceiling_caps_its_share_and_leaves_the_rest_to_the_others`.
+- **peer connection**: automatic SRTP re-keying has a tie-break (`conf/rekey-1-glare`). Two
+  peers with the same key lifetime reached the lifetime warning on the same packet and both
+  offered a new DTLS association, so their offers always crossed. Now the DTLS client of the
+  association asks at the warning (a sixteenth of the lifetime left) and the DTLS server only
+  once a thirty-second is left (`RTCEventInternal::SrtpRekeyingDue`), if no new association has
+  come by then; the client's offer gives the server new keys first. One renewal at a time: no
+  re-keying is asked for while a new association of any transport is asked for, being
+  negotiated or being established, and one that waited is asked for when the connection is
+  back in stable without a new association. New setting
+  `SettingEngineBuilder::with_srtp_rekeying_dtls_client_first(bool)` (default `true`; `false`
+  is the previous behaviour, both at the warning). A server whose peer does not re-key by
+  itself now asks with half the margin it had.
+- **peer connection**: `poll_event` no longer hands out a `negotiationneeded` whose reason
+  went before the application read it (W3C webrtc-pc "Updating the Negotiation-Needed flag":
+  the queued task checks again, "If connection.[[SignalingState]] is not "stable", abort", and
+  clears the flag when nothing is to be negotiated). Before, the event queued when a rollback
+  brought the connection back to stable with a renewal still wanted was handed out after the
+  answer to the peer's offer had given the renewal, and the application made a needless offer;
+  likewise the event queued before a first exchange that the application made without reading
+  events (`tests/rtcp_session_rtc2rtc.rs::a_sender_moves_to_a_new_ssrc_after_a_collision` now
+  counts one event, the new SSRC's).
+- **congestion control, peer connection**: a new selected candidate pair is a new path for the
+  congestion controllers also when the datagrams keep their addresses
+  (`conf/gcc-2-path-change`). The peer connection reads `PathChanged` (rtc-interceptor, an
+  empty-RTCP carrier on the read leg, tagged with the transport's `RtpSession` when there are
+  several) into the chain each time a transport's ICE agent selects another pair after its
+  first; the TWCC-driven GCC (`GccInterceptor`) starts over from its start rate and forgets the
+  send times of the packets sent before, and the congestion control interceptor calls
+  `BandwidthEstimator::on_path_change` and forgets its send history
+  (`History::forget_sent`), so the packets sent into the old path are not counted as the new
+  path's loss. Both controllers followed only the addresses inbound packets arrive between,
+  and the congestion control interceptor counted the old path's packets as lost when it did
+  see a change; that detection stays, and now forgets the history too. Why: ParolNet's
+  `an_ice_restart_follows_a_machine_to_another_network` hands every datagram over with one
+  placeholder pair, so neither detection fired: after a 4 s outage one transport-wide feedback
+  reported a loss of 0.985 (the packets sent into the dead path), GCC cut its estimate from
+  437 to 242 kbit/s and the call froze 7 s. A TURN relay can keep the addresses too. libwebrtc
+  restarts its estimate on a route change and has its feedback adapter report only the packets
+  sent on the new route (`RtpTransportControllerSend::OnNetworkRouteChanged`,
+  `TransportFeedbackAdapter::SetNetworkRoute`), and leaves the first connection alone, as here.
+  Tests: `tests/capacity_cap_video_rtc2rtc.rs`
+  `an_ice_restart_with_the_same_addresses_starts_the_estimate_over` (ParolNet's chain) and
+  `..._counts_no_old_loss_in_the_default_chain`, an ICE restart after a 4 s outage with the
+  addresses unchanged; unit tests in `gcc/twcc_gcc` and `tests/congestion_control_limits.rs`.
+  Measured there (hosted run 45299712792): ParolNet's chain restarts at 300 kbit/s from 638
+  and never goes under 300 kbit/s after the switch; without the peer connection's carrier the
+  estimate stays at 638 kbit/s through the switch and one feedback cuts it (run 45300194903),
+  and with the restart but the old send times kept it falls to 153 kbit/s (45300201020). The
+  default chain counts no loss after the switch; with its history kept, a smoothed 18 %
+  (45300207507).
+
 - **peer connection, interceptors**: behaviour profiles after the train-12 and train-13
   (sctp-15, mt-9) merges (`conf/profile-3-on-master`). Each setting master added is classified, its libwebrtc value
   read at `a222406d` (file and lines in `docs/behaviour-profiles.md`):
@@ -764,6 +1017,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media**: `SampleBuilder::with_max_gap_wait(Duration)`, an optional wall-clock bound on a
+  gap (off by default; behaviour unchanged without it). `max_late` bounds the wait for a missing
+  packet in packets, which is a time only at one bit rate: a receiver with `max_late` 256 froze
+  8.6 s at 100 kbit/s on a gap that never filled (`tests/capacity_cap_video_rtc2rtc.rs`). With
+  the bound, once the oldest missing packet has been missing that long (from the arrival of the
+  first packet after it), the builder gives the gap up as `max_late` does (the incomplete
+  sample and the missing packets dropped, counted in the next `Sample::prev_dropped_packets`,
+  building resumed at the next packet that starts a sample) and raises a key-frame request
+  (`take_key_frame_request() -> bool`; `skipped_gaps() -> u64` counts them). Checked on `push`
+  and `pop` with their `now`; `poll_timeout() -> Option<Instant>` names when to call `pop`
+  while a gap waits (sans-I/O, no clock read). `docs/receiver-gap-policy.md` updated
+  (`a_gap_that_never_fills_is_skipped_at_the_bound_with_a_key_frame_request`,
+  `a_gap_repaired_before_the_bound_changes_nothing`,
+  `without_the_bound_a_gap_is_held_until_max_late`,
+  `the_deadline_is_the_oldest_gap_plus_the_bound`).
+
+- **peer connection**: `RTCPeerConnection::unsent_media_packets()`: RTP and RTCP written but not
+  sent (no ICE path, or an SRTP index already used), so media the engine cannot send is counted,
+  not lost unseen (`conf/rekey-2-no-loss`). `rtc-stream-driver`: `PeerDriver::unsent_datagrams()`
+  for datagrams no socket sent.
 - **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
   (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
   set of local candidates, on transport addresses the previous DTLS association did not use
@@ -885,6 +1158,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+- **interceptors, peer connection**: a wall-clock anchor per peer connection
+  (`conf/det-1-wall-clock`). Every interceptor that writes NTP times takes
+  `with_wall_clock(SystemInstant)`: `RtcpSessionBuilder` (sender reports, XR receiver reference
+  times), `SenderReportBuilder`, `ReceiverReportBuilder`, `Rfc8888Builder` (report timestamps)
+  and `NtpTimestampBuilder` (the RFC 6051 header extension); `DefaultInterceptorOptions::wall_clock`
+  gives one anchor to all of them in the default set. Without it nothing changes: the
+  process-wide `SystemInstant::shared`, taken at its first use, which is right for a process with
+  one clock. Under virtual time it is not: a second run in the same process mapped its instants
+  to NTP times later by the real time since the first run, with different fractions of a
+  second, so two runs of one seed could differ (`circuit_breaker_reordering_rtc2rtc::the_same_seed_gives_the_same_run`
+  failed 3 of 6 times on a branch whose NACK retransmission rule is sensitive to the round trip
+  the reports give; with a per-run anchor 6 of 6 passed). The seeded harnesses
+  (`circuit_breaker_reordering_rtc2rtc`, `gcc_rate_limited_link_rtc2rtc`) anchor each run at
+  its start. `the_same_seed_gives_the_same_bytes_after_a_pause` runs one seed twice, 1.5 s of
+  real time apart, and compares every RTP and RTCP packet both peers' chains hand to SRTP,
+  byte for byte (the SRTP datagrams themselves are keyed by DTLS ephemeral keys no seed reaches;
+  the CNAME, the media and RTX SSRCs and the RTX sequence numbers, which the engine draws from
+  `rand`, are fixed or masked); with the process-wide anchor 473 of the sender's 482 packets
+  differ.
 
 ### Added
 
@@ -956,6 +1248,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sans-I/O time boundary allows the one anchor read the nanoseconds need.
 
 ### Bug Fixes
+
+- **stream-driver**: a TCP connection from a socket to itself is a failed connection
+  (`conf/flake-3-self-connect`). Connecting from an ephemeral port to a loopback port nothing
+  listens on, Linux can choose that very port as the source, and simultaneous open (RFC 9293
+  section 3.5) connects the socket to itself; the driver reported `Connected` (seen in
+  `a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer`, `Connected { local:
+  127.0.0.1:45149 }` to 127.0.0.1:45149). Every stream the driver connects (ICE-TCP active and
+  simultaneous-open candidates, TURN and STUN over TCP and TLS) goes through one connect path,
+  which now closes such a socket and reports `ConnectFailed`. The test's closed port is now
+  the local end of an established connection: refused on Linux, macOS and Windows (a bound,
+  not listening socket is dropped silently on macOS), and no client can take it as its source
+  port. `a_socket_connected_to_itself_is_a_failed_connection` connects 127.0.0.1:P to itself.
+- **peer connection**: a DTLS server that alone has a short SRTP key lifetime failed the call
+  when the re-keying took longer than half the margin (`conf/rekey-3-server-margin`, found by
+  ParolNet's `turn_rekey::a_relay_only_call_re_keys_on_new_allocations`, a relayed call: 9600
+  packets at 188 a second, so 3.2 s of margin, and about 2 s to re-key through TURN). The
+  tie-break of `with_srtp_rekeying_dtls_client_first` had the server wait for the client's offer
+  until a thirty-second of the lifetime was left, half the margin; lifetimes are local, so the
+  server cannot know that the client re-keys at all. The server now waits at most 500 ms and at
+  most an eighth of the time its keys have left at their packet rate (not at all without packets
+  to measure it by), then asks itself; glare is resolved by rollback as before. The lifetime docs
+  state the margin a re-keying needs (`16 x packet rate x re-keying time`), and a margin under
+  2 s at the warning is logged. Test:
+  `tests/srtp_rekeying_glare_rtc2rtc.rs::a_dtls_server_alone_with_a_short_lifetime_re_keys_in_time_on_a_slow_path`.
+- **stream-driver** (`conf/deps-1-hickory`, security): the optional `dns-records` feature
+  takes hickory-resolver 0.26.2 or later instead of 0.25, whose hickory-proto 0.25.2 and
+  hickory-resolver 0.25.2 carried 17 RustSec advisories. One is reachable from the driver's
+  lookups (A, AAAA, SRV and NAPTR from the system's name servers): RUSTSEC-2026-0491, memory
+  amplification from the record counts of a DNS response's header, which any name server the
+  client asks, or anyone spoofing its answers, could send (fixed in 0.26.2). Thirteen concern
+  DNSSEC validation, which the feature does not compile in (no `dnssec-*` feature), and are
+  not present in 0.26 (`unaffected >= 0.26.0-beta.1`); RUSTSEC-2026-0487, -0489 and -0490
+  parse zone files and SVCB text, a server's work (fixed in 0.26.2); RUSTSEC-2026-0119 is
+  quadratic name compression when encoding, here only of the client's one-name queries (fixed
+  in 0.26.1). The driver follows 0.26's API (`Lookup::answers`, public record fields,
+  `ResolverBuilder::build` returning a `Result`); hickory 0.26 declares Rust 1.88, within the
+  workspace's 1.89. New test
+  `srv_and_naptr_records_and_each_address_family_come_back_whole`: the lookups against a name
+  server on loopback, the first test of the feature. `audit.yml` passes `--workspace` to all
+  three cargo-deny checks, the library advisory check included: they read every member's
+  graph, not the root package's alone.
+- **peer connection**: one RTP packet lost per SRTP re-keying when the call ran over ICE-TCP
+  (`conf/rekey-2-no-loss`; the intermittent `rtc-stream-driver` re-keying loss, 1 to 17% of
+  runs). The re-keying's ICE restart moves the call to a new pair; the controlled side selects
+  it first (on the nomination) and closed the TCP connection of the replaced pair at once (RFC
+  6544 section 8), while the controlling side, until its own selection one round trip later,
+  still wrote on it. The connection of the replaced path now stays open while the agent takes
+  data on it (`Agent::retired_media_path`, 5 s; RFC 8445 section 12.2). Test:
+  `tests/ice_tcp_streams_rtc2rtc.rs::moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched`.
+- **peer connection**: during a re-keying, SRTP packets the peer already protects with the new
+  association's keys (it completed its handshake first) were dropped until this side's
+  handshake completed. They are held (at most 256, for 2 s) and read with the new keys (RFC 5764
+  section 4.3: "store multiple SRTP keys sets during a rekey in order to avoid the need for
+  receivers to drop packets for which they lack a key"). Test:
+  `tests/srtp_rekeying_glare_rtc2rtc.rs::packets_under_the_new_keys_before_the_handshake_completes_are_held_not_dropped`.
+- **peer connection**: SRTP re-keying offers that cross (both peers re-key at once, glare)
+  ended with no new DTLS association, and the call failed when the old keys ran out
+  (`conf/rekey-1-glare`, reported from ParolNet's `m1::srtp_re_keying_keeps_the_call`). Two
+  causes, both in the polite peer's rollback followed by its answer to the other offer
+  (W3C perfect negotiation):
+  - `Agent::revert_restart` announces the selected pair it goes back to. That announcement
+    was read only after the answer had restarted ICE and installed the new association, so
+    the DTLS client started the new handshake on the previous generation's path, where the
+    peer's previous association answered: the client went "connected" at once, the peer's new
+    endpoint (installed when it applied the answer) waited in "connecting", and the next key
+    expiry failed the transport. The ICE handler now ignores a selected-pair announcement that
+    is no longer the agent's selection (RFC 8842 section 5.1: a new association runs on a new
+    3-tuple).
+  - A rolled-back local offer kept the `a=tls-id` it had staged for its new association, and
+    the answer to the peer's offer carried it. RFC 9429 section 5.7 ("Any resources or
+    candidates that were allocated by the abandoned local description are discarded") and RFC
+    8842 section 5.3 (the answer carries "a new unique attribute value"): the rollback
+    unstages it, and an answer never takes a value an offer of this side staged (one created
+    and not applied is put aside and back if the peer's offer is rolled back).
+  Tests: `tests/srtp_rekeying_glare_rtc2rtc.rs` (explicit and implicit rollback, either side
+  polite, staggered offers, several transports, the tie-break),
+  `transport/dtls/mod.rs::a_rolled_back_offer_takes_its_tls_id_back`, and through the driver's
+  real sockets `examples/stream-driver/tests/peer.rs::crossing_re_keying_offers_are_rolled_back_and_carry_every_packet`.
+- **peer connection**: the SRTP handler reads the events of the contexts a new handshake
+  replaces before replacing them (a discarded packet is still reported), and drops a lifetime
+  warning of a key that is now retired, which would have asked for a renewal the handshake had
+  just given.
+- **rtc-stream-driver**: `PeerDriver` handles a rolled-back local offer. The offer's
+  `OnLocalCandidatesNeeded` had retired the previous sockets and bound new ones; the rollback
+  takes the restart back, but the driver kept the previous sockets marked retired (to be
+  closed after the next selection, although they carry the media again) and the new ones open
+  for good. Back in the stable state the driver now matches its sockets to the candidates the
+  transports hold: a retired socket the transport holds again is not retired, a socket whose
+  candidate the transport dropped is closed.
+- **interceptors** (RFC 3550 section 6.4.1, RFC 8083 section 4.3,
+  `conf/gcc-4-rr-pacer-drops`): media the pacer discarded (`PacerQueueOverflow::Drop`, the
+  default) was taken for path loss. Those packets were numbered by the application's
+  packetizer before the pacer dropped them, so the receiver counts them as lost in its receiver
+  reports, and two interceptors wire-ward of the pacer read those reports: the congestion
+  controller gave the fraction lost to the loss-based controller while there is no per-packet
+  feedback (`Gcc` backs off on it), and the circuit breaker averaged it, with the cumulative
+  count, into the congestion breaker's loss event rate (a sender above the target could be
+  ceased for its own discards). Each now keeps, per local SSRC, the sequence numbers it never
+  saw leave (the gaps in what it wrote toward the wire; a number that leaves later, a
+  retransmission without RTX, is sent after all; RTX and FEC SSRCs are their own sequence
+  spaces), and takes them out of the loss of the interval a report covers (from the previous
+  report's extended highest sequence number to this one's): the loss less the numbers never
+  sent, over the packets that left. Bounded: what a report covered is forgotten, at most 8192
+  numbers are kept per stream, and a jump of 3000 or more (RFC 3550 A.1's MAX_DROPOUT) is not
+  recorded. TWCC and RFC 8888 feedback, which never name a packet that did not leave, are
+  unchanged
+  (`sequence_numbers_the_pacer_discarded_are_not_loss_to_the_loss_based_controller`,
+  `sequence_numbers_discarded_across_the_wrap_are_not_loss_to_the_loss_based_controller`,
+  `gcc_does_not_back_off_on_reported_loss_of_numbers_the_pacer_discarded`,
+  `reported_loss_of_sequence_numbers_never_sent_does_not_trip_the_congestion_breaker`,
+  `reported_loss_of_sequence_numbers_never_sent_across_the_wrap_does_not_trip_the_congestion_breaker`,
+  and the `never_sent` unit tests).
+- **sctp, data channels** (RFC 6525 5.1.2 A3, 5.2.2 E2/E4; RFC 8831 6.7;
+  `conf/sctp-16-delivery-stall`): a data channel opened right after another one was closed in
+  the middle of a transfer stalled: its messages up to one Stream Sequence Number arrived and
+  none after, all acknowledged (ParolNet `file_tamper`, about 1 run in 10). The peer asked to
+  reset the stream answered with the reset of its own direction at once, bundled with the
+  response, with a Sender's Last Assigned TSN of its next TSN minus 1, while the rest of a
+  message written to the stream before it (and any message after it) was still in its send
+  queue. That data then went out above the Sender's Last Assigned TSN with the stream's old
+  numbers; the receiver, as RFC 6525 5.2.2 E2/E4 says, took it for data of the stream after
+  the reset, and the next channel, which takes the lowest free id and so the same stream, had
+  its message with that number put together with it, never complete, every message after it
+  waiting behind. Three changes:
+  - Sender: the answering reset leaves with the response only when nothing written to the
+    stream waits in the send queue; otherwise it waits behind that data, as a reset this side
+    asks for itself does (`the_answering_reset_covers_the_message_half_sent_on_the_stream`).
+  - Receiver: a fragment that does not begin a message, when every TSN below it has arrived
+    and none of them is held with it, can never be part of a complete message (RFC 9260 6.9
+    step 2; RFC 8260 2.1 for I-DATA). It is dropped (as it arrives, or when the cumulative TSN
+    passes the TSN it lacked), stays acknowledged, makes no stream, and is logged once per
+    run; data held for a deferred reset is released in TSN order. A peer with the old sender
+    no longer stalls the next channel on the stream with the rest of a half-sent message
+    (`fragments_sent_after_a_reset_with_the_old_numbers_do_not_hold_the_next_channel`,
+    `fragments_out_of_order_are_not_taken_for_orphans`). Whole messages such a peer sends
+    after its reset with the old numbers cannot be told from the next channel's own and are
+    not caught.
+  - Receiver: what arrives on a stream this side has closed (`Stream::stop` / `Stream::close`,
+    the close of a data channel) is dropped, acknowledged, and what it held is dropped at the
+    close: nothing can read it. Held, it took the receive window for good, so a peer sending
+    the data it had queued before its reset could fill the window and never send that reset,
+    and a complete message held the peer's reset "In progress": the close never completed and
+    the stream id was never freed (`a_channel_opened_on_the_stream_of_one_just_closed_gets_every_message`).
+    It is abandoned with the stream (RFC 8831 6.7, "delivered (or abandoned)"; W3C webrtc-pc
+    fires no message on a channel that is closing).
+  - Tests: the reported run pinned (`a_channel_reopened_on_a_reset_stream_gets_every_message`),
+    a 96-run close/reopen sweep (where the close falls, DATA or I-DATA, ordered or unordered,
+    whole or in parts, send backlog, clean or lossy and reordering link;
+    `closing_and_reopening_a_channel_on_its_stream_never_stalls`), the same through two peer
+    connections (`tests/data_channel_reopen_rtc2rtc.rs`) and against webrtc 0.17 sending
+    (`tests/data_channels_reopen_interop.rs`, a 23rd interop target). A class guard on the SCTP
+    sweeps: once the link is quiet and the application has drained, neither side may hold
+    anything acknowledged and undelivered (`Association::undelivered`, test-only; on the
+    672-run zero window sweep and the close/reopen sweep).
 
 - **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
   dropped the local candidates (a new DTLS association on new ports), the side that selected
@@ -1199,6 +1645,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released section of `CHANGELOG.md` differs from that section at the latest `v*` tag: merges
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
   0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
+- **Release preparation** (`conf/publish-3-release-prep`): `docs/releasing.md` has the order of
+  operations for 0.1.0 (merged and green, rename commit, release commit, tag, dry runs,
+  publish, repository rename, detach from the fork network), what each workflow does on a tag
+  (`release.yml` alone runs; it makes the GitHub release and publishes nothing), the
+  brainwires.6 known issues with their state on `master` for the release notes, and an
+  "after publishing" checklist (docs.rs builds, yanking, announcing the rename). The tag now
+  comes before publishing. The README's status follows `COUNTS.md` (111 specifications; MUST
+  99.7 % RFC behaviour tested, 16 MUST rows open) and its crate table says what is not
+  published.
 
 - **New crates' packaging** (`conf/publish-2-ffi-mp-parts`, for the owner of `rtc-audio`,
   `rtc-devices`, `rtc-ffi` and `release-binaries.yml`): `rtc-audio` and `rtc-devices` gain the
@@ -1216,6 +1671,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes for integrators
 
+- **A rolled-back offer after `OnLocalCandidatesNeeded`** (`conf/rekey-1-glare`): a local
+  offer that is rolled back takes back its ICE restart and the event it fired (RFC 9429
+  section 5.7). Keep the previous sockets (no longer retired), close or keep aside the ones
+  bound for the event, and gather on the next event (the answer to the peer's colliding offer
+  fires one when it sets up a new association). The crate's "Gathering" section says how;
+  `rtc-stream-driver`'s `PeerDriver` does it.
 - **A transport that needs new candidates** (`conf/mt-10-gather-anew`): since the RFC 8842
   section 5.1 default, a new DTLS association (an ICE restart for one: `renew_dtls_association`,
   automatic SRTP re-keying, a peer's new `a=tls-id`; or the transport set up after an answer
@@ -1268,10 +1729,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs these with the `libopus` feature (CMake; installed from PyPI where the runner has none).
 - **ci** (`conf/ffi-mp-5`): `audit.yml`'s whole-workspace advisory check and its licences /
   bans / sources check pass `--workspace`, so they read every member's dependency graph (they
-  read the root package's alone, without `rtc-audio`, `rtc-devices` or `rtc-ffi`). The
-  library advisory check (`.github/deny-library.toml`) keeps the root package's graph: with
-  `--workspace` it reaches hickory-resolver 0.25 through `rtc-stream-driver`'s optional
-  `dns-records` feature and fails on its advisories, which are left to the owner.
+  read the root package's alone, without `rtc-audio`, `rtc-devices` or `rtc-ffi`).
+- **rtc**: the paced chain's oldest-picture bound in the capacity-cap port is 11.75 s
+  (`conf/gcc-8-paced-picture-guard`). It was 10 s, 1.6 % above the most one tree measured: with
+  the ICE agent's SOFTWARE text 14 bytes long instead of 27 (the crate rename), seed 3 of the
+  full matrix (`RTC_CAP_FULL`) showed a picture 10.23 s old. Measured on six seeds and three
+  wall clocks with either text: 5.56 to 10.23 s; the bound is that maximum and some 15 %. It
+  guards the documented known limit (a sudden drop under the pacer, see Known limits)
+  against gross regression; the freeze, retransmission and recovery assertions hold the call
+  more tightly.
+- **rtc**: the capacity-cap port's recovery is measured over a window and, for the paced
+  chain, against the estimate the cap left (`conf/gcc-7-recovery-mean`). A single reading 20 s
+  after the cap fell on the estimate's sawtooth: renaming the crates shortened the ICE
+  agent's STUN SOFTWARE text from 27 to 14 bytes, which moved the seeded run's packet sizes and
+  timing, the paced chain's target at the cap's end on seed 1 from 212 to 132 kbit/s, and its
+  reading 20 s later from 1137 to 632 kbit/s (under the 800 kbit/s bound). After the cap a
+  source that follows its target is not application limited, so no probe is due, and the
+  estimate climbs from where the cap left it at the 8 % a second of draft-ietf-rmcat-gcc-02
+  section 5.5. Every run now goes on to 25 s after the cap and records the target's lowest,
+  mean and highest from 15 to 25 s; the 800 kbit/s bounds of the chains without a pacer are
+  on that mean. `a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer`
+  asserts that the target never falls from 1 s after the cap on and that its mean from 15 to
+  25 s is at least nine tenths of the draft's climb from the target at the cap's end
+  (measured 0.99 to 2.81 times it, six seeds on three wall clocks, with either SOFTWARE text).
 - **rtc** (`conf/mt-10-gather-anew`): rtc-to-rtc tests driven by `OnLocalCandidatesNeeded`:
   `transport_close_rtc2rtc.rs::the_new_transport_asks_for_candidates_on_new_addresses_and_the_event_drives_the_gathering`
   (stop all, then a new transceiver; the twin of the browser cell) and

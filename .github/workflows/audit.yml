@@ -34,19 +34,16 @@ jobs:
       - name: Resolve dependencies afresh
         run: cargo generate-lockfile
       # Fails on any advisory (vulnerability, unmaintained, unsound, yanked) reachable from the
-      # library: normal and build dependencies, all features. No ignores. The root package's
-      # graph only: with `--workspace` (every member) it reaches hickory-resolver 0.25 through
-      # rtc-stream-driver's optional `dns-records` feature, whose advisories (several with no
-      # fixed release) are the owner's to settle before this check can cover every member.
+      # libraries: every workspace member's normal and build dependencies (`--workspace`;
+      # without it cargo-deny reads the root package's graph alone), all features. No ignores.
       - name: Library dependency graph
-        run: cargo deny --config .github/deny-library.toml check advisories
-      # The whole workspace (`--workspace`: every member's graph, not the root package's alone),
-      # dev-dependencies and examples included; ignores in deny.toml are
+        run: cargo deny --workspace --config .github/deny-library.toml check advisories
+      # The whole workspace (`--workspace`: every member's graph), dev-dependencies and
+      # examples included; ignores in deny.toml are
       # limited to advisories that cannot reach the library, each with its reason.
       - name: Whole workspace
         run: cargo deny --workspace --config deny.toml check advisories
       # Permissive licences only (no GPL, LGPL or AGPL), crates.io as the only source; every
-      # member and every feature, so optional dependencies (webpki-roots, rtc-audio's libopus
-      # binding, rtc-devices' cpal) are covered.
+      # feature, so optional dependencies (webpki-roots) are covered.
       - name: Licences, bans and sources
         run: cargo deny --workspace --all-features --config deny.toml check licenses bans sources

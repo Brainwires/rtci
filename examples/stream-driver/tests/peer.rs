@@ -450,3 +450,135 @@ async fn with_the_opt_out_the_driver_keeps_its_sockets() -> Result<()> {
     }
     Ok(())
 }
+
+/// Both sides with the same key lifetime and each asking at the lifetime warning
+/// (`with_srtp_rekeying_dtls_client_first(false)`): `a`'s outbound key and `b`'s inbound key
+/// near their end on the same packet, both raise negotiation-needed and both offer a new
+/// association (glare). The application does what W3C "perfect negotiation" does: `a`, the
+/// polite side, rolls its offer back and answers `b`'s; `b` ignores `a`'s offer, and the
+/// candidates `a` gathered for it, which `b` refuses. The rollback takes back `a`'s restart
+/// (RFC 9429 section 5.7) after its driver already bound a socket for it: the driver closes
+/// that socket and keeps the previous one carrying the media; the answer's new association
+/// moves both sides to new sockets. Every packet arrives, and each side ends on one socket,
+/// a new one.
+#[tokio::test]
+async fn crossing_re_keying_offers_are_rolled_back_and_carry_every_packet() -> Result<()> {
+    const PACKETS: u16 = 1100;
+    let settings = || {
+        SettingEngineBuilder::new()
+            .with_srtp_key_lifetime(Some(rtc::srtp::keying::KeyLifetime {
+                srtp_packets: 960,
+                srtcp_packets: 1 << 31,
+            }))
+            .with_srtp_rekeying_dtls_client_first(false)
+    };
+    let mut a = Side::new(settings())?;
+    let mut b = Side::new(settings())?;
+    let audio = connected(&mut a, &mut b).await?;
+    let before = (a.driver.local_addresses(), b.driver.local_addresses());
+    a.negotiation_needed = false;
+    b.negotiation_needed = false;
+    b.rtp.clear();
+    let mut collisions = 0;
+    let mut exchanges = 0;
+    let stable = |a: &Side, b: &Side| {
+        [a, b]
+            .iter()
+            .all(|s| s.driver.pc().signaling_state() == RTCSignalingState::Stable)
+    };
+    for seq in 1..=PACKETS {
+        write_audio(&mut a, audio, seq)?;
+        run_for(&mut a, &mut b, Duration::from_millis(10)).await?;
+        if !stable(&a, &b) {
+            continue;
+        }
+        match (a.negotiation_needed, b.negotiation_needed) {
+            (true, true) => {
+                collide(&mut a, &mut b)?;
+                collisions += 1;
+            }
+            (true, false) => {
+                exchange(&mut a, &mut b)?;
+                exchanges += 1;
+            }
+            (false, true) => {
+                exchange(&mut b, &mut a)?;
+                b.negotiation_needed = false;
+                exchanges += 1;
+            }
+            (false, false) => {}
+        }
+    }
+    run_until(&mut a, &mut b, Duration::from_secs(5), |_, b| {
+        b.rtp.len() >= usize::from(PACKETS)
+    })
+    .await?;
+    assert!(
+        collisions >= 1,
+        "the offers crossed ({exchanges} plain exchanges)"
+    );
+    let received: HashSet<u16> = b.rtp.iter().copied().collect();
+    let missing: Vec<u16> = (1..=PACKETS).filter(|s| !received.contains(s)).collect();
+    assert!(
+        missing.is_empty(),
+        "{} packets lost across {collisions} collisions and {exchanges} exchanges: {missing:?}",
+        missing.len()
+    );
+    run_for(&mut a, &mut b, LINGER * 3).await?;
+    for (who, side, before) in [("a", &a, &before.0), ("b", &b, &before.1)] {
+        let after = side.driver.local_addresses();
+        assert_eq!(
+            after.len(),
+            1,
+            "{who}: one socket left, the rolled-back offer's and the previous ones closed: \
+             {after:?}"
+        );
+        assert!(
+            disjoint(before, &after),
+            "{who}: a new port: {before:?} -> {after:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Both sides offer; `polite` rolls its offer back and answers the other's, which ignores the
+/// polite side's offer and its candidates (W3C webrtc-pc "perfect negotiation").
+fn collide(polite: &mut Side, impolite: &mut Side) -> Result<()> {
+    let now = Instant::now();
+    let abandoned = polite.driver.pc_mut().create_offer(None)?;
+    polite
+        .driver
+        .pc_mut()
+        .set_local_description(now, abandoned)?;
+    let offer = impolite.driver.pc_mut().create_offer(None)?;
+    impolite
+        .driver
+        .pc_mut()
+        .set_local_description(now, offer.clone())?;
+    polite.driver.flush()?;
+    impolite.driver.flush()?;
+    polite.collect();
+    impolite.collect();
+    // The candidates of the abandoned offer's generation: the impolite side refuses them (it
+    // never applied that offer), and ignores the error, as perfect negotiation does.
+    for candidate in std::mem::take(&mut polite.outgoing) {
+        let _ = impolite.driver.pc_mut().add_remote_candidate(candidate);
+    }
+    let pc = polite.driver.pc_mut();
+    pc.set_local_description(
+        now,
+        rtc::peer_connection::sdp::RTCSessionDescription::rollback(None)?,
+    )?;
+    pc.set_remote_description(now, offer)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer.clone())?;
+    impolite
+        .driver
+        .pc_mut()
+        .set_remote_description(now, answer)?;
+    polite.driver.flush()?;
+    impolite.driver.flush()?;
+    polite.negotiation_needed = false;
+    impolite.negotiation_needed = false;
+    Ok(())
+}

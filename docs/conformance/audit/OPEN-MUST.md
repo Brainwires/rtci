@@ -9,18 +9,18 @@ Verdicts and classes are defined in `RULES.md`.
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5083.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5067 of 5083 (99.7 %).
-- Tested as the default (`tested`): 5036 of 5083 (99.1 %); `setting`: 24; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Tested as the default (`tested`): 5035 of 5083 (99.1 %); `setting`: 25; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 16: 1 untested, 10 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 24 | 17 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 25 | 18 |
 | B | implemented, lacking a test that fails without it | 0 | 0 |
 | C | partly implemented | 6 | 4 |
 | D | not implemented | 7 | 5 |
 | E | cannot be met or observed inside this engine | 10 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 47 | 34 |
+| all | | 48 | 35 |
 
 ## What 100 % takes
 
@@ -69,6 +69,7 @@ Sorted by class, then owner, size and ID.
 | RFC8108-6.1-2 | `rfc8108.md` | A new stream after a stopped one, or one that changes media type or ... | setting | A | `setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC) | S | media (media-25) |
 | RFC8834-4.3-6 | `rfc8834.md` | Sender changing between clock rates follows RFC 7160 4.1 | setting | A | `setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC) | S | media (media-25) |
 | GCC-5.4-4 | `draft-ietf-rmcat-gcc.md` | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - ... | setting | A | `setting` (measured, audit-5): `Gcc::with_threshold_time_base(ThresholdTimeBase::Arrival)`, RFC test mutation-checked; worse queueing delay and fairness on `rfc8836_multi_flow.rs` | S | media (running) |
+| GCC-5.5-11 | `draft-ietf-rmcat-gcc.md` | A_hat(i) < 1.5 R_hat(i): the estimate may not run away from the rate ... | setting | A | `setting` (measured): `Gcc::with_received_rate_bound(ReceivedRateBound::Clamps)`, RFC test mutation-checked; as a clamp the estimate of an application that sends less than it falls to 1.5 x what is sent with no congestion signal (`capacity_cap_video_rtc2rtc.rs`) | S | media (running) |
 | RFC3550-6.1-13 | `rfc3550.md` | Padding only on the last packet of a compound packet | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | setting | A | `setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs` | S | media (running) |

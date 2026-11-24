@@ -45,20 +45,20 @@ whole session reproducible in a test without a socket or a sleep.
 
 ## Status
 
-As of 2026-11-23 the workspace is audited clause by clause against 110 specifications (the W3C WebRTC
+As of 2026-11-23 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
 API, statistics, extensions, encoded transform and SVC specifications, and the IETF RFCs and drafts
 WebRTC uses); every row names the code and the test that proves it. From
 [docs/conformance/audit/COUNTS.md](docs/conformance/audit/COUNTS.md), of the rows that bind this engine:
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5082 | 5015 (98.7 %) | 4992 (98.2 %) |
-| SHOULD | 968 | 836 (86.4 %) | 836 (86.4 %) |
-| MAY | 605 | 442 (73.1 %) | 442 (73.1 %) |
+| MUST | 5080 | 5064 (99.7 %) | 5033 (99.1 %) |
+| SHOULD | 968 | 851 (87.9 %) | 851 (87.9 %) |
+| MAY | 607 | 445 (73.3 %) | 445 (73.3 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. The open MUST rows, each with its
-class and reason, are in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+browser or a deployed peer cannot interoperate with it by default. 16 MUST rows are open (1 untested,
+10 partial, 5 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/webrtc-rs-rtc/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
@@ -581,6 +581,9 @@ RTC is built from composable crates, each implementing a specific protocol:
 | [`rtc-media`](rtc-media/README.md) | Media samples and container readers and writers |
 | [`rtc-sframe`](rtc-sframe/README.md) | SFrame end-to-end media encryption (RFC 9605) |
 | [`rtc-stream-driver`](examples/stream-driver/README.md) | The tokio driver for the engine's stream transports (it does I/O) |
+
+These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
+`rtc-signal`, the examples' signalling helper; the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 

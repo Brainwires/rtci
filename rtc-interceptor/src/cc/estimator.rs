@@ -60,6 +60,12 @@ pub trait BandwidthEstimator: Send + Sync {
     /// an estimator tell "nothing was sent" from "something was sent and nothing came back".
     fn on_packet_sent(&mut self, _now: Instant, _size: usize) {}
 
+    /// A packet left for the network on a stream that negotiated no per-packet feedback (no
+    /// transport-wide sequence numbers, no RFC 8888): nothing will ever report it, so an
+    /// estimator that counts on feedback for what it sent ([`on_packet_sent`](Self::on_packet_sent))
+    /// must not wait for this packet's.
+    fn on_unreported_packet_sent(&mut self, _now: Instant, _size: usize) {}
+
     /// A round trip time measured from feedback: the instant a packet left to the instant the
     /// feedback naming it was read, less nothing, so it includes the receiver's reporting delay.
     fn on_round_trip_time(&mut self, _now: Instant, _round_trip_time: std::time::Duration) {}
@@ -69,6 +75,14 @@ pub trait BandwidthEstimator: Send + Sync {
     /// The interceptor combines them and hands over the tightest; `None` lifts the limit. An
     /// estimator that honours them keeps its target at or below `max` whatever it measures.
     fn set_external_bounds(&mut self, _min: Option<f64>, _max: Option<f64>) {}
+
+    /// The floor the target never goes under, in bits per second, when the estimator has one.
+    /// It rides with the target as [`MinimumTarget`](crate::MinimumTarget), so the NACK
+    /// responder knows where the original media cannot be lowered for retransmissions
+    /// (RFC 4588 section 7).
+    fn min_bitrate(&self) -> Option<f64> {
+        None
+    }
 
     /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over
     /// only while the receiver sends no per-packet feedback (no TWCC, no RFC 8888): the

@@ -1850,6 +1850,41 @@ impl<'a> InterceptorHandler<'a> {
         }
     }
 
+    /// Media the pacer discarded (`PacerDiscard`): `OnPacerDiscard` for the sender that sends
+    /// the stream, with its RID.
+    fn announce_pacer_discard(&mut self, now: Instant, discard: &interceptor::PacerDiscard) {
+        let found = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .find_map(|(id, t)| {
+                let sender = t.sender().as_ref()?;
+                if t.stopped() {
+                    return None;
+                }
+                sender
+                    .send_encodings()
+                    .iter()
+                    .find(|e| e.rtp_coding_parameters.ssrc == Some(discard.ssrc))
+                    .map(|e| (id, e.rtp_coding_parameters.rid.clone()))
+            });
+        if let Some((id, rid)) = found {
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnPacerDiscard {
+                        sender: crate::rtp_transceiver::RTCRtpSenderId::from(id),
+                        rid: (!rid.is_empty()).then_some(rid),
+                        frames: discard.frames,
+                        packets: discard.sequence_numbers.len(),
+                        octets: discard.octets,
+                        target_bitrate: discard.target_bitrate,
+                    },
+                ),
+            });
+        }
+    }
+
     /// Records the SSRC and CSRCs of a packet the chain released, on the receiver that owns
     /// the SSRC (`RTCRtpReceiver::get_synchronization_sources`, `get_contributing_sources`).
     fn record_sources(&mut self, now: Instant, header: &rtp::Header) {
@@ -2263,11 +2298,22 @@ impl<'a>
                                     on_transport,
                                 );
                             self.stats.on_target_bitrate(key, *bits_per_second, &shares);
+                            // A pause of the source (the pacer's queue is long) is a target
+                            // of zero for the streams; the path's estimate is unchanged.
+                            if let Some(pause) = packet.message.custom::<interceptor::PacerPause>()
+                            {
+                                self.stats
+                                    .on_outgoing_estimate(key, pause.target_bits_per_second);
+                            }
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {
                                 let event = event.clone();
                                 self.process_session_event(packet.now, &event);
+                            } else if let Some(discard) =
+                                value.downcast_ref::<interceptor::PacerDiscard>()
+                            {
+                                self.announce_pacer_discard(packet.now, discard);
                             }
                         }
                         _ => {}
