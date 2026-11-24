@@ -5,7 +5,7 @@
 //! 110-bit mask can express.
 
 use libfuzzer_sys::fuzz_target;
-use rtc::interceptor::{FLEXFEC_MAX_MASK_BITS, FlexFecHeader, FlexFecProtected};
+use rtci::interceptor::{FLEXFEC_MAX_MASK_BITS, FlexFecHeader, FlexFecProtected};
 
 fuzz_target!(|data: &[u8]| {
     let Some((&count, rest)) = data.split_first() else {

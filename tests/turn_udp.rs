@@ -6,32 +6,32 @@
 
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCIceGatheringState;
-use rtc::peer_connection::transport::{RTCIceCandidateInit, RTCIceServerTransportProtocol};
-use rtc::peer_connection::turn_streams::RelayGathering;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{StreamCommand, StreamEvent};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM};
-use rtc::stun::error_code::{CODE_UNAUTHORIZED, ErrorCodeAttribute};
-use rtc::stun::fingerprint::FINGERPRINT;
-use rtc::stun::integrity::MessageIntegrity;
-use rtc::stun::message::{
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCIceGatheringState;
+use rtci::peer_connection::transport::{RTCIceCandidateInit, RTCIceServerTransportProtocol};
+use rtci::peer_connection::turn_streams::RelayGathering;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{StreamCommand, StreamEvent};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM};
+use rtci::stun::error_code::{CODE_UNAUTHORIZED, ErrorCodeAttribute};
+use rtci::stun::fingerprint::FINGERPRINT;
+use rtci::stun::integrity::MessageIntegrity;
+use rtci::stun::message::{
     CLASS_ERROR_RESPONSE, CLASS_INDICATION, CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, Getter,
     METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_DATA, METHOD_REFRESH,
     METHOD_SEND, Message, MessageClass, MessageType, Setter, TransactionId,
 };
-use rtc::stun::textattrs::{Nonce, Realm};
-use rtc::stun::xoraddr::XorMappedAddress;
-use rtc::turn::proto::chandata::ChannelData;
-use rtc::turn::proto::data::Data;
-use rtc::turn::proto::lifetime::Lifetime;
-use rtc::turn::proto::peeraddr::PeerAddress;
-use rtc::turn::proto::relayaddr::RelayedAddress;
+use rtci::stun::textattrs::{Nonce, Realm};
+use rtci::stun::xoraddr::XorMappedAddress;
+use rtci::turn::proto::chandata::ChannelData;
+use rtci::turn::proto::data::Data;
+use rtci::turn::proto::lifetime::Lifetime;
+use rtci::turn::proto::peeraddr::PeerAddress;
+use rtci::turn::proto::relayaddr::RelayedAddress;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -76,7 +76,7 @@ struct Server {
 
 impl Server {
     fn new() -> Result<Self> {
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let key = MessageIntegrity::long_term_integrity_key(
             USER.to_owned(),
             REALM.to_owned(),
@@ -103,7 +103,7 @@ impl Server {
         attrs: Vec<Box<dyn Setter>>,
         sign: bool,
     ) -> Result<Vec<u8>> {
-        let provider = rtc::crypto::default_provider()?;
+        let provider = rtci::crypto::default_provider()?;
         let mut setters: Vec<Box<dyn Setter>> = vec![
             Box::new(request.transaction_id),
             Box::new(MessageType::new(request.typ.method, class)),
@@ -202,7 +202,7 @@ impl Server {
         Ok(())
     }
 
-    fn requests_of(&self, method: rtc::stun::message::Method) -> Vec<(SocketAddr, Message)> {
+    fn requests_of(&self, method: rtci::stun::message::Method) -> Vec<(SocketAddr, Message)> {
         self.requests
             .iter()
             .filter(|(_, m)| m.typ.method == method && m.typ.class == CLASS_REQUEST)
@@ -424,8 +424,8 @@ fn a_turn_server_over_udp_is_allocated_on_by_the_engine_from_the_host_candidate(
 #[test]
 fn two_peers_connect_through_the_engine_udp_allocation() -> Result<()> {
     use dtls_sdp_common::{Peer, World};
-    use rtc::peer_connection::configuration::RTCIceTransportPolicy;
-    use rtc::peer_connection::event::RTCDataChannelEvent;
+    use rtci::peer_connection::configuration::RTCIceTransportPolicy;
+    use rtci::peer_connection::event::RTCDataChannelEvent;
     common::install_crypto_provider();
     let b_addr = a("10.0.0.2:5000");
     let config = RTCConfigurationBuilder::new()
@@ -506,7 +506,7 @@ fn two_peers_connect_through_the_engine_udp_allocation() -> Result<()> {
                 }
             }
             if m.typ.method == METHOD_CHANNEL_BIND && m.typ.class == CLASS_REQUEST {
-                let mut number = rtc::turn::proto::channum::ChannelNumber::default();
+                let mut number = rtci::turn::proto::channum::ChannelNumber::default();
                 let mut peer = PeerAddress::default();
                 if number.get_from(&m).is_ok() && peer.get_from(&m).is_ok() {
                     channels.push((number.0, SocketAddr::new(peer.ip, peer.port)));
@@ -582,15 +582,15 @@ fn the_engine_refreshes_its_udp_allocation_before_it_expires() -> Result<()> {
 
 /// The SOFTWARE of the engine's TURN client over UDP (RFC 8656 section 5: SOFTWARE "SHOULD"
 /// be in every Allocate and Refresh request; RFC 8489 section 16.1.2: "Implementers SHOULD make usage
-/// of the SOFTWARE attribute a configurable option"): `rtc-turn` and its version by default, the text
+/// of the SOFTWARE attribute a configurable option"): `rtci-turn` and its version by default, the text
 /// `with_ice_software` names, and with `with_ice_software(None)` no SOFTWARE in any message
 /// sent to the server (the 401 exchange, the signed Allocate, the Refresh).
 #[test]
 fn the_engine_udp_turn_client_sends_the_software_with_ice_software_names() -> Result<()> {
-    use rtc::stun::attributes::ATTR_SOFTWARE;
-    use rtc::stun::textattrs::Software;
+    use rtci::stun::attributes::ATTR_SOFTWARE;
+    use rtci::stun::textattrs::Software;
     for (setting, expected) in [
-        (None, Some(rtc::turn::client::DEFAULT_SOFTWARE.to_owned())),
+        (None, Some(rtci::turn::client::DEFAULT_SOFTWARE.to_owned())),
         (Some(None), None),
         (Some(Some("app 1.0".to_owned())), Some("app 1.0".to_owned())),
     ] {

@@ -37,7 +37,7 @@ This example uses the `shared::tcp_framing` utilities:
 ## Instructions
 
 ### Run ice-tcp
-From the `rtc` directory, execute:
+From the `rtci` directory, execute:
 
 ```
 cargo run --example ice-tcp

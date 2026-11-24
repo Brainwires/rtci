@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Evidence for the pure-Rust codec backends of rtc-video (docs/video-pipeline.md 4.6), run on a
+# Evidence for the pure-Rust codec backends of rtci-video (docs/video-pipeline.md 4.6), run on a
 # GitHub-hosted Ubuntu runner (agent-test.yml), never committed data:
 #
 #  1. VP8 decode, conformance: the WebM project's 59 VP8 test vectors, each shown frame's MD5
@@ -29,7 +29,7 @@ fi
 ffmpeg -hide_banner -version | head -1
 ffmpeg -hide_banner -decoders 2>/dev/null | grep -E "libvpx|libdav1d" || true
 
-cargo build --release -q -p rtc-video --features vp8,av1 --example codec_check || exit 1
+cargo build --release -q -p rtci-video --features vp8,av1 --example codec_check || exit 1
 check=target/release/examples/codec_check
 
 fetch() { # URL FILE

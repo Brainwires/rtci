@@ -10,15 +10,15 @@
 //! the peer that offered first, and so was the DTLS server, answered a later `actpass` offer
 //! with `active`. Its peer, the client, then either refused the role change (libwebrtc: "Failed
 //! to set SSL role for the transport") or, with an ICE restart in the same exchange, both
-//! `rtc` peers tore their healthy association down and waited for a ClientHello that the other
+//! `rtci` peers tore their healthy association down and waited for a ClientHello that the other
 //! did not send.
 
 mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
 
 /// The one `a=setup` value of a description.
 fn setup(sdp: &str) -> String {

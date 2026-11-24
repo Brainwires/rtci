@@ -8,8 +8,8 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, crlf, default_peer, media_sections};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::sdp::attribute::{Dependency, DependencyType};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::sdp::attribute::{Dependency, DependencyType};
 
 const SESSION: &str = "v=0
 o=- 1 2 IN IP4 127.0.0.1

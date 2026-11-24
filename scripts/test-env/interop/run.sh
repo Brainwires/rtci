@@ -15,18 +15,18 @@ A=${RTC_TESTENV_ARTIFACTS_DIR:-/artifacts}
 export RTC_INTEROP_PEERS_DIR=$(cd "$HERE/../peers" && pwd)
 export RTC_INTEROP_PEER_BIN=/run/rtc-env/peers
 
-# examples/interop-peer built by the rtc-video-interop package with its `pipeline` feature: the
-# same peer plus the video pipeline scenario (the browser's video through rtc-video and its
-# pure-Rust codecs), which the `rtc` crate's own build of the example leaves out (rtc does not
-# depend on rtc-video).
-cargo build -p rtc-video-interop --features pipeline --bin interop-peer-video > "$A/interop-build.log" 2>&1 || { echo "interop-peer build failed"; tail -30 "$A/interop-build.log"; exit 1; }
+# examples/interop-peer built by the rtci-video-interop package with its `pipeline` feature: the
+# same peer plus the video pipeline scenario (the browser's video through rtci-video and its
+# pure-Rust codecs), which the `rtci` crate's own build of the example leaves out (rtc does not
+# depend on rtci-video).
+cargo build -p rtci-video-interop --features pipeline --bin interop-peer-video > "$A/interop-build.log" 2>&1 || { echo "interop-peer build failed"; tail -30 "$A/interop-build.log"; exit 1; }
 PEER=${CARGO_TARGET_DIR:-/src/target}/debug/interop-peer-video
 
 ip netns exec open-b "$PEER" --listen 203.0.113.51:8080 --ice-ip 203.0.113.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer.log" 2>&1 &
 PEER_PID=$!
 # The mDNS peer logs every mDNS packet it parses and each answer it takes or refuses.
-RUST_LOG=${RTC_INTEROP_MDNS_LOG:-error,rtc_mdns=trace,rtc_ice::agent=debug} \
+RUST_LOG=${RTC_INTEROP_MDNS_LOG:-error,rtci_mdns=trace,rtci_ice::agent=debug} \
   ip netns exec lan-b "$PEER" --listen 10.99.0.51:8080 --ice-ip 10.99.0.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer-mdns.log" 2>&1 &
 MDNS_PEER_PID=$!

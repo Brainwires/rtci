@@ -2,11 +2,11 @@
 //! crate, whose SCTP announces neither user message interleaving (RFC 8260) nor the zero
 //! checksum (RFC 9653).
 //!
-//! `rtc` announces both by default and uses each only when the peer announces it too, so the
+//! `rtci` announces both by default and uses each only when the peer announces it too, so the
 //! association with this peer runs on DATA chunks with a CRC32c: a packet of I-DATA chunks or a
 //! zero checksum would be dropped or aborted by the peer, and no message would come back. RFC
 //! 8831 section 6.6: "As long as message interleaving is not supported, the sender SHOULD limit
-//! the maximum message size to 16 KB to avoid monopolization", so `rtc` reports and enforces a
+//! the maximum message size to 16 KB to avoid monopolization", so `rtci` reports and enforces a
 //! 16 KB limit on this association, whatever larger size the peer's `a=max-message-size`
 //! allows.
 use anyhow::{Result, bail};
@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
 
 use webrtc::api::APIBuilder;
 use webrtc::api::media_engine::MediaEngine;
@@ -41,7 +41,7 @@ const LIMIT_WITHOUT_INTERLEAVING: usize = 16 * 1024;
 /// How long the whole exchange may take in wall-clock time.
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// An `rtc` offerer with its default settings and a `webrtc` 0.17 answerer that echoes every
+/// An `rtci` offerer with its default settings and a `webrtc` 0.17 answerer that echoes every
 /// message: the channel opens, the transport reports the 16 KB limit, a message one byte over it
 /// is refused, and a message of exactly 16 KB and a short one each come back intact.
 #[tokio::test]
@@ -73,7 +73,7 @@ async fn the_default_association_falls_back_for_a_peer_without_interleaving_or_z
     }
     .new_candidate_host()?;
     rtc_pc.add_local_candidate(
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
     )?;
     let offer = rtc_pc.create_offer(None)?;
     rtc_pc.set_local_description(Instant::now(), offer.clone())?;
@@ -92,7 +92,7 @@ async fn the_default_association_falls_back_for_a_peer_without_interleaving_or_z
         .expect("local description should be set");
     rtc_pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp)?,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp)?,
     )?;
 
     let mut io = Io {
@@ -156,7 +156,7 @@ async fn the_default_association_falls_back_for_a_peer_without_interleaving_or_z
 
 /// RFC 3758 4.1 TR3 against a peer that numbers messages the old way: an ordered channel with a
 /// 20 ms lifetime to the `webrtc` 0.17 echo peer. Thirty messages are written and left in the
-/// queue past their lifetime, so `rtc` drops each one it had not sent yet without a TSN or a
+/// queue past their lifetime, so `rtci` drops each one it had not sent yet without a TSN or a
 /// stream sequence number; the three written after that take the next numbers. The peer must
 /// deliver those three, in order, and nothing out of order: a gap in the stream's sequence
 /// numbers without a FORWARD TSN would stall the ordered stream on the peer for good.
@@ -189,7 +189,7 @@ async fn an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent() -> R
     }
     .new_candidate_host()?;
     rtc_pc.add_local_candidate(
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
     )?;
     let offer = rtc_pc.create_offer(None)?;
     rtc_pc.set_local_description(Instant::now(), offer.clone())?;
@@ -207,7 +207,7 @@ async fn an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent() -> R
         .expect("local description should be set");
     rtc_pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp)?,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp)?,
     )?;
 
     let mut io = Io {
@@ -273,7 +273,7 @@ async fn an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent() -> R
     Ok(())
 }
 
-/// The `rtc` peer's socket and what its application saw.
+/// The `rtci` peer's socket and what its application saw.
 struct Io {
     socket: UdpSocket,
     local_addr: std::net::SocketAddr,

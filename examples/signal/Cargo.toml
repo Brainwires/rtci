@@ -1,5 +1,5 @@
 [package]
-name = "rtc-signal"
+name = "rtci-signal"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

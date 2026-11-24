@@ -985,10 +985,10 @@ dependencies = [
  "dimpl",
  "rcgen",
  "rice-proto",
- "rtc-crypto",
- "rtc-dtls",
- "rtc-ice",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-dtls",
+ "rtci-ice",
+ "rtci-shared",
  "sansio",
  "stun-proto",
 ]
@@ -1605,8 +1605,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-crypto"
-version = "0.22.0+brainwires.6"
+name = "rtci-crypto"
+version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
  "ccm 0.5.0",
@@ -1624,8 +1624,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-dtls"
-version = "0.22.0+brainwires.6"
+name = "rtci-dtls"
+version = "0.1.0"
 dependencies = [
  "bytecheck",
  "byteorder",
@@ -1635,23 +1635,23 @@ dependencies = [
  "pem 3.0.6",
  "rcgen",
  "rkyv",
- "rtc-crypto",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-shared",
  "rustls",
  "x509-parser 0.16.0",
 ]
 
 [[package]]
-name = "rtc-ice"
-version = "0.22.0+brainwires.6"
+name = "rtci-ice"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "crc",
  "log",
- "rtc-crypto",
- "rtc-mdns",
- "rtc-shared",
- "rtc-stun",
+ "rtci-crypto",
+ "rtci-mdns",
+ "rtci-shared",
+ "rtci-stun",
  "sansio",
  "serde",
  "url",
@@ -1659,19 +1659,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-mdns"
-version = "0.22.0+brainwires.6"
+name = "rtci-mdns"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "log",
- "rtc-shared",
+ "rtci-shared",
  "sansio",
  "socket2",
 ]
 
 [[package]]
-name = "rtc-shared"
-version = "0.22.0+brainwires.6"
+name = "rtci-shared"
+version = "0.1.0"
 dependencies = [
  "bitflags 1.3.2",
  "bytes",
@@ -1685,8 +1685,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-stun"
-version = "0.22.0+brainwires.6"
+name = "rtci-stun"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1694,8 +1694,8 @@ dependencies = [
  "lazy_static",
  "precis-profiles",
  "rand 0.10.4",
- "rtc-crypto",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-shared",
  "sansio",
  "url",
 ]

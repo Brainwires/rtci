@@ -1,6 +1,6 @@
 //! W3C webrtc-stats members, checked against what two peers put on the wire.
 //!
-//! Two `rtc` peers talk over an in-memory network in virtual time. The network keeps a record
+//! Two `rtci` peers talk over an in-memory network in virtual time. The network keeps a record
 //! of every datagram (who sent it, when, what it was), so a counter in a report is compared
 //! with the traffic itself, not only looked for. An SRTP packet's header travels in the clear:
 //! the record has its SSRC, sequence number and header length; the payload sizes are the ones
@@ -10,34 +10,34 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::interceptor::{PacerBuilder, Registry, Slot};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::interceptor::{PacerBuilder, Registry, Slot};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_nack, configure_rtcp_reports,
 };
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId,
     RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext};
-use rtc::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
-use rtc::statistics::stats::RTCQualityLimitationReason;
-use rtc::statistics::{
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext};
+use rtci::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
+use rtci::statistics::stats::RTCQualityLimitationReason;
+use rtci::statistics::{
     AudioPlayoutStatsUpdate, AudioReceiverStatsUpdate, AudioSourceStatsUpdate, DecoderStatsUpdate,
     EncoderStatsUpdate, PsnrSum, QualityLimitationDurations, StatsSelector, VideoSourceStatsUpdate,
 };
@@ -177,11 +177,11 @@ fn codec(mime_type: &str, clock_rate: u32, channels: u16, sdp_fmtp_line: &str) -
         // The PLI and FIR the feedback-count test writes are negotiated (RFC 4585 section
         // 4.2, RFC 5104 section 7.2).
         rtcp_feedback: vec![
-            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+            rtci::rtp_transceiver::rtp_sender::RTCPFeedback {
                 typ: "nack".to_owned(),
                 parameter: "pli".to_owned(),
             },
-            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+            rtci::rtp_transceiver::rtp_sender::RTCPFeedback {
                 typ: "ccm".to_owned(),
                 parameter: "fir".to_owned(),
             },
@@ -543,7 +543,7 @@ impl World {
             .pc
             .rtp_sender(sender)
             .expect("sender")
-            .replace_track(Some(rtc::media_stream::MediaStreamTrack::new(
+            .replace_track(Some(rtci::media_stream::MediaStreamTrack::new(
                 "stats-stream".to_owned(),
                 "stats-track".to_owned(),
                 "stats-track".to_owned(),
@@ -651,8 +651,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             padding: padding > 0,
                             padding_size: padding,
@@ -1399,8 +1399,8 @@ fn a_stream_names_its_transport_codec_track_mid_and_source() -> Result<()> {
 /// receiver sent are the ones the sender received.
 #[test]
 fn feedback_counts_are_the_feedback_packets_sent() -> Result<()> {
-    use rtc::rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
-    use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    use rtci::rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
+    use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
     let (mut world, sender) = World::connected(VIDEO)?;
     let (ssrc, _, _) = world.sender_stream(sender);
@@ -1411,10 +1411,11 @@ fn feedback_counts_are_the_feedback_packets_sent() -> Result<()> {
     let receiver_id = world.peers[1].tracks[0].0;
     for n in 0..5u8 {
         let now = world.now;
-        let mut feedback: Vec<Box<dyn rtc::rtcp::Packet>> = vec![Box::new(PictureLossIndication {
-            sender_ssrc: 1,
-            media_ssrc: ssrc,
-        })];
+        let mut feedback: Vec<Box<dyn rtci::rtcp::Packet>> =
+            vec![Box::new(PictureLossIndication {
+                sender_ssrc: 1,
+                media_ssrc: ssrc,
+            })];
         if n < 2 {
             feedback.push(Box::new(FullIntraRequest {
                 sender_ssrc: 1,
@@ -1869,8 +1870,8 @@ fn total_packet_send_delay_is_the_time_the_pacer_held_the_packets() -> Result<()
             .expect("sender")
             .write_rtp(
                 written_at,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: pt,
                         sequence_number: 100 + n,

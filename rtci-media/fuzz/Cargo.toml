@@ -1,0 +1,57 @@
+[package]
+name = "rtci-media-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+
+[dependencies.rtci-media]
+path = ".."
+
+[dependencies.rtci-rtp]
+path = "../../rtci-rtp"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "ogg_reader"
+path = "fuzz_targets/ogg_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ivf_reader"
+path = "fuzz_targets/ivf_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h26x_reader"
+path = "fuzz_targets/h26x_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h26x_sample_reader"
+path = "fuzz_targets/h26x_sample_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sample_builder"
+path = "fuzz_targets/sample_builder.rs"
+test = false
+doc = false
+bench = false

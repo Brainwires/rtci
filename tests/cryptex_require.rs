@@ -9,9 +9,9 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, video_track};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
-use rtc::shared::error::Error;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+use rtci::shared::error::Error;
 
 #[test]
 fn require_refuses_an_answer_without_cryptex() -> TestResult {
@@ -79,12 +79,12 @@ fn require_accepts_cryptex_both_ways() -> TestResult {
 
 /// A peer with the default codecs and the given setting engine.
 fn peer_with(
-    settings: rtc::peer_connection::configuration::setting_engine::SettingEngine,
-) -> Result<rtc::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
+    settings: rtci::peer_connection::configuration::setting_engine::SettingEngine,
+) -> Result<rtci::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut media_engine =
-        rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+        rtci::peer_connection::configuration::media_engine::MediaEngine::default();
     media_engine.register_default_codecs()?;
-    Ok(rtc::peer_connection::RTCPeerConnectionBuilder::new()
+    Ok(rtci::peer_connection::RTCPeerConnectionBuilder::new()
         .with_media_engine(media_engine)
         .with_setting_engine(settings)
         .build(Instant::now())?)
@@ -142,7 +142,7 @@ fn negotiated_by_placement(
         assert_eq!(sections, 2, "{}", answer.sdp);
         offerer.set_remote_description(
             now,
-            rtc::peer_connection::sdp::RTCSessionDescription::answer(munged)?,
+            rtci::peer_connection::sdp::RTCSessionDescription::answer(munged)?,
         )?;
         negotiated.push((placement, offerer.cryptex_negotiated()));
     }
@@ -198,7 +198,7 @@ fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestRes
 /// the other RTP sections.
 #[test]
 fn every_written_offer_and_answer_has_cryptex_for_every_bundled_rtp_section() -> TestResult {
-    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
     for repeated in [true, false] {
         let settings = || {
             SettingEngineBuilder::new()
@@ -297,9 +297,9 @@ fn by_default_cryptex_is_negotiated_and_a_peer_without_it_is_accepted() -> TestR
 }
 
 /// A peer with the default codecs and the MID header extension for video.
-fn peer_with_mid() -> Result<rtc::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::rtp_transceiver::rtp_sender::{RTCRtpHeaderExtensionCapability, RtpCodecKind};
+fn peer_with_mid() -> Result<rtci::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::rtp_transceiver::rtp_sender::{RTCRtpHeaderExtensionCapability, RtpCodecKind};
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     media_engine.register_header_extension(
@@ -309,7 +309,7 @@ fn peer_with_mid() -> Result<rtc::peer_connection::RTCPeerConnection, Box<dyn st
         RtpCodecKind::Video,
         None,
     )?;
-    Ok(rtc::peer_connection::RTCPeerConnectionBuilder::new()
+    Ok(rtci::peer_connection::RTCPeerConnectionBuilder::new()
         .with_media_engine(media_engine)
         .build(Instant::now())?)
 }
@@ -339,7 +339,7 @@ fn the_appbits_identifier_256_is_never_negotiated() -> TestResult {
         let mut answerer = peer_with_mid()?;
         answerer.set_remote_description(
             Instant::now(),
-            rtc::peer_connection::sdp::RTCSessionDescription::offer(edited)?,
+            rtci::peer_connection::sdp::RTCSessionDescription::offer(edited)?,
         )?;
         let answer = answerer.create_answer(None)?;
         assert_eq!(
@@ -362,7 +362,7 @@ fn the_appbits_identifier_256_is_never_negotiated() -> TestResult {
 /// it; the attribute in a section that is not the tagged one does not stand for the group.
 #[test]
 fn a_cryptex_attribute_in_the_bundle_tagged_section_applies_to_the_group() -> TestResult {
-    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
     let mut offerer = default_peer()?;
     offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
     offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
@@ -380,7 +380,7 @@ fn a_cryptex_attribute_in_the_bundle_tagged_section_applies_to_the_group() -> Te
         answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
         let applied = answerer.set_remote_description(
             Instant::now(),
-            rtc::peer_connection::sdp::RTCSessionDescription::offer(edited.clone())?,
+            rtci::peer_connection::sdp::RTCSessionDescription::offer(edited.clone())?,
         );
         if accepted {
             applied?;
@@ -407,7 +407,7 @@ fn require_refuses_the_recorded_firefox_offer() -> TestResult {
     const FIREFOX_OFFER: &str =
         include_str!("fixtures/browser-sdp/firefox-152--simulcast-three-rids-send--1-offer.sdp");
     let offer = || -> Result<_, Box<dyn std::error::Error>> {
-        Ok(rtc::peer_connection::sdp::RTCSessionDescription::offer(
+        Ok(rtci::peer_connection::sdp::RTCSessionDescription::offer(
             FIREFOX_OFFER.replace("\r\n", "\n").replace('\n', "\r\n"),
         )?)
     };

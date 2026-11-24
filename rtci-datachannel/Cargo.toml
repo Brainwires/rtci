@@ -1,0 +1,27 @@
+[package]
+name = "rtci-datachannel"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "WebRTC data channels and the Data Channel Establishment Protocol (RFC 8831, RFC 8832), sans-I/O"
+license.workspace = true
+repository.workspace = true
+keywords = ["webrtc", "datachannel", "sctp", "dcep", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = ["marshal"] }
+sansio.workspace = true
+sctp.workspace = true
+
+bytes.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
+chrono.workspace = true

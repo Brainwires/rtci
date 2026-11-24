@@ -1,7 +1,7 @@
 # Congestion control after a capacity cap lifts
 
 Measured on `conf/gcc-1-cap-recovery` (and on the release, v0.22.0+brainwires.6) with the
-TWCC-driven GCC (`rtc-interceptor/src/gcc/twcc_gcc`, no pacer: ParolNet's chain), in ParolNet's
+TWCC-driven GCC (`rtci-interceptor/src/gcc/twcc_gcc`, no pacer: ParolNet's chain), in ParolNet's
 simulation `m1::the_estimate_follows_a_cap_that_comes_and_goes` and in its port
 `tests/capacity_cap_video_rtc2rtc.rs`. A finding for the congestion-control work; nothing here
 is changed yet.

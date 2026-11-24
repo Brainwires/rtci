@@ -12,27 +12,27 @@
 /// 6. Test verifies answerer received packets from all 3 simulcast layers
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::interceptor::Registry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtp;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtp;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RTCRtpHeaderExtensionCapability,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -94,7 +94,7 @@ async fn test_one_media_section_rtc_to_rtc_simulcast() -> Result<()> {
 
     // Use the default set of Interceptors
     let registry =
-        rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+        rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
             registry,
             &mut answerer_media_engine,
         )?;
@@ -159,7 +159,7 @@ async fn test_one_media_section_rtc_to_rtc_simulcast() -> Result<()> {
 
     // Use the default set of Interceptors
     let registry =
-        rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+        rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
             registry,
             &mut offerer_media_engine,
         )?;

@@ -10,12 +10,12 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, video_track,
 };
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCSignalingState;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCSignalingState;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::{
     RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit, SSRC,
 };
 use sansio::Protocol;
@@ -289,9 +289,9 @@ fn pending(pc: &RTCPeerConnection) -> RTCSignalingState {
 }
 
 fn peer_with_explicit_rollback_only() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     Ok(RTCPeerConnectionBuilder::new()
@@ -385,9 +385,9 @@ fn a_remote_offer_over_a_local_offer_rolls_it_back_unless_rollback_is_left_to_th
 /// rolls back all the same.
 #[test]
 fn a_rollback_with_contents_is_refused_unless_they_are_to_be_ignored() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 
     let now = Instant::now();
     let mut pc = default_peer()?;

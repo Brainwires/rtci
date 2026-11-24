@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory contains integration tests for the `rtc` library:
+This directory contains integration tests for the `rtci` library:
 
 - **Interoperability tests** with the `webrtc` library (Tests 1-5)
 - **Pure rtc-to-rtc tests** using only the sansio API (Test 6)
@@ -71,7 +71,7 @@ Consider adding tests for:
 
 **File:** `data_channels_interop.rs`
 
-**Purpose:** Verifies that the `rtc` library (using the sansio/polling-based API) can successfully establish a peer
+**Purpose:** Verifies that the `rtci` library (using the sansio/polling-based API) can successfully establish a peer
 connection and exchange data with the `webrtc` library (using the async API).
 
 ### Test Flow
@@ -120,7 +120,7 @@ RUST_LOG=info cargo test --test data_channels_interop -- --nocapture
 
 **File:** `data_channels_create_interop.rs`
 
-**Purpose:** Verifies that the `rtc` library can create a data channel as the offerer, establish a connection with
+**Purpose:** Verifies that the `rtci` library can create a data channel as the offerer, establish a connection with
 `webrtc` as the answerer, and send messages proactively.
 
 ### Test Flow
@@ -559,7 +559,7 @@ cargo test --test simulcast_rtc_to_webrtc_interop -- --ignored --nocapture
 
 **File:** `offer_answer_rtc2rtc.rs`
 
-**Purpose:** Verifies that two `rtc` peers using the sansio API can establish a complete offer/answer connection and
+**Purpose:** Verifies that two `rtci` peers using the sansio API can establish a complete offer/answer connection and
 exchange data without requiring the `webrtc` library.
 
 ### Test Flow
@@ -629,7 +629,7 @@ This test demonstrates the pure sansio architecture:
 
 **File:** `interceptor_rtcp_reports_interop.rs`
 
-**Purpose:** Verifies that the `rtc-interceptor` crate's RTCP report interceptors work correctly when integrated at the
+**Purpose:** Verifies that the `rtci-interceptor` crate's RTCP report interceptors work correctly when integrated at the
 peer connection level with `Registry` and `RTCConfigurationBuilder.with_interceptor_registry()`.
 
 ### Overview
@@ -693,7 +693,7 @@ Tests the `register_default_interceptors()` helper function:
 
 ```rust
 let registry = Registry::new();
-let registry = rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+let registry = rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors(
 registry,
 & mut media_engine,
 ) ?;
@@ -717,9 +717,9 @@ cargo test --test interceptor_rtcp_reports_interop -- --nocapture
 - ✅ RTCP Sender Report generation on RTP send
 - ✅ Full peer connection with interceptor chain
 
-### Related: rtc-interceptor Unit Tests
+### Related: rtci-interceptor Unit Tests
 
-The `rtc-interceptor` crate also has its own integration tests at `rtc-interceptor/tests/rtcp_report_integration.rs`
+The `rtci-interceptor` crate also has its own integration tests at `rtci-interceptor/tests/rtcp_report_integration.rs`
 which test the interceptor chain in isolation (without a full peer connection):
 
 | Test                                                       | Description              |
@@ -739,5 +739,5 @@ which test the interceptor chain in isolation (without a full peer connection):
 Run these with:
 
 ```bash
-cargo test --package rtc-interceptor --test rtcp_report_integration
+cargo test --package rtci-interceptor --test rtcp_report_integration
 ```

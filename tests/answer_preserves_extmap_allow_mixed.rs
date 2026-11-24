@@ -12,7 +12,7 @@
 //! Dependency Descriptor exceeds that on the packets carrying the template structure, so
 //! Chrome never writes the extension.
 
-use rtc::{
+use rtci::{
     peer_connection::{
         RTCPeerConnectionBuilder, configuration::media_engine::MediaEngine,
         sdp::RTCSessionDescription,
@@ -45,7 +45,7 @@ fn test_answer_preserves_extmap_allow_mixed() -> Result<(), Box<dyn std::error::
 
     offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     let offer = offerer.create_offer(None)?;
@@ -73,7 +73,7 @@ fn test_answer_omits_extmap_allow_mixed() -> Result<(), Box<dyn std::error::Erro
 
     offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     let offer = offerer.create_offer(None)?;

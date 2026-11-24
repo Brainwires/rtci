@@ -1,35 +1,35 @@
-//! The RTCP session between two `rtc` peer connections, in virtual time: one CNAME per
+//! The RTCP session between two `rtci` peer connections, in virtual time: one CNAME per
 //! connection for every SSRC it sends from (RFC 7022, RFC 8834 4.9, RFC 4588 5.2), feedback
 //! from the connection's own SSRC in a compound packet (RFC 4585 3.1, RFC 8108 5.4.1), RTCP
 //! kept to a few packets a second (RFC 3550 6.2), and BYE on close (RFC 3550 6.6).
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::interceptor::{FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::event::RTCTrackEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -61,7 +61,7 @@ struct Peer {
     /// How many tracks were muted.
     muted: usize,
     /// The RTCP packets `poll_read` yielded.
-    read_rtcp: Vec<Box<dyn rtc::rtcp::Packet>>,
+    read_rtcp: Vec<Box<dyn rtci::rtcp::Packet>>,
     /// The (SSRC, sequence number) of the RTP packets `poll_read` yielded.
     read_rtp: Vec<(u32, u16)>,
     /// The RTCP datagrams this peer put on the wire.
@@ -122,7 +122,7 @@ impl Peer {
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     // RFC 5104 TMMBR negotiated for the stream.
-                    rtcp_feedback: vec![rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                    rtcp_feedback: vec![rtci::rtp_transceiver::rtp_sender::RTCPFeedback {
                         typ: "ccm".to_owned(),
                         parameter: "tmmbr".to_owned(),
                     }],
@@ -497,8 +497,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: pt,
                             sequence_number,
@@ -629,7 +629,7 @@ fn a_pli_arrives_from_the_receivers_own_ssrc() -> Result<()> {
     // then, and that Regular packet is put off to `tp + 2 * T_rr`), with the next Regular
     // packet, a randomised interval away. Either way it arrives, once.
     let is_pli =
-        |packet: &Box<dyn rtc::rtcp::Packet>| packet.as_any().is::<PictureLossIndication>();
+        |packet: &Box<dyn rtci::rtcp::Packet>| packet.as_any().is::<PictureLossIndication>();
     let deadline = now + Duration::from_secs(20);
     while world.now < deadline && !world.peers[0].read_rtcp.iter().any(is_pli) {
         let next = world.now + Duration::from_millis(100);
@@ -784,7 +784,7 @@ fn shared_ssrc_world(signal: fn(&str) -> String) -> Result<(World, Vec<RTCRtpSen
         .set_local_description(now, offer.clone())?;
     world.peers[1].pc.set_remote_description(
         now,
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(signal(&offer.sdp))?,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(signal(&offer.sdp))?,
     )?;
     let answer = world.peers[1].pc.create_answer(None)?;
     world.peers[1]
@@ -792,7 +792,7 @@ fn shared_ssrc_world(signal: fn(&str) -> String) -> Result<(World, Vec<RTCRtpSen
         .set_local_description(now, answer.clone())?;
     world.peers[0].pc.set_remote_description(
         now,
-        rtc::peer_connection::sdp::RTCSessionDescription::answer(signal(&answer.sdp))?,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(signal(&answer.sdp))?,
     )?;
     Ok((world, senders, answer.sdp))
 }
@@ -845,8 +845,8 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
             let pt = rtp_sender.get_parameters().rtp_parameters.codecs[0].payload_type;
             rtp_sender.write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: pt,
                         sequence_number: FIRST_SEQ + n,
@@ -901,7 +901,7 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
 
     let stats = world.peers[0]
         .pc
-        .get_stats(world.now, rtc::statistics::StatsSelector::None);
+        .get_stats(world.now, rtci::statistics::StatsSelector::None);
     let outbound: Vec<u32> = stats
         .outbound_rtp_streams()
         .map(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc)
@@ -998,8 +998,8 @@ fn a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet() -> Re
 /// `availableOutgoingBitrate` falls to the limit; `None` lifts it.
 #[test]
 fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
-    use rtc::statistics::StatsSelector;
-    use rtc::statistics::report::RTCStatsReportEntry;
+    use rtci::statistics::StatsSelector;
+    use rtci::statistics::report::RTCStatsReportEntry;
     const LIMIT: u64 = 100_000;
     let outgoing = |pc: &mut RTCPeerConnection, now: Instant| -> Option<f64> {
         pc.get_stats(now, StatsSelector::None)
@@ -1036,7 +1036,7 @@ fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
 /// (`nackCount` of its inbound stream stays put), and removing the horizon starts them again.
 #[test]
 fn a_receiver_stops_asking_for_packets_behind_its_nack_horizon() -> Result<()> {
-    use rtc::statistics::StatsSelector;
+    use rtci::statistics::StatsSelector;
     let nacks = |pc: &mut RTCPeerConnection, now: Instant, ssrc: u32| -> u32 {
         pc.get_stats(now, StatsSelector::None)
             .inbound_rtp_streams()
@@ -1105,8 +1105,8 @@ fn a_receiver_stops_asking_for_packets_behind_its_nack_horizon() -> Result<()> {
 /// keeps at the negotiated value) the sender's estimate stays under it.
 #[test]
 fn the_receive_bandwidth_is_signalled_and_bounds_what_the_sender_sends() -> Result<()> {
-    use rtc::statistics::StatsSelector;
-    use rtc::statistics::report::RTCStatsReportEntry;
+    use rtci::statistics::StatsSelector;
+    use rtci::statistics::report::RTCStatsReportEntry;
     const CAP: u64 = 80_000;
     let outgoing = |pc: &mut RTCPeerConnection, now: Instant| -> Option<f64> {
         pc.get_stats(now, StatsSelector::None)
@@ -1191,7 +1191,7 @@ fn stopping_the_receivers_track_keeps_the_receiver_reporting() -> Result<()> {
 /// still arrives is no longer received.
 #[test]
 fn stop_says_bye_for_the_senders_streams_and_stops_receiving() -> Result<()> {
-    use rtc::rtp_transceiver::RTCRtpTransceiverId;
+    use rtci::rtp_transceiver::RTCRtpTransceiverId;
     let (mut world, sender) = World::connected()?;
     world.send_media(sender, FIRST_SEQ, 25)?;
     assert_eq!(0, world.peers[1].muted);
@@ -1244,8 +1244,8 @@ fn source_changes_fire_ssrcchange_and_csrcchange() -> Result<()> {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: pt,
                         sequence_number: seq,
@@ -1299,7 +1299,7 @@ fn a_key_frame_request_reaches_an_application_with_an_empty_registry() -> Result
     let media_engine = || -> Result<MediaEngine> {
         let mut media_engine = Peer::media_engine(false)?;
         media_engine.register_feedback(
-            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+            rtci::rtp_transceiver::rtp_sender::RTCPFeedback {
                 typ: "nack".to_owned(),
                 parameter: "pli".to_owned(),
             },
@@ -1337,7 +1337,7 @@ fn a_key_frame_request_reaches_an_application_with_an_empty_registry() -> Result
             })],
         )?;
     let is_pli =
-        |packet: &Box<dyn rtc::rtcp::Packet>| packet.as_any().is::<PictureLossIndication>();
+        |packet: &Box<dyn rtci::rtcp::Packet>| packet.as_any().is::<PictureLossIndication>();
     let deadline = now + Duration::from_secs(20);
     world.pump()?;
     while world.now < deadline && !world.peers[0].read_rtcp.iter().any(is_pli) {

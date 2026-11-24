@@ -3,16 +3,16 @@
 //! media: a cluster the application's own packets do not fill is padding on the RTX stream,
 //! which a receiver drops, never a second copy of a packet it may play twice.
 
-use rtc::interceptor::{
+use rtci::interceptor::{
     AttributedPacket, Interceptor, Packet, ProbePacket, RTCPFeedback, RTPHeaderExtension, Registry,
     StreamInfo, TaggedPacket,
 };
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorOptions, register_default_interceptors_with_options,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::sansio::Protocol;
-use rtc::shared::TransportContext;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::sansio::Protocol;
+use rtci::shared::TransportContext;
 use std::time::{Duration, Instant};
 
 const TRANSPORT_CC_URI: &str =
@@ -63,8 +63,8 @@ fn first_second(options: &DefaultInterceptorOptions) -> (usize, usize, usize) {
                 .handle_write(TaggedPacket {
                     now,
                     transport: TransportContext::default(),
-                    message: AttributedPacket::new(Packet::Rtp(rtc::rtp::packet::Packet {
-                        header: rtc::rtp::header::Header {
+                    message: AttributedPacket::new(Packet::Rtp(rtci::rtp::packet::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: 96,
                             sequence_number,

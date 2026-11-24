@@ -11,17 +11,17 @@
 //!
 //! See <https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction>.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use sansio::Protocol;
 use std::time::Instant;
 
 /// Drain every currently queued peer-connection event and return how many of
 /// them were `OnNegotiationNeededEvent`.
-fn count_negotiation_needed(pc: &mut rtc::peer_connection::RTCPeerConnection) -> usize {
+fn count_negotiation_needed(pc: &mut rtci::peer_connection::RTCPeerConnection) -> usize {
     let mut count = 0;
     while let Some(event) = pc.poll_event() {
         if matches!(event, RTCPeerConnectionEvent::OnNegotiationNeededEvent) {
@@ -47,11 +47,11 @@ fn test_set_direction_updates_negotiation_needed_flag() -> Result<(), Box<dyn st
     // Add one video transceiver on each side (defaults to "recvonly").
     let transceiver_id = offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     answerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     // Complete a full offer/answer exchange so the offerer settles back into a

@@ -6,10 +6,10 @@ mod dc_common;
 use anyhow::Result;
 use bytes::BytesMut;
 use dc_common::Pair;
-use rtc::data_channel::{RTCDataChannelInit, RTCDataChannelState};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::transport::RTCDtlsRole;
+use rtci::data_channel::{RTCDataChannelInit, RTCDataChannelState};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::transport::RTCDtlsRole;
 
 /// RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY start sending
 /// messages containing user data without waiting for the reception of the corresponding
@@ -176,9 +176,9 @@ fn a_stream_is_used_again_after_its_channel_closed() -> Result<()> {
 /// with the OPEN's retransmission after that. The channel opens, and carries data both ways.
 #[test]
 fn a_channel_whose_ack_takes_longer_than_thirty_seconds_still_opens() -> Result<()> {
-    use rtc::peer_connection::transport::RTCSctpTransportState;
-    use rtc::sansio::Protocol;
-    use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+    use rtci::peer_connection::transport::RTCSctpTransportState;
+    use rtci::sansio::Protocol;
+    use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
     use std::time::Duration;
 
     const BLACKOUT: Duration = Duration::from_secs(35);
@@ -225,14 +225,15 @@ fn a_channel_whose_ack_takes_longer_than_thirty_seconds_still_opens() -> Result<
             offerer.handle_read(arriving(datagram, now))?;
         }
         while let Some(event) = offerer.poll_event() {
-            if let rtc::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(event) = event
+            if let rtci::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(event) =
+                event
                 && !matches!(event, RTCDataChannelEvent::OnBufferedAmountLow(_))
             {
                 offerer_events.push(event);
             }
         }
         while let Some(event) = answerer.poll_event() {
-            if let rtc::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+            if let rtci::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
                 RTCDataChannelEvent::OnOpen(id),
             ) = event
             {
@@ -240,14 +241,14 @@ fn a_channel_whose_ack_takes_longer_than_thirty_seconds_still_opens() -> Result<
             }
         }
         while let Some(read) = offerer.poll_read() {
-            if let rtc::peer_connection::message::RTCMessage::DataChannelMessage(_, m) =
+            if let rtci::peer_connection::message::RTCMessage::DataChannelMessage(_, m) =
                 read.message
             {
                 received.0.push(m.data.to_vec());
             }
         }
         while let Some(read) = answerer.poll_read() {
-            if let rtc::peer_connection::message::RTCMessage::DataChannelMessage(_, m) =
+            if let rtci::peer_connection::message::RTCMessage::DataChannelMessage(_, m) =
                 read.message
             {
                 received.1.push(m.data.to_vec());

@@ -33,7 +33,7 @@ use shared::error::{Error, Result};
 /// ## Creating a Fingerprint
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsFingerprint;
+/// use rtci::peer_connection::transport::RTCDtlsFingerprint;
 ///
 /// let fingerprint = RTCDtlsFingerprint {
 ///     algorithm: "sha-256".to_string(),
@@ -46,7 +46,7 @@ use shared::error::{Error, Result};
 /// ## Serialization for SDP
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsFingerprint;
+/// use rtci::peer_connection::transport::RTCDtlsFingerprint;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let fingerprint = RTCDtlsFingerprint {
@@ -64,7 +64,7 @@ use shared::error::{Error, Result};
 /// ## Verifying Algorithm Support
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsFingerprint;
+/// use rtci::peer_connection::transport::RTCDtlsFingerprint;
 ///
 /// fn is_secure_algorithm(fingerprint: &RTCDtlsFingerprint) -> bool {
 ///     matches!(

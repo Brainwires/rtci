@@ -1,6 +1,6 @@
 #![cfg(not(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
 
 #[test]
 fn peer_connection_without_a_provider_returns_actionable_error() {

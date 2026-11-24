@@ -10,12 +10,12 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, exchange, media_sections, port_of, video_track,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn peer(policy: Option<RTCBundlePolicy>) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     peer_with(policy, true)
@@ -59,7 +59,7 @@ fn offerer_with(
     let mut pc = peer_with(policy, max_bundle_alias)?;
     pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     pc.add_track(video_track("first", 0x0101_0101))?;
     pc.add_track(video_track("second", 0x0202_0202))?;

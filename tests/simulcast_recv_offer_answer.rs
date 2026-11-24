@@ -16,15 +16,15 @@
 use anyhow::Result;
 use std::time::Instant;
 
-use rtc::interceptor::Registry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngine;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpHeaderExtensionCapability,
     RtpCodecKind,
 };
@@ -64,7 +64,7 @@ a=simulcast:recv f;h;q
 /// Build an answerer whose local video sender carries three simulcast
 /// encodings (rids f, h, q), mirroring how
 /// `tests/simulcast_rtc_to_webrtc_interop.rs` constructs its layers.
-fn build_simulcast_sender_answerer() -> Result<rtc::peer_connection::RTCPeerConnection> {
+fn build_simulcast_sender_answerer() -> Result<rtci::peer_connection::RTCPeerConnection> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     for uri in [

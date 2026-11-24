@@ -5,15 +5,15 @@
 //! `maxMessageSize` and what the association lets this side send; a provisional answer
 //! does as much.
 //!
-//! Two `rtc` peers on a simulated network; virtual time, no sockets.
+//! Two `rtci` peers on a simulated network; virtual time, no sockets.
 
 mod dtls_sdp_common;
 
 use anyhow::Result;
 use bytes::BytesMut;
 use dtls_sdp_common::{Peer, World, replace_lines};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 fn world() -> Result<World> {
     Ok(World::new(

@@ -1,4 +1,4 @@
-//! ICE over TCP (RFC 6544) between two `rtc` peers, on a simulated network.
+//! ICE over TCP (RFC 6544) between two `rtci` peers, on a simulated network.
 //!
 //! One peer has a passive TCP host candidate (a listener), the other an active one (port 9 in
 //! signalling; each connection it opens gets an ephemeral port). The test plays the network: a
@@ -14,19 +14,19 @@
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::ice::network_type::NetworkType;
-use rtc::ice::tcp_type::TcpType;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::data_channel::RTCDataChannelId;
+use rtci::ice::network_type::NetworkType;
+use rtci::ice::tcp_type::TcpType;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -78,7 +78,7 @@ impl Peer {
         (self.tcp_type == TcpType::Passive).then(|| format!("{}:5000", self.ip).parse().unwrap())
     }
 
-    fn candidate(&self) -> Result<rtc::peer_connection::transport::RTCIceCandidateInit> {
+    fn candidate(&self) -> Result<rtci::peer_connection::transport::RTCIceCandidateInit> {
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
                 network: "tcp".to_owned(),
@@ -328,12 +328,12 @@ fn ice_tcp_passive_controlling_offerer_active_answerer() -> Result<()> {
 
 #[test]
 fn ice_tcp_selected_pair_reports_tcp() -> Result<()> {
-    use rtc::statistics::report::RTCStatsReportEntry;
+    use rtci::statistics::report::RTCStatsReportEntry;
     let (mut peers, _) = run(TcpType::Passive, TcpType::Active, &[b"x".to_vec()])?;
     for peer in peers.iter_mut() {
         let report = peer
             .pc
-            .get_stats(Instant::now(), rtc::statistics::StatsSelector::None);
+            .get_stats(Instant::now(), rtci::statistics::StatsSelector::None);
         let local: Vec<String> = report
             .iter()
             .filter_map(|entry| match entry {

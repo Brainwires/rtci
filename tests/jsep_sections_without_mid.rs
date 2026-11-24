@@ -10,7 +10,7 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, mid_of, video_track,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 #[test]
 fn an_offer_without_mids_numbers_its_sections_by_index() -> TestResult {

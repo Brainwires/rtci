@@ -1,4 +1,4 @@
-// Browser <-> webrtc-rs-rtc interop. Each test opens a page on a local origin (served by
+// Browser <-> rtci interop. Each test opens a page on a local origin (served by
 // Playwright, a secure context), loads peer.js and drives a session with
 // examples/interop-peer at RTC_INTEROP_WS.
 import { test, expect } from "@playwright/test";
@@ -188,8 +188,8 @@ for (const codec of ["VP8", "VP9", "H264", "H265", "AV1"]) {
   });
 }
 
-// ---- the video pipeline: the browser sends, rtc-video assembles, times and decodes ----
-// interop-peer's `pipeline` scenario runs the browser's video through rtc-video's receive
+// ---- the video pipeline: the browser sends, rtci-video assembles, times and decodes ----
+// interop-peer's `pipeline` scenario runs the browser's video through rtci-video's receive
 // pipeline (frame assembly, reference finding, jitter buffer, PLI) and its pure-Rust decoder:
 // vp8-decoder for VP8, rav1d for AV1 (docs/video-pipeline.md, phase 2). The freezes and the
 // longest interval it measured are recorded as the `video-pipeline` annotation, not asserted:
@@ -208,7 +208,7 @@ for (const codec of ["VP8", "AV1"]) {
           const rep = await s.report();
           const st = rep.pipeline && rep.pipeline.streams && rep.pipeline.streams[0];
           return st && st.framesDecoded >= 15 && rep;
-        }, 25000, "15 pictures decoded by rtc-video").catch(async (e) => ({ error: String(e), last: await s.report() }));
+        }, 25000, "15 pictures decoded by rtci-video").catch(async (e) => ({ error: String(e), last: await s.report() }));
         s.close();
         return report;
       },

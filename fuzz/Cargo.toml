@@ -1,5 +1,5 @@
 [package]
-name = "rtc-fuzz"
+name = "rtci-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bytes = "1"
 
-[dependencies.rtc]
+[dependencies.rtci]
 path = ".."
 
 # Prevent this from interfering with workspaces

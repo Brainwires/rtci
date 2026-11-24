@@ -8,8 +8,8 @@ costs a viewer.
 
 ## How it was measured
 
-`rtc-video/tests/receive_rtc2rtc.rs`, `two_percent_loss_with_reordering_waits_only_for_repairs`:
-two `rtc` peer connections in virtual time; VP8 at 500 kbit/s, 30 frames a second, one SSRC
+`rtci-video/tests/receive_rtc2rtc.rs`, `two_percent_loss_with_reordering_waits_only_for_repairs`:
+two `rtci` peer connections in virtual time; VP8 at 500 kbit/s, 30 frames a second, one SSRC
 with RTX; the uplink drops 2 % of the RTP datagrams (seeded) and delays each by 25 ms plus a
 uniform 0..40 ms (so it reorders); RTCP in both directions takes 25 ms. Round trip about 70 ms
 (the receiver is told 70 ms). The interceptor chains are those of

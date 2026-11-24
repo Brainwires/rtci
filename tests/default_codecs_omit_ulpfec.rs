@@ -1,11 +1,11 @@
 //! The default offer carries no ULPFEC (RFC 5109): the engine neither encodes nor decodes it, so
 //! offering it would invite repair packets that are dropped (upstream #837 made the same change,
 //! see FORK.md). End-to-end: the generated SDP has video codecs and no ULPFEC rtpmap.
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use std::time::Instant;
 
 #[test]

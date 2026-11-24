@@ -46,12 +46,12 @@
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
 //! only counts (simulcast: packets per RID); `{"media":"pipeline","video":"VP8|AV1"}` takes the
-//! browser's video through `rtc-video`'s receive pipeline and its pure-Rust decoder (frame
+//! browser's video through `rtci-video`'s receive pipeline and its pure-Rust decoder (frame
 //! assembly, jitter buffer, PLI, decode) and reports what it decoded under `pipeline` in the
 //! `report` reply (frames decoded and dropped, freezes, size, decoder errors); that scenario needs
-//! the peer built from the `rtc-video-interop` package with its `pipeline` feature (the `rtc`
-//! crate itself does not depend on `rtc-video`): `cargo build -p rtc-video-interop --features
-//! pipeline`, binary `interop-peer-video`; built as `rtc`'s example it answers with an error.
+//! the peer built from the `rtci-video-interop` package with its `pipeline` feature (the `rtci`
+//! crate itself does not depend on `rtci-video`): `cargo build -p rtci-video-interop --features
+//! pipeline`, binary `interop-peer-video`; built as `rtci`'s example it answers with an error.
 //! `"negotiated":[{"label":..,"id":..,"ordered":..}]`
 //! creates pre-negotiated data channels. `"ice_tcp":true` adds a passive TCP candidate (RFC
 //! 6544) and `"udp":false` leaves out the UDP one. `"engine_tcp":true` has the engine gather
@@ -70,44 +70,44 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::ice::mdns::MulticastDnsMode;
-use rtc::ice::tcp_type::TcpType;
-use rtc::interceptor::Registry;
-use rtc::media::io::h26x_reader::H26xSampleReader;
-use rtc::media::io::ivf_reader::IVFReader;
-use rtc::media::io::ogg_reader::OggReader;
-use rtc::media_stream::{MediaStreamTrack, MediaStreamTrackId};
-use rtc::peer_connection::configuration::BehaviourProfile;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::ice::mdns::MulticastDnsMode;
+use rtci::ice::tcp_type::TcpType;
+use rtci::interceptor::Registry;
+use rtci::media::io::h26x_reader::H26xSampleReader;
+use rtci::media::io::ivf_reader::IVFReader;
+use rtci::media::io::ogg_reader::OggReader;
+use rtci::media_stream::{MediaStreamTrack, MediaStreamTrackId};
+use rtci::peer_connection::configuration::BehaviourProfile;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_simulcast_extension_headers, register_default_interceptors,
 };
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_HEVC, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,
     MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::{
+use rtci::peer_connection::configuration::setting_engine::{
     SctpMaxMessageSize, SettingEngineBuilder,
 };
-use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::packetizer::Packetizer;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
-use rtc::sansio::Protocol;
-use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
+use rtci::sansio::Protocol;
+use rtci::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -116,11 +116,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "pipeline")]
-use rtc_video::decoder::VideoDecoder;
+use rtci_video::decoder::VideoDecoder;
 #[cfg(feature = "pipeline")]
-use rtc_video::engine::VideoReceiver;
+use rtci_video::engine::VideoReceiver;
 #[cfg(feature = "pipeline")]
-use rtc_video::{DecodeOutcome, ReceiveConfig};
+use rtci_video::{DecodeOutcome, ReceiveConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
@@ -405,7 +405,7 @@ fn audio_mime(name: &str) -> Option<&'static str> {
 
 /// `p`'s sequence number on the track's own run (`Outgoing::next_sequence`): the first packet
 /// keeps its own.
-fn renumber(next_sequence: &mut Option<u16>, p: &mut rtc::rtp::Packet) {
+fn renumber(next_sequence: &mut Option<u16>, p: &mut rtci::rtp::Packet) {
     let next = next_sequence.get_or_insert(p.header.sequence_number);
     p.header.sequence_number = *next;
     *next = next.wrapping_add(1);
@@ -460,7 +460,7 @@ struct Session {
         (
             RtpCodecKind,
             Option<String>,
-            rtc::rtp_transceiver::RTCRtpReceiverId,
+            rtci::rtp_transceiver::RTCRtpReceiverId,
         ),
     >,
     /// Simulcast layers share one track; each layer's SSRC names its RID.
@@ -547,7 +547,7 @@ impl Session {
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
         let mdns = match ip {
-            IpAddr::V4(v4) => match rtc::mdns::MulticastSocket::new()
+            IpAddr::V4(v4) => match rtci::mdns::MulticastSocket::new()
                 .with_interface(v4)
                 .into_std()
                 .and_then(|s| {
@@ -847,7 +847,7 @@ impl Session {
     /// given again. The candidate goes to the browser by trickle ICE.
     fn gather_anew(
         &mut self,
-        needed: &rtc::peer_connection::event::RTCLocalCandidatesNeededEvent,
+        needed: &rtci::peer_connection::event::RTCLocalCandidatesNeededEvent,
     ) -> Result<()> {
         let Some(mid) = needed.mids.first().cloned() else {
             return Ok(());
@@ -1024,7 +1024,7 @@ impl Session {
                 for kind in receive {
                     self.pc.add_transceiver_from_kind(
                         kind,
-                        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+                        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
                     )?;
                 }
                 for name in tracks {
@@ -1411,7 +1411,7 @@ impl Session {
                 if let Some(out) = self.tcp_out.get(&peer) {
                     let _ = out.send(frame_packet(&m.message));
                 }
-            } else if peer.port() == rtc::mdns::MDNS_PORT
+            } else if peer.port() == rtci::mdns::MDNS_PORT
                 && let Some(mdns) = &self.mdns
             {
                 let _ = mdns.try_send_to(&m.message, peer);
@@ -1471,8 +1471,8 @@ impl Session {
                 RTCPeerConnectionEvent::OnTransportEvent(event)
                     if matches!(
                         event.event,
-                        rtc::peer_connection::event::RTCTransportEventKind::DtlsStateChange(
-                            rtc::peer_connection::transport::RTCDtlsTransportState::Connected
+                        rtci::peer_connection::event::RTCTransportEventKind::DtlsStateChange(
+                            rtci::peer_connection::transport::RTCDtlsTransportState::Connected
                         )
                     ) =>
                 {
@@ -1484,7 +1484,7 @@ impl Session {
                 }
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(st) => {
                     self.connected =
-                        st == rtc::peer_connection::state::RTCPeerConnectionState::Connected;
+                        st == rtci::peer_connection::state::RTCPeerConnectionState::Connected;
                     self.state = st.to_string();
                 }
                 _ => {}
@@ -1525,7 +1525,7 @@ impl Session {
         Ok(())
     }
 
-    fn on_rtp(&mut self, track_id: MediaStreamTrackId, mut pkt: rtc::rtp::Packet) {
+    fn on_rtp(&mut self, track_id: MediaStreamTrackId, mut pkt: rtci::rtp::Packet) {
         let Some((kind, rid, receiver_id)) = self.tracks.get(&track_id).cloned() else {
             return;
         };
@@ -1606,13 +1606,13 @@ impl Session {
             };
             let o = &mut self.outgoing[i];
             let pk = o.packetizer.get_or_insert_with(|| {
-                Box::new(rtc::rtp::packetizer::new_packetizer(
+                Box::new(rtci::rtp::packetizer::new_packetizer(
                     Instant::now(),
                     1200,
                     pt,
                     o.ssrc,
                     o.codec.payloader().expect("payloader"),
-                    Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                    Box::new(rtci::rtp::sequence::new_random_sequencer()),
                     o.codec.clock_rate,
                 ))
             });
@@ -1723,13 +1723,13 @@ impl Session {
         };
         let frame = tone.frame();
         let pk = tone.packetizer.get_or_insert_with(|| {
-            Box::new(rtc::rtp::packetizer::new_packetizer(
+            Box::new(rtci::rtp::packetizer::new_packetizer(
                 now,
                 1200,
                 pt,
                 wire,
                 codec.payloader().expect("a G.711 payloader"),
-                Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                Box::new(rtci::rtp::sequence::new_random_sequencer()),
                 8000,
             ))
         });
@@ -1796,7 +1796,7 @@ async fn accept_opt(
 /// The next Opus packet: one RTP payload (RFC 7587 4.2). A page may hold several packets and a
 /// packet may span pages (RFC 3533 section 6), so packets are read, not pages. OpusHead and
 /// OpusTags are stream headers, not packets to send (RFC 7845 section 3).
-fn next_audio_packet(r: &mut OggReader<BufReader<File>>) -> rtc::shared::error::Result<BytesMut> {
+fn next_audio_packet(r: &mut OggReader<BufReader<File>>) -> rtci::shared::error::Result<BytesMut> {
     loop {
         let (d, _) = r.next_packet()?;
         if !d.starts_with(b"OpusHead") && !d.starts_with(b"OpusTags") {
@@ -1860,8 +1860,8 @@ fn wire_rtp_json(counts: &BTreeMap<u8, (u64, u64)>) -> Value {
     )
 }
 
-fn rtcp_name(h: &rtc::rtcp::header::Header) -> String {
-    use rtc::rtcp::header::PacketType;
+fn rtcp_name(h: &rtci::rtcp::header::Header) -> String {
+    use rtci::rtcp::header::PacketType;
     match (h.packet_type, h.count) {
         (PacketType::SenderReport, _) => "sr".into(),
         (PacketType::ReceiverReport, _) => "rr".into(),
@@ -1886,7 +1886,7 @@ fn codec_kind(c: &RTCRtpCodec) -> RtpCodecKind {
     }
 }
 
-/// Scenario `pipeline`: the browser's video through `rtc-video` (package `rtc-video-interop`,
+/// Scenario `pipeline`: the browser's video through `rtci-video` (package `rtci-video-interop`,
 /// feature `pipeline`).
 #[cfg(feature = "pipeline")]
 struct VideoPipeline {
@@ -1902,7 +1902,7 @@ struct VideoPipeline {
 #[cfg(feature = "pipeline")]
 impl Session {
     /// Scenario `pipeline`: the receive pipeline for the first video track.
-    fn start_video_pipeline(&mut self, receiver_id: rtc::rtp_transceiver::RTCRtpReceiverId) {
+    fn start_video_pipeline(&mut self, receiver_id: rtci::rtp_transceiver::RTCRtpReceiverId) {
         if self.video_pipeline.is_some() {
             return;
         }
@@ -1929,7 +1929,7 @@ impl Session {
     }
 
     /// Scenario `pipeline`: a video packet into the pipeline; `false` when there is none.
-    fn video_pipeline_rtp(&mut self, pkt: &rtc::rtp::Packet) -> bool {
+    fn video_pipeline_rtp(&mut self, pkt: &rtci::rtp::Packet) -> bool {
         let Some(vp) = &mut self.video_pipeline else {
             return false;
         };
@@ -1952,7 +1952,7 @@ impl Session {
             let decoder = vp
                 .decoders
                 .entry(ssrc)
-                .or_insert_with(|| rtc_video::codec::decoder_for(codec));
+                .or_insert_with(|| rtci_video::codec::decoder_for(codec));
             let outcome = match decoder.as_mut().map(|d| d.decode(&request.frame)) {
                 Some(Ok(Some(p))) => {
                     vp.size = Some((p.width, p.height));
@@ -2023,12 +2023,12 @@ impl Session {
     }
 }
 
-/// Built without the `pipeline` feature (as `rtc`'s example): the scenario is refused.
+/// Built without the `pipeline` feature (as `rtci`'s example): the scenario is refused.
 #[cfg(not(feature = "pipeline"))]
 impl Session {
-    fn start_video_pipeline(&mut self, _receiver_id: rtc::rtp_transceiver::RTCRtpReceiverId) {
+    fn start_video_pipeline(&mut self, _receiver_id: rtci::rtp_transceiver::RTCRtpReceiverId) {
         self.errors.push(
-            "video pipeline: this interop peer was built without it (build the rtc-video-interop \
+            "video pipeline: this interop peer was built without it (build the rtci-video-interop \
              package with its pipeline feature)"
                 .into(),
         );
@@ -2038,7 +2038,7 @@ impl Session {
         None
     }
 
-    fn video_pipeline_rtp(&mut self, _pkt: &rtc::rtp::Packet) -> bool {
+    fn video_pipeline_rtp(&mut self, _pkt: &rtci::rtp::Packet) -> bool {
         false
     }
 

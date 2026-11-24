@@ -17,26 +17,26 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
-use rtc::interceptor::{Attribute, Interceptor, Packet, Slot, StreamInfo, TaggedPacket};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry as RtcRegistry;
+use rtci::interceptor::{Attribute, Interceptor, Packet, Slot, StreamInfo, TaggedPacket};
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceServer,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::shared::error::Error;
+use rtci::shared::error::Error;
 
 use webrtc::api::APIBuilder;
 // webrtc links its own `rtcp`, so the type it is handed is not the one this crate parses with.
@@ -377,8 +377,9 @@ async fn test_rtcp_processing_webrtc_offerer_rtc_answerer() -> Result<()> {
     rtc_pc.add_local_candidate(RTCIceCandidate::from(&candidate).to_json()?)?;
 
     // Set remote description (offer)
-    let rtc_offer =
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_with_candidates.sdp.clone())?;
+    let rtc_offer = rtci::peer_connection::sdp::RTCSessionDescription::offer(
+        offer_with_candidates.sdp.clone(),
+    )?;
     rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
 
     // Create and set answer
@@ -609,7 +610,7 @@ async fn test_rtcp_processing_rtc_offerer_webrtc_answerer() -> Result<()> {
     rtc_pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
         Some(RTCRtpTransceiverInit {
-            direction: rtc::rtp_transceiver::RTCRtpTransceiverDirection::Recvonly,
+            direction: rtci::rtp_transceiver::RTCRtpTransceiverDirection::Recvonly,
             ..Default::default()
         }),
     )?;
@@ -656,7 +657,7 @@ async fn test_rtcp_processing_rtc_offerer_webrtc_answerer() -> Result<()> {
         .expect("local description should be set");
 
     // Set answer on RTC
-    let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(
+    let rtc_answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(
         answer_with_candidates.sdp.clone(),
     )?;
     rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
@@ -926,7 +927,7 @@ async fn test_rtcp_processing_rtc_sender_receives_feedback() -> Result<()> {
         .local_description()
         .await
         .expect("local description should be set");
-    let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(
+    let rtc_answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(
         answer_with_candidates.sdp.clone(),
     )?;
     rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
@@ -959,8 +960,8 @@ async fn test_rtcp_processing_rtc_sender_receives_feedback() -> Result<()> {
             && rtp_packets_sent < 300
             && let Some(mut sender) = rtc_pc.rtp_sender(sender_id)
         {
-            let packet = rtc::rtp::packet::Packet {
-                header: rtc::rtp::header::Header {
+            let packet = rtci::rtp::packet::Packet {
+                header: rtci::rtp::header::Header {
                     version: 2,
                     payload_type: 96,
                     sequence_number: rtp_packets_sent as u16,

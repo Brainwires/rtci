@@ -6,31 +6,31 @@
 //! under the old keys until the new handshake hands over the new ones, and the data channel
 //! goes on over the new association (RFC 8841 section 10.5).
 //!
-//! Two `rtc` peers exchange datagrams in memory, on a virtual clock, with a key lifetime of
+//! Two `rtci` peers exchange datagrams in memory, on a virtual clock, with a key lifetime of
 //! 320 SRTP packets and an audio stream of 900 packets, one every 20 ms.
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::data_channel::RTCDataChannelId;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelId;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::srtp::keying::KeyLifetime;
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::srtp::keying::KeyLifetime;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -148,7 +148,7 @@ impl Peer {
 
     fn dtls_state(&mut self, now: Instant) -> Option<RTCDtlsTransportState> {
         self.pc
-            .get_stats(now, rtc::statistics::StatsSelector::None)
+            .get_stats(now, rtci::statistics::StatsSelector::None)
             .transport()
             .map(|t| t.dtls_state)
     }
@@ -304,8 +304,8 @@ fn run(settings: [SettingEngineBuilder; 2]) -> Result<Outcome> {
             // Refused once a key is exhausted: the error is the pipeline's.
             let _ = peers[0].pc.rtp_sender(sender).expect("sender").write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: 111,
                         sequence_number: sent,

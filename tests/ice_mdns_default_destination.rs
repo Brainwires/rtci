@@ -2,11 +2,11 @@
 //! `c=` line (or as the `m=` port's address); with only mDNS host candidates the default
 //! destination is `0.0.0.0` (`::`) and port 9.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use std::time::Instant;
 
 #[test]
@@ -18,7 +18,7 @@ fn an_mdns_host_candidate_is_never_the_default_destination()
         .with_media_engine(media_engine)
         .with_setting_engine(
             SettingEngineBuilder::new()
-                .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::QueryAndGather)
+                .with_multicast_dns_mode(rtci::ice::mdns::MulticastDnsMode::QueryAndGather)
                 .build(),
         )
         .build(Instant::now())?;

@@ -1,6 +1,6 @@
 # The video pipeline: design
 
-The engine (`rtc`) carries video; it never captures, encodes, decodes or renders it. This
+The engine (`rtci`) carries video; it never captures, encodes, decodes or renders it. This
 document designs the crates that do that beside the engine, as `docs/media-pipeline.md` did
 for audio, and fixes the phases in which they are built. It is measured against libwebrtc
 (Chrome's stack): every behaviour that libwebrtc has is either built, or listed here with the
@@ -35,18 +35,18 @@ cited as `file:line @ a222406d`; RFC and W3C texts as in the conformance work
 
 | Area | Where | What it gives the pipeline |
 |---|---|---|
-| Payload formats | `rtc-rtp/src/codec/{vp8,vp9,av1,h264,h265}` | packetizers and depacketizers; `Vp8Packet` (PictureID with its width, TL0PICIDX, TID, Y, KEYIDX, N, S, PID), `Vp9Packet` (I, P, L, F, B, E, V, Z, PictureID, TID, U, SID, D, P_DIFF, the scalability structure with its GOF), `Av1Depacketizer` (OBU aggregation, Z / Y / N bits), `H264Packet` (RFC 6184 single NAL, STAP-A, FU-A, packetization modes, interleaved), `H265Packet` (RFC 7798) |
-| Dependency Descriptor | `rtc-rtp/src/codec/dependency_descriptor/` | `DependencyDescriptor` (frame number, template, DTIs, fdiffs, chains, attached structure, active decode targets), `DependencyDescriptorReader` (keeps the structure across packets), `DependencyDescriptorWriter`, `DecodeTargetSelector` with chain integrity |
-| SVC / simulcast signalling | `rtc-rtp/src/codec/svc/`, `RTCRtpSender::set_configured_scalability_mode` | the webrtc-svc mode table, `ScalabilityPattern` (per-picture layer frames with their dependencies, VP8 / VP9 info, the DD structure and the VP9 scalability structure for a mode); RID simulcast in SDP (RFC 8853), `send_restrictions` (rid restrictions, `max-fr` / `max-fs` / `max-mbps` / `max-br`, `b=TIAS`), `send_resolution` (`a=imageattr`) |
-| Containers | `rtc-media/src/io/{ivf_reader,ivf_writer,h26x_reader,h26x_writer,sample_builder}` | IVF and Annex B readers and writers; `SampleBuilder` (the upstream frame assembler the capacity test uses) |
-| Retransmission | `rtc-interceptor/src/nack/` (generator and responder), `src/peer_connection/handler/endpoint.rs` | NACK generation (RFC 4585) with reordering allowance, round-trip spacing, optional age and count limits; RTX (RFC 4588) answered by the responder, and an RTX packet reaches the application as the original packet it carries (`interceptor_rtx_test.rs::the_chain_sees_the_original_packet_an_rtx_packet_carries`) |
-| FEC | `rtc-interceptor/src/{flexfec,ulpfec}` | FlexFEC (draft-03 and RFC 8627) and ULPFEC (RFC 5109) encoders and decoders; not in the default interceptors (`tests/default_codecs_omit_ulpfec.rs`) |
-| Key-frame requests | `rtc-interceptor/src/keyframe.rs`, `src/peer_connection/event/mod.rs` (`OnKeyFrameRequest`), `RTCRtpReceiver::send_key_frame_request` (FIR), `RTCRtpReceiver::write_rtcp` | inbound PLI / FIR reach the application, and a sender gets `OnKeyFrameRequest { sender, rid }`; a receiver can send FIR (webrtc-encoded-transform) and any RTCP (PLI) |
-| Congestion control | `rtc-interceptor/src/{gcc,twcc,rfc8888,cc,pacing}` | GCC on transport-cc or RFC 8888, probing, the pacer, TMMBR, REMB; `RTCRtpSender::target_bitrates()` is the share of the target per encoding (W3C webrtc-priority split, capped at `maxBitrate`) |
-| Header extensions | `rtc-rtp/src/extension/` | `playout_delay_extension`, `abs_capture_time_extension`, `video_orientation_extension`, `transport_cc_extension`, `abs_send_time_extension`, `corruption_detection_extension`, `sdes` (MID, RID, repaired RID) |
+| Payload formats | `rtci-rtp/src/codec/{vp8,vp9,av1,h264,h265}` | packetizers and depacketizers; `Vp8Packet` (PictureID with its width, TL0PICIDX, TID, Y, KEYIDX, N, S, PID), `Vp9Packet` (I, P, L, F, B, E, V, Z, PictureID, TID, U, SID, D, P_DIFF, the scalability structure with its GOF), `Av1Depacketizer` (OBU aggregation, Z / Y / N bits), `H264Packet` (RFC 6184 single NAL, STAP-A, FU-A, packetization modes, interleaved), `H265Packet` (RFC 7798) |
+| Dependency Descriptor | `rtci-rtp/src/codec/dependency_descriptor/` | `DependencyDescriptor` (frame number, template, DTIs, fdiffs, chains, attached structure, active decode targets), `DependencyDescriptorReader` (keeps the structure across packets), `DependencyDescriptorWriter`, `DecodeTargetSelector` with chain integrity |
+| SVC / simulcast signalling | `rtci-rtp/src/codec/svc/`, `RTCRtpSender::set_configured_scalability_mode` | the webrtc-svc mode table, `ScalabilityPattern` (per-picture layer frames with their dependencies, VP8 / VP9 info, the DD structure and the VP9 scalability structure for a mode); RID simulcast in SDP (RFC 8853), `send_restrictions` (rid restrictions, `max-fr` / `max-fs` / `max-mbps` / `max-br`, `b=TIAS`), `send_resolution` (`a=imageattr`) |
+| Containers | `rtci-media/src/io/{ivf_reader,ivf_writer,h26x_reader,h26x_writer,sample_builder}` | IVF and Annex B readers and writers; `SampleBuilder` (the upstream frame assembler the capacity test uses) |
+| Retransmission | `rtci-interceptor/src/nack/` (generator and responder), `src/peer_connection/handler/endpoint.rs` | NACK generation (RFC 4585) with reordering allowance, round-trip spacing, optional age and count limits; RTX (RFC 4588) answered by the responder, and an RTX packet reaches the application as the original packet it carries (`interceptor_rtx_test.rs::the_chain_sees_the_original_packet_an_rtx_packet_carries`) |
+| FEC | `rtci-interceptor/src/{flexfec,ulpfec}` | FlexFEC (draft-03 and RFC 8627) and ULPFEC (RFC 5109) encoders and decoders; not in the default interceptors (`tests/default_codecs_omit_ulpfec.rs`) |
+| Key-frame requests | `rtci-interceptor/src/keyframe.rs`, `src/peer_connection/event/mod.rs` (`OnKeyFrameRequest`), `RTCRtpReceiver::send_key_frame_request` (FIR), `RTCRtpReceiver::write_rtcp` | inbound PLI / FIR reach the application, and a sender gets `OnKeyFrameRequest { sender, rid }`; a receiver can send FIR (webrtc-encoded-transform) and any RTCP (PLI) |
+| Congestion control | `rtci-interceptor/src/{gcc,twcc,rfc8888,cc,pacing}` | GCC on transport-cc or RFC 8888, probing, the pacer, TMMBR, REMB; `RTCRtpSender::target_bitrates()` is the share of the target per encoding (W3C webrtc-priority split, capped at `maxBitrate`) |
+| Header extensions | `rtci-rtp/src/extension/` | `playout_delay_extension`, `abs_capture_time_extension`, `video_orientation_extension`, `transport_cc_extension`, `abs_send_time_extension`, `corruption_detection_extension`, `sdes` (MID, RID, repaired RID) |
 | Frame metadata | `src/rtp_transceiver/rtp_receiver/frame_metadata.rs` | `RTCRtpReceiver::encoded_frame_metadata(packets)`: receive time, capture time (abs-capture-time, or from the sender reports), the DD frame id and dependencies, frame type, size, layer indices |
 | Receiver track | `RTCRtpReceiver::report_received_frame(now, w, h)`, `jitter_buffer_target()` | track settings (size, aspect, frame rate) and the W3C `jitterBufferTarget` |
-| SFrame | `rtc-sframe`, `encoded_transform_sframe_rtc2rtc.rs` | per-frame end-to-end encryption |
+| SFrame | `rtci-sframe`, `encoded_transform_sframe_rtc2rtc.rs` | per-frame end-to-end encryption |
 | Statistics | `src/statistics/feed.rs`, `accumulator/media/app_provided.rs` | `update_decoder_stats(ssrc, DecoderStatsUpdate)` (framesReceived, framesDecoded, keyFramesDecoded, framesRendered, framesDropped, frameWidth / Height, framesPerSecond, qpSum, totalDecodeTime, totalInterFrameDelay, totalSquaredInterFrameDelay, totalProcessingDelay, pauseCount, totalPausesDuration, freezeCount, totalFreezesDuration, packetsDiscarded, totalAssemblyTime, framesAssembledFromMultiplePackets, decoderImplementation, corruption measurements); `update_encoder_stats`; `update_video_source_stats`. The engine itself counts packets, bytes, NACK, PLI and FIR counts, RTX and FEC packets |
 
 What none of this does: assemble frames that survive loss and reordering correctly per codec,
@@ -127,7 +127,7 @@ specification 4.4 (Z, Y, N) and appendix A (`start_of_frame`, `end_of_frame`), R
 (the marker bit "set for the very last packet of the access unit") and RFC 7798. They define
 the boundaries; buffering policy is left to the receiver.
 
-**This project.** `rtc_video::assembly::PacketBuffer`, one per SSRC (RTX already folded back
+**This project.** `rtci_video::assembly::PacketBuffer`, one per SSRC (RTX already folded back
 by the engine): unwrapped sequence numbers (`i64`), a `BTreeMap` window instead of a ring
 (same complexity for the sizes involved, no aliasing), capacity 2048 packets by default
 (libwebrtc's maximum; configurable), duplicate drop counted, overflow and large backward
@@ -157,7 +157,7 @@ specification appendix A (frame_number, fdiffs: "the frame dependencies"). The p
 formats make the references explicit; nothing is left to policy except what to do with a
 frame whose references are unknown.
 
-**This project.** `rtc_video::reference::ReferenceFinder`, an enum over the same five
+**This project.** `rtci_video::reference::ReferenceFinder`, an enum over the same five
 finders with libwebrtc's dispatch, written from the RFCs; frame ids unwrapped to `i64`
 (picture ids per their width, which RFC 7741 4.2 lets change mid-session: the engine's
 `picture_id_15_bits`), the DD frame number to `i64`. Stash limits as libwebrtc's. A finder
@@ -180,7 +180,7 @@ and counted (`DropNextDecodableTemporalUnit`, `:145`).
 because the frame missed its display deadline"; `framesReceived` "complete frames received";
 `packetsDiscarded` "discarded by the jitter buffer due to late or early-arrival".
 
-**This project.** `rtc_video::buffer::FrameBuffer` with the same rules and limits; a temporal
+**This project.** `rtci_video::buffer::FrameBuffer` with the same rules and limits; a temporal
 unit is what is handed out (all spatial layers of one picture); every frame that leaves the
 buffer undecoded is counted in `framesDropped`, its packets in `packetsDiscarded`.
 
@@ -223,9 +223,9 @@ the jitter buffer and the emit timestamp is when the whole frame exits the jitte
 webrtc-extensions `jitterBufferTarget` (the engine's `RTCRtpReceiver::jitter_buffer_target`).
 The playout-delay extension is a webrtc.org experiment
 (`http://www.webrtc.org/experiments/rtp-hdrext/playout-delay`, engine
-`rtc-rtp/src/extension/playout_delay_extension`), no RFC.
+`rtci-rtp/src/extension/playout_delay_extension`), no RFC.
 
-**This project.** `rtc_video::timing` ports the model: jitter estimator (Kalman filter,
+**This project.** `rtci_video::timing` ports the model: jitter estimator (Kalman filter,
 noise, outliers, NACK term, frame-rate scaling), timestamp extrapolator, decode-time
 percentile, target / current / render time, scheduling with the 5 ms skip rule, the
 low-latency path, the 10 s reset. `jitterBufferTarget` raises the minimum (as libwebrtc's
@@ -273,7 +273,7 @@ retries at most (`:39`).
 **Specifications.** RFC 4588 6.3: "The receiver should generally assess whether the
 retransmitted packet would still be useful at the time it is received."
 
-**Engine today.** `rtc-interceptor/src/nack/generator.rs` asks for a missing packet for as long
+**Engine today.** `rtci-interceptor/src/nack/generator.rs` asks for a missing packet for as long
 as its receive log holds it, unless an age (`with_max_packet_age`, or the sender's
 `rtx-time`) or a count limit is set; its documentation states the gap: "How long a packet
 stays useful is the receiving application's playout (RFC 4588 6.3), which this interceptor
@@ -298,7 +298,7 @@ missing horizon costs (retransmissions of dropped frames).
 controller skips late frames (2.4) and the low-latency path releases at most what the queue
 bound allows.
 
-**This project.** `rtc_video::decoder::VideoDecoder` trait: `decode(&mut self, frame:
+**This project.** `rtci_video::decoder::VideoDecoder` trait: `decode(&mut self, frame:
 &EncodedFrame) -> Result<Option<DecodedPicture>, DecodeError>` with `DecodeError::
 NeedKeyFrame` / `Corrupt`, `implementation_name()`, `is_hardware()`, the QP of the last frame
 when the decoder knows it. Synchronous and `Send`, so the application runs it where it likes:
@@ -325,7 +325,7 @@ last rendered frame exceeds 5 seconds"; `totalFreezesDuration`, `totalPausesDura
 `totalInterFrameDelay`, `totalSquaredInterFrameDelay`, `framesRendered` are recorded "just
 after a frame has been rendered".
 
-**This project.** `rtc_video::render::RenderStats`, fed by the application's renderer
+**This project.** `rtci_video::render::RenderStats`, fed by the application's renderer
 (`on_rendered(now, width, height)`), or by the pipeline at the frame's render time when the
 application has no renderer of its own. Default: the W3C definition, on render times, from
 the first interval. `BehaviourProfile::Chrome`: libwebrtc's five-interval warm-up. A pause is
@@ -514,7 +514,7 @@ the documentation and/or other materials provided with the distribution"; no use
 name to endorse). For source, the crates satisfy it themselves (NOTICE travels in the
 `.crate`). For **binaries**, the obligation falls on whoever ships an application built with
 `vp8`: it must carry Google's notice from the crates' `NOTICE` with its other licence notices.
-`rtc-video` is not published and contains no code derived from section 20, so it carries no
+`rtci-video` is not published and contains no code derived from section 20, so it carries no
 notice of its own; its README says what an application must include.
 
 The patent text is a different matter and is **not** a condition to ship. RFC 6386 section
@@ -526,7 +526,7 @@ the grant does not plainly extend to these crates, and the crates do not claim i
 "Nothing here grants any patent licence beyond what Apache-2.0 grants for our own
 contributions"; libvpx's PATENTS file is deliberately not included). Whether other patent
 arrangements for VP8 cover an independent implementation is a legal question this review does
-not answer; the owner should treat it as such. Nothing has to be added to `rtc-video` for the
+not answer; the owner should treat it as such. Nothing has to be added to `rtci-video` for the
 patent text: there is no obligation to ship it, and shipping it would claim a grant that may not
 apply.
 
@@ -543,7 +543,7 @@ stream. The other route with history is libvpx through the opt-in `libvpx` backe
 
 **The pin and how it is enforced.**
 
-- `vp8-decoder = "=0.1.3"` and `vp8-encoder = "=0.1.3"` in `rtc-video/Cargo.toml`: cargo
+- `vp8-decoder = "=0.1.3"` and `vp8-encoder = "=0.1.3"` in `rtci-video/Cargo.toml`: cargo
   cannot select another version, not even a patch release.
 - crates.io never changes the contents of a published version (a version can be yanked, not
   replaced), and cargo checks each download against the SHA-256 in the index.
@@ -597,7 +597,7 @@ a child process; rav1e 96x64 stream, 12 temporal units):
 | every single-bit flip of the 2419-byte key frame, alone | **711 of 19,352** |
 | phase 2's seeded mutations of the stream (flips, truncation, appended or overwritten bytes) | 193 of 750 |
 
-The reproducer (`rtc-video/tests/data/rav1d-abort.ivf`, 2463 bytes): the key frame with bit 6
+The reproducer (`rtci-video/tests/data/rav1d-abort.ivf`, 2463 bytes): the key frame with bit 6
 of byte 4 flipped (the first payload byte of the sequence header: `seq_profile` 0 becomes 2).
 With rav1d 1.1.0 it aborts at `n_threads` 1 or 4 with `max_frame_delay` 1; at `n_threads` 2,
 `max_frame_delay` 2 it does not (the delayed-output path, unusable for a decoder that must
@@ -615,7 +615,7 @@ branch (not done; the owner's call when a release does not come). What is sound 
 process; when the child aborts, crashes or hangs past a timeout (2 s by default), that frame
 returns `DecodeError::Corrupt`, the next frame starts a new child, which asks for a key frame
 like any fresh decoder. It costs two copies through a pipe per frame. Tested in
-`rtc-video/tests/isolated.rs` (the reproducer kills an in-process decoder; through the child it
+`rtci-video/tests/isolated.rs` (the reproducer kills an in-process decoder; through the child it
 costs one frame and the next key frame decodes to the same picture; a hung child is killed). It
 contains the C backends' crashes too (libvpx, dav1d, OpenH264), which no in-process mechanism
 can.
@@ -697,7 +697,7 @@ libraries).** A job `video-codecs` on ubuntu-latest: `sudo apt-get install -y li
 libvpx12`, download Cisco's `libopenh264-2.6.0-linux64.8.so.bz2` from
 `http://ciscobinary.openh264.org/` into the runner's temporary directory (a CI machine fetching
 the binary for a test is the "separately downloaded" case; it is never committed or cached in
-the repository) and set `OPENH264_LIBRARY`, then `cargo test -p rtc-video --all-features`. About
+the repository) and set `OPENH264_LIBRARY`, then `cargo test -p rtci-video --all-features`. About
 3 minutes with a warm cache. No other job changes: `cargo check --workspace --all-features`
 needs no library. macOS (Homebrew `libvpx`, `dav1d`) and Windows (vcpkg) variants are possible
 but not proposed until an application needs them.
@@ -781,23 +781,23 @@ the engine depacketizes, and hands frames to whichever decoder the application r
 
 ### 5.1 Crates
 
-- **`rtc-video`**: the receive pipeline (assembly, reference finder, frame buffer,
+- **`rtci-video`**: the receive pipeline (assembly, reference finder, frame buffer,
   timing, key-frame policy, render statistics), the decoder and encoder traits, the send
   pipeline (cadence, scaling, allocation, adaptation), the codec backends behind features,
   and `engine` (feature, default) for the glue to `RTCRtpReceiver` / `RTCRtpSender`, as
   `rtc-audio` does. Default features: `engine` only; `vp8` (4.7), `av1` (4.8) and `isolation`
-  are opt-in. The engine does not depend on `rtc-video` in any way (not even as a
-  dev-dependency): the interop peer's video scenario is built by the `rtc-video-interop`
-  package (`rtc-video/interop`, not published) from `examples/interop-peer`, and the
+  are opt-in. The engine does not depend on `rtci-video` in any way (not even as a
+  dev-dependency): the interop peer's video scenario is built by the `rtci-video-interop`
+  package (`rtci-video/interop`, not published) from `examples/interop-peer`, and the
   workspace's ordinary builds compile no codec (6.4).
 - **Capture**: not in `rtc-devices`, which is audio-only and another agent's; a crate
-  `rtc-video-devices` (or features of `rtc-video`) for cameras and screens is an owner decision
-  (section 7). Synthetic sources (test patterns, moving shapes, noise) are in `rtc-video` itself
+  `rtci-video-devices` (or features of `rtci-video`) for cameras and screens is an owner decision
+  (section 7). Synthetic sources (test patterns, moving shapes, noise) are in `rtci-video` itself
   and are what every test uses.
 
 ### 5.2 Attachment to the engine
 
-Receive: `rtc_video::engine::VideoReceiver::new(&mut pc, receiver_id, config)`; for every
+Receive: `rtci_video::engine::VideoReceiver::new(&mut pc, receiver_id, config)`; for every
 `RTCMessage::RtpPacket(track, packet)` of its track `handle_rtp(now, &packet)`; `poll(&mut pc,
 now)` writes due PLI, returns `DecodeRequest`s; `on_decoded(&mut pc, now, outcome)` reports
 the decoded size (`report_received_frame`) and statistics; `poll_timeout()` for the next
@@ -823,7 +823,7 @@ given the same `now`.
 
 **On master without the audio crates.** Engine `master` (4431dda0) does not contain
 `rtc-audio`, `rtc-devices` or `rtc-ffi`: they were reverted and return on
-`conf/ffi-mp-5`. `rtc-video` does not depend on them, and phase 4 keeps it that way: the sync
+`conf/ffi-mp-5`. `rtci-video` does not depend on them, and phase 4 keeps it that way: the sync
 module takes each stream's measurements as plain values (capture time on the sender's clock,
 render or playout time on the receiver's, the current extra delay) and returns the extra delay
 for each side. The video side applies its own through `ReceivePipeline::set_sync_delay` (it
@@ -858,7 +858,7 @@ integration train.
 
 ### Phase 1: the receive pipeline, codec-agnostic (`conf/vp-2-receive`)
 
-Scope: `rtc-video` with `assembly`, `reference`, `buffer`, `timing`, `keyframe`, `render`,
+Scope: `rtci-video` with `assembly`, `reference`, `buffer`, `timing`, `keyframe`, `render`,
 `stats`, `decoder` (trait only, plus a test decoder that models reference validity),
 `engine::VideoReceiver`. No codec dependency.
 
@@ -874,7 +874,7 @@ Tests (no camera, no browser):
   releases must be byte-identical to the IVF frame and released in order with its references
   released before it. Test-environment GStreamer fixtures (`vp8.ivf`, `h264` 640x480) where
   the env stage runs.
-- Virtual-time networks: two `rtc` peer connections (a world like `rtc-audio/tests/common`'s:
+- Virtual-time networks: two `rtci` peer connections (a world like `rtc-audio/tests/common`'s:
   seeded loss, uniform jitter that reorders) with default interceptors (NACK, RTX, PLI),
   a synthetic VP8 sender (frames sized by a bitrate, PictureID / TL0PICIDX, key frame on PLI)
   and the pipeline on the receiver; and the capacity scenario of
@@ -901,7 +901,7 @@ Browser cells: none yet (no decoder); phase 2 adds them.
 
 #### 6.1 Phase 1: what was measured
 
-GitHub-hosted runs of `cargo test -p rtc-video -- --nocapture` on `conf/vp-2-receive`
+GitHub-hosted runs of `cargo test -p rtci-video -- --nocapture` on `conf/vp-2-receive`
 (ubuntu-latest; the `MEASURE` lines), virtual time, fixed seeds:
 
 | Scenario | Decoded | Freezes (W3C) | Longest interval | Mean jitter buffer delay | Repairs: count, mean, max |
@@ -929,7 +929,7 @@ reported to the congestion / retransmission work and not changed here (outside t
 The W3C freezes in the loss rows are those repairs: the pipeline waits for nothing else (the
 asserted bound), and with repairs one round trip late (the golden streams) there is none.
 
-**Mutation check.** Each mutation on a throwaway branch, `cargo test -p rtc-video` on a hosted
+**Mutation check.** Each mutation on a throwaway branch, `cargo test -p rtci-video` on a hosted
 runner; all killed:
 
 | Mutation | Killed by |
@@ -949,18 +949,18 @@ scenario, retransmissions of packets older than the horizon = 0.
 
 #### 6.2 Phase 1b: what was built and measured
 
-- `NackControl::Horizon { media_ssrc, oldest_useful }` (rtc-interceptor) and
+- `NackControl::Horizon { media_ssrc, oldest_useful }` (rtci-interceptor) and
   `RTCRtpReceiver::set_nack_horizon(now, ssrc, Option<u16>)` (rtc): the generator drops
   missing sequence numbers older than the horizon, wrap-aware, and forgets their requests
-  (`rtc-interceptor/tests/nack_control_horizon.rs`; two peers:
+  (`rtci-interceptor/tests/nack_control_horizon.rs`; two peers:
   `tests/rtcp_session_rtc2rtc.rs::a_receiver_stops_asking_for_packets_behind_its_nack_horizon`).
   `VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
   nack_horizon`, on by default and in `chrome()`: libwebrtc's `NackRequester::ClearUpTo`).
 - `DecoderStatsUpdate::{jitter_buffer_delay, jitter_buffer_target_delay,
   jitter_buffer_minimum_delay, jitter_buffer_emitted_count}`, which win over the audio
   update's (`statistics::feed_test::the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`);
-  `rtc-video` no longer calls `update_audio_receiver_stats`.
-- Tap interceptors in `rtc-video/tests/receive_rtc2rtc.rs` record every NACK as generated, as
+  `rtci-video` no longer calls `update_audio_receiver_stats`.
+- Tap interceptors in `rtci-video/tests/receive_rtc2rtc.rs` record every NACK as generated, as
   it leaves and as it arrives, and every RTX as it leaves (by its original sequence number):
   the per-packet repair trace is `docs/video-repair-latency.md` (the first NACK is made
   157 ms after a gap on average; the rest of a repair is the link).
@@ -992,7 +992,7 @@ Acceptance: VP8 decode 720p at 30 fps or more on one GitHub-hosted core; PSNR of
 encode-decode at 640x360, 600 kbit/s at least 32 dB on the synthetic source; AV1 figures
 reported, no real-time claim unless measured. Browser cells: Rust sends VP8 (and AV1) through
 the pipeline, the browser decodes (framesDecoded > 0, no freeze at 0 % loss); the browser
-sends, `rtc-video` decodes (frames decoded, sizes right) — Chromium, Firefox, WebKit.
+sends, `rtci-video` decodes (frames decoded, sizes right) — Chromium, Firefox, WebKit.
 
 #### 6.3 Phase 2: status
 
@@ -1004,9 +1004,9 @@ Built: the `vp8` (default) and `av1` (opt-in) backends (`codec::vp8`, `codec::av
 
 Browser cells (`scripts/test-env/interop/webrtc.spec.mjs`, `pipeline receive VP8` and
 `pipeline receive AV1`; interop-peer scenario `{"media":"pipeline","video":...}`, which only
-the peer built by `cargo build -p rtc-video-interop --features pipeline` (binary
+the peer built by `cargo build -p rtci-video-interop --features pipeline` (binary
 `interop-peer-video`, what `scripts/test-env/interop/run.sh` now starts) has): the
-browser sends its canvas track, the peer runs it through `rtc-video` and its pure-Rust
+browser sends its canvas track, the peer runs it through `rtci-video` and its pure-Rust
 decoder and reports what it decoded. Not run here (browsers run on the integration train). The
 train must confirm, for Chromium, Firefox and WebKit: at least 15 pictures decoded within
 25 s, no decoder error, no codec without a decoder, the decoder named (`vp8-decoder`,
@@ -1020,28 +1020,28 @@ encoder is skipped by its own capabilities. Rust sending to the browser waits fo
 What changed: `vp8` opt-in (4.7, with `scripts/check-video-codec-pins.py`); the AV1 wrapper's
 leak fixed and the abort documented where the feature is (4.8); `codec::vp8` catches a decoder
 panic (pure Rust: it unwinds) and replaces the decoder; `codec::isolated` (feature
-`isolation`); the `rtc` crate no longer dev-depends on `rtc-video`: the interop peer's
-`pipeline` scenario is behind the `pipeline` feature of the new `rtc-video-interop` package,
+`isolation`); the `rtci` crate no longer dev-depends on `rtci-video`: the interop peer's
+`pipeline` scenario is behind the `pipeline` feature of the new `rtci-video-interop` package,
 which compiles the same `examples/interop-peer/interop-peer.rs`.
 
 Measured on GitHub-hosted runners (ubuntu-latest, 4 vCPUs):
 
 | Check | Result |
 |---|---|
-| `cargo test -p rtc-video`, default features, then `--features vp8,av1,isolation` (run 45324314829, `e5e73d6a`) | 10 test binaries, 118 passed, 0 failed, 2 ignored |
+| `cargo test -p rtci-video`, default features, then `--features vp8,av1,isolation` (run 45324314829, `e5e73d6a`) | 10 test binaries, 118 passed, 0 failed, 2 ignored |
 | isolation (`tests/isolated.rs`) | the reproducer decoded in process: `signal: 6 (SIGABRT)`; through `IsolatedDecoder`: `Err(Corrupt("decoder process ended (signal: 6 (SIGABRT) ...)"))`, then the key frame decodes in a new child to the same picture; a child that never answers is killed after 501 ms |
 | reproducer search (run 45322103402) | 711 of 19,352 single-bit flips of a key frame abort rav1d 1.1.0; 193 of 750 of phase 2's mutations (4.8) |
 | AV1 fuzz, 15 min each, fork mode, AddressSanitizer + LeakSanitizer (runs 45322108334, 45324307021) | before and after the wrapper change: 1 crash artifact, 3 and 4 leak artifacts, 1 and 0 timeout artifacts; the leak input replayed leaks the same 96 bytes with either wrapper (runs 45324302343, 45324307021), from `dav1d_picture_unref` (symbolised, run 45326503227): rav1d issue 1522 (4.8) |
 | `cargo test --workspace --no-run`, fresh target directory | before (`conf/vp-5-codecs`, runs 45322132676 and 45324331617): 257 s and 233 s, 384 crates, rav1d / rav1e / vp8-* among them; after (run 45324323050): 228 s, 344 crates, no codec crate |
 | `cargo test --no-run` at the root (cargo.yml's first test job) | before: 190 s and 179 s, 360 crates with the four codec crates; after: 175 s, 312 crates, none |
-| `cargo build -p rtc-video-interop --features pipeline` after that | 56 s, 145 crates (the codecs and the video interop peer) |
+| `cargo build -p rtci-video-interop --features pipeline` after that | 56 s, 145 crates (the codecs and the video interop peer) |
 
 The build-time gain in wall-clock terms is small and within the runners' spread (the two
 "before" runs differ by 24 s): on 4 vCPUs the codec crates compile in parallel with the rest
 and are not on the critical path. What changed is that 40 to 48 crates, among them the two
 largest of the dependency graph (rav1e, rav1d), are no longer built at all by any job that
 does not test video, and only the browser stage (which tests video) pays the 56 s. A CI job
-that tests the codecs is proposed to the train, not added: `cargo test -p rtc-video
+that tests the codecs is proposed to the train, not added: `cargo test -p rtci-video
 --features vp8,av1,isolation` (pure Rust, no system library), plus `python3
 scripts/check-video-codec-pins.py` after any build. `cargo check --workspace --all-features`
 (cargo.yml) still compiles the codecs, by definition of `--all-features`.
@@ -1063,11 +1063,11 @@ Base: `conf/vp-6-codec-safety` (1624f763) with `conf/gcc-5-app-limited` (c56eeb2
 the pacer's pause (target 0 through `PacerPause`), the pacer in the default chain and
 `OnPacerDiscard` are on that line, not on master yet. The merge had one conflict
 (`CHANGELOG.md`, two independent "Breaking changes" bullets: both kept). Merged tree proved on
-a hosted ubuntu runner: `cargo test -p rtc` 251 binaries, 2344 passed, 0 failed, 67 ignored
-(run 45341081324); `cargo test -p rtc-video`, default then `--features vp8`, 50 and 54 passed
+a hosted ubuntu runner: `cargo test -p rtci` 251 binaries, 2344 passed, 0 failed, 67 ignored
+(run 45341081324); `cargo test -p rtci-video`, default then `--features vp8`, 50 and 54 passed
 (run 45341077903).
 
-**Built** (`rtc-video/src/send.rs`, `engine_send.rs`): `SendPipeline` (picture in, RTP packets
+**Built** (`rtci-video/src/send.rs`, `engine_send.rs`): `SendPipeline` (picture in, RTP packets
 out) and `engine::VideoSender` (the glue to an `RTCRtpSender`: its SSRC, the negotiated
 codec's payload type and payloader, `target_bitrates()`, `OnKeyFrameRequest`,
 `OnPacerDiscard`, the nominated pair's round trip, `update_encoder_stats`). The encoder runs
@@ -1086,7 +1086,7 @@ adjuster, the zero-hertz cadence adapter, `abs-capture-time` stamping, CPU-overu
 `VideoSender` drives the sender's first encoding only.
 
 **The reactions, and the rule behind each** (default = the specification; `SendConfig::chrome()`
-= libwebrtc where it differs; `rtc-video` is outside the engine's generated profile table,
+= libwebrtc where it differs; `rtci-video` is outside the engine's generated profile table,
 `docs/behaviour-profiles.md`, so these rows live here as the receive side's
 `ReceiveConfig::chrome()` does):
 
@@ -1103,7 +1103,7 @@ frame during every long pause (17 to 23 requests coalesced per run), so a key fr
 the resume in both configurations (`measure_the_pause_with_the_chrome_configuration`: the same
 figures on seed 3). An owner decision is listed below.
 
-**Measured** (`rtc-video/tests/send_rtc2rtc.rs`, the VP8 backend, 640x360 at 30 fps from
+**Measured** (`rtci-video/tests/send_rtc2rtc.rs`, the VP8 backend, 640x360 at 30 fps from
 `TestSource`, both peers on the engine's default interceptors, GCC bounded to 100 kbit/s -
 2.5 Mbit/s as the capacity test does; hosted ubuntu runs 45344063951 and 45344738955 at
 f9aa85bd, the second with the 5 s hold):
@@ -1152,7 +1152,7 @@ flash / beep source in both directions.
 | 2. Accept `vp8-decoder` / `vp8-encoder` (first published 2026-11-06 by a crates.io account from 2026-11-03; one-commit repository; section 4.7) as default dependencies | Yes, pinned by exact version and checksum (`scripts/check-video-codec-pins.py` in CI) once a VP8 fuzz target is in the train's fuzz job; not vendored (4.7 gives the reasons) | `vp8` is opt-in: the default build decodes no video |
 | 2b. AV1 decode with rav1d while 1.1.0 aborts on hostile input | Keep `av1` opt-in with the warning; recommend `isolation` for untrusted senders; move to rav1d's Rust API (catchable panics) when it is released; the opt-in `dav1d` backend as the robust decoder | the reproducer and a comment for rav1d#1521 are prepared, not posted |
 | 3. Hardware backends: order | VideoToolbox, then Media Foundation, then VA-API; NVENC when the MSRV reaches 1.93 | none built |
-| 4. Capture: where and how much | A new crate `rtc-video-devices` (camera via `nokhwa`; screen per platform), opt-in features, never run in CI | synthetic sources only |
+| 4. Capture: where and how much | A new crate `rtci-video-devices` (camera via `nokhwa`; screen per platform), opt-in features, never run in CI | synthetic sources only |
 | 5. Screen capture in scope | Yes, after camera; with the zero-hertz cadence and screen-content encoder modes it needs | the cadence adapter and screen-content mode are designed in phase 3 |
 | 6. MSRV | Keep 1.89; it excludes `shiguredo_nvcodec` and newer pure-Rust codecs (`oxideav-*` 1.95, `gamut-av1` 1.92) | none of these needed now |
 | 7. Key frame when a pacer pause ends (6.5) | The default makes one (the brief's decision); libwebrtc and the engine's note on `target_bitrates` do not. Measured: no difference in the capacity call (the receiver's PLIs make one due anyway). Recommendation: keep the default, revisit with the stale-backlog drop | `SendConfig::key_frame_on_resume` |

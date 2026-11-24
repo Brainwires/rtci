@@ -1,31 +1,31 @@
-//! RTP stream pause and resume (RFC 7728) between two `rtc` peers, in virtual time: the offer
+//! RTP stream pause and resume (RFC 7728) between two `rtci` peers, in virtual time: the offer
 //! and answer negotiate `a=rtcp-fb:<pt> ccm pause` (section 9), the receiver asks the sender to
 //! pause a stream and to resume it, and the sender's media stops and starts again on the wire.
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{
+use rtci::interceptor::{
     Interceptor, Packet, PauseResumeBuilder, PauseResumeHandle, PauseState, Registry,
     RemotePauseState, Slot, StreamInfo, TaggedPacket,
 };
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_pause_resume, configure_pause_resume_with, configure_rtcp_reports,
 };
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -46,7 +46,7 @@ enum Pause {
 }
 
 /// The RTCP compound packets a peer's chain writes, as they leave its RTCP session.
-type Written = Arc<Mutex<Vec<Vec<Box<dyn rtc::rtcp::Packet>>>>>;
+type Written = Arc<Mutex<Vec<Vec<Box<dyn rtci::rtcp::Packet>>>>>;
 
 /// An interceptor below the RTCP session (written packets pass it after the session): it
 /// records each RTCP packet written and passes everything on.
@@ -60,7 +60,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
     type Rout = TaggedPacket;
     type Wout = TaggedPacket;
     type Eout = ();
-    type Error = rtc::shared::error::Error;
+    type Error = rtci::shared::error::Error;
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
@@ -355,8 +355,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: VP8_PT,
                             sequence_number: seq,
@@ -522,8 +522,8 @@ fn a_local_pause_reaches_the_receiver() -> Result<()> {
 /// encoding; one without it does not (unless `with_rid_pause_marks`).
 #[test]
 fn an_inactive_simulcast_encoding_is_marked_paused_when_pause_is_offered() -> Result<()> {
-    use rtc::media_stream::MediaStreamTrack;
-    use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
+    use rtci::media_stream::MediaStreamTrack;
+    use rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
     for pause in [Pause::Off, Pause::On] {
         let mut peer = Peer::new("10.0.0.1:5000", pause)?;
         let encodings = ["f", "h"]
@@ -567,8 +567,8 @@ fn an_inactive_simulcast_encoding_is_marked_paused_when_pause_is_offered() -> Re
 /// starts in the local paused state and nothing of it goes on the wire, while `a` flows.
 #[test]
 fn a_layer_the_answer_marks_paused_starts_paused() -> Result<()> {
-    use rtc::media_stream::MediaStreamTrack;
-    use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
+    use rtci::media_stream::MediaStreamTrack;
+    use rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
     let ssrc = |i: u32| 0x0808_0100 + i;
     let mut peers = [
         Peer::new("10.0.0.1:5000", Pause::On)?,
@@ -611,7 +611,7 @@ fn a_layer_the_answer_marks_paused_starts_paused() -> Result<()> {
         .replace("a=simulcast:recv a;b", "a=simulcast:recv a;~b");
     peers[0].pc.set_remote_description(
         now,
-        rtc::peer_connection::sdp::RTCSessionDescription::answer(paused)?,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(paused)?,
     )?;
     let mut world = World {
         peers,
@@ -646,8 +646,8 @@ fn a_layer_the_answer_marks_paused_starts_paused() -> Result<()> {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: VP8_PT,
                             sequence_number: 100 + n,
@@ -717,15 +717,15 @@ fn an_encoding_made_inactive_is_a_local_pause_and_active_again_a_resume() -> Res
 
 /// The PAUSE-RESUME entries of `typ` in `packets`.
 fn pause_resume_entries(
-    packets: &[Box<dyn rtc::rtcp::Packet>],
-    typ: rtc::rtcp::transport_feedbacks::pause_resume::PauseResumeType,
+    packets: &[Box<dyn rtci::rtcp::Packet>],
+    typ: rtci::rtcp::transport_feedbacks::pause_resume::PauseResumeType,
 ) -> usize {
     packets
         .iter()
         .filter_map(|packet| {
             packet
                 .as_any()
-                .downcast_ref::<rtc::rtcp::transport_feedbacks::pause_resume::PauseResume>()
+                .downcast_ref::<rtci::rtcp::transport_feedbacks::pause_resume::PauseResume>()
         })
         .flat_map(|message| &message.entries)
         .filter(|entry| entry.typ == typ)
@@ -741,7 +741,7 @@ fn pause_resume_entries(
 /// its session is a Regular one), and in no packet after them.
 #[test]
 fn pause_resume_messages_ride_the_rtcp_sessions_compound_packets() -> Result<()> {
-    use rtc::rtcp::transport_feedbacks::pause_resume::PauseResumeType;
+    use rtci::rtcp::transport_feedbacks::pause_resume::PauseResumeType;
     let mut world = World::connected(Pause::NoWait, Pause::NoWait)?;
     world.send(10)?;
     let ssrc = world.ssrc;
@@ -769,7 +769,7 @@ fn pause_resume_messages_ride_the_rtcp_sessions_compound_packets() -> Result<()>
         later.iter().all(|packets| packets.iter().any(|packet| {
             packet
                 .as_any()
-                .is::<rtc::rtcp::source_description::SourceDescription>()
+                .is::<rtci::rtcp::source_description::SourceDescription>()
         })),
         "every one a compound packet, with the CNAME"
     );

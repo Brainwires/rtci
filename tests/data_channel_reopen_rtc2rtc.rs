@@ -16,8 +16,8 @@ mod dc_common;
 use anyhow::{Result, bail, ensure};
 use bytes::BytesMut;
 use dc_common::Pair;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::transport::RTCDtlsRole;
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::transport::RTCDtlsRole;
 use std::time::Duration;
 
 const SIZE: usize = 64 * 1024;

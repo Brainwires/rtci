@@ -266,8 +266,8 @@ impl Default for MediaTrackConstraintSet {
 /// # Examples
 ///
 /// ```
-/// use rtc::media_stream::MediaTrackConstraints;
-/// use rtc::media_stream::MediaStreamTrack;
+/// use rtci::media_stream::MediaTrackConstraints;
+/// use rtci::media_stream::MediaStreamTrack;
 ///
 /// # fn example(mut track: MediaStreamTrack) {
 /// // Create constraints

@@ -26,7 +26,7 @@
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {

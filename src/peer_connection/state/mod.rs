@@ -24,8 +24,8 @@
 //! ## Monitoring ICE Connection State
 //!
 //! ```no_run
-//! use rtc::peer_connection::state::RTCIceConnectionState;
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::peer_connection::state::RTCIceConnectionState;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
 //!
 //! # fn example(event: RTCPeerConnectionEvent) {
 //! // Handle ICE connection state change event
@@ -50,8 +50,8 @@
 //! ## Monitoring Candidate Gathering
 //!
 //! ```no_run
-//! use rtc::peer_connection::state::RTCIceGatheringState;
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::peer_connection::state::RTCIceGatheringState;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
 //!
 //! # fn example(event: RTCPeerConnectionEvent) {
 //! match event {
@@ -73,8 +73,8 @@
 //! ## Checking Overall Connection State
 //!
 //! ```no_run
-//! use rtc::peer_connection::state::RTCPeerConnectionState;
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::peer_connection::state::RTCPeerConnectionState;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
 //!
 //! # fn example(event: RTCPeerConnectionEvent) {
 //! match event {
@@ -101,8 +101,8 @@
 //! ## Tracking Signaling State
 //!
 //! ```no_run
-//! use rtc::peer_connection::state::RTCSignalingState;
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::peer_connection::state::RTCSignalingState;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
 //!
 //! # fn example(event: RTCPeerConnectionEvent) {
 //! match event {
@@ -133,7 +133,7 @@
 //! ## State Transitions and String Conversion
 //!
 //! ```
-//! use rtc::peer_connection::state::{
+//! use rtci::peer_connection::state::{
 //!     RTCIceConnectionState, RTCPeerConnectionState, RTCSignalingState
 //! };
 //!

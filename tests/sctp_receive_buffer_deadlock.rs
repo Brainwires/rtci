@@ -1,11 +1,11 @@
-//! Reproduction for <https://github.com/webrtc-rs/webrtc/issues/822>, at the `rtc` layer.
+//! Reproduction for <https://github.com/webrtc-rs/webrtc/issues/822>, at the `rtci` layer.
 //!
 //! An SCTP association can reach a receive-buffer state it can never leave: the window is zero,
 //! and the only chunk that would reopen it is dropped on arrival — including on every
 //! retransmission. The sender retransmits forever, the receiver drops forever, and the message
 //! is never delivered.
 //!
-//! Three facts in `rtc-sctp` combine to produce it:
+//! Three facts in `rtci-sctp` combine to produce it:
 //!
 //! 1. `Association::get_my_receiver_window_credit` is
 //!    `max_receive_buffer_size - sum(bytes in every stream's reassembly queue)`. Fragments of an
@@ -35,20 +35,20 @@
 
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::{
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::{
     SctpMaxMessageSize, SettingEngineBuilder,
 };
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;

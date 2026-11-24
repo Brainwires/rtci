@@ -9,13 +9,13 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, exchange, media_sections};
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionToNegotiate, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverId};
-use rtc::shared::error::Error;
+use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverId};
+use rtci::shared::error::Error;
 
 use RTCRtpTransceiverDirection::{Inactive, Recvonly, Sendonly, Sendrecv, Stopped};
 
@@ -339,7 +339,7 @@ fn an_extension_the_section_direction_cannot_use_is_stopped() -> TestResult {
     let mut answerer = peer()?;
     let v = offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     set(
         &mut offerer,

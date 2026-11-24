@@ -14,10 +14,10 @@ use anyhow::Result;
 use dc_common::Pair;
 use dtls::cipher_suite::{CipherSuite, CipherSuiteId, cipher_suite_for_id};
 use dtls::record_layer::record_layer_header::RECORD_LAYER_HEADER_SIZE;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::RTCSctpTransportState;
-use rtc::shared::error::Error;
-use rtc::statistics::StatsSelector;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::RTCSctpTransportState;
+use rtci::shared::error::Error;
+use rtci::statistics::StatsSelector;
 
 const OFFERER: &str = "127.0.0.1:50010";
 const ANSWERER: &str = "127.0.0.1:50011";
@@ -29,8 +29,8 @@ fn connected(
     answerer: SettingEngineBuilder,
 ) -> Result<(
     Pair,
-    rtc::data_channel::RTCDataChannelId,
-    rtc::data_channel::RTCDataChannelId,
+    rtci::data_channel::RTCDataChannelId,
+    rtci::data_channel::RTCDataChannelId,
 )> {
     connected_at(OFFERER, offerer, ANSWERER, answerer)
 }
@@ -42,8 +42,8 @@ fn connected_at(
     answerer: SettingEngineBuilder,
 ) -> Result<(
     Pair,
-    rtc::data_channel::RTCDataChannelId,
-    rtc::data_channel::RTCDataChannelId,
+    rtci::data_channel::RTCDataChannelId,
+    rtci::data_channel::RTCDataChannelId,
 )> {
     let mut pair = Pair::with_setting_engines(offerer_addr, offerer, answerer_addr, answerer)?;
     let local = pair.open_channel("data")?;
@@ -213,7 +213,7 @@ fn a_peer_that_does_not_accept_a_zero_checksum_gets_a_crc32c() -> Result<()> {
 /// the order it was sent.
 #[test]
 fn channels_of_different_priority_deliver_in_order_under_either_scheduler() -> Result<()> {
-    use rtc::data_channel::RTCDataChannelInit;
+    use rtci::data_channel::RTCDataChannelInit;
 
     for weighted in [true, false] {
         // 40 messages of 2000 bytes queued at once on each channel: within the W3C
@@ -283,7 +283,7 @@ fn dtls_versions() -> [(&'static str, Settings); 2] {
 
 /// What each DTLS record the offerer sends adds to its content, from the version and cipher
 /// suite the connection reports in its statistics (`tlsVersion`, `dtlsCipher`): the record
-/// header of that version and what `rtc-dtls` says the suite adds to a record
+/// header of that version and what `rtci-dtls` says the suite adds to a record
 /// (`CipherSuite::record_expansion`). Neither side asks for a connection id.
 fn negotiated_record_overhead(pair: &mut Pair) -> usize {
     let now = pair.now;
@@ -301,7 +301,7 @@ fn negotiated_record_overhead(pair: &mut Pair) -> usize {
         .map(CipherSuiteId::from)
         .find(|id| id.to_string() == transport.dtls_cipher)
         .unwrap_or_else(|| panic!("dtlsCipher {}", transport.dtls_cipher));
-    let suite: Box<dyn CipherSuite> = cipher_suite_for_id(suite).expect("a suite rtc-dtls has");
+    let suite: Box<dyn CipherSuite> = cipher_suite_for_id(suite).expect("a suite rtci-dtls has");
     header + suite.record_expansion()
 }
 
@@ -347,8 +347,8 @@ fn full_packets_fill_the_initial_path_mtu_of_the_address_family_and_no_more() ->
 /// of the connected `pair`.
 fn largest_datagram_of_a_large_message(
     pair: &mut Pair,
-    local: rtc::data_channel::RTCDataChannelId,
-    remote: rtc::data_channel::RTCDataChannelId,
+    local: rtci::data_channel::RTCDataChannelId,
+    remote: rtci::data_channel::RTCDataChannelId,
 ) -> Result<usize> {
     pair.offerer.written_sizes.clear();
     pair.answerer.written_sizes.clear();
@@ -456,8 +456,8 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
         peer.events.iter().any(|event| {
             matches!(
                 event,
-                rtc::peer_connection::event::RTCDataChannelEvent::OnClose(_)
-                    | rtc::peer_connection::event::RTCDataChannelEvent::OnError(_)
+                rtci::peer_connection::event::RTCDataChannelEvent::OnClose(_)
+                    | rtci::peer_connection::event::RTCDataChannelEvent::OnError(_)
             )
         })
     };

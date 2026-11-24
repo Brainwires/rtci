@@ -1,27 +1,27 @@
-//! A remote track's muted state between two `rtc` peer connections, in virtual time (W3C
+//! A remote track's muted state between two `rtci` peer connections, in virtual time (W3C
 //! webrtc-pc 9.3, 5.1.1, 5.3): the track starts muted, its first RTP packet unmutes it, an RTCP
 //! BYE mutes it without ending it, RTP unmutes it again, and a remote description that stops
 //! the sending mutes it.
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{
     RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -251,8 +251,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: pt,
                             sequence_number,
@@ -270,7 +270,7 @@ impl World {
         Ok(())
     }
 
-    fn receiver_track(&mut self) -> (bool, rtc::media_stream::MediaStreamTrackState) {
+    fn receiver_track(&mut self) -> (bool, rtci::media_stream::MediaStreamTrackState) {
         let id: RTCRtpTransceiverId = self.peers[1]
             .pc
             .get_transceivers()
@@ -306,7 +306,7 @@ fn rtp_unmutes_the_remote_track_and_a_bye_mutes_it_without_ending_it() -> Result
     assert_eq!(world.peers[1].take_mute_events(), vec!["mute"]);
     assert_eq!(
         world.receiver_track(),
-        (true, rtc::media_stream::MediaStreamTrackState::Live),
+        (true, rtci::media_stream::MediaStreamTrackState::Live),
         "muted, not ended"
     );
     Ok(())
@@ -327,7 +327,7 @@ fn with_departure_ending_tracks_a_bye_ends_the_remote_track() -> Result<()> {
     assert_eq!(world.peers[1].take_mute_events(), vec!["close"]);
     assert_eq!(
         world.receiver_track().1,
-        rtc::media_stream::MediaStreamTrackState::Ended
+        rtci::media_stream::MediaStreamTrackState::Ended
     );
     Ok(())
 }
@@ -349,7 +349,7 @@ fn a_remote_description_that_stops_the_sending_mutes_the_track() -> Result<()> {
     assert_eq!(world.peers[1].take_mute_events(), vec!["mute"]);
     assert_eq!(
         world.receiver_track(),
-        (true, rtc::media_stream::MediaStreamTrackState::Live)
+        (true, rtci::media_stream::MediaStreamTrackState::Live)
     );
     Ok(())
 }

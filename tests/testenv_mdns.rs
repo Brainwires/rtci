@@ -9,10 +9,10 @@
 mod common;
 mod testenv;
 
-use rtc::ice::mdns::MulticastDnsMode;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::ice::mdns::MulticastDnsMode;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use std::time::{Duration, Instant};
 use testenv::{Env, EnvPeer, Gather, negotiate_in_sdp, pump};
 

@@ -7,10 +7,10 @@ use anyhow::Result;
 use dtls_sdp_common::{
     Peer, World, attribute_values, keep, replace_lines, session_part, with_session_line,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::shared::error::Error;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::shared::error::Error;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -33,7 +33,7 @@ fn only_stun_is_sent_before_ice_has_verified_consent() -> Result<()> {
     let mut world = world()?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     world.exchange(0)?;
@@ -113,11 +113,11 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
     let mut world = world()?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange(0)?;
@@ -166,7 +166,7 @@ fn sdp_security_descriptions_are_not_used() -> Result<()> {
     let mut world = world()?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange_with(0, with_crypto, keep)?;
@@ -185,7 +185,7 @@ fn sdp_security_descriptions_are_not_used() -> Result<()> {
     let mut offerer = peer("10.0.0.1:5000")?;
     offerer.pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let offer = offerer.pc.create_offer(None)?.sdp;
     let sdes_only = replace_lines(&with_crypto(&offer), "a=fingerprint:", None);
@@ -316,12 +316,12 @@ fn the_local_ice_credentials_are_drawn_by_the_engine() -> Result<()> {
 }
 
 /// The `a=fingerprint` values of an SDP, as fingerprints.
-fn fingerprints_of(sdp: &str) -> Vec<rtc::peer_connection::transport::RTCDtlsFingerprint> {
+fn fingerprints_of(sdp: &str) -> Vec<rtci::peer_connection::transport::RTCDtlsFingerprint> {
     attribute_values(sdp, "fingerprint")
         .into_iter()
         .map(|value| {
             let (algorithm, value) = value.split_once(' ').expect("algorithm and value");
-            rtc::peer_connection::transport::RTCDtlsFingerprint {
+            rtci::peer_connection::transport::RTCDtlsFingerprint {
                 algorithm: algorithm.to_owned(),
                 value: value.to_owned(),
             }
@@ -336,7 +336,7 @@ fn fingerprints_of(sdp: &str) -> Vec<rtc::peer_connection::transport::RTCDtlsFin
 /// it is discarded when the remote description's fingerprints change.
 #[test]
 fn the_peer_identity_is_bound_to_the_fingerprints_and_the_certificate_in_use() -> Result<()> {
-    use rtc::peer_connection::identity::RTCPeerIdentity;
+    use rtci::peer_connection::identity::RTCPeerIdentity;
     const ASSERTION: &str = "YWxpY2U=";
     let mut world = world()?;
     world.peers[0]
@@ -396,7 +396,7 @@ fn the_peer_identity_is_bound_to_the_fingerprints_and_the_certificate_in_use() -
 /// association is up.
 #[test]
 fn an_identity_that_does_not_cover_the_certificate_in_use_is_refused() -> Result<()> {
-    use rtc::peer_connection::identity::RTCPeerIdentity;
+    use rtci::peer_connection::identity::RTCPeerIdentity;
     let unverified = Peer::new(
         "10.0.0.2:5000",
         SettingEngineBuilder::new()
@@ -419,7 +419,7 @@ fn an_identity_that_does_not_cover_the_certificate_in_use_is_refused() -> Result
     world.run("the connection", |peers| {
         peers.iter().all(|p| p.connected() && p.channel.is_some())
     })?;
-    let described = vec![rtc::peer_connection::transport::RTCDtlsFingerprint {
+    let described = vec![rtci::peer_connection::transport::RTCDtlsFingerprint {
         algorithm: "sha-256".to_owned(),
         value: named.split_once(' ').unwrap().1.to_owned(),
     }];
@@ -467,7 +467,8 @@ fn stun_transaction_ids_reach_neither_events_nor_statistics() -> Result<()> {
     for peer in world.peers.iter_mut() {
         let stats = format!(
             "{:?}",
-            peer.pc.get_stats(now, rtc::statistics::StatsSelector::None)
+            peer.pc
+                .get_stats(now, rtci::statistics::StatsSelector::None)
         );
         let events = peer.events.join("\n");
         for id in &ids {
@@ -510,7 +511,7 @@ fn a_new_dtls_association_keeps_the_fingerprints_the_identity_covers() -> Result
 /// material." No public function or field of the peer connection API (everything under
 /// `src/`) hands out the DTLS exporter, the master secret, the SRTP master keys or the SRTP or
 /// DTLS state that holds them: each public item is read from the source, and one whose
-/// signature names any of them fails the test. (The sub-crates `rtc::dtls` and `rtc::srtp`
+/// signature names any of them fails the test. (The sub-crates `rtci::dtls` and `rtci::srtp`
 /// export their own state for a standalone DTLS or SRTP session; nothing in the peer
 /// connection reaches the association's.)
 #[test]

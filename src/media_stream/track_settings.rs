@@ -25,7 +25,7 @@
 /// # Examples
 ///
 /// ```
-/// use rtc::media_stream::MediaStreamTrack;
+/// use rtci::media_stream::MediaStreamTrack;
 ///
 /// # fn example(track: MediaStreamTrack) {
 /// let settings = track.get_settings();

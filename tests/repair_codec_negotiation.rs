@@ -12,17 +12,17 @@
 //!
 //! These assertions mirror pion's `TestConfigureFlexFEC03_FECParameters`.
 
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MIME_TYPE_VP9, MediaEngine,
 };
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RTCRtpFecParameters, RTCRtpRtxParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, SSRC};
+use rtci::rtp_transceiver::{RTCRtpSenderId, SSRC};
 use std::time::Instant;
 
 const MEDIA_SSRC: SSRC = 0x1111_1111;

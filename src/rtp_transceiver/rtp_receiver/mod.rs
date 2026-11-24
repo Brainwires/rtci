@@ -17,9 +17,9 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::media_stream::MediaStreamTrackId;
-//! # use rtc::rtp_transceiver::RTCRtpReceiverId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::media_stream::MediaStreamTrackId;
+//! # use rtci::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(
 //! #     receiver_id: RTCRtpReceiverId,
 //! #     track_id: MediaStreamTrackId
@@ -41,8 +41,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpReceiverId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -62,9 +62,9 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-//! # use rtc::rtp_transceiver::RTCRtpReceiverId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+//! # use rtci::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -90,8 +90,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpReceiverId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -111,8 +111,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpReceiverId;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -131,7 +131,7 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -444,9 +444,9 @@ impl RTCRtpReceiver<'_> {
     ///
     /// ```
     /// // Send a Picture Loss Indication to request a keyframe
-    /// use rtc::peer_connection::RTCPeerConnection;
-    /// use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-    /// use rtc::rtp_transceiver::RTCRtpReceiverId;
+    /// use rtci::peer_connection::RTCPeerConnection;
+    /// use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    /// use rtci::rtp_transceiver::RTCRtpReceiverId;
     /// use std::time::Instant;
     ///
     /// # fn example(
