@@ -94,7 +94,10 @@ fn access_units(data: &[u8], hevc: bool) -> Vec<Vec<Vec<u8>>> {
             (t < 32, nal.get(2).is_some_and(|b| b & 0x80 != 0))
         } else {
             let t = nal[0] & 0x1f;
-            ((1..=5).contains(&t), nal.get(1).is_some_and(|b| b & 0x80 != 0))
+            (
+                (1..=5).contains(&t),
+                nal.get(1).is_some_and(|b| b & 0x80 != 0),
+            )
         };
         if is_slice {
             if first || !seen_slice {
@@ -171,9 +174,8 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
             let mut at = send;
             let mut delivered = false;
             for attempt in 0..10 {
-                let arrival = at
-                    + net.delay
-                    + Duration::from_secs_f64(net.jitter.as_secs_f64() * rng.unit());
+                let arrival =
+                    at + net.delay + Duration::from_secs_f64(net.jitter.as_secs_f64() * rng.unit());
                 if rng.unit() >= net.loss {
                     let mut p = packet.clone();
                     p.arrival = arrival;
@@ -216,9 +218,7 @@ fn run(codec: Codec, frames: &[Bytes], mut payloader: Box<dyn Payloader>, net: N
             out.released += 1;
             let expected = &sent[&request.frame.frame.rtp_timestamp];
             let same = match codec {
-                Codec::H264 | Codec::H265 => {
-                    nal_units(expected) == nal_units(request.frame.data())
-                }
+                Codec::H264 | Codec::H265 => nal_units(expected) == nal_units(request.frame.data()),
                 _ => expected == request.frame.data(),
             };
             if !same {
@@ -283,11 +283,18 @@ fn check(codec: Codec, frames: &[Bytes], payloader: impl Fn() -> Box<dyn Payload
             ..lossy(1)
         },
     );
-    assert_eq!(clean.released, frames.len(), "every frame released on a clean link");
+    assert_eq!(
+        clean.released,
+        frames.len(),
+        "every frame released on a clean link"
+    );
     assert_eq!((clean.mismatched, clean.decoder_errors), (0, 0));
     let o = run(codec, frames, payloader(), lossy(2));
     assert_eq!(o.mismatched, 0, "every released picture is what was sent");
-    assert_eq!(o.decoder_errors, 0, "released in an order its references allow");
+    assert_eq!(
+        o.decoder_errors, 0,
+        "released in an order its references allow"
+    );
     assert_eq!(o.lost_for_good, 0, "the seed loses nothing for good");
     assert!(
         o.decoded * 100 >= frames.len() * 99,
