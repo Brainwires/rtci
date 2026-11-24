@@ -893,7 +893,7 @@ impl NackResponderInterceptor {
         // The pacer says how much padding the cluster needs beyond the media it holds
         // ([`ProbeFill`](crate::ProbeFill)); without a pacer, the whole cluster.
         let wanted = fill
-            .map_or(request.octets, |octets| octets.min(request.octets))
+            .map_or(request.octets, |_| request.octets)
             .min(MAX_PROBE_FILL_OCTETS);
         let mut filled = 0usize;
         for _ in 0..MAX_PROBE_FILL_PACKETS {
