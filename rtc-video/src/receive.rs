@@ -695,4 +695,82 @@ mod tests {
         assert_eq!(reason, KeyFrameReason::Timeout);
         assert!(t - (t0 + Duration::from_millis(100)) >= Duration::from_secs(3));
     }
+
+    #[test]
+    fn a_picture_is_held_until_its_render_time_less_decode_and_render_delay() {
+        let t0 = Instant::now();
+        let mut p = ReceivePipeline::new(Codec::Vp8, t0, ReceiveConfig::default());
+        p.set_jitter_buffer_target(Some(Duration::from_millis(100)));
+        p.insert_packet(frame(t0, 0, true));
+        drain(&mut p, t0);
+        for n in 1..60u16 {
+            let arrival = t0 + FRAME * u32::from(n);
+            p.insert_packet(frame(t0, n, false));
+            if n < 40 {
+                drain(&mut p, arrival + Duration::from_millis(200));
+                continue;
+            }
+            // Render at arrival + 100 ms; released 10 ms (render delay) and the decode time
+            // estimate (1 ms decodes) before that.
+            assert!(
+                p.poll_frame(arrival).is_none(),
+                "frame {n} released on arrival"
+            );
+            assert!(
+                p.poll_frame(arrival + Duration::from_millis(80)).is_none(),
+                "frame {n}"
+            );
+            let r = p
+                .poll_frame(arrival + Duration::from_millis(95))
+                .unwrap_or_else(|| panic!("frame {n} due"));
+            let render = r.render_time.expect("not the low-latency path");
+            let lead = render.saturating_duration_since(arrival);
+            assert!(
+                lead >= Duration::from_millis(95) && lead <= Duration::from_millis(105),
+                "{lead:?}"
+            );
+            p.on_decoded(
+                arrival,
+                r.token,
+                DecodeOutcome::Decoded {
+                    width: 1,
+                    height: 1,
+                    qp: None,
+                    decode_time: Duration::from_millis(1),
+                    request_key_frame: false,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn a_packet_late_against_the_packet_after_its_gap_counts_as_a_retransmission() {
+        let t0 = Instant::now();
+        let mut p = ReceivePipeline::new(Codec::Vp8, t0, ReceiveConfig::default());
+        let packet = |seq: u16, at_ms: u64| {
+            vp8_packet(
+                t0 + Duration::from_millis(at_ms),
+                seq,
+                u32::from(seq) * 3000,
+                true,
+                seq != 0,
+                true,
+                seq,
+            )
+        };
+        p.insert_packet(packet(0, 0));
+        // 1 is overtaken by 2 and arrives 10 ms after it: reordering.
+        p.insert_packet(packet(2, 66));
+        p.insert_packet(packet(1, 76));
+        // 4 overtakes 3, which comes 80 ms after 4: a retransmission.
+        p.insert_packet(packet(4, 132));
+        p.insert_packet(packet(3, 212));
+        let s = p.stats(t0 + Duration::from_millis(300));
+        assert_eq!(s.packets_retransmitted, 1);
+        assert!(
+            (s.max_repair_delay - 0.080).abs() < 1e-6,
+            "{}",
+            s.max_repair_delay
+        );
+    }
 }

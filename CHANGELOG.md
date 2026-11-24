@@ -836,6 +836,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **video pipeline, phase one: the receive side** (`conf/vp-2-receive`, design on
+  `conf/vp-1-design`, `docs/video-pipeline.md`). A new crate, `rtc-video`, sans-I/O, pure
+  Rust, no codec dependency:
+  - `assembly::PacketBuffer`: frames from RTP packets per payload format (VP8 S / PID, VP9
+    B / E, AV1 and the Dependency Descriptor's start / end of frame, H.264 / H.265 by RTP
+    timestamp and marker), key frames and key-frame sizes, duplicates, late packets, overflow
+    and backward jumps as libwebrtc's `packet_buffer.cc`.
+  - `reference::ReferenceFinder`: frame ids and references with libwebrtc's dispatch: VP8
+    temporal layers (TL0PICIDX, TID, Y), picture-id-only and sequence-number-only streams
+    (padding closes gaps), VP9 flexible mode with inter-layer dependency and non-flexible
+    picture groups, the Dependency Descriptor's fdiffs.
+  - `buffer::FrameBuffer`: decodable temporal units, dropping of frames passed over
+    (`framesDropped`, `packetsDiscarded`), libwebrtc's limits (800 frames, 8192 decoded ids).
+  - `timing`: ports of libwebrtc's jitter estimator (Kalman filter on frame delay variation
+    and size, noise threshold, retransmission term, frame-rate scaling), timestamp
+    extrapolator, decode-time percentile and render-time model, the playout-delay extension,
+    `jitterBufferTarget` and an A/V sync delay input; release at render time minus decode and
+    render time, late pictures skipped (`kMaxAllowedFrameDelay`), the low-latency path.
+  - `keyframe::KeyFramePolicy`: PLI on a first frame that is not a key frame, packet buffer
+    overflow, a missing Dependency Descriptor structure, the decode timeouts (200 ms / 3 s, or
+    from `rtx-time`), decoder errors, repeated every 200 ms until a key frame decodes, and a
+    repair window (5 RTT, at least 1 s) after which pictures stuck behind a gap ask for a key
+    frame (`ReceiveConfig::chrome()` keeps libwebrtc's decode timeout only).
+  - `render::RenderStats`: W3C `freezeCount`, `totalFreezesDuration`, `pauseCount`,
+    `totalPausesDuration`, `totalInterFrameDelay`, `totalSquaredInterFrameDelay`,
+    `framesRendered` (W3C definition; libwebrtc's 5-interval warm-up in `chrome()`).
+  - `decoder::VideoDecoder` trait and `ReferenceCheckingDecoder`; `engine::VideoReceiver`
+    (feature `engine`): one pipeline per SSRC of an `RTCRtpReceiver`, PLI through
+    `write_rtcp` when `nack pli` was negotiated, `report_received_frame`, the statistics
+    through `update_decoder_stats` (the jitter buffer members through
+    `update_audio_receiver_stats` for now).
+  - Tests: libvpx VP8 / VP9 IVF and H.264 / H.265 Annex B fixtures through 5 % loss with
+    0..40 ms reordering and retransmission (every picture byte-identical, in an order the
+    stream allows, no freeze); calls between two peer connections at 2 % and 10 % loss and a
+    300 kbit/s capacity drop (no wait beyond the slowest repair, no corrupt picture, no
+    decode out of order).
+
 - **media pipeline, phase one: audio** (`conf/mp-1-audio-pipeline`). Two new crates beside the
   engine, sans-I/O, pure Rust by default; `docs/media-pipeline.md` describes them and the
   measured quality.

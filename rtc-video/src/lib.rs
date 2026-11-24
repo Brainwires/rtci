@@ -42,6 +42,7 @@ pub mod stats;
 pub mod timing;
 
 #[cfg(test)]
+#[path = "test_util_test.rs"]
 mod test_util;
 
 pub use frame::{Codec, EncodedFrame};

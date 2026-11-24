@@ -386,6 +386,11 @@ over SRTP and is subject to none of SCTP's flow control.
   audio statistics fed into `getStats`); echo cancellation, noise suppression, gain control, high-pass filter and
   voice activity detection; a send pipeline following the congestion controller; capture and playout (cpal, opt-in).
   Sans-I/O like the engine; see [docs/media-pipeline.md](docs/media-pipeline.md) for the measured quality
+- 🚧 **Video pipeline** (`rtc-video`, phase one: the receive side) - frame assembly for VP8, VP9, AV1, H.264 and
+  H.265, the frame reference finder (VP8 temporal layers, VP9 flexible and non-flexible modes, the Dependency
+  Descriptor, sequence numbers), a frame buffer with libwebrtc's jitter estimate and playout timing, key-frame
+  requests (PLI) when the picture is lost, freeze / pause and jitter buffer statistics fed into `getStats`; decoders
+  behind a trait. See [docs/video-pipeline.md](docs/video-pipeline.md) for the design, the phases and what was measured
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
