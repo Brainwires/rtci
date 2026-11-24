@@ -598,14 +598,17 @@ fn tclass(_: &socket2::SockRef<'_>) -> io::Result<u32> {
 /// What each platform does:
 /// - **Linux, Android, the BSDs, macOS**: `IP_TOS` / `IPV6_TCLASS` set what every later
 ///   packet carries, with no privilege. (Linux keeps the ECN bits of a TCP socket to itself.)
-/// - **Windows**: `IP_TOS` is accepted and ignored by the network stack unless the host's
-///   policy allows applications to set it (it does not by default); marking needs the qWAVE
+/// - **Windows**: `IP_TOS` is accepted, and `getsockopt` reads the value back (hosted
+///   `windows-latest`), but Microsoft documents the option as not to be used and the stack as
+///   not applying it unless the host's policy allows applications to set it (it does not by
+///   default): the packets are not known to carry it. Marking needs the qWAVE
 ///   API (`QOSAddSocketToFlow`, and `QOSSetFlow` with `QOSSetOutgoingDSCPValue`, which only an
 ///   administrator or a member of Network Configuration Operators may call) or a Group Policy
 ///   QoS rule. The driver does neither: on Windows its packets leave unmarked whatever the
 ///   engine asks, and RFC 8835 section 4.2 allows that ("It is appropriate to depart from this
 ///   recommendation when running on platforms where QoS marking is not implemented").
-///   `IPV6_TCLASS` is not offered there: an error.
+///   `IPV6_TCLASS` is not offered there (`socket2` has none): `Unsupported`, and the driver
+///   counts the socket in `PeerDriver::unmarked_sockets`.
 /// - Other targets without `IPV6_TCLASS` in `socket2`: an error for IPv6.
 ///
 /// # Errors
