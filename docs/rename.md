@@ -69,24 +69,24 @@ directories back to `rtc-<x>` when it collects the fork's tests.
 ## What it leaves on purpose
 
 After applying, the script prints every remaining occurrence of the old names, grouped by reason.
-On master at `c51a4709` (5834 occurrences):
+On the tree the rename commit was made from (master `56b6476b` with `conf/gcc-8-paced-picture-guard`; 6027 occurrences):
 
 | Reason | Count |
 |---|---|
 | Upstream test lists `docs/upstream-tests/*.txt` (upstream data) | 3481 |
-| Identifiers and names that are not crate names (`rtc_pc` 447, `rtc_connected` 79, test names such as `offer_answer_rtc2rtc`, `rtc-env`, `rtc-testenv`, `rtc-interop`, thread names) | 1181 |
-| The word `rtc` in prose, local variables, strings and keys (not a crate path) | 365 |
-| URLs of other projects: upstream's repository, badges, crates.io and docs.rs pages of upstream's crates, the webrtc.rs logo files | 214 |
+| Identifiers and names that are not crate names (`rtc_pc` 516, `rtc_connected` 108, test names such as `offer_answer_rtc2rtc`, `rtc-env`, `rtc-testenv`, `rtc-interop`, thread names) | 1246 |
+| The word `rtc` in prose, local variables, strings and keys (not a crate path) | 409 |
+| URLs of other projects: upstream's repository, badges, crates.io and docs.rs pages of upstream's crates, the webrtc.rs logo files | 57 |
 | Released CHANGELOG sections | 170 |
-| The rename script and its tests (and, once committed, this page) | 189 |
-| The parity table's rows (upstream keys) | 103 |
+| The rename script and its tests (and, once committed, this page) | 412 |
+| The parity table's rows (upstream keys) | 105 |
+| Byte-string and C-string data literals: hashed, signed, AAD, KDF labels, test vectors (a peer or a fixture must agree) | 17 |
 | `docs/crypto-provider-migration.md`, the migration guide of the `rtc` 0.21 line (history) | 51 |
 | The test environment's realm `rtc.test` (certificates, coturn) | 27 |
 | `scripts/check-test-parity.py` (upstream names) | 23 |
 | The layers peer's lock file before regeneration | 19 |
 | FORK.md table cells about upstream (`Upstream changes not taken`, `Fork features dropped`) and `upstream's rtc-...` statements | 7 |
 | fuzz.yml's runner-plan key `rtc` (a job key like `dtls`; check-fuzz-registry.py checks it) | 3 |
-| Vendored third-party file (`scripts/test-env/peers/aiortc/image/`) | 1 |
 
 Also unchanged: W3C and IETF names in Rust and C (`RTCPeerConnection`, `RTCRtpSender`,
 `RTCIceCandidate`, `RTCConfiguration`, `RTCP`, `rtcp-mux`, `srtcp`, `webrtc`), licence files and
@@ -179,7 +179,10 @@ or its header, so a local variable called `rtc_pc` elsewhere stays.
 
 `cargo publish` order for the new names, dependencies first (normal and build dependencies, and
 versioned dev-dependencies), generated from `cargo metadata` and written into release.yml's
-commented publish step:
+commented publish step. On the rename commit's tree it was the first nineteen below with
+`rtci-signal` between `rtci-sdp` and `rtci-srtp`; since then `rtci-signal` is `publish = false`
+and `rtci-stream-driver` is published, and the audio crates (`rtci-audio`, `rtci-devices`,
+ported from a pre-rename branch with this script) are publishable after `rtci`:
 
 1. `rtci-crypto`
 2. `rtci-interceptor-derive`
@@ -194,23 +197,22 @@ commented publish step:
 11. `rtci-sctp`
 12. `rtci-datachannel`
 13. `rtci-sdp`
-14. `rtci-signal`
-15. `rtci-srtp`
-16. `rtci-stun`
-17. `rtci-ice`
-18. `rtci-turn`
-19. `rtci`
+14. `rtci-srtp`
+15. `rtci-stun`
+16. `rtci-ice`
+17. `rtci-turn`
+18. `rtci`
+19. `rtci-audio`
+20. `rtci-devices`
+21. `rtci-stream-driver`
 
-`rtci` has a versioned dev-dependency on `rtci-stream-driver`, which is `publish = false`: cargo
-keeps versioned dev-dependencies in the published manifest, so publishing `rtci` needs that
-dependency's `version` dropped or the driver published. `rtci-signal` (the examples' signalling
-helper) is publishable today because nothing says otherwise.
+`rtci-ffi` is `publish = false` (a C library delivered as built libraries and a header,
+`docs/packaging.md`). The root crate's dev-dependencies on `rtci-stream-driver`, `rtci-signal`
+and `rtci-audio` carry no version, so `cargo publish` drops them.
 
 crates.io fields (`--manifest-report`): every publishable crate has a description, a licence and
-`repository = "https://github.com/Brainwires/rtci"`; `rtci-interceptor`, `rtci-interceptor-derive`,
-`rtci-mdns`, `rtci-media` and `rtci-signal` have no README. `homepage` is still upstream's
-`https://webrtc.rs` and `license = "MIT/Apache-2.0"` uses the old `/` form (SPDX:
-`MIT OR Apache-2.0`); the rename changes neither.
+`repository = "https://github.com/Brainwires/rtci"` and a README; `license` is the SPDX
+`MIT OR Apache-2.0` and no crate names a `homepage` (both changed after the rename, not by it).
 
 ## For dependents
 
