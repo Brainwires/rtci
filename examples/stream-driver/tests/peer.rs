@@ -582,3 +582,74 @@ fn collide(polite: &mut Side, impolite: &mut Side) -> Result<()> {
     impolite.negotiation_needed = false;
     Ok(())
 }
+
+/// RFC 8837 / RFC 8835 section 4.2 through the driver: each datagram leaves its UDP socket
+/// with the DSCP (and ECN bits) the engine gives it (`RTCPeerConnection::traffic_class`), set
+/// with `IP_TOS` before the datagram when it differs from the socket's. Audio at `high` is EF
+/// (46): its packets leave a socket set to TOS 184, while STUN and RTCP leave it at 0; the
+/// operating system reports the byte set (`getsockopt`, `sockets.rs`). Under
+/// `RTCDscpMarking::Off` the socket is never marked. The audio arrives either way. On Windows,
+/// where `IP_TOS` does not mark (see `sockets::set_traffic_class`), what happened is printed,
+/// not asserted.
+#[tokio::test]
+async fn the_driver_marks_each_datagram_with_its_flows_codepoint() -> Result<()> {
+    use rtci::peer_connection::priority::{RTCDscpMarking, RTCPriorityType};
+    for marking in [RTCDscpMarking::Rfc8837, RTCDscpMarking::Off] {
+        // UDP only: on loopback the engine's ICE-TCP pair would otherwise carry the call (its
+        // connections are marked by `StreamDriver`, `loopback.rs`).
+        let mut a = Side::new(
+            SettingEngineBuilder::new()
+                .with_dscp_marking(marking)
+                .with_tcp_candidate_gathering(false),
+        )?;
+        let mut b = Side::new(SettingEngineBuilder::new().with_tcp_candidate_gathering(false))?;
+        let audio = connected(&mut a, &mut b).await?;
+        {
+            let pc = a.driver.pc_mut();
+            let sender = pc
+                .rtp_transceiver(audio)
+                .and_then(|t| t.sender())
+                .ok_or("a sender")?;
+            let mut sender = pc.rtp_sender(sender).ok_or("the sender")?;
+            let mut parameters = sender.get_parameters().clone();
+            parameters.encodings[0].priority = RTCPriorityType::High;
+            sender.set_parameters(parameters, None)?;
+        }
+        for seq in 1..=20 {
+            write_audio(&mut a, audio, seq)?;
+            round(&mut a, &mut b).await?;
+        }
+        run_until(&mut a, &mut b, Duration::from_secs(5), |_, b| {
+            !b.rtp.is_empty()
+        })
+        .await?;
+        assert!(!b.rtp.is_empty(), "{marking:?}: audio arrives");
+        let sent = a.driver.sent_by_traffic_class().clone();
+        let locals = a.driver.local_addresses();
+        println!(
+            "{marking:?}: sent by traffic class {sent:?}, unmarked sockets {}, socket now {:?}",
+            a.driver.unmarked_sockets(),
+            locals
+                .first()
+                .and_then(|l| a.driver.socket_traffic_class(*l))
+                .map(|r| r.ok()),
+        );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(a.driver.unmarked_sockets(), 0);
+            match marking {
+                RTCDscpMarking::Off => {
+                    assert_eq!(sent.keys().copied().collect::<Vec<u8>>(), vec![0])
+                }
+                _ => {
+                    assert!(sent.get(&(46 << 2)).is_some_and(|n| *n >= 20), "{sent:?}");
+                    assert!(
+                        sent.get(&0).is_some_and(|n| *n > 0),
+                        "STUN and RTCP: {sent:?}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}

@@ -45,6 +45,64 @@ fn test_requests_carry_rtc_turn_and_its_version_by_default_and_none_when_set_emp
     Ok(())
 }
 
+/// Section 6.1: "Indications MAY include a SOFTWARE attribute". With
+/// `ClientConfig::software_in_indications` a Send indication carries the client's SOFTWARE
+/// (before FINGERPRINT, which stays last); by default, and with an empty `software`, it carries
+/// none.
+#[test]
+fn test_send_indications_carry_software_only_when_configured() -> Result<()> {
+    let now = Instant::now();
+    let peer: SocketAddr = "198.51.100.7:4000".parse().unwrap();
+    let indication_software = |software: &str, in_indications: bool| -> Result<Option<String>> {
+        let server = TestServer::new()?;
+        let mut client = Client::new(
+            ClientConfig {
+                turn_serv_addr: server_addr().to_string(),
+                local_addr: local_addr(),
+                transport_protocol: TransportProtocol::UDP,
+                username: USERNAME.to_owned(),
+                password: PASSWORD.to_owned(),
+                software: software.to_owned(),
+                software_in_indications: in_indications,
+                ..Default::default()
+            },
+            test_crypto_provider(),
+        )?;
+        let relayed = server.allocate(&mut client, now)?;
+        server.permit(&mut client, now, relayed, peer)?;
+        client.relay(relayed)?.send_to(now, b"payload", peer)?;
+        let indication = sent(&mut client)
+            .into_iter()
+            .find_map(|s| match s {
+                Sent::Indication(i) => Some(i),
+                _ => None,
+            })
+            .expect("a Send indication");
+        assert_eq!(
+            indication.typ,
+            MessageType::new(METHOD_SEND, CLASS_INDICATION)
+        );
+        let mut data = Data::default();
+        data.get_from(&indication)?;
+        assert_eq!(data.0, b"payload");
+        assert_eq!(
+            indication.attributes.0.last().map(|a| a.typ),
+            Some(ATTR_FINGERPRINT),
+            "FINGERPRINT is the last attribute"
+        );
+        Ok(software_of(&indication))
+    };
+    assert_eq!(
+        indication_software(DEFAULT_SOFTWARE, true)?.as_deref(),
+        Some(DEFAULT_SOFTWARE)
+    );
+    assert_eq!(indication_software(DEFAULT_SOFTWARE, false)?, None);
+    assert_eq!(indication_software("", true)?, None);
+    // The default is off.
+    assert!(!ClientConfig::default().software_in_indications);
+    Ok(())
+}
+
 /// Section 6.1: outside MTU probing, a STUN message over UDP keeps within the path MTU. A
 /// request that would not is refused before anything is sent; over TCP there is no such
 /// limit.

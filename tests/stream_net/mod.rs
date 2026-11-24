@@ -160,6 +160,8 @@ pub struct Net {
     pub bytes_carried: u64,
     pub resets_seen: Vec<(usize, StreamId)>,
     pub closes_seen: Vec<(usize, StreamId)>,
+    /// The DSCP of each stream transmit, with the peer that wrote it.
+    pub transmit_dscps: Vec<(usize, u8)>,
 }
 
 impl Net {
@@ -187,6 +189,7 @@ impl Net {
             bytes_carried: 0,
             resets_seen: vec![],
             closes_seen: vec![],
+            transmit_dscps: Vec::new(),
         }
     }
 
@@ -362,6 +365,7 @@ impl Net {
                     self.command(i, cmd);
                 }
                 while let Some(t) = peers[i].pc.poll_stream_transmit() {
+                    self.transmit_dscps.push((i, t.dscp));
                     self.transmit(i, t.id, t.data);
                 }
             }

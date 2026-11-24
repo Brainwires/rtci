@@ -853,3 +853,78 @@ fn a_new_dtls_association_deletes_the_engine_allocation_and_allocates_again() ->
     );
     Ok(())
 }
+
+/// W3C webrtc-pc "set the configuration": "Set the ICE Agent's ICE servers list to
+/// iceServers. As defined in [RFC9429], if a new list of servers replaces the ICE Agent's
+/// existing ICE servers list, no action will be taken until the next gathering phase." The
+/// engine's TURN gathering allocates on the new server from the next ICE generation on, and
+/// the allocation on the server that left the list is deleted then (RFC 8656 section 7.2:
+/// a Refresh with lifetime 0); nothing happens before that.
+#[test]
+fn turn_servers_set_by_set_configuration_are_allocated_on_from_the_next_gathering_phase()
+-> Result<()> {
+    let new_server = a("192.0.2.21:3478");
+    let mut h = Harness::with(
+        &format!("turn:{SERVER}"),
+        SettingEngineBuilder::new()
+            .with_tcp_candidate_gathering(false)
+            .build(),
+        vec![a(SERVER), new_server],
+    )?;
+    h.add_host(HOST)?;
+    h.run(h.now + Duration::from_secs(5))?;
+    let to = |h: &Harness, method, server: SocketAddr| {
+        h.server
+            .requests_of(method)
+            .into_iter()
+            .filter(|(addr, _)| *addr == server)
+            .count()
+    };
+    assert_eq!(to(&h, METHOD_ALLOCATE, a(SERVER)), 2);
+    let refreshes_before = to(&h, METHOD_REFRESH, a(SERVER));
+
+    h.pc.set_configuration(
+        RTCConfigurationBuilder::new()
+            .with_ice_servers(vec![RTCIceServer {
+                urls: vec![format!("turn:{new_server}")],
+                username: USER.to_owned(),
+                credential: PASS.to_owned(),
+            }])
+            .build(),
+    )?;
+    h.run(h.now + Duration::from_secs(1))?;
+    assert_eq!(
+        to(&h, METHOD_ALLOCATE, new_server),
+        0,
+        "no action before the next gathering phase"
+    );
+    assert_eq!(to(&h, METHOD_REFRESH, a(SERVER)), refreshes_before);
+
+    h.pc.restart_ice();
+    let offer = h.pc.create_offer(None)?;
+    h.pc.set_local_description(h.now, offer)?;
+    h.add_host(HOST)?;
+    h.run(h.now + Duration::from_secs(5))?;
+    assert_eq!(
+        to(&h, METHOD_ALLOCATE, new_server),
+        2,
+        "the next phase allocates on the new server"
+    );
+    assert_eq!(
+        to(&h, METHOD_ALLOCATE, a(SERVER)),
+        2,
+        "and not on the old one"
+    );
+    assert!(
+        to(&h, METHOD_REFRESH, a(SERVER)) > refreshes_before,
+        "the old allocation is deleted"
+    );
+    assert!(
+        h.relayed()
+            .iter()
+            .any(|(_, url, _)| url.as_deref() == Some("turn:192.0.2.21:3478?transport=udp")),
+        "{:?}",
+        h.relayed()
+    );
+    Ok(())
+}

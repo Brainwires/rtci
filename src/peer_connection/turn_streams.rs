@@ -35,6 +35,7 @@ use super::RTCPeerConnection;
 use super::streams::{TURN, tcp_context};
 use super::turn_tls::{TlsLayer, TurnTlsConfig};
 use crate::peer_connection::handler::transport_set::TransportId;
+use crate::peer_connection::servers_in_force::{ServersInForce, same_url};
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use bytes::BytesMut;
 use ice::url::{ProtoType, SchemeType, Url};
@@ -224,6 +225,16 @@ impl TurnLink {
 
 /// Whether the URL an application gave a relayed candidate names `server` (scheme, host and
 /// port; `turn:host` without a port is 3478).
+/// The `turn:` / `turns:` URLs of `urls`: `turns:` over UDP is DTLS (RFC 7350 section 4);
+/// `turn:` over UDP runs unless the application gathers its relayed candidates itself
+/// (`relay_gathering`).
+fn turn_servers(urls: &[Url]) -> Vec<Url> {
+    urls.iter()
+        .filter(|u| matches!(u.scheme, SchemeType::Turn | SchemeType::Turns))
+        .cloned()
+        .collect()
+}
+
 fn same_server(url: &str, server: &Url) -> bool {
     Url::parse_url(url).is_ok_and(|u| {
         u.scheme == server.scheme
@@ -244,8 +255,10 @@ fn host_for_url(host: &str) -> String {
 /// The engine's TURN-over-stream links.
 pub(crate) struct EngineTurn {
     /// The servers each transport allocates on: `turn:...?transport=tcp` and `turns:` URLs
-    /// (`turns:...?transport=udp` over DTLS), and `turn:` over UDP.
-    servers: Vec<Url>,
+    /// (`turns:...?transport=udp` over DTLS), and `turn:` over UDP; as each ICE generation of
+    /// each transport took them (`RTCPeerConnection::set_configuration` gives the next
+    /// generations a new list).
+    servers: ServersInForce,
     /// The bases of the UDP host candidates of each transport: where a DTLS link starts.
     udp_bases: Vec<(TransportId, SocketAddr)>,
     /// The transports whose links were made (once each, failed ones are not made again).
@@ -277,13 +290,7 @@ pub(crate) struct EngineTurn {
 impl EngineTurn {
     /// The links of the `turn:...?transport=tcp` and `turns:` URLs among `urls`.
     pub(crate) fn new(urls: &[Url], enabled: bool, tls: TurnTlsConfig) -> Self {
-        let servers = urls
-            .iter()
-            // `turns:` over UDP is DTLS (RFC 7350 section 4); `turn:` over UDP runs unless the
-            // application gathers its relayed candidates itself (`relay_gathering`).
-            .filter(|u| matches!(u.scheme, SchemeType::Turn | SchemeType::Turns))
-            .cloned()
-            .collect();
+        let servers = ServersInForce::new(turn_servers(urls));
         let tls_config = tls.client_config().ok().flatten();
         Self {
             servers,
@@ -327,12 +334,44 @@ impl EngineTurn {
             .any(|(a, until)| *a == server && now < *until)
     }
 
-    /// The links of `transport`, one per server, unless it has had them.
-    fn make_links(&mut self, transport: TransportId) {
-        if !self.made_for.insert(transport) {
-            return;
+    /// The configuration's new servers: the ICE generations that begin from now on allocate
+    /// on them (W3C webrtc-pc "set the configuration", RFC 9429 section 4.1.18).
+    pub(crate) fn set_servers(&mut self, urls: &[Url]) {
+        self.servers.set(turn_servers(urls));
+    }
+
+    /// The links of `transport` for its generation `ufrag`, one per server of the list that
+    /// generation takes: made once per transport, and when a later generation takes another
+    /// list, the links of servers no longer in it are returned (to be closed) and links for
+    /// the new servers are made.
+    fn make_links(&mut self, transport: TransportId, ufrag: &str) -> Vec<TurnLink> {
+        let (servers, new_phase) = self.servers.for_generation(transport, ufrag);
+        let first = self.made_for.insert(transport);
+        if !first && !new_phase {
+            return vec![];
         }
-        for url in &self.servers {
+        let mut dropped = vec![];
+        if !first {
+            let mut i = 0;
+            while i < self.links.len() {
+                if self.links[i].transport == transport
+                    && !servers.iter().any(|u| same_url(u, &self.links[i].url))
+                {
+                    dropped.push(self.links.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for url in &servers {
+            if !first
+                && self
+                    .links
+                    .iter()
+                    .any(|l| l.transport == transport && same_url(&l.url, url))
+            {
+                continue;
+            }
             let carrier = match (url.scheme, url.proto) {
                 (SchemeType::Turns, ProtoType::Udp) => Carrier::Dtls,
                 (SchemeType::Turns, _) => Carrier::Tls,
@@ -377,6 +416,7 @@ impl EngineTurn {
                 });
             }
         }
+        dropped
     }
 
     /// Whether a link of `transport` is still on its way to a relayed candidate. A link over
@@ -534,9 +574,17 @@ impl RTCPeerConnection {
         {
             return;
         }
+        let mut dropped = vec![];
         for transport in self.pipeline_context.transports.ids() {
-            self.streams.turn.make_links(transport);
+            let ufrag = self
+                .ice_transport_of(transport)
+                .agent
+                .get_local_credentials()
+                .ufrag
+                .clone();
+            dropped.extend(self.streams.turn.make_links(transport, &ufrag));
         }
+        self.close_turn_links(dropped);
         let now = self.pipeline_context.now;
         let driver = self.streams.driver_seen;
         for index in 0..self.streams.turn.links.len() {
@@ -1415,6 +1463,27 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Closes links taken out of the engine (their server left the list a new generation
+    /// took): their connections end, a DTLS association says close_notify, an allocation
+    /// over UDP is deleted.
+    fn close_turn_links(&mut self, mut links: Vec<TurnLink>) {
+        let now = self.pipeline_context.now;
+        let out = &mut self.pipeline_context.write_outs;
+        let mut ended = vec![];
+        for l in links.iter_mut() {
+            ended.extend(l.attempts.iter().copied());
+            ended.extend(l.data.iter().filter_map(|c| c.stream()));
+            for a in l.dtls.iter_mut().chain(l.dtls_attempts.iter_mut()) {
+                let _ = a.endpoint.close(now);
+                a.flush(out);
+            }
+            release_udp_allocation(l, now, out);
+        }
+        for id in ended {
+            self.streams.table.close(id);
+        }
+    }
+
     /// Drops the links of transports a description removed, and their connections.
     pub(crate) fn release_removed_turn_links(&mut self) {
         let ids = self.pipeline_context.transports.ids();
@@ -1436,6 +1505,7 @@ impl RTCPeerConnection {
             kept
         });
         self.streams.turn.made_for.retain(|t| ids.contains(t));
+        self.streams.turn.servers.retain_transports(&ids);
         self.streams.turn.udp_bases.retain(|(t, _)| ids.contains(t));
         for id in ended {
             self.streams.table.close(id);
@@ -2180,8 +2250,8 @@ mod tests {
             "no link before a transport needs one"
         );
         let first = TransportId::default();
-        turn.make_links(first);
-        turn.make_links(first);
+        turn.make_links(first, "u1");
+        turn.make_links(first, "u1");
         let links: Vec<(String, RTCIceServerTransportProtocol)> = turn
             .links
             .iter()
@@ -2215,7 +2285,7 @@ mod tests {
         // Nothing started: nothing pending for the end of gathering.
         assert!(!turn.pending(first, true));
         // Another transport gets links of its own, once.
-        turn.make_links(TransportId(1));
+        turn.make_links(TransportId(1), "u1");
         assert_eq!(turn.links.len(), 10);
         assert!(
             turn.links[5..]
@@ -2226,7 +2296,7 @@ mod tests {
         let mut turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
         turn.tcp_relay = false;
         turn.relay_gathering = RelayGathering::Application;
-        turn.make_links(first);
+        turn.make_links(first, "u1");
         assert_eq!(turn.links.len(), 4);
         assert!(turn.links.iter().all(|l| l.carrier != Carrier::Udp));
     }
@@ -2245,7 +2315,7 @@ mod tests {
         .map(|u| Url::parse_url(u).unwrap())
         .collect();
         let mut turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
-        turn.make_links(TransportId::default());
+        turn.make_links(TransportId::default(), "u1");
         let links: Vec<(RTCIceServerTransportProtocol, bool)> = turn
             .links
             .iter()

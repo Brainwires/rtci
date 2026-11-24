@@ -303,7 +303,11 @@ impl RTCPeerConnection {
     pub fn poll_stream_transmit(&mut self) -> Option<StreamTransmit> {
         self.streams.driver_seen = true;
         self.route_stream_writes();
-        self.streams.table.poll_transmit()
+        let dscp = self.stream_dscp();
+        self.streams.table.poll_transmit().map(|mut transmit| {
+            transmit.dscp = dscp;
+            transmit
+        })
     }
 
     /// What the driver did: a listener bound or failed, a connection established or failed,
