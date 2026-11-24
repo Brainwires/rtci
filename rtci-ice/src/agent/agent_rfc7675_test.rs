@@ -308,10 +308,15 @@ fn test_previous_path_is_dropped_when_its_consent_expires() {
             dropped_at = Some(t);
             break;
         }
-        t = a
+        // Straight to the agent's next timer: `run_traced` has handled every one due by `t`.
+        // (Stepping at least a millisecond, as this loop did, jumped past the expiry when a
+        // consent request fell less than a millisecond before it: the randomized 4 to 6 s
+        // intervals put one there about once in five thousand runs.)
+        let next = a
             .poll_timeout()
-            .expect("a timer runs while the path is kept")
-            .max(t + Duration::from_millis(1));
+            .expect("a timer runs while the path is kept");
+        assert!(next > t, "the agent's timer does not advance past {t:?}");
+        t = next;
     }
     let dropped_at = dropped_at.expect("the path is dropped");
     assert_eq!(
