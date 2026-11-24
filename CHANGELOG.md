@@ -766,6 +766,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **peer connection**: `RTCPeerConnection::unsent_media_packets()`: RTP and RTCP written but not
+  sent (no ICE path, or an SRTP index already used), so media the engine cannot send is counted,
+  not lost unseen (`conf/rekey-2-no-loss`). `rtc-stream-driver`: `PeerDriver::unsent_datagrams()`
+  for datagrams no socket sent.
 - **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
   (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
   set of local candidates, on transport addresses the previous DTLS association did not use
@@ -890,6 +894,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **peer connection**: one RTP packet lost per SRTP re-keying when the call ran over ICE-TCP
+  (`conf/rekey-2-no-loss`; the intermittent `rtc-stream-driver` re-keying loss, 1 to 17% of
+  runs). The re-keying's ICE restart moves the call to a new pair; the controlled side selects
+  it first (on the nomination) and closed the TCP connection of the replaced pair at once (RFC
+  6544 section 8), while the controlling side, until its own selection one round trip later,
+  still wrote on it. The connection of the replaced path now stays open while the agent takes
+  data on it (`Agent::retired_media_path`, 5 s; RFC 8445 section 12.2). Test:
+  `tests/ice_tcp_streams_rtc2rtc.rs::moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched`.
+- **peer connection**: during a re-keying, SRTP packets the peer already protects with the new
+  association's keys (it completed its handshake first) were dropped until this side's
+  handshake completed. They are held (at most 256, for 2 s) and read with the new keys (RFC 5764
+  section 4.3: "store multiple SRTP keys sets during a rekey in order to avoid the need for
+  receivers to drop packets for which they lack a key"). Test:
+  `tests/srtp_rekeying_glare_rtc2rtc.rs::packets_under_the_new_keys_before_the_handshake_completes_are_held_not_dropped`.
 - **peer connection**: SRTP re-keying offers that cross (both peers re-key at once, glare)
   ended with no new DTLS association, and the call failed when the old keys ran out
   (`conf/rekey-1-glare`, reported from ParolNet's `m1::srtp_re_keying_keeps_the_call`). Two
