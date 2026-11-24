@@ -17,9 +17,9 @@ publish = false
 features = ["engine", "vp8", "av1"]
 
 # The default features are pure Rust and need no system library: the workspace's CI installs
-# none. Codec backends arrive as features in later phases (docs/video-pipeline.md).
+# none. docs/video-pipeline.md 4.6 has the evidence for each codec feature.
 [features]
-default = ["engine"]
+default = ["engine", "vp8"]
 # The glue that connects the receive pipeline to an `RTCRtpReceiver` of the `rtc` peer
 # connection. Without it the crate has no dependency on the engine.
 engine = ["dep:rtc"]

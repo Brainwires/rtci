@@ -3,8 +3,8 @@
 //!
 //! | Feature | Decode | Encode | Pure Rust |
 //! |---|---|---|---|
-//! | `vp8` | VP8 (`vp8-decoder`) | VP8 (`vp8-encoder`) | yes |
-//! | `av1` | AV1 (`rav1d`, no assembly) | AV1 (`rav1e`, no assembly) | yes |
+//! | `vp8` (default) | VP8 (`vp8-decoder`) | VP8 (`vp8-encoder`) | yes |
+//! | `av1` (opt-in) | AV1 (`rav1d`, no assembly; aborts on a hostile frame) | AV1 (`rav1e`, no assembly; not real time) | yes |
 //!
 //! docs/video-pipeline.md section 4 lists the opt-in backends that link system libraries
 //! (libvpx, dav1d, OpenH264) and the licensing of H.264.

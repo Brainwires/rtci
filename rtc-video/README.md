@@ -10,6 +10,12 @@ extrapolator and timing model); key frames asked for (PLI) when the picture is l
 video statistics (`framesDecoded`, `freezeCount`, `jitterBufferDelay`, ...) measured and handed
 to the engine's `getStats()`. Decoding is the application's, behind the `VideoDecoder` trait.
 
+Codecs (phase two): VP8 decode and encode in pure Rust by default (`vp8-decoder` /
+`vp8-encoder`, pinned; checked bit-exact on the WebM test vectors and against libvpx, real
+time to 720p, fuzzed); AV1 (`rav1d` / `rav1e` without assembly) behind the opt-in `av1`
+feature: decode real time to 720p30, encode not real time, and rav1d aborts the process on a
+hostile frame.
+
 See `docs/video-pipeline.md` in the repository for the design, the phases and what was
 measured.
 

@@ -871,6 +871,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
+- **video pipeline, phase 2: codecs** (`conf/vp-5-codecs`, `docs/video-pipeline.md` 4.6):
+  - `rtc-video` feature `vp8` (default): VP8 decode and encode in pure Rust with
+    `vp8-decoder` / `vp8-encoder` pinned to `=0.1.3`. Checked on hosted runners: the WebM
+    project's 59 VP8 test vectors bit-exact, libvpx's decode of the same streams identical
+    (58 of 60; the two others change resolution, which the comparison tool rescales), every
+    encoded stream decoded identically by libvpx, 720p decode at 257 fps or more and encode at
+    53 fps or more on one core, 15 min of libFuzzer with no finding.
+  - Feature `av1` (opt-in): AV1 decode with `rav1d` and encode with `rav1e`, both without
+    assembly. rav1d matches dav1d on libaom's vectors (10 of 10) and decodes 720p at about
+    40 fps, but aborts the process on a hostile frame (a panic across its C API); rav1e makes
+    5 to 8 pictures a second at 360p (not real time) and holds 4 pictures back.
+  - `picture` (I420 view and buffer, PSNR, a synthetic source), the `encoder::VideoEncoder`
+    trait, `VideoDecoder::picture`, `codec::decoder_for`.
+  - Tests: PSNR at 640x360 and 600 kbit/s (VP8 39.5 dB), hostile VP8 frames (no panic), the
+    libvpx fixture's MD5, the VP8 fixture and a rav1e stream through loss decoded bit-exactly,
+    a two-peer call with the real VP8 codecs. `scripts/video-codec-check.sh` and
+    `rtc-video/examples/codec_check.rs` reproduce the evidence.
+  - interop-peer scenario `{"media":"pipeline","video":"VP8"|"AV1"}` and the browser cells
+    `pipeline receive VP8` / `AV1`; the root crate dev-depends on `rtc-video` (path only).
+  - `deny.toml`: libfuzzer-sys (NCSA, a permissive licence) allowed; it is a `cfg(fuzzing)`-only
+    dependency of rav1e. The dev profile optimises the codec crates (their tests code video).
+
 - **video pipeline, phase 1b: the engine boundary** (`conf/vp-4-engine-boundary`,
   `docs/video-pipeline.md` 2.6, 2.9):
   - `RTCRtpReceiver::set_nack_horizon(now, ssrc, oldest_useful)` and
