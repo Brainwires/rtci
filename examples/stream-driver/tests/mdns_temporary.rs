@@ -93,26 +93,22 @@ async fn the_driver_marks_the_temporary_address_the_os_reports_and_only_it_goes_
     let addresses = vec![IpAddr::V6(temporary), IpAddr::V6(stable)];
 
     let on = signalled(addresses.clone(), true).await?;
-    // One UDP host candidate per address (the engine's ICE-TCP ones follow the same rule).
+    // The UDP host candidates (signalled again for each section the driver gathers for).
     let hosts: Vec<&String> = on
         .iter()
         .filter(|c| c.contains(" udp ") && c.contains("typ host"))
         .collect();
-    assert_eq!(hosts.len(), 2, "{on:?}");
     assert!(
-        hosts
-            .iter()
-            .any(|c| c.contains(&format!(" {temporary} ")) && c.contains("typ host")),
+        hosts.iter().any(|c| c.contains(&format!(" {temporary} "))),
         "the temporary address goes out as it is: {on:?}"
+    );
+    assert!(
+        hosts.iter().any(|c| c.contains(".local ")),
+        "the stable address goes out under a name: {on:?}"
     );
     assert!(
         on.iter().all(|c| !c.contains(&stable.to_string())),
         "the stable address stays hidden: {on:?}"
-    );
-    assert_eq!(
-        hosts.iter().filter(|c| c.contains(".local ")).count(),
-        1,
-        "{on:?}"
     );
 
     let off = signalled(addresses, false).await?;
