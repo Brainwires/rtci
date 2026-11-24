@@ -638,10 +638,12 @@ impl Agent {
         (self.ta * u32::try_from(active).unwrap_or(u32::MAX)).max(MIN_RTO)
     }
 
-    /// How long a consent request waits for its response: four times the pair's last
-    /// round-trip time, between 500 ms and 4 s (RFC 7675 Section 5.1).
-    fn consent_wait(&self, pair: &CandidatePair) -> Duration {
-        (pair.current_round_trip_time * 4).clamp(MIN_RTO, MAX_BINDING_REQUEST_TIMEOUT)
+    /// How long the consent request sent now on the pair waits for its response (RFC 7675
+    /// Section 5.1): by default `Rm` times the pair's RTO, the consent expiry at most. See
+    /// [`ConsentResponseWait`].
+    fn consent_wait(&mut self, now: Instant, pair_index: usize) -> Duration {
+        let rto = self.candidate_pairs[pair_index].rto.start(now);
+        super::consent_response_wait(self.consent_response_wait, rto, self.consent_expiry())
     }
 
     /// Builds and sends a Binding request on the pair and opens its transaction: a
@@ -726,7 +728,9 @@ impl Agent {
 
         let rto = self.check_rto();
         let (retransmit, next_event) = if consent {
-            (false, now + self.consent_wait(&pair))
+            // Sent once (RFC 7675 Section 5.1), over TCP as over UDP; its response is awaited
+            // for a time based on the pair's round-trip time.
+            (false, now + self.consent_wait(now, pair_index))
         } else if is_tcp {
             // RFC 6544 Section 7.1: no retransmissions over TCP.
             (false, now + STUN_TI)
@@ -1037,17 +1041,21 @@ impl Agent {
         self.update_connection_state(Some(now), ConnectionState::Failed);
     }
 
-    /// Takes the open transaction `id`, if there is one.
+    /// Takes the open transaction `id`, if there is one. A consent request's transaction
+    /// that has reached its end is not one, whether or not the timer has run since (RFC 8489
+    /// Section 6.3: the response of a transaction that is no longer in progress is
+    /// discarded).
     pub(crate) fn handle_inbound_binding_success(
         &mut self,
-        _now: Instant,
+        now: Instant,
         id: TransactionId,
     ) -> Option<BindingRequest> {
         let index = self
             .pending_binding_requests
             .iter()
             .position(|r| r.transaction_id == id)?;
-        Some(self.pending_binding_requests.remove(index))
+        let request = self.pending_binding_requests.remove(index);
+        (!request.consent || request.next_event > now).then_some(request)
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1144,10 +1152,13 @@ impl Agent {
         }
 
         // Round-trip time, from a request that was sent once (a retransmitted one does not say
-        // which transmission was answered).
+        // which transmission was answered: RFC 8489 Section 6.2.1, Karn's algorithm). It
+        // also makes the pair's RTO (RFC 6298), which the wait of the next consent requests
+        // is based on: a response that takes long teaches the agent to wait longer.
         let rtt = now.saturating_duration_since(request.timestamp);
         if request.transmissions == 1 {
             self.candidate_pairs[checked].on_response_received(rtt);
+            self.candidate_pairs[checked].rto.sample(rtt, now);
         } else {
             self.candidate_pairs[checked].responses_received += 1;
         }

@@ -82,15 +82,11 @@ pub(crate) const DEFAULT_MAX_BINDING_REQUESTS: u16 = 7;
 /// The number of bytes that can be buffered before we start to error.
 pub(crate) const MAX_BUFFER_SIZE: usize = 1000 * 1000; // 1MB
 
-/// The longest a consent request waits for its response. The wait is four times the pair's
-/// last round-trip time, at least 500 ms (RFC 7675 Section 5.1: "for a time based on the
-/// estimated round-trip time (RTT) [...] with an allowance for variation in network delay"),
-/// and never longer than this, which is also less than the shortest consent interval.
-pub(crate) const MAX_BINDING_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
-
 /// The most open transactions the agent tracks beyond one per candidate pair: consent requests
 /// and cancelled transactions still waiting out their timeout. Past it the oldest of those is
-/// forgotten (its response, if it ever arrives, is then ignored).
+/// forgotten (its response, if it ever arrives, is then ignored). Consent requests alone stay
+/// far under it: they are at least 4 seconds apart and none is kept past the consent expiry
+/// (30 seconds) with [`ConsentResponseWait::Rto`], or past the fixed wait otherwise.
 pub(crate) const MAX_PENDING_BINDING_REQUESTS: usize = 50;
 
 impl AgentConfig {
@@ -176,6 +172,32 @@ impl PacingGroup {
             }
         }
     }
+}
+
+/// How long a consent request (RFC 7675) waits for its response: how long its transaction is
+/// in progress, so that a matching, authenticated success response still renews consent (RFC
+/// 8489 Section 6.3: a response is processed when "the transaction ID matches a transaction
+/// that is still in progress"). A consent request is sent once; a response to an earlier one
+/// than the latest counts as well (RFC 7675 Section 5.1: "a response might be for a previous
+/// request (rather than for the most recently sent request)").
+///
+/// Whatever the wait, consent expires 30 seconds after the last response that renewed it, and
+/// every open consent transaction is discarded then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ConsentResponseWait {
+    /// RFC 7675 Section 5.1 (the default): "An endpoint SHOULD await a binding response for
+    /// each request it sends for a time based on the estimated round-trip time (RTT) (see
+    /// Section 7.2.1 of [RFC5389]) with an allowance for variation in network delay." The
+    /// wait is what RFC 8489 Section 6.2.1 gives a transaction after its last request, `Rm`
+    /// (16) times the RTO, the RTO being the pair's (RFC 6298: the smoothed round-trip time
+    /// plus four times its variation, 500 ms at least, from every request that was answered
+    /// without having been retransmitted): 8 seconds at least, and never longer than the
+    /// consent expiry.
+    #[default]
+    Rto,
+    /// A fixed time, whatever the round-trip time is. libwebrtc's is 60 seconds.
+    Fixed(Duration),
 }
 
 /// What an agent does when a nomination fails (RFC 8445 Section 7.2.5.2): the controlling
@@ -405,6 +427,9 @@ pub struct AgentConfig {
     /// where the peer has shown that it lost it (a role conflict the agent wins after it
     /// nominated).
     pub nominate_on_consent_checks: bool,
+
+    /// How long a consent request waits for its response: see [`ConsentResponseWait`].
+    pub consent_response_wait: ConsentResponseWait,
 
     /// What a Binding request that fails authentication gets: an error response (RFC 8489
     /// Section 9.1.3, rate limited; the default) or nothing.

@@ -115,7 +115,7 @@ use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use ice::agent::remote_policy::RemoteAddressFilter;
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
-use ice::{FailedNomination, NominationAcceptance, UnauthenticatedRequests};
+use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
@@ -304,6 +304,8 @@ pub struct IceBehaviour {
     pub failed_nomination: FailedNomination,
     /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
     pub nominate_on_consent_checks: bool,
+    /// See [`SettingEngineBuilder::with_ice_consent_response_wait`].
+    pub consent_response_wait: ConsentResponseWait,
     /// See [`SettingEngineBuilder::with_ice_pacing`].
     pub pacing: Option<Duration>,
     /// See [`SettingEngineBuilder::with_ice_pacing_group`].
@@ -1900,6 +1902,36 @@ impl SettingEngineBuilder {
     /// shows it lost it (a role conflict after the nomination).
     pub fn with_ice_nomination_on_consent_checks(mut self, enabled: bool) -> Self {
         self.0.ice.nominate_on_consent_checks = enabled;
+        self
+    }
+
+    /// How long an ICE consent request (RFC 7675) waits for its response, that is, how long a
+    /// matching, authenticated Binding success response still renews consent.
+    ///
+    /// The default, [`ConsentResponseWait::Rto`], is RFC 7675 section 5.1: "a time based on
+    /// the estimated round-trip time (RTT) [...] with an allowance for variation in network
+    /// delay", here `Rm` (16) times the candidate pair's RTO (RFC 8489 section 6.2.1, RFC
+    /// 6298), which is 8 seconds at least and grows with the round-trip time the responses
+    /// show, and never longer than the consent expiry (30 seconds). A path whose round trip
+    /// rises, even from milliseconds to seconds at once, keeps its consent: a response that
+    /// takes long is still taken, and makes the next requests wait longer.
+    ///
+    /// [`ConsentResponseWait::Fixed`] is a fixed wait; libwebrtc's is 60 seconds
+    /// (`kConnectionResponseTimeout`), which takes a response whatever the round trip was.
+    ///
+    /// Either way consent expires 30 seconds after the last response that renewed it.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use rtci::ice::ConsentResponseWait;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_consent_response_wait(ConsentResponseWait::Fixed(Duration::from_secs(60)))
+    ///     .build();
+    /// ```
+    pub fn with_ice_consent_response_wait(mut self, wait: ConsentResponseWait) -> Self {
+        self.0.ice.consent_response_wait = wait;
         self
     }
 

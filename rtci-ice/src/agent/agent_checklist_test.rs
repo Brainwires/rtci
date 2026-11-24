@@ -1441,54 +1441,6 @@ fn test_a_controlled_nomination_whose_triggered_check_gets_an_error_fails_the_ch
     assert_eq!(a.checklist_state(), ChecklistState::Failed);
 }
 
-/// RFC 7675 Section 5.1: a consent request waits for its response for a time based on the
-/// round-trip time (four times the last one, 500 ms at least); a response after that is for
-/// a transaction the agent no longer has and gives no consent.
-#[test]
-fn test_consent_response_is_awaited_for_a_time_based_on_the_rtt() {
-    let start = Instant::now();
-    let mut a = agent_with(start, config(true), &[(1, 500)]);
-    answered(&mut a, start, Duration::ZERO, Duration::from_secs(1));
-    assert!(a.get_selected_candidate_pair().is_some());
-    let consent_before = a.remote_candidates[0].last_consent().unwrap();
-
-    // The next two consent requests, unanswered for now.
-    let mut consent: Vec<TransactionId> = vec![];
-    let mut now = start + Duration::from_secs(1);
-    loop {
-        a.handle_timeout(now).unwrap();
-        consent.extend(
-            sent(&mut a)
-                .iter()
-                .filter(|(m, _)| m.typ == BINDING_REQUEST)
-                .map(|(m, _)| m.transaction_id),
-        );
-        if consent.len() >= 2 {
-            break;
-        }
-        now = a
-            .poll_timeout()
-            .unwrap()
-            .max(now + Duration::from_micros(1));
-    }
-    let (late, in_time) = (consent[0], consent[1]);
-    assert!(
-        a.pending_binding_requests
-            .iter()
-            .all(|r| r.transaction_id != late),
-        "the first one stopped waiting"
-    );
-
-    let at = now + 400 * MS;
-    let response = peer_response(BINDING_SUCCESS, late, addr(LOCAL), None);
-    let _ = deliver(&mut a, at, &response, "10.0.0.1:5000");
-    assert_eq!(a.remote_candidates[0].last_consent(), Some(consent_before));
-
-    let response = peer_response(BINDING_SUCCESS, in_time, addr(LOCAL), None);
-    deliver(&mut a, at, &response, "10.0.0.1:5000").unwrap();
-    assert_eq!(a.remote_candidates[0].last_consent(), Some(at));
-}
-
 // --- Heavy loss: a nomination whose requests or responses are all lost ---
 
 /// A controlling agent with one remote candidate and the checking timer on (the defaults):

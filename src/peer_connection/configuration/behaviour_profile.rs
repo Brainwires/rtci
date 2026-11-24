@@ -386,7 +386,7 @@ macro_rules! governed_behaviours {
     };
 }
 
-use ice::{FailedNomination, NominationAcceptance};
+use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance};
 use interceptor::{EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase};
 
 governed_behaviours! {
@@ -426,6 +426,18 @@ governed_behaviours! {
         evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_nomination_on_consent_checks(v),
         read: |s: &SettingEngine| s.ice.nominate_on_consent_checks,
+    },
+    {
+        id: "ice.consent-response-wait",
+        setting: "SettingEngineBuilder::with_ice_consent_response_wait",
+        clause: "RFC 7675 5.1, RFC 8489 6.2.1",
+        rfc: ConsentResponseWait::Rto => "Rto",
+        chrome: ConsentResponseWait::Fixed(Duration::from_secs(60)) => "Fixed(60s)",
+        strict_rfc: ConsentResponseWait::Rto => "Rto",
+        chrome_source: "libwebrtc p2p/base/connection.cc::Connection::ConnectionRequest::resend_delay @ a222406d: a ping is sent once (OnSent calls set_timed_out) and its request stays open kConnectionResponseTimeout, 60 s (p2p/base/p2p_constants.h: \"the length of time that we wait for a ping response to come back [...] in some networks (2G), we observe up to 60s RTTs\"); Connection::OnConnectionRequestResponse takes the response whenever it comes within that, and ReceivedPingResponse makes the connection writable and takes its round-trip time",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_consent_response_wait(v),
+        read: |s: &SettingEngine| s.ice.consent_response_wait,
     },
     {
         id: "ice.data-before-nomination",
