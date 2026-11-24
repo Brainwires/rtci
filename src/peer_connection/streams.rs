@@ -335,6 +335,12 @@ impl RTCPeerConnection {
         if self.is_closed() {
             return None;
         }
+        // A connection from a source the embedder's address policy refuses is not taken: the
+        // driver closes the socket, and nothing it would carry reaches the ICE agent.
+        if !self.address_allowed(remote, ice::AddressPurpose::InboundDatagramSource) {
+            debug!("refused a connection on {listener} from {remote}: the address policy");
+            return None;
+        }
         let id = self.streams.table.accept(listener, local, remote);
         trace!("accepted {id:?} on {listener} from {remote}");
         if let Some(id) = id
@@ -378,6 +384,17 @@ impl RTCPeerConnection {
             return Ok(());
         }
         if info.tag != ICE_TCP {
+            return Ok(());
+        }
+        // ICE-TCP data from a source the embedder's address policy refuses (one it refused
+        // after the connection was made): dropped, and the connection reset.
+        if !self.address_allowed(info.remote, ice::AddressPurpose::InboundDatagramSource) {
+            debug!(
+                "{id}: data from {}: the address policy refuses the source, reset",
+                info.remote
+            );
+            self.streams.table.reset(id);
+            self.process_stream_notices(now);
             return Ok(());
         }
         let local = self.streams.agent_local(id, info.local);
