@@ -468,8 +468,11 @@ fn on_arrival_a_gap_on_a_stream_that_does_not_reorder_is_asked_for_when_it_is_se
     assert_eq!(vec![5], asked_now(&mut chain));
 
     // A set reordering delay holds it exactly that long.
-    let mut chain =
-        rtx_generator(NackGeneratorBuilder::new().with_reorder_delay(Duration::from_millis(30)));
+    let mut chain = rtx_generator(
+        NackGeneratorBuilder::new()
+            .with_first_request_on_arrival(true)
+            .with_reorder_delay(Duration::from_millis(30)),
+    );
     chain.handle_read(rtp(base, 4)).unwrap();
     chain
         .handle_read(rtp(base + Duration::from_millis(33), 6))
@@ -489,8 +492,11 @@ fn on_arrival_a_gap_on_a_stream_that_does_not_reorder_is_asked_for_when_it_is_se
 fn on_arrival_without_rtx_a_packet_too_early_to_be_its_retransmission_is_reordering() {
     let base = Instant::now();
     let at = |ms: u64| base + Duration::from_millis(ms);
-    let mut chain =
-        generator(NackGeneratorBuilder::new().with_round_trip_time(Duration::from_millis(200)));
+    let mut chain = generator(
+        NackGeneratorBuilder::new()
+            .with_first_request_on_arrival(true)
+            .with_round_trip_time(Duration::from_millis(200)),
+    );
     chain.handle_read(rtp(base, 1)).unwrap();
     chain.handle_read(rtp(base, 3)).unwrap();
     assert_eq!(vec![2], asked_now(&mut chain));
