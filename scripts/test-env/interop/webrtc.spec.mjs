@@ -188,6 +188,45 @@ for (const codec of ["VP8", "VP9", "H264", "H265", "AV1"]) {
   });
 }
 
+// ---- the video pipeline: the browser sends, rtci-video assembles, times and decodes ----
+// interop-peer's `pipeline` scenario runs the browser's video through rtci-video's receive
+// pipeline (frame assembly, reference finding, jitter buffer, PLI) and its pure-Rust decoder:
+// vp8-decoder for VP8, rav1d for AV1 (docs/video-pipeline.md, phase 2). The freezes and the
+// longest interval it measured are recorded as the `video-pipeline` annotation, not asserted:
+// headless canvas capture runs at a browser-dependent frame rate.
+for (const codec of ["VP8", "AV1"]) {
+  test(`pipeline receive ${codec}`, async ({ page }) => {
+    await skipUnlessCodec(page, "video", `video/${codec}`, "sender");
+    const r = await page.evaluate(
+      async ([ws, codec]) => {
+        const s = await Interop.open(ws, { media: "pipeline", video: codec });
+        const tr = s.pc.addTransceiver(Interop.canvasStream(320, 240).getVideoTracks()[0], { direction: "sendonly" });
+        Interop.prefer(tr, "video", `video/${codec}`);
+        await s.negotiate();
+        await s.connected();
+        const report = await Interop.until(async () => {
+          const rep = await s.report();
+          const st = rep.pipeline && rep.pipeline.streams && rep.pipeline.streams[0];
+          return st && st.framesDecoded >= 15 && rep;
+        }, 25000, "15 pictures decoded by rtci-video").catch(async (e) => ({ error: String(e), last: await s.report() }));
+        s.close();
+        return report;
+      },
+      [WS, codec],
+    );
+    expect(r.error, JSON.stringify(r.last && r.last.pipeline)).toBeUndefined();
+    const p = r.pipeline;
+    test.info().annotations.push({ type: "video-pipeline", description: JSON.stringify(p) });
+    expect(p.unsupported).toBe(0);
+    expect(p.decoderErrors).toBe(0);
+    expect(p.decoder).toBe(codec === "VP8" ? "vp8-decoder" : "rav1d");
+    // The browser may scale down under load, never up, and keeps the aspect ratio.
+    expect(p.width).toBeGreaterThan(0);
+    expect(p.width).toBeLessThanOrEqual(320);
+    expect(p.height * 4).toBe(p.width * 3);
+  });
+}
+
 // The wire payload types both ways (interop-peer's `wireRtp`, counted from the SRTP header
 // before the engine takes RED apart) are recorded as the `wire-payload-types` annotation of
 // the result. Chromium and WebKit offer RED (RFC 2198) after Opus and the engine's answer keeps

@@ -17,11 +17,31 @@ members = [
     "rtci-srtp",
     "rtci-stun",
     "rtci-turn",
+    "rtci-video",
+    "rtci-video/interop",
 ]
 resolver = "2"
 
 [profile.dev]
 opt-level = 0
+
+# The video pipeline's tests run minutes of virtual-time calls through two peer connections;
+# unoptimised they take far longer. Only this package is optimised in the dev profile.
+[profile.dev.package.rtci-video]
+opt-level = 2
+
+# rtci-video's codec backends (features `vp8`, `av1`): their tests encode and decode real video.
+[profile.dev.package.vp8-decoder]
+opt-level = 2
+
+[profile.dev.package.vp8-encoder]
+opt-level = 2
+
+[profile.dev.package.rav1d]
+opt-level = 2
+
+[profile.dev.package.rav1e]
+opt-level = 2
 
 [workspace.package]
 version = "0.2.0-dev"
@@ -447,5 +467,8 @@ bench = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(fuzzing)'
+    'cfg(fuzzing)',
+    # examples/interop-peer is also built by the rtci-video-interop package, whose `pipeline`
+    # feature adds the video pipeline scenario; this crate has no such feature.
+    'cfg(feature, values("pipeline"))',
 ] }

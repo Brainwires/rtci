@@ -12,8 +12,8 @@ use crate::statistics::StatsSelector;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use crate::statistics::report::RTCStatsReportEntry;
 use crate::statistics::{
-    AudioPlayoutStatsUpdate, AudioSourceStatsUpdate, DecoderStatsUpdate, EncoderStatsUpdate,
-    VideoSourceStatsUpdate,
+    AudioPlayoutStatsUpdate, AudioReceiverStatsUpdate, AudioSourceStatsUpdate, DecoderStatsUpdate,
+    EncoderStatsUpdate, VideoSourceStatsUpdate,
 };
 use std::time::Instant;
 
@@ -74,6 +74,51 @@ fn an_update_merges_into_what_was_supplied_before() {
     assert!(!stats.update_decoder_stats(10, DecoderStatsUpdate::default()));
     assert!(!stats.update_encoder_stats(10, EncoderStatsUpdate::default()));
     assert_eq!(stats.inbound_rtp_streams.len(), 1);
+}
+
+/// A video pipeline hands its jitter buffer members over with the decoder update (a video
+/// stream has no audio update); they reach the report, and win over an audio update's values.
+#[test]
+fn the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream() {
+    let now = Instant::now();
+    let mut stats = RTCStatsAccumulator::new();
+    stats.get_or_create_inbound_rtp_streams(9, RtpCodecKind::Video, "t", "0", None, None, 0);
+
+    assert!(stats.update_decoder_stats(
+        9,
+        DecoderStatsUpdate {
+            jitter_buffer_delay: Some(1.5),
+            jitter_buffer_target_delay: Some(2.0),
+            jitter_buffer_minimum_delay: Some(0.5),
+            jitter_buffer_emitted_count: Some(30),
+            ..Default::default()
+        },
+    ));
+    let inbound = stats.inbound_rtp_streams[&9].snapshot(now, "x");
+    assert_eq!(inbound.jitter_buffer_delay, Some(1.5));
+    assert_eq!(inbound.jitter_buffer_target_delay, Some(2.0));
+    assert_eq!(inbound.jitter_buffer_minimum_delay, Some(0.5));
+    assert_eq!(inbound.jitter_buffer_emitted_count, Some(30));
+
+    // A later decoder update that leaves them out keeps them; an audio update does not
+    // override what the decoder update supplied.
+    assert!(stats.update_decoder_stats(
+        9,
+        DecoderStatsUpdate {
+            frames_decoded: Some(30),
+            ..Default::default()
+        },
+    ));
+    assert!(stats.update_audio_receiver_stats(
+        9,
+        AudioReceiverStatsUpdate {
+            jitter_buffer_delay: Some(9.0),
+            ..Default::default()
+        },
+    ));
+    let inbound = stats.inbound_rtp_streams[&9].snapshot(now, "x");
+    assert_eq!(inbound.jitter_buffer_delay, Some(1.5));
+    assert_eq!(inbound.jitter_buffer_emitted_count, Some(30));
 }
 
 /// Through a real call: the sender's encoder and capture stats, and the receiver's decoder and
