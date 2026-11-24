@@ -419,6 +419,10 @@ struct Peer {
     model: VideoModel,
     force_key: bool,
     keyframes_sent: Vec<Duration>,
+    /// REVIEW: flows the circuit breaker ceased (time, SSRC low nibble, reason), and when the
+    /// connection first left Connected after the call was up.
+    ceased: Vec<(Duration, u32, String)>,
+    disconnected_at: Option<Duration>,
     /// The receiving side.
     video_receiver: Option<RTCRtpReceiverId>,
     builder: SampleBuilder<Vp8Packet>,
@@ -691,6 +695,8 @@ impl Peer {
             model: VideoModel::default(),
             force_key: true,
             keyframes_sent: Vec::new(),
+            ceased: Vec::new(),
+            disconnected_at: None,
             video_receiver: None,
             builder: review_builder(),
             decoder: ModelDecoder::default(),
@@ -1018,6 +1024,9 @@ impl World {
                     if state == RTCPeerConnectionState::Failed {
                         bail!("peer {i} failed");
                     }
+                    if peer.connected && state != RTCPeerConnectionState::Connected {
+                        peer.disconnected_at.get_or_insert(at);
+                    }
                     peer.connected = state == RTCPeerConnectionState::Connected;
                 }
                 RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => {
@@ -1136,6 +1145,20 @@ impl World {
             }
         }
         if now >= self.next_target {
+            for peer in self.peers.iter_mut() {
+                if let Some(handles) = &peer.handles {
+                    for (ssrc, reason) in handles.circuit_breaker.ceased() {
+                        if !peer.ceased.iter().any(|(_, s, _)| *s == ssrc & 0xf) {
+                            peer.ceased.push((at, ssrc & 0xf, format!("{reason:?}")));
+                        }
+                        // An application that restarts a ceased flow as soon as RFC 8083
+                        // section 4.5's rate limit allows.
+                        if review_knob("REVIEW_CB_RESTART").is_some_and(|v| v != 0) {
+                            handles.circuit_breaker.restart(ssrc, now);
+                        }
+                    }
+                }
+            }
             self.next_target += Duration::from_millis(100);
             let link = &self.uplinks[0];
             let (delay_based, loss_based) = self.peers[0].halves();
@@ -3025,7 +3048,7 @@ fn review_one(chain: &str, seed: u64, offset_ms: u64) -> Result<String> {
         println!("RTRACE {chain} seed {seed} keyframes {:?} pli {:?}", caller.keyframes_sent, callee.keyframe_requests);
     }
     Ok(format!(
-        "RROW chain {chain} seed {seed} offset {offset_ms} | before {} est {} cap_at {:.2} | first_cut {:.3} under_cap {:.3} reacted {:.2} | freeze {:.3} at {:.2} freeze_cap {:.3} at {:.2} freeze_lift {:.3} | lag {:.3} max_age {:.3} stale1 {:.3} stale2 {:.3} caught_up {:.2} | rtx {} dropped {} rtx_cap {} dropped {} | qdrops {} qdrops_cap {} audio {} audio_cap {} padding {} dropped {} | pacer_discards {} pauses {} paused {:.2} | pli {} keyframes {} unusable {} | under {} lift {} window {} | wall {:.1}",
+        "RROW chain {chain} seed {seed} offset {offset_ms} | before {} est {} cap_at {:.2} | first_cut {:.3} under_cap {:.3} reacted {:.2} | freeze {:.3} at {:.2} freeze_cap {:.3} at {:.2} freeze_lift {:.3} | lag {:.3} max_age {:.3} stale1 {:.3} stale2 {:.3} caught_up {:.2} | rtx {} dropped {} rtx_cap {} dropped {} | qdrops {} qdrops_cap {} audio {} audio_cap {} padding {} dropped {} | pacer_discards {} pauses {} paused {:.2} | pli {} keyframes {} unusable {} | under {} lift {} window {} | wall {:.1} | cb {} cbat {:.2} cbwhy {} disc {:.2}",
         before / 1000,
         estimate_before / 1000,
         capped_at.as_secs_f64(),
@@ -3062,6 +3085,27 @@ fn review_one(chain: &str, seed: u64, offset_ms: u64) -> Result<String> {
         target_at_lift / 1000,
         window_mean / 1000,
         started.elapsed().as_secs_f64(),
+        world.peers.iter().map(|p| p.ceased.len()).sum::<usize>(),
+        world
+            .peers
+            .iter()
+            .flat_map(|p| p.ceased.iter().map(|(at, _, _)| at.as_secs_f64()))
+            .fold(-1.0f64, |first, at| if first < 0.0 { at } else { first.min(at) }),
+        {
+            let why: Vec<String> = world
+                .peers
+                .iter()
+                .enumerate()
+                .flat_map(|(i, p)| p.ceased.iter().map(move |(_, s, r)| format!("p{i}s{s}{r}")))
+                .collect();
+            if why.is_empty() { "-".to_owned() } else { why.join("+") }
+        },
+        world
+            .peers
+            .iter()
+            .filter_map(|p| p.disconnected_at)
+            .map(|d| d.as_secs_f64())
+            .fold(-1.0f64, |first, at| if first < 0.0 { at } else { first.min(at) }),
     ))
 }
 
