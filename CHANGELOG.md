@@ -1115,6 +1115,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
   0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
 
+- **New crates' packaging** (`conf/publish-2-ffi-mp-parts`, for the owner of `rtc-audio`,
+  `rtc-devices`, `rtc-ffi` and `release-binaries.yml`): `rtc-audio` and `rtc-devices` gain the
+  README their manifests named, `LICENSE-MIT` / `LICENSE-APACHE` (without them `cargo package`
+  failed) and `[package.metadata.docs.rs]` without the features that build or link C
+  (`libopus`, `devices`); their explicit `documentation` URLs are removed. Both are publishable
+  after `rtc` (`cargo publish --workspace --dry-run` passed with them under the `rtci` names).
+  `rtc-ffi` stays `publish = false`: a C library delivered as built libraries and a header.
+  The root crate's dev-dependency on `rtc-audio` is path-only, so `cargo publish` drops it
+  (`rtc-audio` depends on `rtc`; with a version the two could not be published).
+  `release-binaries.yml` runs by `workflow_dispatch` only, until the owner decides how release
+  binaries are built; `docs/packaging.md` and `FORK.md` say so. Rename script: the root
+  `[profile.dev.package.rtc-audio]` table is not renamed (`--check` exits 1); the patch is in
+  the publish-2 report.
+
 ### Notes for integrators
 
 - **ICE restart, answerer**: candidates gathered for the restart may be added as soon as the

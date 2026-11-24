@@ -142,8 +142,8 @@ binding. See [bindings/deno/README.md](../bindings/deno/README.md).
 
 ## What a release would contain
 
-`.github/workflows/release-binaries.yml` runs on a `v*` tag push or by hand (never on a branch
-or pull request) and builds, on GitHub's runners:
+`.github/workflows/release-binaries.yml` runs only by hand (`workflow_dispatch`; never on a tag,
+branch or pull request, until the owner decides how release binaries are built) and builds, on GitHub's runners:
 
 | Archive | Target | Baseline |
 |---|---|---|
@@ -157,15 +157,17 @@ Each archive holds `lib/` (the shared and the static library), `include/rtc.h`, 
 licence files and `build.json` (target, baseline, commit). Beside them: `SHA256SUMS` and
 `manifest.json` (ref, commit, ABI version, and per archive its target, baseline, SHA-256 and
 size), which a loader like Deno's can use to pick and verify a download. A dispatch uploads
-everything as workflow artifacts; a tag also attaches it to the GitHub release of the tag. The
-workflow takes no secret but `GITHUB_TOKEN` and has not been run.
+everything as workflow artifacts; a dispatch on a tag ref also attaches it to the GitHub release
+of that tag. The workflow takes no secret but `GITHUB_TOKEN` and has not been run.
 
 ## Decisions left to the owner
 
 1. **Tagging and publishing.** Nothing here tags, creates a release or publishes to a registry
-   (crates.io, npm, JSR). A `v*` tag would run `release-binaries.yml` (and the existing
-   `release.yml`); whether and when to tag is the owner's call, as is publishing a Deno or
+   (crates.io, npm, JSR). A `v*` tag runs `release.yml` only; `release-binaries.yml` is started
+   by hand, and how and where release binaries are built (runners, artefacts, signing) is not
+   decided yet. Whether and when to tag is the owner's call, as is publishing a Deno or
    other binding anywhere.
-2. **Crate names.** The `rtc`, `rtc-*` names on crates.io belong to upstream (webrtc-rs), so
-   publishing the fork's crates, `rtc-ffi` included, needs new names. `rtc-ffi` and the
-   reference driver are `publish = false` until the names are chosen; no crate was renamed.
+2. **Crate names.** On crates.io, the names of upstream's crates belong to webrtc-rs; the
+   release renames this project's crates to their `rtci` names (`scripts/rename-to-rtci.py`,
+   run as the release's last content commit, `docs/rename.md`). `rtc-ffi` stays `publish = false`: it is delivered as built
+   libraries and a header, not as a Rust dependency.
