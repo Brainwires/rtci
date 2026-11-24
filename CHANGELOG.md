@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **sdp**: an H.265 answer to an offer with `sprop-max-don-diff` above 0, and an H.265 format
+  of this endpoint with it, state `depack-buf-cap=33554432`, the de-packetization buffer the
+  depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
+  section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
+  `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

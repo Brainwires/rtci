@@ -280,3 +280,43 @@ fn an_h264_offer_without_profile_level_id_is_answered_at_level_1() -> TestResult
     );
     Ok(())
 }
+
+/// RFC 7798 section 7.2.2: with decoding order numbers in play (`sprop-max-don-diff` above
+/// 0) "both parties are RECOMMENDED to include depack-buf-cap". An answer to an H.265 offer
+/// that announces reordering states this endpoint's de-packetization buffer in bytes
+/// (`MAX_DEPACKETIZATION_BYTES`, 32 MiB: absent, the offerer would take 4294967295); an
+/// answer to one without it, and this endpoint's default offer, carry none.
+#[test]
+fn an_h265_answer_to_a_reordering_stream_states_the_depacketization_buffer() -> TestResult {
+    let cap = format!(
+        "depack-buf-cap={}",
+        rtci::rtp::codec::h265::MAX_DEPACKETIZATION_BYTES
+    );
+    let h265 = |extra: &str| {
+        offer(
+            "video",
+            "110",
+            &format!(
+                "a=rtpmap:110 H265/90000\n\
+                 a=fmtp:110 level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST{extra}\n"
+            ),
+        )
+    };
+    let mut pc = default_peer()?;
+    let sdp = answer(
+        &mut pc,
+        h265(";sprop-max-don-diff=2;sprop-depack-buf-nalus=4;sprop-depack-buf-bytes=40000"),
+    )?;
+    assert!(fmtp(&sdp, "110").contains(&cap), "{sdp}");
+
+    let mut pc = default_peer()?;
+    let sdp = answer(&mut pc, h265(""))?;
+    assert!(!fmtp(&sdp, "110").is_empty(), "H.265 answered: {sdp}");
+    assert!(!sdp.contains("depack-buf-cap"), "{sdp}");
+
+    let mut pc = default_peer()?;
+    pc.add_transceiver_from_kind(rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video, None)?;
+    let offer = pc.create_offer(None)?;
+    assert!(!offer.sdp.contains("depack-buf-cap"), "{}", offer.sdp);
+    Ok(())
+}

@@ -205,6 +205,41 @@ fn h265_answer_fmtp(local: &str, offered: &str) -> String {
     parameters.join(";")
 }
 
+/// The fmtp line this endpoint writes for an H.265 format: when decoding order numbers are in
+/// play (`sprop-max-don-diff` above 0 in this format, or, in an answer, in the offered one),
+/// `depack-buf-cap` states the de-packetization buffer the depacketizer holds, in bytes
+/// ([`MAX_DEPACKETIZATION_BYTES`](rtp::codec::h265::MAX_DEPACKETIZATION_BYTES)), unless the
+/// application gave one (RFC 7798 section 7.2.2: "both parties are RECOMMENDED to include
+/// depack-buf-cap"; absent, it is taken as 4294967295, more than the buffer holds).
+fn h265_generated_fmtp(line: &str, offered: Option<&str>) -> String {
+    let value = |line: &str, key: &str| -> Option<String> {
+        line.split(';').find_map(|p| {
+            let (k, v) = p.trim().split_once('=')?;
+            k.trim()
+                .eq_ignore_ascii_case(key)
+                .then(|| v.trim().to_owned())
+        })
+    };
+    let reorders = |line: &str| {
+        value(line, "sprop-max-don-diff")
+            .and_then(|v| v.parse::<u32>().ok())
+            .is_some_and(|v| v > 0)
+    };
+    if value(line, "depack-buf-cap").is_some() || !(reorders(line) || offered.is_some_and(reorders))
+    {
+        return line.to_owned();
+    }
+    let cap = format!(
+        "depack-buf-cap={}",
+        rtp::codec::h265::MAX_DEPACKETIZATION_BYTES
+    );
+    if line.trim().is_empty() {
+        cap
+    } else {
+        format!("{line};{cap}")
+    }
+}
+
 #[cfg(test)]
 mod h264_high_profile_test;
 #[cfg(test)]
@@ -2233,6 +2268,12 @@ impl MediaEngine {
             .eq_ignore_ascii_case(MIME_TYPE_H264)
         {
             h264_generated_fmtp(&line)
+        } else if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_HEVC)
+        {
+            h265_generated_fmtp(&line, answering.then_some(&*codec.rtp_codec.sdp_fmtp_line))
         } else {
             line
         }
