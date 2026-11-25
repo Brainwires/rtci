@@ -203,6 +203,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
   `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
   packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
+- **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
+  (`conf/rtx-1r-duplicate-repairs`): a request for a packet whose retransmission per-packet
+  feedback reported received is no longer answered, and one whose retransmission left
+  without a report yet waits for it: answered at once when the retransmission is reported
+  lost, or when two round trips and the feedback interval (`REPAIR_REPORT_MARGIN`, 100 ms;
+  1 s before a round trip is known) pass without a report; held requests keep their place
+  and those behind them are served meanwhile. The receiver asks again every round trip while
+  a packet is missing, and a retransmission can wait longer than that in the path's queue:
+  after a sudden capacity drop 24 to 28 of 92 to 101 retransmissions (a chain without a
+  pacer) and 35 to 41 of 90 to 103 (the default chain) repeated a packet whose first repair
+  then arrived first (hosted traces 45341865225, 45342290711). The TWCC sender reports what
+  transport-wide feedback says of each retransmission it numbered (`RetransmissionsReported`,
+  new, on an empty RTCP carrier application-ward; keyed as `RetransmissionsLeft`); with RFC
+  8888 feedback (the default between two endpoints of this engine) the responder reads the
+  report on the RTX stream itself. Without per-packet feedback of either kind every request
+  is answered as before. RFC 4588 section 7: the sender "MAY selectively retransmit only the
+  packets that it deems important and ignore NACK messages for other packets"; RFC 8834
+  section 6.1: "It is not appropriate to blindly retransmit RTP packets in response to a
+  NACK": the sender's choice, bounded. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
+  (cap after 20 s, six seeds on three wall clocks, hosted run 45408404348; 0.1.0: run
+  45407054812): without a pacer the oldest picture 2.90 to 3.15 s (4.35 to 4.51), 57 to 64
+  retransmissions (89 to 97), longest freeze 1.28 to 1.29 s (1.28 to 1.32); the default chain
+  4.14 to 7.13 s (5.56 to 10.23), 59 to 80 (90 to 104), 0.75 to 1.13 s (0.97 to 1.91), and the
+  recovery's mean 15 to 25 s after the cap 898 to 2500 kbit/s (646 to 2500). After a 4 s
+  outage and an ICE restart (six seeds) the chain without a pacer is frozen 0.33 to 0.92 s
+  from one second after the switch (0.70 to 0.99), the default chain still shows no usable
+  frame to the end of the run (a known limit of 0.1.0). The tests' bounds on the picture's
+  age and the retransmissions on this branch are the tripwires of the perturbed ensemble
+  (`conf/capmatrix-1-perturbed-ensemble`, measured on the tree before this change; this
+  change sits well inside them). Not offered: libwebrtc's
+  form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
+  (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
+  every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
+  (measured, run 45349364771: freezes of 1.62 to 2.39 s without a pacer, against 1.28 to
+  1.29 s; the repeats left are repairs of lost repairs, which a receiver that plays in order
+  waits for first). This narrows two known limits of 0.1.0 (the 1.4 Mbit/s cliff's cause (2),
+  and the picture's age after a sudden drop with the pacer). Tests:
+  `rtci-interceptor/tests/nack_repeat_repairs.rs`.
+  **What is remembered of a repair is one packet's and ends by the clock**
+  (`conf/rtx-1r2-duplicate-repairs`, after an independent review proved two defects in the
+  first form, hosted run 45477234586: a "received" memory pruned only when another report
+  came, so a request could be declined for ever and the packet that reused a 16-bit sequence
+  number a cycle later was never retransmitted; and a transport-wide number kept for a
+  retransmission by count only, so feedback on the packet that had the number a cycle later
+  was taken for the old retransmission arriving). The responder keeps one record per packet
+  for its latest retransmission (waiting in the pacer, left with no report yet, report
+  overdue, reported received), named by the packet's place in the order the stream was
+  written, which no later packet has again; a waiting request is for its packet too. Every
+  state ends by the engine's clock at the request, write, notice or timeout at hand, whether
+  or not another report or pacer notice ever comes: in the pacer 4 s, the wait for a report
+  two round trips and 100 ms, a late report 4 s (`RETRANSMISSION_REPORT_HORIZON`), reported
+  received 4 s (`DELIVERED_MEMORY`). A report counts once, for a retransmission of the packet
+  held now: a report repeated (RFC 8888 reports a span of packets every time) does not extend
+  the memory, one on nothing remembered begins none, the loss of an earlier copy does not end
+  the wait for a later one. So a receiver whose feedback reports repairs it did not get stops
+  the repairs of its own packet for 4 s per retransmission and no longer, and what is
+  remembered is at most one record per place of the send buffer. The TWCC sender's number
+  is a retransmission's until it is handed out again, until the numbering is half a cycle
+  past it, and for 4 s. `RetransmissionsReported` names each retransmission with the instant
+  it was made (`ReportedRetransmission`, new). Tests (the reviewer's three among them):
+  sequence numbers and transport-wide numbers coming round at 100 000 packets a second,
+  feedback and pacer notices that never come, a receiver that reports every repair received,
+  feedback naming every number, requests and lost reports without end against the rate
+  limit, and the sizes of what is remembered (`nack_repeat_repairs.rs`,
+  `nack::responder::tests`, `twcc::sender::tests`); each rule has a mutation a test catches.
 
 - **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
   6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
@@ -469,6 +534,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination; rtci-ice local peer-reflexive candidates; the candidate string form).
 
 ### Changed
+
+- SRTP re-keying (RFC 5764 section 4.4) starts at a margin measured in time as well as in
+  packets: the larger of a sixteenth of the key's lifetime and the packets the key protects,
+  at the rate it has been used since its first packet, in the time a re-keying needs as
+  measured on the handshake that gave it (twice the handshake's duration, for the handshake
+  and the ICE checks of the restart, plus one DTLS retransmission timer). On a slow path with
+  a short lifetime the re-keying starts earlier instead of the key running out and the
+  transport failing (0.1.0's known limit); with the default lifetimes, and wherever the
+  sixteenth is the larger, nothing moves. `OnSrtpKeyLifetimeExpiring` still comes at the
+  sixteenth; the DTLS client still asks first (`with_srtp_rekeying_dtls_client_first`: the
+  client measures its handshake from its first flight, the server from the first datagram it
+  reads). Engine behaviour change.
 
 - **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
   with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
@@ -1106,6 +1183,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
   delivered from such a packet).
 
+### Known limits
+
+- **congestion control, default (paced) chain: a sudden capacity drop can freeze the video for
+  more than 2 s** (`tests/capacity_cap_video_rtc2rtc.rs`, the 300 kbit/s cap arriving at
+  2.5 Mbit/s). Over 108 runs (six seeds, three wall clocks, six perturbations of incidental wire
+  sizes and seeded draws) the longest freeze is 0.88 to 2.31 s (median 1.35 s) and 1 run is
+  over the 2 s the test requires (4 of 108, 2.10 to 2.28 s, before train 24; one of them a seed
+  `RTC_CAP_FULL` runs, so the full matrix failed then). Not a regression of train 23:
+  `conf/jsep-75-session-version` draws the `o=` session id from the crypto provider, which the
+  test seeds, and that one draw moved every seeded figure (with the draw removed every cell is
+  train 22's again). The freeze is the repair of the drop's losses inside the pacer's pause;
+  `conf/rtx-2r-smooth-limiter` (with `conf/rtx-1r-duplicate-repairs`) brings all 108 runs to
+  0.75 to 1.28 s.
+- **a sudden capacity drop (2.5 Mbit/s to 300 kbit/s), measured as its user sees it**
+  (`tests/capacity_instrument.rs`, docs/capacity-instrument.md; master 63e1b8b8, 1000 seeds in
+  the default chain's cells and 200 in the others; each is an ignored `known_limit_*` test that
+  states the requirement, "in at most 5 % of calls", and a tripwire holds today's level; this
+  supersedes the entry above, whose freeze counted any frame however old):
+  - default chain, a receiver that gives a gap up after 300 ms and asks for a key frame: the
+    screen shows a picture older than 2 s in every run (required: for no more than 0.5 s, in at
+    most 5 % of calls); the oldest picture is 9.0 s in the median (10.2 s at the 90th
+    percentile) and there is no new picture under a second old for 8.7 s. The source is paused
+    about 8 s while the backlog written before the drop and its repairs drain inside the new
+    rate.
+  - default chain, a receiver that waits without a bound in time (the one
+    `tests/capacity_cap_video_rtc2rtc.rs` asserted on): more than 2 s without a frame of any age
+    in 27.2 % of runs (that test's two to six seeds at one phase of the cap showed 8 %, and
+    passed more often than not); the picture on the screen is 8.3 s old in the median all the
+    same.
+  - the audio never returns in 8.9 % of runs of the default chain (33 % with a 1000 ms queue):
+    the RTP circuit breaker ceases the audio flow at the drop and nothing restarts it.
+  - both directions capped: every run of the default chain misses the picture requirement
+    (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
+    ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
+  - without the pacer: the picture requirement is violated in 7.0 % of runs (interval 4.2 to
+    11.4 %) and the freeze one in 5.5 %: at the bound, neither met nor missed can be claimed
+    (their 300-run tests pass on one draw and fail on the next; run on demand).
+  - a peer leaves Connected (ICE consent answers arrive later than the consent wait) in 16 %
+    of runs of the default chain, and in 197 of 200 without the pacer with a 1000 ms queue, 3 of
+    them to Failed.
+  - an outage of 4 s ended by an ICE restart: in the default chain the next new picture comes
+    later than 2 s after the new pair in 67 % of runs.
+  - met: ParolNet's chain (no pacer, the TWCC-driven estimator) with the bounded receiver meets
+    the picture, freeze and audio requirements (0 of 200; oldest picture 1.33 s), and the
+    outage without the pacer meets the resume requirement (0 of 200).
+
+### Testing
+
+- **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
+  `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
+  bytes; one or two seeded draws dropped first), `RTC_CAP_RULES=default` and runs side by side.
+  Each bound says whether it is a requirement (the 2 s freeze: unchanged everywhere) or a
+  tripwire, set at the ensemble's most measured and some 15 %: without a pacer at a 1 Mbit/s
+  target, oldest picture 3.5 s (4 s under `UpToTarget`) -> 2.9 s and retransmissions 100 -> 63;
+  the cap after 20 s, oldest picture 5.5 -> 6.1 s (one draw per seed had put it 4 % over the
+  most measured) and retransmissions 130 -> 122; the paced test, retransmissions 130 -> 127.
+  The paced test's recovery is measured from the lowest target of the first second after the
+  lift; its ordinary seeds are 1 and 4 (the ensemble's medians; seed 2 was among its mildest),
+  and it reports every failing seed, not the first.
+- **the capacity instrument** (`conf/instrument-1-user-visible-ensemble`):
+  `tests/capacity_instrument.rs` measures what the user of a call sees at a capacity drop and
+  after an outage, per run: the age of the picture on the screen (oldest, time over 1 s and
+  2 s, time-weighted percentiles), the longest time without a new picture under a second old,
+  the audio (longest gap, share delivered each way, delay), the time to recover the rate, the
+  flows the circuit breaker ceased and whether a peer left Connected; over cells (default
+  chain, pacer-less, ParolNet's; a receiver with a 300 ms bound on a gap and one without; one or
+  both directions capped; queue 100 / 300 / 1000 ms; 5 % loss on the reverse path; the outage
+  with an ICE restart) and seeds, the cap at three phases of the frame clock. Requirements are
+  shares tested with a stated power (300 runs, at most 21 violating: 0.951 to pass at 5 %,
+  0.954 to fail at 10 %); regressions are tripwires against a recorded baseline
+  (`tests/fixtures/capacity-instrument-baseline.tsv`); a run is a function of its seed, and
+  that is asserted. `scripts/capacity-instrument.py` (tables, the merge-point rule of
+  docs/capacity-instrument.md, the baseline) has its unit tests. The world model moved to
+  `tests/capacity_common/mod.rs`, shared with `tests/capacity_cap_video_rtc2rtc.rs`, unchanged
+  in what it does (the instrument reproduces an independent 1100-seed ensemble of v0.1.0 to the
+  digit).
+- **`tests/capacity_cap_video_rtc2rtc.rs`: the freeze and oldest-picture assertions are
+  retired.** "Never more than 2 s without a usable frame" (a requirement) and the oldest
+  picture (2.9 s, 6.1 s and 11.75 s tripwires) were asserted on two to six seeds and counted a
+  frame however old it was; the instrument above asserts what is on the screen instead. The
+  file keeps its other checks: retransmissions, the rate under the cap, the recovery after the
+  cap, the pacer's pause and discards, the path change, the cameras, the open link.
+
 ### Test environment and documentation
 
 - **video** (`conf/vp-9r-vp8-partitions`): the golden-stream tests of `rtci-video`
@@ -1147,74 +1307,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interface that carries multicast to the group, as some hosted images, its two tests on the
   default interface print why and skip).
 
-
-### Known limits
-
-- **a sudden capacity drop (2.5 Mbit/s to 300 kbit/s), measured as its user sees it**
-  (`tests/capacity_instrument.rs`, docs/capacity-instrument.md; master 63e1b8b8, 1000 seeds in
-  the default chain's cells and 200 in the others; each is an ignored `known_limit_*` test that
-  states the requirement, "in at most 5 % of calls", and a tripwire holds today's level):
-  - default chain, a receiver that gives a gap up after 300 ms and asks for a key frame: the
-    screen shows a picture older than 2 s in every run (required: for no more than 0.5 s, in at
-    most 5 % of calls); the oldest picture is 9.0 s in the median (10.2 s at the 90th
-    percentile) and there is no new picture under a second old for 8.7 s. The source is paused
-    about 8 s while the backlog written before the drop and its repairs drain inside the new
-    rate.
-  - default chain, a receiver that waits without a bound in time (the one
-    `tests/capacity_cap_video_rtc2rtc.rs` asserted on): more than 2 s without a frame of any age
-    in 27.2 % of runs (that test's two to six seeds at one phase of the cap showed 8 %, and
-    passed more often than not); the picture on the screen is 8.3 s old in the median all the
-    same.
-  - the audio never returns in 8.9 % of runs of the default chain (33 % with a 1000 ms queue):
-    the RTP circuit breaker ceases the audio flow at the drop and nothing restarts it.
-  - both directions capped: every run of the default chain misses the picture requirement
-    (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
-    ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
-  - without the pacer: the picture requirement is violated in 7.0 % of runs (interval 4.2 to
-    11.4 %) and the freeze one in 5.5 %: at the bound, neither met nor missed can be claimed
-    (their 300-run tests pass on one draw and fail on the next; run on demand).
-  - a peer leaves Connected (ICE consent answers arrive later than the consent wait) in 16 %
-    of runs of the default chain, and in 197 of 200 without the pacer with a 1000 ms queue, 3 of
-    them to Failed.
-  - an outage of 4 s ended by an ICE restart: in the default chain the next new picture comes
-    later than 2 s after the new pair in 67 % of runs.
-  - met: ParolNet's chain (no pacer, the TWCC-driven estimator) with the bounded receiver meets
-    the picture, freeze and audio requirements (0 of 200; oldest picture 1.33 s), and the
-    outage without the pacer meets the resume requirement (0 of 200).
-
-### Testing
-
-- **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
-  `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
-  bytes; one or two seeded draws dropped first), `RTC_CAP_RULES=default` and runs side by side.
-  The tripwires on retransmissions were set at the ensemble's most measured and some 15 %:
-  without a pacer at a 1 Mbit/s target 100 -> 63; the cap after 20 s 130 -> 122; the paced test
-  130 -> 127. The paced test's recovery is measured from the lowest target of the first second
-  after the lift; its ordinary seeds are 1 and 4, and it reports every failing seed, not the
-  first.
-- **the capacity instrument** (`conf/instrument-1-user-visible-ensemble`):
-  `tests/capacity_instrument.rs` measures what the user of a call sees at a capacity drop and
-  after an outage, per run: the age of the picture on the screen (oldest, time over 1 s and
-  2 s, time-weighted percentiles), the longest time without a new picture under a second old,
-  the audio (longest gap, share delivered each way, delay), the time to recover the rate, the
-  flows the circuit breaker ceased and whether a peer left Connected; over cells (default
-  chain, pacer-less, ParolNet's; a receiver with a 300 ms bound on a gap and one without; one or
-  both directions capped; queue 100 / 300 / 1000 ms; 5 % loss on the reverse path; the outage
-  with an ICE restart) and seeds, the cap at three phases of the frame clock. Requirements are
-  shares tested with a stated power (300 runs, at most 21 violating: 0.951 to pass at 5 %,
-  0.954 to fail at 10 %); regressions are tripwires against a recorded baseline
-  (`tests/fixtures/capacity-instrument-baseline.tsv`); a run is a function of its seed, and
-  that is asserted. `scripts/capacity-instrument.py` (tables, the merge-point rule of
-  docs/capacity-instrument.md, the baseline) has its unit tests. The world model moved to
-  `tests/capacity_common/mod.rs`, shared with `tests/capacity_cap_video_rtc2rtc.rs`, unchanged
-  in what it does (the instrument reproduces an independent 1100-seed ensemble of v0.1.0 to the
-  digit).
-- **`tests/capacity_cap_video_rtc2rtc.rs`: the freeze and oldest-picture assertions are
-  retired.** "Never more than 2 s without a usable frame" (a requirement) and the oldest
-  picture (2.9 s, 6.1 s and 11.75 s tripwires) were asserted on two to six seeds and counted a
-  frame however old it was; the instrument above asserts what is on the screen instead. The
-  file keeps its other checks: retransmissions, the rate under the cap, the recovery after the
-  cap, the pacer's pause and discards, the path change, the cameras, the open link.
 
 ## [0.1.0] - 2026-11-24
 

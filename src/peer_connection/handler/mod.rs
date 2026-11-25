@@ -792,8 +792,10 @@ impl RTCPeerConnection {
     }
 
     /// RFC 5764 section 4.4: "Once the key lifetime has been reached, a new DTLS session SHOULD
-    /// be established". A key of the active transport has a sixteenth of its lifetime left
-    /// (`due` false) or a thirty-second (`due` true): unless the application turned it off, a
+    /// be established". A key of the active transport has reached the re-keying margin (a
+    /// sixteenth of its lifetime left, or the packets a re-keying needs in time at its rate
+    /// when that is more: `SrtpHandlerContext::rekeying_margin_reached`; `due` false) or a
+    /// thirty-second of its lifetime is left (`due` true): unless the application turned it off, a
     /// new association is wanted, and asked for as `renew_dtls_association` does (new
     /// `tls-id`, ICE restart, negotiation-needed).
     ///
@@ -1079,11 +1081,22 @@ impl RTCPeerConnection {
                     self.update_connection_state(false);
                 }
                 RTCEventInternal::DTLSHandshakeComplete(_, _) | RTCEventInternal::DTLSClosed => {
+                    // The re-keying margin of the new keys is measured on the handshake that
+                    // gave them (`SrtpHandlerContext::rekeying_margin_reached`).
+                    for transport in self.pipeline_context.transports.iter_mut() {
+                        transport.srtp_handler_context.rekeying_time = transport
+                            .dtls_handler_context
+                            .dtls_transport
+                            .rekeying_handshake_time;
+                    }
                     self.announce_transport_states();
                     self.update_connection_state(false);
                 }
                 RTCEventInternal::SrtpRekeyingDue => {
                     self.renew_before_the_key_lifetime_ends(true);
+                }
+                RTCEventInternal::SrtpRekeyingMarginReached => {
+                    self.renew_before_the_key_lifetime_ends(false);
                 }
                 RTCEventInternal::SRTPKeyExhausted => {
                     // RFC 3711 section 9.2: re-key or end the session. A new DTLS association

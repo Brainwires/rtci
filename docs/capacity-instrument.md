@@ -22,6 +22,7 @@ documentation; this page says how the instrument is used and what it found.
 | requirements the engine meets | picture, freeze and audio in ParolNet's chain, 300 runs | the same job |
 | a requirement met, too large for the job; requirements at the bound | the outage without the pacer; picture and freeze without the pacer; 300 runs each | on demand: `-- --ignored on_demand_` |
 | requirements the engine does not meet | `known_limit_*`: ignored, with the measured share in the attribute | they fail when run: `-- --ignored known_limit_` |
+| the audio guard | no run of the default chain's reference cells ends with a flow left ceased by the circuit breaker or its audio silent (`known_limit_no_flow_is_left_ceased_and_audio_is_alive_at_the_end`) | a known limit until the breaker restarts flows (8.9 % of runs today); the tripwires `cb` > 0 and `audio_tail` > 1 s hold that share on every pull request meanwhile; the change that fixes it renames the test `ensemble_requirement_…` so that the job runs it |
 | the fine comparison | the merge-point rule below | `capacity-compare.yml`, by hand |
 
 A requirement is a share: "in at most 5 % of calls ...", tested on 300 runs with at most 21
