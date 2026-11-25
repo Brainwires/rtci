@@ -57,6 +57,11 @@ build() { # tree crate bench
   (cd "$1" && CARGO_TARGET_DIR=$(target_of "$1") cargo bench --quiet -p "$2" --bench "$3" --no-run)
 }
 
+# Criterion compares each bench with the results it saved last time in <target>/criterion. A
+# restored cache can hold a half of that directory, and criterion then prints an error in the
+# middle of the bencher line (run 45664707179); the comparison here needs none of it.
+rm -rf "$head_target/criterion" "$base_dir/target/criterion"
+
 base_has=()
 for target in "$@"; do
   crate=${target%%:*} bench=${target#*:}

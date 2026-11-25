@@ -46,6 +46,19 @@ class Parse(unittest.TestCase):
             bc.parse_bencher(text),
         )
 
+    def test_a_line_split_by_a_criterion_message(self):
+        text = "\n".join(
+            [
+                'test DTLS/Setup/AES-128-GCM/ring ... Criterion.rs ERROR: error: Failed to access file "x/base/sample.json"',
+                "bench:         297 ns/iter (+/- 8)",
+                "test DTLS/Encrypt/AES-128-GCM/ring ... bench:         208 ns/iter (+/- 0)",
+            ]
+        )
+        self.assertEqual(
+            {"DTLS/Setup/AES-128-GCM/ring": 297.0, "DTLS/Encrypt/AES-128-GCM/ring": 208.0},
+            bc.parse_bencher(text),
+        )
+
     def test_a_name_with_spaces_and_no_deviation(self):
         self.assertEqual({"STUN/a b": 9.0}, bc.parse_bencher("test STUN/a b ... bench: 9 ns/iter"))
 
@@ -58,6 +71,12 @@ class Ratios(unittest.TestCase):
         self.assertAlmostEqual(99.0 / 100.0, r.ratio)
         self.assertAlmostEqual(0.9, r.low)
         self.assertAlmostEqual(1.1, r.high)
+        self.assertEqual("same", r.verdict)
+
+    def test_a_sub_nanosecond_bench_printing_zero_is_the_same(self):
+        r = bc.compare([{"z": 0.0}] * 2, [{"z": 0.0}] * 2)[0]
+        self.assertEqual(1.0, r.ratio)
+        self.assertEqual([1.0, 1.0], r.rounds)
         self.assertEqual("same", r.verdict)
 
     def test_identical_trees_are_the_same(self):

@@ -42,27 +42,42 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Measured on hosted runners with base == head (docs/performance.md, "How to measure").
-DEFAULT_THRESHOLD = 0.25
+# Set from five base==head runs on hosted runners (docs/performance.md, "How to measure"):
+# single rounds ranged 0.85 to 1.40, but the lowest round of a bench never exceeded 1.053.
+DEFAULT_THRESHOLD = 0.20
 DEFAULT_FLOOR_NS = 25.0
 
-BENCHER = re.compile(
-    r"^test (?P<name>\S.*?)\s+\.\.\. bench:\s+(?P<ns>[\d,]+(?:\.\d+)?) ns/iter"
-    r"(?: \(\+/- (?P<dev>[\d,]+(?:\.\d+)?)\))?\s*$"
-)
+
+def ratio_of(head: float, base: float) -> float:
+    """head / base; two zeros (a sub-nanosecond bench prints 0) are the same."""
+    if base > 0:
+        return head / base
+    return 1.0 if head == 0 else float("inf")
+
+START = re.compile(r"^test (?P<name>\S.*?) \.\.\. ")
+RESULT = re.compile(r"bench:\s+(?P<ns>[\d,]+(?:\.\d+)?) ns/iter")
 
 
 def parse_bencher(text: str) -> dict[str, float]:
     """Benchmark name -> nanoseconds per iteration, from criterion's bencher lines.
 
-    Criterion prints the integer with thousands separators (``1,234``); other lines (cargo's
-    progress, criterion's warnings) are ignored. A name seen twice keeps its last value.
+    Criterion prints the integer with thousands separators (``1,234``). A message criterion
+    prints while a bench runs can split its line (``test X ... Criterion.rs ERROR: ...`` and
+    ``bench: 297 ns/iter`` on the next line), so a result belongs to the last ``test X ...``
+    seen. Other lines are ignored; a name seen twice keeps its last value.
     """
     out: dict[str, float] = {}
+    pending: str | None = None
     for line in text.splitlines():
-        match = BENCHER.match(line.strip())
-        if match:
-            out[match["name"]] = float(match["ns"].replace(",", ""))
+        line = line.strip()
+        start = START.match(line)
+        if start:
+            pending = start["name"]
+            line = line[start.end():]
+        result = RESULT.search(line)
+        if result and pending is not None:
+            out[pending] = float(result["ns"].replace(",", ""))
+            pending = None
     return out
 
 
@@ -163,10 +178,10 @@ def compare(
             continue
         base_ns = statistics.median(base)
         head_ns = statistics.median(head)
-        ratio = head_ns / base_ns if base_ns > 0 else float("inf")
+        ratio = ratio_of(head_ns, base_ns)
         # Rounds paired by index; a round in which either tree lacks the bench is skipped.
         paired = [
-            h[name] / b[name] if b[name] > 0 else float("inf")
+            ratio_of(h[name], b[name])
             for b, h in zip(base_rounds, head_rounds)
             if name in b and name in h
         ] or [ratio]
