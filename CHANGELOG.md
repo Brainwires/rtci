@@ -1295,6 +1295,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
+  (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
+  it receives, so a peer that follows it (this engine with
+  `rtcp_report_from_every_ssrc`, the `StrictRfc` profile) sends several report blocks about
+  each flow in one compound packet, the same reception each time. The RFC 8083 breaker took
+  each copy for a report of its own: the media timeout's count of reports without progress
+  was reached in a fraction of the reporting intervals, a loss interval's packets were taken
+  by the first copy and the others showed none, and the spacing between copies read as a
+  reporting interval of zero. A flow now follows one reporting SSRC and takes another only
+  once the one it follows has been silent for the RTCP timeout (the reporter left or changed
+  its SSRC). With a peer that reports once (the default, libwebrtc) nothing changes. Tests
+  `every_ssrc_of_the_receiver_reporting_counts_as_one_report`,
+  `another_reporting_ssrc_is_followed_once_the_first_has_been_silent_for_the_rtcp_timeout`.
+
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
   report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the
@@ -1665,6 +1679,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped, nothing worse (oldest picture -0.33 s); both directions capped, recovery slower than
   20 s in 64 % of runs against 18.5 %. The capacity world's `Setup` takes
   `immediate_congestion_feedback`.
+- **audit and capacity instrument** (rtcpbudget-4): RFC 8108 section 5.1's report blocks
+  from every SSRC stay a setting (`rtcp.report-from-every-ssrc`: `StrictRfc` on, the default
+  and `Chrome` once), now on the capacity instrument's evidence in place of a two-seed
+  print: as the default it made the picture through a capacity collapse 0.53 s older
+  (8.00 -> 8.53 s, 1000 seeds), the send target under the cap 24 kbit/s lower and three
+  times as many calls slow to recover (81 -> 244 of 1000), because its compound packets are
+  twice the size (RTCP of an endpoint 122 -> 149 kbit/s on an open 2.5 Mbit/s call). The
+  instrument's chain token `every` runs it; the ParolNet chain of the capacity world takes
+  `Setup::report_from_every_ssrc` too. Audit rows corrected: RFC8108-5.3-2 (an aggregated
+  compound packet begins with SR or RR: tested, was "no aggregation"), RFC8108-5.3.1-1 (the
+  conditional limit of two aggregated reports for non-updated peers: missing, was "met by
+  not aggregating"), RFC8108-5.3.2-5 (untested, was "no step b"), RFC4585-4.3-1 (`b=RS` /
+  `b=RR` of the remote description reach the session: tested, was "the SDP layer does not
+  feed it").
+
+- **capacity instrument: the behaviour profiles through a collapse** (rtcpbudget-4):
+  `docs/capacity-instrument.md` has the table of the default, `Performance`, the default with
+  `rtcp_share_follows_send_rate` and `Chrome` on the same 1000 seeds, paired: RTCP on the
+  capped link 80 / 22 / 33 / 20 kbit/s, oldest picture 7.9 / 6.1 / 6.2 / 5.8 s, calls over
+  20 s to recover 128 / 0 / 0 / 18 of 1000; `Performance` pays when both directions collapse
+  (picture +1.6 s). The `Chrome` column was measured before the repair of retransmitted RED
+  packets and is marked so.
+
 - **capacity instrument** (rtcpbudget-5): chain tokens for the default chain with other
   settings, measurement only: `share` (the defaults with `rtcp_share_follows_send_rate`),
   `perf` (the `Performance` profile's interceptor settings), `perfshare`, `perfnoshare`,
