@@ -540,6 +540,40 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
     Ok(())
 }
 
+/// The chain as an application gets it, probing on, through the cap: the tests above run the
+/// call that met the cap while still climbing ([`CAP_AT_TARGET`]); this one keeps the default
+/// chain in this file's matrix. With the start-up clusters the call stands at the path's
+/// 2.5 Mbit/s when the cap arrives after 20 s, so it meets the collapse from a higher rate
+/// than the call that climbed to 1.4 Mbit/s, and loses more at it (some 140 retransmissions
+/// against 68, the picture on a receiver without a bound in time several seconds older:
+/// `capacity_instrument.rs`, cells `cap/parolnet/..`, has the distributions and holds the
+/// requirements). Asserted here are only the hard properties, on any seed: the start found
+/// the path's rate, the sender reacted to the cap (the run fails otherwise), the picture came
+/// back under the cap, and the estimate returned after it.
+#[test]
+fn a_call_without_a_pacer_that_probes_survives_a_capacity_cap() -> Result<()> {
+    for seed in seed_range(2, 6) {
+        let outcome = run(&Setup::new(seed, None).anchor(ANCHORS[0]))?;
+        println!("probing, cap after 20 s seed {seed}: {outcome:?}");
+        assert!(
+            outcome.before >= MAX_BPS / 100 * 95,
+            "seed {seed}: the start-up clusters did not find the path: the cap met {} bit/s: {outcome:?}",
+            outcome.before
+        );
+        assert!(
+            outcome.freeze < Duration::from_secs(10),
+            "seed {seed}: no usable frame for {:?}: {outcome:?}",
+            outcome.freeze
+        );
+        assert!(
+            outcome.recovery_window.1 >= 800_000,
+            "seed {seed}: {} bit/s on average 15 to 25 s after the cap: {outcome:?}",
+            outcome.recovery_window.1
+        );
+    }
+    Ok(())
+}
+
 /// The same call with retransmissions not congestion controlled
 /// ([`RetransmissionRateLimit::Unlimited`]), for comparison: prints the outcomes, asserts
 /// nothing.

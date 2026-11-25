@@ -501,12 +501,12 @@ mod tests {
         (chain, handle)
     }
 
-    /// The next packet on the read leg that carries RTCP: the feedback. What comes before it
-    /// is the controller's own (a probe request, on an empty carrier: the builder probes by
+    /// The next packet on the read leg that is not a probe request: the feedback. The
+    /// controller's requests come first (each on a carrier of its own: the builder probes by
     /// default, and the first cluster is asked for with the first packets written).
     fn next_feedback(chain: &mut impl crate::Interceptor) -> Option<TaggedPacket> {
         while let Some(read) = chain.poll_read() {
-            if matches!(&read.message.packet, Packet::Rtcp(packets) if !packets.is_empty()) {
+            if read.message.custom::<crate::ProbeRequest>().is_none() {
                 return Some(read);
             }
         }
