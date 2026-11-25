@@ -18,7 +18,7 @@ GCC-5.5-11	A	S	media (running)	`setting` (measured): `Gcc::with_received_rate_bo
 RFC2198-5-4	E	S	media (running)	RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream
 RFC3550-6.1-13	A	S	media (running)	`setting`: strict RTCP validity
 RFC3550-A.2-1	A	S	media (running)	`setting`: strict RTCP validity
-RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`
+RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`; an audio-only estimate halves to the floor on a clean link (`feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent`); both directions capped: recovery over 20 s in 64% of runs against 18.5% (instrument)
 RFC4585-4.2-7	E	S	media (running)	Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
 RFC5109-7.2-2	D	L	media (running)	A separate FEC RTP session (own m= line and transport) so the FEC stream can use the media SSRC; RFC5109-14.1-5
 RFC5109-14.1-2	D	L	media (running)	As RFC5109-7.2-2
@@ -52,7 +52,8 @@ RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_tran
 RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
 RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
-RFC8108-5.1-1	A	S	media (running)	`setting` (measured, rtpcore-6): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; mean freeze 1.73 against 1.60 s, lag 9.03 against 8.70 s on `measure_report_blocks_from_every_ssrc_against_once` (one sample; it asserts nothing since rtp-9), the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without`
+RFC8108-5.1-1	A	S	media (running)	`setting` (measured, rtcpbudget-4): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; capacity instrument `tests/capacity_instrument.rs::measure`, chain `every` against `paced`, 1000 seeds: oldest picture 8.00 -> 8.53 s, target under the cap 209.8 -> 185.8 kbit/s, recovery over 20 s 81 -> 244 calls, 15 gate and 33 star statistics worse (RTCP 122 -> 149 kbit/s open); the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without`
+RFC8108-5.3.2-5	B	S	media (RTCP session)	a test of `send_regular` step b under `T_rr_interval` > 0 with SSRCs whose T_rr_last differ (one joined after the others' first regular packet), fixed random numbers: tt_avg as reconsideration alone gives it; then a mutation applying the suppression in step b
 RFC8108-6.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC8122-6.2-5	C	S	dtls-srtp	Missing certificate: bad_certificate (RFC 8122) instead of handshake_failure (RFC 5246 7.4.6) on the peer-connection path
 RFC8122-6.2-6	C	M	dtls-srtp	Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4)

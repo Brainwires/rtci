@@ -28,6 +28,7 @@ use rtci::interceptor::{
 };
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorHandles, DefaultInterceptorOptions, configure_key_frame_requests,
@@ -159,9 +160,20 @@ pub struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     pub video: [bool; 2],
-    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains, the
-    /// options' default when `None`.
+    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains and
+    /// `RtcpSessionBuilder::with_report_from_every_ssrc` for ParolNet's, their default when
+    /// `None`.
     pub report_from_every_ssrc: Option<bool>,
+    /// The behaviour profile whose interceptor settings the default chains take
+    /// (`DefaultInterceptorOptions::for_profile`); the build's default when `None`. The media
+    /// engine and the session description stay this world's own.
+    pub profile: Option<BehaviourProfile>,
+    /// `DefaultInterceptorOptions::rtcp_share_follows_send_rate` for the default chains, the
+    /// profile's value when `None`.
+    pub share_follows_send_rate: Option<bool>,
+    /// `DefaultInterceptorOptions::congestion_feedback_cadence` for the default chains, the
+    /// profile's value when `None`.
+    pub feedback_cadence: Option<rtci::interceptor::CongestionFeedbackCadence>,
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
@@ -169,6 +181,10 @@ pub struct Setup {
     /// (`DefaultInterceptorOptions::pacer_backlog`, docs/capacity-collapse.md); the engine's
     /// default when `None`.
     pub pacer_backlog: Option<PacerBacklog>,
+    /// `DefaultInterceptorOptions::rtcp_immediate_congestion_feedback` for the default chains
+    /// (`false`: RFC 4585 3.2 and 3.5.2, congestion control feedback takes its turn inside
+    /// the RTCP bandwidth), the options' default when `None`.
+    pub immediate_congestion_feedback: Option<bool>,
     /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
     /// permanent tests run [`Perturbation::None`].
     pub perturbation: Perturbation,
@@ -232,8 +248,12 @@ impl Setup {
             cap_at_target: None,
             video: [true, true],
             report_from_every_ssrc: None,
+            profile: None,
+            share_follows_send_rate: None,
+            feedback_cadence: None,
             received_rate_bound: None,
             pacer_backlog: None,
+            immediate_congestion_feedback: None,
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
@@ -261,6 +281,35 @@ impl Setup {
     /// Every local SSRC reports on every other (RFC 8108 section 5.1) or the blocks go once.
     pub fn report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = Some(every);
+        self
+    }
+
+    /// Congestion control feedback sent at once (`true`) or under RFC 4585 3.5.2's timing,
+    /// inside the RTCP bandwidth (`false`), in the default chain.
+    pub fn immediate_congestion_feedback(mut self, immediate: bool) -> Self {
+        self.immediate_congestion_feedback = Some(immediate);
+        self
+    }
+
+    /// The default chains take the interceptor settings of `profile`.
+    pub fn profile(mut self, profile: BehaviourProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
+    /// The default chains' RTCP share follows the send rate (or not), whatever the profile
+    /// says.
+    pub fn share_follows_send_rate(mut self, follows: bool) -> Self {
+        self.share_follows_send_rate = Some(follows);
+        self
+    }
+
+    /// The default chains' congestion control feedback is built with `cadence`.
+    pub fn feedback_cadence(
+        mut self,
+        cadence: rtci::interceptor::CongestionFeedbackCadence,
+    ) -> Self {
+        self.feedback_cadence = Some(cadence);
         self
     }
 
@@ -531,6 +580,8 @@ pub struct Peer {
     /// ([`World::tolerate_failure`]).
     pub left_connected: u32,
     pub failed: bool,
+    /// Every connection state the application was told of, and when.
+    pub states: Vec<(Duration, RTCPeerConnectionState)>,
     pub decoder: ModelDecoder,
     pub usable_at: Vec<Duration>,
     /// How long after its capture each usable frame came out of the decoder.
@@ -683,7 +734,16 @@ impl Peer {
             RtpCodecKind::Audio,
         )?;
         if setup.chain != Chain::ParolNet {
-            let mut options = DefaultInterceptorOptions::default();
+            let mut options = match setup.profile {
+                Some(profile) => DefaultInterceptorOptions::for_profile(profile),
+                None => DefaultInterceptorOptions::default(),
+            };
+            if let Some(follows) = setup.share_follows_send_rate {
+                options.rtcp_share_follows_send_rate = follows;
+            }
+            if let Some(cadence) = setup.feedback_cadence {
+                options.congestion_feedback_cadence = cadence;
+            }
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
             if let Some(every) = setup.report_from_every_ssrc {
@@ -697,6 +757,9 @@ impl Peer {
             }
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;
+            }
+            if let Some(immediate) = setup.immediate_congestion_feedback {
+                options.rtcp_immediate_congestion_feedback = immediate;
             }
             let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),
@@ -742,6 +805,10 @@ impl Peer {
         let session = RtcpSessionBuilder::new()
             .with_t_rr_interval(Duration::ZERO)
             .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match setup.report_from_every_ssrc {
+            Some(every) => session.with_report_from_every_ssrc(every),
+            None => session,
+        };
         let session = match wall_clock {
             Some(anchor) => session.with_wall_clock(anchor),
             None => session,
@@ -832,6 +899,7 @@ impl Peer {
             gap_wait: setup.gap_wait,
             audio_arrivals: Vec::new(),
             left_connected: 0,
+            states: Vec::new(),
             failed: false,
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
@@ -1112,6 +1180,19 @@ pub struct World {
     /// A peer connection that fails does not end the run ([`Peer::failed`] records it): for
     /// a measurement that reports the failure as a figure. Off: the run ends with an error.
     pub tolerate_failure: bool,
+    /// The STUN datagrams (ICE consent checks and their responses, RFC 7675) that did not
+    /// arrive: dropped at a link's queue, or lost on the reverse path.
+    pub stun_lost: u32,
+    /// Until then none of the callee's RTCP reaches the link: a feedback outage with the
+    /// capacity unchanged (the instrument's `fbgap` scenario).
+    pub feedback_outage_until: Option<Instant>,
+    /// The RTCP datagrams that outage took.
+    pub feedback_outage_lost: u32,
+}
+
+/// Whether a datagram is SRTCP (RFC 7983 first octet, RFC 5761 packet type).
+pub fn is_rtcp(data: &[u8]) -> bool {
+    matches!(data, [b0, b1, ..] if (128..=191).contains(b0) && (192..=223).contains(b1))
 }
 
 impl World {
@@ -1146,6 +1227,11 @@ impl World {
                     let lost = i == 1
                         && self.reverse_loss > 0
                         && self.loss_rng.next_u64() % 100 < u64::from(self.reverse_loss);
+                    let in_outage = i == 1
+                        && self.feedback_outage_until.is_some_and(|t| self.now < t)
+                        && is_rtcp(&msg.message);
+                    self.feedback_outage_lost += u32::from(in_outage);
+                    let lost = lost || in_outage;
                     let arrives = if lost {
                         None
                     } else {
@@ -1167,6 +1253,9 @@ impl World {
                     }
                     if payload_type == Some(OPUS_PT) {
                         self.uplinks[i].audio_dropped += u64::from(arrives.is_none());
+                    }
+                    if stun && arrives.is_none() {
+                        self.stun_lost += 1;
                     }
                     let Some(at) = arrives else { continue };
                     self.order += 1;
@@ -1227,6 +1316,7 @@ impl World {
             moved = true;
             match event {
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
+                    peer.states.push((at, state));
                     if state == RTCPeerConnectionState::Failed {
                         if !tolerate_failure {
                             bail!("peer {i} failed");
@@ -1562,6 +1652,9 @@ impl World {
             media: false,
             video_on: setup.video,
             trace: Vec::new(),
+            stun_lost: 0,
+            feedback_outage_until: None,
+            feedback_outage_lost: 0,
             blackhole: false,
             stun_only: false,
             sampling: false,
