@@ -42,6 +42,18 @@ pub const DEFAULT_PRUNE_HORIZON: Duration = Duration::from_secs(2);
 /// taken to be gone, as a receiver that stopped estimating has no other way to lift it.
 pub const REMB_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Rides with [`Attribute::TargetBitrateChanged`] application-ward: the congestion
+/// controller's estimate of what this endpoint may send, as the estimator has it. The target
+/// beside it is lowered on its way up (the NACK responder takes its retransmission reserve
+/// off, the pacer writes zero for a pause); this is not. The congestion control feedback
+/// generators size [`CongestionFeedbackCadence::SendEstimate`](crate::CongestionFeedbackCadence)
+/// by it. Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SendEstimate {
+    /// The estimate, bits per second.
+    pub bits_per_second: f64,
+}
+
 /// The addresses and protocol a packet arrived between.
 type PathKey = (
     std::net::SocketAddr,
@@ -128,6 +140,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
     after_drop_probe: AfterDropProbe,
+    send_rate_told_to_rtcp: bool,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -140,7 +153,19 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
             after_drop_probe: AfterDropProbe::default(),
+            send_rate_told_to_rtcp: false,
         }
+    }
+
+    /// Whether the estimate is told to the RTCP session of the same chain
+    /// ([`RtcpSessionControl::SendRate`](crate::RtcpSessionControl::SendRate), written
+    /// wire-ward whenever the estimate has moved by a twentieth), for
+    /// [`RtcpSessionBuilder::with_share_following_send_rate`](crate::RtcpSessionBuilder::with_share_following_send_rate).
+    /// Off by default; it needs an RTCP session wire-ward of this interceptor, which takes
+    /// the control out of the chain.
+    pub fn with_send_rate_told_to_rtcp(mut self, told: bool) -> Self {
+        self.send_rate_told_to_rtcp = told;
+        self
     }
 
     /// How long an unacknowledged packet is kept before it is written off.
@@ -243,6 +268,8 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 probe_senders: std::collections::HashSet::new(),
                 sent: VecDeque::new(),
                 last_target: None,
+                send_rate_told_to_rtcp: self.send_rate_told_to_rtcp,
+                told_rate: None,
                 estimator: self.estimator,
                 prune_horizon: self.prune_horizon,
                 history: History::new(),
@@ -446,6 +473,9 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     /// `None` until the first one has been announced: the pacer has to learn the estimator's
     /// starting rate too, not only its changes.
     last_target: Option<f64>,
+    /// [`CongestionControlBuilder::with_send_rate_told_to_rtcp`], and the rate last told.
+    send_rate_told_to_rtcp: bool,
+    told_rate: Option<f64>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -1051,6 +1081,34 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         })
     }
 
+    /// Tells the RTCP session wire-ward the estimate, when it has moved by a twentieth since
+    /// it was last told ([`CongestionControlBuilder::with_send_rate_told_to_rtcp`]).
+    fn tell_rtcp(&mut self, now: Instant) {
+        if !self.send_rate_told_to_rtcp {
+            return;
+        }
+        let target = self.estimator.target_bitrate();
+        if self
+            .told_rate
+            .is_some_and(|told| (target - told).abs() < told * 0.05)
+        {
+            return;
+        }
+        self.told_rate = Some(target);
+        self.write_queue.push_back(
+            crate::RtcpSessionControl::SendRate(target.max(0.0) as u64).into_packet(now),
+        );
+    }
+
+    /// The estimate as it is, for what application-ward needs the congestion controller's
+    /// own value: the target that rides beside it is lowered on its way (the retransmission
+    /// reserve, a pause).
+    fn estimate_attribute(&self) -> Attribute {
+        Attribute::Custom(std::sync::Arc::new(SendEstimate {
+            bits_per_second: self.estimator.target_bitrate(),
+        }))
+    }
+
     /// Publish the estimate, and return the attribute to announce when it moved.
     fn publish(&mut self) -> Option<Attribute> {
         let target = self.estimator.target_bitrate();
@@ -1129,8 +1187,10 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         //
         // Onto *this* packet: the pacer is application-ward of here, so it sees this packet
         // after this interceptor does and reads the attribute on its way past.
+        self.tell_rtcp(msg.now);
         if let Some(attribute) = self.publish() {
             msg.message.add(attribute);
+            msg.message.add(self.estimate_attribute());
             if let Some(minimum) = self.minimum_attribute() {
                 msg.message.add(minimum);
             }
@@ -1254,8 +1314,10 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         self.poll_probe(now);
 
         // No packet to ride on: the estimate leaves on the chain's attribute carrier.
+        self.tell_rtcp(now);
         if let Some(attribute) = self.publish() {
             let mut message = AttributedPacket::new(Packet::Rtcp(Vec::new())).with(attribute);
+            message.add(self.estimate_attribute());
             if let Some(minimum) = self.minimum_attribute() {
                 message.add(minimum);
             }

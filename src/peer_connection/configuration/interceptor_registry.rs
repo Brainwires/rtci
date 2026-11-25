@@ -394,8 +394,10 @@ pub struct DefaultInterceptorOptions {
     /// [`RtcpSessionBuilder::with_immediate_congestion_feedback`](interceptor::RtcpSessionBuilder::with_immediate_congestion_feedback).
     pub rtcp_immediate_congestion_feedback: bool,
     /// Whether every local SSRC carries a report block for every remote SSRC and for the
-    /// endpoint's other SSRCs (RFC 8108 section 5.1). `false` by default (measured, see the
-    /// setting), `true` in the `StrictRfc` behaviour profile. See
+    /// endpoint's other SSRCs (RFC 8108 section 5.1: "each SSRC will send RTCP reports for all
+    /// other SSRCs, including those co-located at the same endpoint"). `false` by default:
+    /// the blocks are carried once, as libwebrtc does; the RFC form was measured worse through
+    /// a capacity collapse (see the setting). `true` in the `StrictRfc` behaviour profile. See
     /// [`RtcpSessionBuilder::with_report_from_every_ssrc`](interceptor::RtcpSessionBuilder::with_report_from_every_ssrc).
     pub rtcp_report_from_every_ssrc: bool,
     /// Whether transport-wide feedback reports a packet received again when the base sequence
@@ -479,12 +481,28 @@ pub struct DefaultInterceptorOptions {
     /// the media is measured. 64 kbit/s by default. See
     /// [`RtcpSessionBuilder::with_minimum_session_bandwidth`](interceptor::RtcpSessionBuilder::with_minimum_session_bandwidth).
     pub rtcp_minimum_session_bandwidth: u64,
-    /// The share of the media received that congestion control feedback (transport-wide and
-    /// RFC 8888) is sized to. 0.05 by default. See
+    /// Tuning with no specification behind it: whether this endpoint's own share of the RTCP
+    /// bandwidth follows the rate its congestion controller allows it to send at, so that an
+    /// endpoint behind a collapsed link reports less while the other direction still flows.
+    /// `false` by default and in every behaviour profile: an option to turn on. See
+    /// [`RtcpSessionBuilder::with_share_following_send_rate`](interceptor::RtcpSessionBuilder::with_share_following_send_rate).
+    pub rtcp_share_follows_send_rate: bool,
+    /// When congestion control feedback (transport-wide and RFC 8888) is built. By default
+    /// [`CongestionFeedbackCadence::ReceivedMedia`](interceptor::CongestionFeedbackCadence::ReceivedMedia):
+    /// every 50 to 250 ms, sized to 5% of the media received, an engine choice no
+    /// specification has (measured: see the type). The `StrictRfc` behaviour profile takes the
+    /// drafts' cadence (`PerFrame`: "once per received video frame or at least once every 30 ms
+    /// if audio-only or multi-stream", up to 100 ms, draft-ietf-rmcat-gcc-02 section 3), the
+    /// `Chrome` profile libwebrtc's (`SendEstimate`: 50 to 250 ms from 5% of the endpoint's
+    /// own send estimate). See
+    /// [`TwccReceiverBuilder::with_cadence`](interceptor::TwccReceiverBuilder::with_cadence).
+    pub congestion_feedback_cadence: interceptor::CongestionFeedbackCadence,
+    /// The share of the rate it is sized to that congestion control feedback takes with the
+    /// `ReceivedMedia` and `SendEstimate` cadences. 0.05 by default. See
     /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share).
     pub congestion_feedback_share: f64,
-    /// The longest interval between two congestion control feedback packets while media
-    /// arrives. 250 ms by default. See
+    /// The longest interval between two congestion control feedback packets with the
+    /// `ReceivedMedia` and `SendEstimate` cadences. 250 ms by default. See
     /// [`TwccReceiverBuilder::with_max_adaptive_interval`](interceptor::TwccReceiverBuilder::with_max_adaptive_interval).
     pub congestion_feedback_max_interval: Duration,
     /// Where the RTCP sessions draw their random numbers from (the report interval's
@@ -570,6 +588,14 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "rtcp_minimum_session_bandwidth",
                 &self.rtcp_minimum_session_bandwidth,
             )
+            .field(
+                "rtcp_share_follows_send_rate",
+                &self.rtcp_share_follows_send_rate,
+            )
+            .field(
+                "congestion_feedback_cadence",
+                &self.congestion_feedback_cadence,
+            )
             .field("congestion_feedback_share", &self.congestion_feedback_share)
             .field(
                 "congestion_feedback_max_interval",
@@ -618,6 +644,8 @@ impl DefaultInterceptorOptions {
             circuit_breaker_automatic_restart: true,
             rtcp_congestion_feedback_in_budget: false,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
+            rtcp_share_follows_send_rate: false,
+            congestion_feedback_cadence: interceptor::CongestionFeedbackCadence::ReceivedMedia,
             congestion_feedback_share: 0.05,
             congestion_feedback_max_interval: Duration::from_millis(250),
             rtcp_random: None,
@@ -669,7 +697,8 @@ impl DefaultInterceptorOptions {
             .with_immediate_congestion_feedback(self.rtcp_immediate_congestion_feedback)
             .with_report_from_every_ssrc(self.rtcp_report_from_every_ssrc)
             .with_congestion_feedback_in_budget(self.rtcp_congestion_feedback_in_budget)
-            .with_minimum_session_bandwidth(self.rtcp_minimum_session_bandwidth);
+            .with_minimum_session_bandwidth(self.rtcp_minimum_session_bandwidth)
+            .with_share_following_send_rate(self.rtcp_share_follows_send_rate);
         let session = match self.wall_clock {
             Some(anchor) => session.with_wall_clock(anchor),
             None => session,
@@ -771,6 +800,7 @@ pub fn register_default_interceptors_with_options(
         let threshold_time_base = options.gcc_threshold_time_base;
         let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
         let received_rate_bound = options.gcc_received_rate_bound;
+        let send_rate_told_to_rtcp = options.rtcp_share_follows_send_rate;
         move |session: usize| {
             let estimator = Gcc::default()
                 .with_threshold_time_base(threshold_time_base)
@@ -781,6 +811,7 @@ pub fn register_default_interceptors_with_options(
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
                 .with_after_drop_probe(probe_after_drop)
+                .with_send_rate_told_to_rtcp(send_rate_told_to_rtcp)
         }
     };
     let (congestion_control, handle) = congestion_control_builder(0).build_with_handle();
@@ -1143,6 +1174,7 @@ fn with_congestion_feedback_recorders(
     options: &DefaultInterceptorOptions,
 ) -> Registry {
     let rereport_received = options.twcc_rereport_received;
+    let cadence = options.congestion_feedback_cadence;
     let share = options.congestion_feedback_share;
     let max_interval = options.congestion_feedback_max_interval;
     let wall_clock = options.wall_clock;
@@ -1154,6 +1186,7 @@ fn with_congestion_feedback_recorders(
             PerRtpSession::new(move || {
                 TwccReceiverBuilder::new()
                     .with_rereport_received(rereport_received)
+                    .with_cadence(cadence)
                     .with_feedback_share(share)
                     .with_max_adaptive_interval(max_interval)
                     .build()
@@ -1167,6 +1200,7 @@ fn with_congestion_feedback_recorders(
             Slot::Rfc8888,
             PerRtpSession::new(move || {
                 let builder = Rfc8888Builder::new()
+                    .with_cadence(cadence)
                     .with_feedback_share(share)
                     .with_max_adaptive_interval(max_interval);
                 match wall_clock {

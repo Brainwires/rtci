@@ -2,7 +2,7 @@
 
 use super::recorder::CcFeedbackRecorder;
 use crate::Interceptor;
-use crate::cc::feedback_cadence::FeedbackCadence;
+use crate::cc::feedback_cadence::{CongestionFeedbackCadence, FeedbackCadence};
 use crate::stream_info::StreamInfo;
 use crate::twcc::flow_ssrcs;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
@@ -47,6 +47,7 @@ fn ecn_of(codepoint: Option<EcnCodepoint>) -> Ecn {
 pub struct Rfc8888Builder {
     interval: Duration,
     adaptive_interval: bool,
+    cadence: CongestionFeedbackCadence,
     feedback_share: f64,
     max_adaptive_interval: Duration,
     max_report_size: usize,
@@ -60,6 +61,7 @@ impl Default for Rfc8888Builder {
         Self {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
+            cadence: CongestionFeedbackCadence::default(),
             feedback_share: crate::cc::feedback_cadence::FEEDBACK_SHARE,
             max_adaptive_interval: crate::cc::feedback_cadence::MAX_ADAPTIVE_INTERVAL,
             max_report_size: DEFAULT_MAX_REPORT_SIZE,
@@ -102,38 +104,41 @@ impl Rfc8888Builder {
         self
     }
 
-    /// Whether the interval stretches to what the RTCP bandwidth holds one report in. On by
-    /// default.
-    ///
-    /// "RTCP bandwidth and transmission rules put some upper limits on how frequently the
-    /// RTCP feedback messages can be sent" (RFC 8888 section 4), and the RTCP session applies
-    /// them: 5% of the session bandwidth unless `b=RS` / `b=RR` say otherwise (RFC 3550
-    /// section 6.2). Reports built more often than that queue in the session and reach the
-    /// sender late or not at all. With this on, the interval is the configured one where the
-    /// bandwidth allows it and longer where it does not, up to half a second: one report for
-    /// every RTCP packet the session may send, each covering everything since the last.
-    /// `false` keeps the interval fixed.
+    /// Whether the interval follows the cadence ([`Self::with_cadence`]) or stays fixed at
+    /// [`Self::with_interval`] (`false`). On by default.
     pub fn with_adaptive_interval(mut self, adaptive_interval: bool) -> Self {
         self.adaptive_interval = adaptive_interval;
         self
     }
 
-    /// The share of the media received that the feedback may take while the interval is
-    /// adaptive: the interval is the time in which this share holds one feedback packet (with
-    /// its lower layers, and the minimal compound packet around it without reduced-size
-    /// RTCP). Default 0.05, RFC 3550 section 6.2's 5% for all of RTCP. A smaller share leaves
-    /// room in the 5% for the regular reports (the `Performance` behaviour profile: 0.025).
+    /// When a report is built while the interval is not fixed: see
+    /// [`CongestionFeedbackCadence`]. Default [`CongestionFeedbackCadence::ReceivedMedia`],
+    /// the engine's own form, which no specification has (RFC 8888 section 4 leaves the
+    /// interval to the application: "Applications need to negotiate an appropriate congestion
+    /// control feedback interval"). [`CongestionFeedbackCadence::PerFrame`] is the form of
+    /// the texts (RFC 8888 section 4, "sending feedback once per frame is an upper bound
+    /// before the reporting overhead becomes excessive", and "Specifications for RTP
+    /// congestion control algorithms can also provide guidance": draft-ietf-rmcat-gcc-02
+    /// section 3, "once per received video frame or at least once every 30 ms if audio-only
+    /// or multi-stream", up to 100 ms where the overhead needs to be limited): measured
+    /// worse as the default, it is the `StrictRfc` behaviour profile's.
+    pub fn with_cadence(mut self, cadence: CongestionFeedbackCadence) -> Self {
+        self.cadence = cadence;
+        self
+    }
+
+    /// The share of the rate it is sized to that the feedback may take with
+    /// [`CongestionFeedbackCadence::SendEstimate`] and
+    /// [`CongestionFeedbackCadence::ReceivedMedia`]. Default 0.05; the `Performance`
+    /// behaviour profile takes 0.025. [`CongestionFeedbackCadence::PerFrame`] does not use it.
     pub fn with_feedback_share(mut self, share: f64) -> Self {
         self.feedback_share = share;
         self
     }
 
-    /// The longest the adaptive interval stretches to while media flows. Default 250 ms.
-    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: "in cases of low uplink
-    /// bandwidth it is acceptable to send them less frequently, e.g., for instance once per
-    /// RTT"; RFC 8888 section 4 leaves the interval to the application ("Applications need to
-    /// negotiate an appropriate congestion control feedback interval ... based on ... the
-    /// acceptable feedback overhead"). The `Performance` behaviour profile takes 500 ms.
+    /// The longest interval of [`CongestionFeedbackCadence::SendEstimate`] and
+    /// [`CongestionFeedbackCadence::ReceivedMedia`] while media flows. Default 250 ms; the
+    /// `Performance` behaviour profile takes 500 ms.
     pub fn with_max_adaptive_interval(mut self, max_interval: Duration) -> Self {
         self.max_adaptive_interval = max_interval;
         self
@@ -179,6 +184,7 @@ impl Rfc8888Builder {
             self.sender_ssrc,
         );
         interceptor.cadence = FeedbackCadence::new(self.interval, self.adaptive_interval)
+            .with_form(self.cadence)
             .with_limits(self.feedback_share, self.max_adaptive_interval);
         interceptor.epoch = self.wall_clock;
         interceptor
@@ -198,7 +204,7 @@ impl Rfc8888Builder {
 ///
 /// [RFC 8888]: https://www.rfc-editor.org/rfc/rfc8888
 pub struct Rfc8888Interceptor {
-    /// When a report is built: the configured interval, stretched to the RTCP bandwidth.
+    /// When a report is built ([`Rfc8888Builder::with_cadence`]).
     cadence: FeedbackCadence,
     max_report_size: usize,
     /// The SSRC set on the builder, if one was.
@@ -255,6 +261,30 @@ impl Rfc8888Interceptor {
         (epoch.ntp(now) >> 16) as u32
     }
 
+    /// Builds the reports on what arrived since the last ones.
+    fn build_reports(&mut self, now: Instant) {
+        self.cadence.reported(now);
+        if self.recorder.is_empty() {
+            return;
+        }
+        let report_timestamp = self.report_timestamp(now);
+        let sender_ssrc = self.sender_ssrc();
+        for report in
+            self.recorder
+                .build_reports(now, sender_ssrc, report_timestamp, self.max_report_size)
+        {
+            if report.report_blocks.is_empty() {
+                continue;
+            }
+            self.cadence.on_feedback(report.marshal_size());
+            self.write_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(report)])),
+            });
+        }
+    }
+
     /// Arm the interval from the first instant this interceptor is given.
     fn arm(&mut self, now: Instant) {
         if self.next_timeout.is_none() && !self.streams.is_empty() && !self.cadence.is_off() {
@@ -271,7 +301,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        self.cadence.on_packet(&msg);
+        // Whether this packet ends a frame the cadence reports at once (per-frame feedback).
+        let frame_ended = self.cadence.on_packet(&msg);
         if let Packet::Rtp(rtp_packet) = &msg.message.packet {
             // An RTX packet reaches the chain rewritten into the original it carries; what
             // arrived on the wire was a packet of the retransmission stream, and that is what
@@ -299,6 +330,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
                 self.recorder
                     .add_packet(msg.now, ssrc, sequence_number, ecn_of(msg.transport.ecn));
                 self.arm(msg.now);
+                if frame_ended {
+                    self.next_timeout = Some(msg.now + self.cadence.interval(msg.now));
+                    self.build_reports(msg.now);
+                }
             }
         }
         self.read_queue.push_back(msg);
@@ -330,27 +365,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
             && now >= next_timeout
         {
             self.next_timeout = Some(now + self.cadence.interval(now));
-
-            if !self.recorder.is_empty() {
-                let report_timestamp = self.report_timestamp(now);
-                let sender_ssrc = self.sender_ssrc();
-                for report in self.recorder.build_reports(
-                    now,
-                    sender_ssrc,
-                    report_timestamp,
-                    self.max_report_size,
-                ) {
-                    if report.report_blocks.is_empty() {
-                        continue;
-                    }
-                    self.cadence.on_feedback(report.marshal_size());
-                    self.write_queue.push_back(TaggedPacket {
-                        now,
-                        transport: TransportContext::default(),
-                        message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(report)])),
-                    });
-                }
-            }
+            self.build_reports(now);
         }
         Ok(())
     }
@@ -370,6 +385,7 @@ impl Interceptor for Rfc8888Interceptor {
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
         if stream_supports_ccfb(info) {
             self.streams.extend(flow_ssrcs(info));
+            self.cadence.bind_remote(info);
         }
     }
 
@@ -378,6 +394,7 @@ impl Interceptor for Rfc8888Interceptor {
             self.streams.remove(&ssrc);
             self.recorder.remove_stream(ssrc);
         }
+        self.cadence.unbind_remote(info);
         if self.streams.is_empty() {
             self.next_timeout = None;
         }
