@@ -629,7 +629,7 @@ fn a_repeated_client_finished_is_verified_again() {
     );
 
     // Under another master secret the cached Finished is not this handshake's.
-    server.state.master_secret[0] ^= 1;
+    server.state.master_secret.as_mut()[0] ^= 1;
     match (Flight6 {}).parse(&mut server.state, &server.cache, &cfg) {
         Err((Some(alert), Some(Error::ErrVerifyDataMismatch))) => {
             assert_eq!(alert.alert_level, AlertLevel::Fatal);

@@ -12,6 +12,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use shared::error::*;
 use std::io::{BufWriter, Cursor};
 use std::sync::Arc;
+use zeroize::Zeroize;
 
 // State holds the dtls connection state and implements both encoding.BinaryMarshaler and encoding.BinaryUnmarshaler
 /// The negotiated connection state: keys, sequence numbers, peer identity and the active
@@ -23,7 +24,8 @@ pub struct State {
     pub(crate) local_sequence_number: Vec<u64>, // uint48
     pub(crate) local_random: HandshakeRandom,
     pub(crate) remote_random: HandshakeRandom,
-    pub(crate) master_secret: Vec<u8>,
+    /// Zeroized when replaced or dropped, like every secret here.
+    pub(crate) master_secret: SecretVec,
     pub(crate) cipher_suite: Option<Box<dyn CipherSuite>>, // nil if a cipher_suite hasn't been chosen
 
     pub(crate) srtp_protection_profile: SrtpProtectionProfile, // Negotiated srtp_protection_profile
@@ -36,7 +38,7 @@ pub struct State {
 
     pub(crate) is_client: bool,
 
-    pub(crate) pre_master_secret: Vec<u8>,
+    pub(crate) pre_master_secret: SecretVec,
     pub(crate) extended_master_secret: bool,
 
     pub(crate) named_curve: NamedCurve,
@@ -135,7 +137,9 @@ pub struct State {
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
-#[derive(Archive, Serialize, Deserialize, PartialEq, Debug)]
+/// What [`State::marshal_binary`] writes. It holds the master secret, so it is zeroized when
+/// dropped and has no `Debug`.
+#[derive(Archive, Serialize, Deserialize, PartialEq)]
 struct SerializedState {
     local_epoch: u16,
     remote_epoch: u16,
@@ -152,6 +156,30 @@ struct SerializedState {
     /// RFC 9146: the connection ids negotiated, as `State` holds them.
     local_connection_id: Option<Vec<u8>>,
     remote_connection_id: Option<Vec<u8>>,
+}
+
+impl Drop for SerializedState {
+    fn drop(&mut self) {
+        self.master_secret.zeroize();
+    }
+}
+
+/// An rkyv writer that only counts: the size of a serialized value, so that the buffer it is
+/// then written to is allocated once at that size and never grows (a buffer that grew would
+/// leave a copy of the master secret behind).
+struct SerializedLength(usize);
+
+impl rkyv::ser::Positional for SerializedLength {
+    fn pos(&self) -> usize {
+        self.0
+    }
+}
+
+impl<E> rkyv::ser::Writer<E> for SerializedLength {
+    fn write(&mut self, bytes: &[u8]) -> std::result::Result<(), E> {
+        self.0 += bytes.len();
+        Ok(())
+    }
 }
 
 impl State {
@@ -185,7 +213,7 @@ impl State {
             local_sequence_number: vec![],
             local_random: HandshakeRandom::default(),
             remote_random: HandshakeRandom::default(),
-            master_secret: vec![],
+            master_secret: SecretVec::new(vec![]),
             cipher_suite: None,
 
             srtp_protection_profile: SrtpProtectionProfile::Unsupported,
@@ -194,7 +222,7 @@ impl State {
 
             is_client,
 
-            pre_master_secret: vec![],
+            pre_master_secret: SecretVec::new(vec![]),
             extended_master_secret: false,
 
             named_curve: NamedCurve::Unsupported,
@@ -281,7 +309,7 @@ impl State {
             local_random,
             remote_random,
             cipher_suite_id,
-            master_secret: self.master_secret.clone(),
+            master_secret: self.master_secret.as_ref().to_vec(),
             sequence_number,
             srtp_protection_profile: self.srtp_protection_profile as u16,
             peer_certificates: self.peer_certificates.clone(),
@@ -320,7 +348,7 @@ impl State {
             .clone_from(&serialized.remote_connection_id);
 
         // Set master secret
-        self.master_secret.clone_from(&serialized.master_secret);
+        self.master_secret = SecretVec::new(serialized.master_secret.clone());
 
         // Set cipher suite
         self.cipher_suite = Some(cipher_suite_for_id(serialized.cipher_suite_id.into())?);
@@ -360,7 +388,7 @@ impl State {
             if self.is_client {
                 cipher_suite.init(
                     self.crypto_provider.clone(),
-                    &self.master_secret,
+                    self.master_secret.as_ref(),
                     &local_random,
                     &remote_random,
                     true,
@@ -368,7 +396,7 @@ impl State {
             } else {
                 cipher_suite.init(
                     self.crypto_provider.clone(),
-                    &self.master_secret,
+                    self.master_secret.as_ref(),
                     &remote_random,
                     &local_random,
                     false,
@@ -382,20 +410,34 @@ impl State {
     // marshal_binary is a binary.BinaryMarshaler.marshal_binary implementation
     /// Serializes the state, so a connection can be resumed or migrated.
     ///
+    /// The bytes hold the session's master secret in the clear: protecting them (and erasing
+    /// them) is the caller's responsibility. Nothing this function makes on the way is left
+    /// in memory it frees.
+    ///
     /// # Errors
     ///
     /// Fails if the state is incomplete.
     pub fn marshal_binary(&self) -> Result<Vec<u8>> {
         let serialized = self.serialize()?;
 
-        match rkyv::to_bytes::<rkyv::rancor::Error>(&serialized).map(Vec::from) {
-            Ok(enc) => Ok(enc),
-            Err(err) => Err(Error::Other(err.to_string())),
-        }
+        let error = |err: rkyv::rancor::Error| Error::Other(err.to_string());
+        let length = rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+            &serialized,
+            SerializedLength(0),
+        )
+        .map_err(error)?
+        .0;
+        rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+            &serialized,
+            Vec::with_capacity(length),
+        )
+        .map_err(error)
     }
 
     // unmarshal_binary is a binary.BinaryUnmarshaler.unmarshal_binary implementation
     /// Restores state previously produced by [`Self::marshal_binary`].
+    ///
+    /// `data` holds a master secret: erasing it afterwards is the caller's responsibility.
     ///
     /// # Errors
     ///
@@ -427,12 +469,13 @@ impl State {
             *exporter_secret = SecretVec::new(vec![]);
         }
         self.forget_pre_master_secret();
-        drop(SecretVec::new(std::mem::take(&mut self.master_secret)));
+        // Replacing a `SecretVec` zeroizes the one replaced.
+        self.master_secret = SecretVec::new(vec![]);
     }
 
     /// Overwrites and drops the premaster secret.
     pub(crate) fn forget_pre_master_secret(&mut self) {
-        drop(SecretVec::new(std::mem::take(&mut self.pre_master_secret)));
+        self.pre_master_secret = SecretVec::new(vec![]);
     }
 
     /// The SRTP protection profile negotiated through `use_srtp`.
@@ -559,16 +602,14 @@ impl State {
 
         if let Some(cipher_suite) = &self.cipher_suite {
             let provider = self.crypto_provider.as_ref();
-            match prf_p_hash(
+            prf_p_hash(
                 provider.crypto(),
-                &self.master_secret,
+                self.master_secret.as_ref(),
                 &seed,
                 length,
                 cipher_suite.hash_func(),
-            ) {
-                Ok(v) => Ok(SecretVec::new(v)),
-                Err(err) => Err(Error::Hash(err.to_string())),
-            }
+            )
+            .map_err(|err| Error::Hash(err.to_string()))
         } else {
             Err(Error::CipherSuiteUnset)
         }

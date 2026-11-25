@@ -13,7 +13,7 @@ fn test_pre_master_secret() -> Result<()> {
         let right_public = right.public_key.clone();
         let left_secret = prf_pre_master_secret(&right_public, &mut left, curve)?;
         let right_secret = prf_pre_master_secret(&left_public, &mut right, curve)?;
-        assert_eq!(left_secret, right_secret);
+        assert_eq!(left_secret.as_ref(), right_secret.as_ref());
         assert!(!left_secret.is_empty());
         assert!(matches!(
             left.complete(&right_public),
@@ -37,7 +37,7 @@ fn test_cross_provider_pre_master_secret() -> Result<()> {
         let right_public = right.public_key.clone();
         let left_secret = prf_pre_master_secret(&right_public, &mut left, curve)?;
         let right_secret = prf_pre_master_secret(&left_public, &mut right, curve)?;
-        assert_eq!(left_secret, right_secret);
+        assert_eq!(left_secret.as_ref(), right_secret.as_ref());
     }
 
     Ok(())
@@ -76,7 +76,8 @@ fn test_master_secret() -> Result<()> {
     )?;
 
     assert_eq!(
-        expected_master_secret, master_secret,
+        expected_master_secret,
+        master_secret.as_ref(),
         "master_secret exp: {expected_master_secret:?} actual: {master_secret:?}"
     );
 
@@ -103,7 +104,6 @@ fn test_encryption_keys() -> Result<()> {
     ];
 
     let expected_encryption_keys = EncryptionKeys {
-        master_secret: master_secret.clone(),
         client_mac_key: vec![],
         server_mac_key: vec![],
         client_write_key: vec![

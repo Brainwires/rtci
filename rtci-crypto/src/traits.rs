@@ -22,6 +22,18 @@ pub trait RTCCryptoProvider: Send + Sync {
 pub trait RTCRandom: Send + Sync {
     /// Fills all of `output` with random bytes.
     fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError>;
+
+    /// Fills all of `output` with random bytes that become a secret key (a cookie secret, a
+    /// ticket key), from a source that keeps no copy of them.
+    ///
+    /// A generator that buffers its output (as the built-in providers' [`fill`](Self::fill)
+    /// does, for speed) keeps the bytes it handed out in its buffer until it makes the next
+    /// block: whatever key was drawn from it stays in memory after the key itself is erased.
+    /// The default calls `fill`; the built-in providers draw from the operating system, which
+    /// writes into `output` only.
+    fn fill_secret(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        self.fill(output)
+    }
 }
 
 /// Provider-neutral cryptographic operations.

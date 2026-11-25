@@ -321,7 +321,7 @@ fn resume(
     let cipher_suite = cipher_suite_for_id(session.cipher_suite)
         .map_err(|err| fatal(AlertDescription::InternalError, err))?;
     state.cipher_suite = Some(cipher_suite);
-    state.master_secret = session.master_secret.as_ref().to_vec();
+    state.master_secret = session.master_secret.clone();
     state.extended_master_secret = true;
     state
         .peer_certificates
@@ -359,7 +359,6 @@ pub(crate) fn init_keys(state: &mut State, cfg: &HandshakeConfig) -> Result<(), 
     };
     let is_client = state.is_client;
     let master_secret = state.master_secret.clone();
-    let master_secret = crypto::SecretVec::new(master_secret);
     if let Some(cipher_suite) = &mut state.cipher_suite
         && !cipher_suite.is_initialized()
     {
@@ -441,7 +440,7 @@ pub(crate) fn client_resume(state: &mut State, cfg: &HandshakeConfig) -> Result<
             verify_peer_certificate(&session.peer_certificates, &chains)
                 .map_err(|err| fatal(AlertDescription::BadCertificate, err))?;
         }
-        state.master_secret = session.master_secret.as_ref().to_vec();
+        state.master_secret = session.master_secret.clone();
         state
             .peer_certificates
             .clone_from(&session.peer_certificates);
@@ -519,7 +518,7 @@ pub(crate) fn session_of(
     Dtls12Session {
         session_id: state.session_id.clone(),
         ticket: None,
-        master_secret: crypto::SecretVec::new(state.master_secret.clone()),
+        master_secret: state.master_secret.clone(),
         cipher_suite: state
             .cipher_suite
             .as_ref()

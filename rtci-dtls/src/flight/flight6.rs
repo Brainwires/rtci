@@ -174,7 +174,7 @@ impl Flight for Flight6 {
             if let Some(cipher_suite) = &state.cipher_suite {
                 state.local_verify_data = match prf_verify_data_server(
                     cfg.provider().crypto(),
-                    &state.master_secret,
+                    state.master_secret.as_ref(),
                     &plain_text,
                     cipher_suite.hash_func(),
                 ) {
