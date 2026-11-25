@@ -575,6 +575,12 @@ impl Peer {
             let mut options = DefaultInterceptorOptions::default();
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
+            // This file's receiver plays in order and waits for a missing packet by count,
+            // without a bound in time: the receiver `PacerBacklog::Keep` is for, and the
+            // pause, the repairs and the bounds asserted here are that configuration's. The
+            // default (`Flush`) is measured with a receiver that bounds its wait, in
+            // `tests/capacity_instrument.rs`.
+            options.pacer_backlog = rtci::interceptor::PacerBacklog::Keep;
             if let Some(every) = setup.report_from_every_ssrc {
                 options.rtcp_report_from_every_ssrc = every;
             }
