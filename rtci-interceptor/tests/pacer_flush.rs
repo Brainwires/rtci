@@ -156,13 +156,13 @@ fn reads(chain: &mut impl Interceptor, into: &mut Reads) {
     }
 }
 
-/// Runs the pacer's timers up to `until`; returns the sequence numbers of the video packets
-/// and of the RTX packets that left.
+/// Runs the pacer's timers up to `until`, a millisecond at a time; returns the sequence
+/// numbers of the video packets and of the RTX packets that left.
 fn run_until(chain: &mut impl Interceptor, until: Instant) -> (Vec<u16>, Vec<u16>) {
     let mut video = Vec::new();
     let mut rtx = Vec::new();
-    loop {
-        while let Some(packet) = chain.poll_write() {
+    let mut collect = |chain: &mut dyn FnMut() -> Option<TaggedPacket>| {
+        while let Some(packet) = chain() {
             if let Packet::Rtp(rtp) = &packet.message.packet {
                 if rtp.header.ssrc == VIDEO {
                     video.push(rtp.header.sequence_number);
@@ -171,10 +171,20 @@ fn run_until(chain: &mut impl Interceptor, until: Instant) -> (Vec<u16>, Vec<u16
                 }
             }
         }
-        match chain.poll_timeout() {
-            Some(deadline) if deadline <= until => chain.handle_timeout(deadline).unwrap(),
-            _ => break,
+    };
+    collect(&mut || chain.poll_write());
+    let mut last: Option<Instant> = None;
+    while let Some(deadline) = chain.poll_timeout() {
+        // Never the same instant twice: a deadline that does not advance cannot spin here.
+        let now = last.map_or(deadline, |last| {
+            deadline.max(last + Duration::from_millis(1))
+        });
+        if now > until {
+            break;
         }
+        chain.handle_timeout(now).unwrap();
+        collect(&mut || chain.poll_write());
+        last = Some(now);
     }
     (video, rtx)
 }
@@ -344,6 +354,51 @@ fn a_long_queue_without_a_collapse_is_paused_not_flushed() {
     }
 }
 
+/// The target falls in steps. At the first (to 0.7 of what the queue was written for) the
+/// queue is long but the target has not halved: the source is paused. The target goes on
+/// falling during the pause; when it reaches half, the queue is flushed and the pause ends
+/// with it: the source reads the target again and is asked for a key frame.
+#[test]
+fn a_target_that_halves_during_a_pause_flushes_the_queue_and_ends_the_pause() {
+    let epoch = Instant::now();
+    let mut chain = pacer(PacerBacklog::Flush);
+    chain.handle_read(target(epoch, HIGH)).unwrap();
+    for sequence_number in 0..90u16 {
+        chain
+            .handle_write(media(epoch, sequence_number, u32::from(sequence_number)))
+            .unwrap();
+    }
+    let (left, _) = run_until(&mut chain, epoch);
+    chain
+        .handle_read(target(epoch + ms(1), 0.7 * HIGH))
+        .unwrap();
+    let mut seen = Reads::default();
+    reads(&mut chain, &mut seen);
+    assert_eq!(vec![(0.0, Some(0.7 * HIGH))], seen.targets, "paused");
+    assert!(seen.flushes.is_empty() && seen.discards.is_empty());
+
+    chain
+        .handle_read(target(epoch + ms(2), 0.4 * HIGH))
+        .unwrap();
+    let mut seen = Reads::default();
+    reads(&mut chain, &mut seen);
+    assert_eq!(vec![vec![VIDEO]], seen.flushes, "{seen:?}");
+    assert_eq!(vec![VIDEO], seen.key_frames);
+    let discarded: Vec<u16> = seen
+        .discards
+        .iter()
+        .flat_map(|(_, sequence_numbers)| sequence_numbers.clone())
+        .collect();
+    assert_eq!(90 - left.len(), discarded.len(), "the whole queue went");
+    assert_eq!(
+        vec![(0.4 * HIGH, None)],
+        seen.targets,
+        "the pause ended with the queue: the source reads the target"
+    );
+    let (video, _) = run_until(&mut chain, epoch + ms(2_000));
+    assert!(video.is_empty(), "{video:?}");
+}
+
 /// With `PacerBacklog::Keep` the collapse of the first test pauses the source and keeps the
 /// queue: nothing is discarded, and all of it leaves in order.
 #[test]
@@ -368,7 +423,10 @@ fn with_keep_a_collapse_pauses_the_source_and_delivers_the_queue() {
         queued.iter().all(|seq| delivered.contains(seq)),
         "the queue is delivered: {video:?}"
     );
-    assert!(rtx.contains(&901), "and its retransmissions: {rtx:?}");
+    assert!(
+        rtx.contains(&901),
+        "and its retransmissions: {rtx:?} {video:?}"
+    );
 }
 
 /// The NACK responder forgets what was sent before a flush: a NACK for a packet of before is

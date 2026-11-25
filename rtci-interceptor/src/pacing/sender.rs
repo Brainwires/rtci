@@ -327,9 +327,10 @@ impl PacerBuilder {
 ///
 /// By default ([`Backlog::Flush`]) the pause above is for a queue that is long at a steady
 /// target: a key frame larger than a second of the target, a source that is slow to follow.
-/// When the queue is long because **the target collapsed** (a pause would begin, and the
-/// target is now half or less of the highest target in force since the oldest queued new
-/// media was written), the pacer does not pause. It **flushes**: every queued packet is
+/// When the queue is long because **the target collapsed** (a pause would begin or is in
+/// force, and the target is now half or less of the highest target in force since the oldest
+/// queued new media was written), the pacer does not pause, or ends the pause. It
+/// **flushes**: every queued packet is
 /// discarded (new media and FEC through [`PacerDiscard`], whole frames, as below; queued
 /// retransmissions through [`RetransmissionsLeft`]), a [`PacerFlush`] tells the NACK responder
 /// to forget everything sent before on the video streams, so that later NACKs for it are
@@ -799,11 +800,14 @@ impl PacerInterceptor {
             }
             None => self.paused,
         };
-        if change && !self.paused && self.collapsed() {
-            // Not a queue to wait out: the rate it was written for is gone.
+        if (self.paused || change) && self.collapsed() {
+            // Not a queue to wait out: the rate it was written for is gone. Also when the
+            // target goes on falling during a pause that began before it had halved.
             self.paused_for_wait = false;
             self.flush(now);
-            return false;
+            // A pause in force ends with its queue.
+            let was_paused = std::mem::replace(&mut self.paused, false);
+            return was_paused;
         }
         if change {
             self.paused = !self.paused;
