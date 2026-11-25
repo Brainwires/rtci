@@ -379,6 +379,13 @@ pub struct DefaultInterceptorOptions {
     /// libwebrtc's single one (the `Chrome` profile). See
     /// [`CongestionControlBuilder::with_after_drop_probe`](interceptor::CongestionControlBuilder::with_after_drop_probe).
     pub probe_after_drop: interceptor::AfterDropProbe,
+    /// Whether, with [`Self::bandwidth_probing`], the path is probed back towards the rate it
+    /// carried before a large drop of the target for a minute after it (a cluster at twice
+    /// the target every five seconds while the target is below 85% of that rate and the
+    /// estimator does not read over-use). Off by default and in every behaviour profile: it
+    /// is tuning, no specification asks for it and Chrome does not do it. See
+    /// [`CongestionControlBuilder::with_recovery_probing`](interceptor::CongestionControlBuilder::with_recovery_probing).
+    pub recovery_probing: bool,
     /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
     /// extension on audio and video, stamped on a stream's first packets and a frame a
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
@@ -543,6 +550,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("pacer_backlog", &self.pacer_backlog)
             .field("bandwidth_probing", &self.bandwidth_probing)
             .field("probe_after_drop", &self.probe_after_drop)
+            .field("recovery_probing", &self.recovery_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
             .field(
@@ -626,6 +634,7 @@ impl DefaultInterceptorOptions {
             pacer_backlog: interceptor::PacerBacklog::default(),
             bandwidth_probing: true,
             probe_after_drop: interceptor::AfterDropProbe::Repeated,
+            recovery_probing: false,
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
@@ -797,6 +806,7 @@ pub fn register_default_interceptors_with_options(
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
         let probe_after_drop = options.probe_after_drop;
+        let recovery_probing = options.recovery_probing;
         let threshold_time_base = options.gcc_threshold_time_base;
         let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
         let received_rate_bound = options.gcc_received_rate_bound;
@@ -811,6 +821,7 @@ pub fn register_default_interceptors_with_options(
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
                 .with_after_drop_probe(probe_after_drop)
+                .with_recovery_probing(recovery_probing)
                 .with_send_rate_told_to_rtcp(send_rate_told_to_rtcp)
         }
     };

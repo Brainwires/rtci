@@ -933,6 +933,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptor / bandwidth probing: recovery probing, an opt-in** (off by default and in
+  every behaviour profile; ungoverned: it is tuning, no specification asks for it and Chrome
+  does not do it): `ProbeController::with_recovery_probing`,
+  `CongestionControlBuilder::with_recovery_probing`,
+  `DefaultInterceptorOptions::recovery_probing`. A sender that keeps up with its target is
+  asked nothing once the probes after a drop have ended (five seconds after it), so when a
+  capacity that fell comes back, the climb is the delay-based controller's 8% a second. With
+  the setting the highest rate before a large drop is remembered for a minute
+  (`PROBE_DROP_MEMORY`); while the target is below 85% of it and the estimator does not read
+  over-use (`BandwidthEstimator::usage`), a cluster at twice the target is asked for every
+  five seconds (`PROBE_RECOVERY_INTERVAL`), with follow-ons at twice the result while the
+  path carries what is asked. Paced chains only: clusters that leave as bursts are not sent
+  for it, and a path change forgets the remembered rate. WHAT A CALL GAINS AND PAYS, measured
+  on the capacity instrument (default chain, a 2.5 Mbit/s path that drops to 300 kbit/s for
+  20 s, 200 calls a cell, hosted runs 45607015088 without and 45607025736 with the setting,
+  on master f9242b4d with the two probing branches before this one): the target is back at
+  1 Mbit/s 4.9 s after the limit went (5.4 s at most) instead of 17.3 s, and at the
+  2.5 Mbit/s maximum 15 to 25 s after it instead of 1283 kbit/s on average; the same behind
+  a 100 ms queue (17.6 -> 5.0 s) and with both directions limited (16.2 -> 4.8 s); behind a
+  1000 ms queue in nine calls of ten (median 17.6 -> 5.0 s, the slowest tenth 17.5 s). It
+  costs 3% of the target under the limit (238 against 246 kbit/s), and behind a 100 ms queue
+  11 more audio packets lost a call (52 against 41) and a quarter more packets dropped at
+  the queue (201 against 159; with the pacer's backlog kept, `PacerBacklog::Keep`, behind the
+  300 ms queue 149 against 121 in the two-peer test's call); the counts of calls with an old
+  picture, a freeze or an audio gap do not move in any cell. After a limit that outlasts the minute (held 60 s) it gains
+  nothing: 17.6 s against 16.9 s, the rate not back within 20 s in 33 of 200 calls against
+  14. Sent as bursts in a chain without a pacer the gain was the same and the calls with an
+  old picture rose in every cell that had any (both directions limited: 25 -> 31 of 200), so
+  the setting does not act there. The default's figures do not move. Tests: seven in
+  `cc::probe::tests` (`recovery_probing_…`, `a_recovery_cluster_the_path_carries_is_followed_up`,
+  `without_recovery_probing_a_sender_at_its_target_is_not_probed_after_the_drop`),
+  `rtci-interceptor/tests/recovery_probing.rs`, `tests/recovery_probe_requests.rs`,
+  `tests/capacity_cap_video_rtc2rtc.rs::with_recovery_probing_a_call_is_back_at_full_rate_when_the_capacity_returns`.
 - **interceptor / bandwidth probing: the probe after a large drop has three forms**
   (`AfterDropProbe`: `Repeated`, `Libwebrtc`, `Off`), set with
   `ProbeController::with_after_drop_probe`, `CongestionControlBuilder::with_after_drop_probe`

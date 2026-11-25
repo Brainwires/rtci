@@ -200,6 +200,9 @@ pub struct Setup {
     /// in ParolNet's chain, `DefaultInterceptorOptions::bandwidth_probing` in the default
     /// ones); the chain's own default (on) when `None`.
     pub bandwidth_probing: Option<bool>,
+    /// Whether the default chains probe back towards the rate before a large drop
+    /// (`DefaultInterceptorOptions::recovery_probing`; off as the engine has it).
+    pub recovery_probing: bool,
 }
 
 /// What a run may change that no call's quality should depend on: the length of the ICE
@@ -262,6 +265,7 @@ impl Setup {
             gap_wait: None,
             reverse_loss: 0,
             bandwidth_probing: None,
+            recovery_probing: false,
         }
     }
 
@@ -282,6 +286,13 @@ impl Setup {
     /// which is how a call meets a cap at a chosen rate below the path's.
     pub fn without_bandwidth_probing(mut self) -> Self {
         self.bandwidth_probing = Some(false);
+        self
+    }
+
+    /// The default chains with recovery probing
+    /// (`DefaultInterceptorOptions::recovery_probing`).
+    pub fn recovery_probing(mut self) -> Self {
+        self.recovery_probing = true;
         self
     }
 
@@ -770,6 +781,9 @@ impl Peer {
             }
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;
+            }
+            if setup.recovery_probing {
+                options.recovery_probing = true;
             }
             if let Some(immediate) = setup.immediate_congestion_feedback {
                 options.rtcp_immediate_congestion_feedback = immediate;

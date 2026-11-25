@@ -140,6 +140,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
     after_drop_probe: AfterDropProbe,
+    recovery_probing: bool,
     send_rate_told_to_rtcp: bool,
 }
 
@@ -153,6 +154,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
             after_drop_probe: AfterDropProbe::default(),
+            recovery_probing: false,
             send_rate_told_to_rtcp: false,
         }
     }
@@ -234,6 +236,32 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// Whether, with bandwidth probing on, the path is probed back towards the rate it
+    /// carried before a large drop of the target for as long as that rate is remembered (a
+    /// minute): a cluster at twice the target every five seconds while the target is below
+    /// 85% of it and the estimator does not read the path as over-used
+    /// ([`BandwidthEstimator::usage`]), with further clusters while the path carries what is
+    /// asked. Off by default, in every behaviour profile
+    /// (`DefaultInterceptorOptions::recovery_probing`): it is tuning, with no specification
+    /// behind it, and Chrome does not do it.
+    ///
+    /// Without it a sender that keeps up with its target climbs back from a limit that has
+    /// gone at the delay-based controller's 8% a second (about 17 s from 250 kbit/s to
+    /// 1 Mbit/s); with it the next cluster finds the path, within five seconds. Measured
+    /// (capacity instrument, 200 calls a cell, a 20 s limit of 300 kbit/s on a 2.5 Mbit/s
+    /// path): 1 Mbit/s 4.9 s after the limit went against 17.3 s, and the full rate from
+    /// then on; it costs 3% of the target under the limit (238 against 246 kbit/s) and,
+    /// behind a 100 ms queue, 11 more audio packets lost a call (52 against 41); it gains
+    /// nothing after a limit longer than the minute the rate is remembered. All the
+    /// figures, why no specification asks for it and what libwebrtc does instead:
+    /// [`ProbeController::with_recovery_probing`](crate::ProbeController::with_recovery_probing).
+    /// It needs the pacer of the same chain: a chain whose clusters leave as bursts is not
+    /// probed this way.
+    pub fn with_recovery_probing(mut self, recovery_probing: bool) -> Self {
+        self.recovery_probing = recovery_probing;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         self.build_with_handle().0
@@ -250,6 +278,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         let probing = self.bandwidth_probing.then(|| {
             ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY)
                 .with_after_drop_probe(self.after_drop_probe)
+                .with_recovery_probing(self.recovery_probing)
         });
         (
             CongestionControlInterceptor {
