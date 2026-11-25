@@ -369,6 +369,7 @@ fn a_target_that_halves_during_a_pause_flushes_the_queue_and_ends_the_pause() {
             .unwrap();
     }
     let (left, _) = run_until(&mut chain, epoch);
+    reads(&mut chain, &mut Reads::default());
     chain
         .handle_read(target(epoch + ms(1), 0.7 * HIGH))
         .unwrap();
@@ -406,6 +407,7 @@ fn with_keep_a_collapse_pauses_the_source_and_delivers_the_queue() {
     let epoch = Instant::now();
     let mut chain = pacer(PacerBacklog::Keep);
     let queued = backlog_at_the_high_rate(&mut chain, epoch);
+    reads(&mut chain, &mut Reads::default());
     let fall = epoch + ms(10);
     chain.handle_read(target(fall, LOW)).unwrap();
     chain.handle_timeout(fall).unwrap();
