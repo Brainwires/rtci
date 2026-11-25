@@ -103,19 +103,26 @@
 //! beyond the same threshold and fails when that count is improbable under the baseline: more
 //! than the binomial critical value at [`TRIPWIRE_ALPHA`] = 0.002 for a share equal to the
 //! upper end of the baseline share's 95 % Wilson interval (the stated tolerance: the baseline
-//! is itself a sample). With 60 runs a tripwire at a 90th percentile (12 % allowed for) fails
-//! above 15 runs: a change that puts 25 % of runs beyond it is caught with probability 0.43,
-//! 40 % with 0.99; one at a median fails above 43: 75 % beyond is caught with 0.68, 85 % with
-//! 0.99. Tripwires are for gross regressions on every pull request; the fine comparison is the
-//! dispatched one (`capacity-compare.yml`, docs/capacity-instrument.md).
+//! is itself a sample). With 60 runs a threshold that a tenth of the baseline's runs were
+//! beyond (12 % allowed for) fails above 15 runs: a change that puts 25 % of runs beyond it is
+//! caught with probability 0.43, 40 % with 0.99; one that half were beyond fails above 43: 75 %
+//! beyond is caught with 0.68, 85 % with 0.99. (With the tenth of slack a median's threshold
+//! has fewer than half of the baseline beyond it: 16 % in the reference cell, whose oldest
+//! picture is 9.0 s with a spread of 0.9 s, so a picture one second older, which puts over half
+//! of the runs beyond it, is caught.) Tripwires are for gross regressions on every pull
+//! request; the fine comparison is the dispatched one (`capacity-compare.yml`,
+//! docs/capacity-instrument.md).
 //!
 //! # Run modes
 //!
 //! - `cargo test --test capacity_instrument`: the figures' and the statistics' unit tests and
 //!   the determinism check (debug build, every platform).
 //! - `cargo test --release --test capacity_instrument -- --ignored ensemble_`: the pull-request
-//!   ensemble ([`PR_CELLS`]): the tripwires of every cell and the requirements the engine
-//!   meets. Release build: a run takes about 0.65 s of a four-core hosted runner.
+//!   ensemble ([`PR_CELLS`], 606 runs): the tripwires of every cell and the requirements the
+//!   engine meets in ParolNet's chain. Release build: a run takes 1.7 to 7.4 s of one core
+//!   (3.1 s on average over the ensemble), about eight minutes on a four-core hosted runner.
+//! - `cargo test --release --test capacity_instrument -- --ignored on_demand_`: a requirement
+//!   the engine meets whose 300 runs do not fit the pull-request job.
 //! - `cargo test --release --test capacity_instrument -- --ignored known_limit_`: the
 //!   requirements the engine does not meet today (they fail, with the figures).
 //! - `cargo test --release --test capacity_instrument -- --ignored --nocapture --exact
@@ -1003,24 +1010,25 @@ const PR_SEED_BASE: u64 = 5000;
 /// cross is `measure`'s and the dispatched comparison's.
 const PR_CELLS: [(&str, usize); 13] = [
     ("cap/paced/gap300/up/q300/rl0", 60),
-    ("cap/paced/gap0/up/q300/rl0", 60),
-    ("cap/nopacer/gap300/up/q300/rl0", 60),
-    ("cap/nopacer/gap0/up/q300/rl0", 40),
-    ("cap/paced/gap300/both/q300/rl0", 40),
-    ("cap/nopacer/gap300/both/q300/rl0", 30),
-    ("cap/paced/gap300/up/q100/rl0", 30),
-    ("cap/paced/gap300/up/q1000/rl0", 30),
-    ("cap/paced/gap300/up/q300/rl5", 30),
-    ("outage/paced/gap300/up/q300/rl0", 30),
-    ("cap/parolnet/gap0/up/q300/rl0", 30),
-    // The cells a requirement is met in: the runs its test needs.
+    ("cap/paced/gap0/up/q300/rl0", 40),
+    ("cap/nopacer/gap300/up/q300/rl0", 40),
+    ("cap/nopacer/gap0/up/q300/rl0", 20),
+    ("cap/paced/gap300/both/q300/rl0", 30),
+    ("cap/nopacer/gap300/both/q300/rl0", 20),
+    ("cap/paced/gap300/up/q100/rl0", 12),
+    ("cap/paced/gap300/up/q1000/rl0", 12),
+    ("cap/paced/gap300/up/q300/rl5", 12),
+    ("outage/paced/gap300/up/q300/rl0", 20),
+    (MET_OUTAGE, 20),
+    ("cap/parolnet/gap0/up/q300/rl0", 20),
+    // The cell the requirements are met in: the runs their tests need.
     (MET_CAP, REQUIREMENT_RUNS),
-    (MET_OUTAGE, REQUIREMENT_RUNS),
 ];
 
-/// The cells in which the engine meets requirements today, asserted on every pull request:
-/// the capacity drop in ParolNet's chain (no pacer, the TWCC-driven estimator) with the
-/// reference receiver, and the outage in the default chain without the pacer.
+/// The cells in which the engine meets requirements today: the capacity drop in ParolNet's
+/// chain (no pacer, the TWCC-driven estimator) with the reference receiver, asserted on every
+/// pull request, and the outage in the default chain without the pacer, asserted on demand
+/// (300 more runs would not fit the pull-request job; its tripwires hold it meanwhile).
 const MET_CAP: &str = "cap/parolnet/gap300/up/q300/rl0";
 const MET_OUTAGE: &str = "outage/nopacer/gap300/up/q300/rl0";
 
@@ -1063,10 +1071,9 @@ fn ensemble_requirement_audio_in_parolnets_chain() -> Result<()> {
 }
 
 #[test]
-#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
-fn ensemble_requirement_resume_after_an_outage_without_the_pacer() -> Result<()> {
-    RESUME.assert_met(MET_OUTAGE, pr_rows(MET_OUTAGE)?);
-    Ok(())
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_resume_after_an_outage_without_the_pacer() -> Result<()> {
+    RESUME.test(MET_OUTAGE)
 }
 
 // Requirements the engine does NOT meet today. Not loosened: each test states the requirement
@@ -1075,55 +1082,55 @@ fn ensemble_requirement_resume_after_an_outage_without_the_pacer() -> Result<()>
 // level. When the engine meets one, its test moves up among the `ensemble_requirement_` ones.
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 63e1b8b8 (required: at most 5 %); the oldest picture is 9.0 s in the median"]
 fn known_limit_picture_in_the_default_chain() -> Result<()> {
     PICTURE.test(DEFAULT_CHAIN)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 1000 of 1000 runs on master 63e1b8b8 (required: at most 5 %); 8.7 s in the median"]
 fn known_limit_freeze_in_the_default_chain() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: more than 1 s without audio in 89 of 1000 runs on master 63e1b8b8, 8.9 % (required: at most 5 %): the circuit breaker ceases the audio and it never returns"]
 fn known_limit_audio_in_the_default_chain() -> Result<()> {
     AUDIO.test(DEFAULT_CHAIN)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 63e1b8b8 (required: at most 5 %); the oldest picture is 8.3 s in the median"]
 fn known_limit_picture_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
     PICTURE.test(DEFAULT_CHAIN_NO_BOUND)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: more than 2 s without a new picture of any age in 272 of 1000 runs on master 63e1b8b8, 27.2 % (required: at most 5 %)"]
 fn known_limit_freeze_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN_NO_BOUND)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 14 of 200 runs on master 63e1b8b8, 7.0 % (required: at most 5 %)"]
 fn known_limit_picture_without_the_pacer() -> Result<()> {
     PICTURE.test(WITHOUT_PACER)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 11 of 200 runs on master 63e1b8b8, 5.5 %, interval 3.1 to 9.6 % (required: at most 5 %; not shown to be met)"]
 fn known_limit_freeze_without_the_pacer() -> Result<()> {
     FREEZE.test(WITHOUT_PACER)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 200 of 200 runs on master 63e1b8b8 (required: at most 5 %); 20.4 s in the median, and 8.5 % of runs never show a new picture again"]
 fn known_limit_picture_with_both_directions_capped() -> Result<()> {
     PICTURE.test(BOTH_DIRECTIONS)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: PENDING"]
+#[ignore = "KNOWN LIMIT: no new picture within 2 s of the new pair in 134 of 200 runs on master 63e1b8b8, 67 % (required: at most 5 %)"]
 fn known_limit_resume_after_an_outage_in_the_default_chain() -> Result<()> {
     RESUME.test(OUTAGE_DEFAULT_CHAIN)
 }
