@@ -29,3 +29,20 @@ bench = "DTLS/Setup/AES-256-CBC/*"
 max_ratio = 7.5
 ledger = "zeroize-1"
 note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x5.65 in one job against master (45665836618)"
+
+# The next two are documentation entries: these benches came with perf-1, so master (the pull
+# request's base) has none of them and the pull-request job reports them as new, never compared.
+# Ratios measured against the tree before key erasure with the benches (train 34 round 7,
+# 58ba8a93), 3 rounds, run 45707098937: CCM x8.21 (rounds 7.83-8.34), CCM-8 x6.77 (6.39-6.88),
+# ChaCha20-Poly1305 x11.27 (10.95-11.71).
+[[accepted]]
+bench = "DTLS/Setup/AES-128-CCM*"
+max_ratio = 11.0
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x8.21 (CCM) / x6.77 (CCM-8) against 58ba8a93 in run 45707098937"
+
+[[accepted]]
+bench = "DTLS/Setup/CHACHA20-POLY1305/*"
+max_ratio = 15.0
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x11.27 against 58ba8a93 in run 45707098937"
