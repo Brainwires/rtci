@@ -1068,6 +1068,68 @@ fn with_the_backlog_kept_a_capacity_collapse_asks_the_application_for_nothing() 
     Ok(())
 }
 
+/// Recovery probing (`DefaultInterceptorOptions::recovery_probing`, off by default) in the
+/// default chain, through the peer connection's option: after the 20 s at 300 kbit/s the
+/// path is open again. Without the setting a sender that keeps up with its target is asked
+/// nothing more once the probes after the drop have ended, and climbs at the 8% a second of
+/// draft-ietf-rmcat-gcc-02 section 5.5: ten seconds after the limit went its target is still
+/// under 1 Mbit/s (over 1000 calls of the capacity instrument's reference cell the earliest
+/// 1 Mbit/s is 12.3 s after it, the median 17.3 s). With the setting the next cluster, five
+/// seconds at most after the limit went, finds the path and its follow-ons take the target
+/// to the maximum: at the ten-second reading it is there (on the instrument 4.9 s in the
+/// median, 5.4 s at most, of 200 calls). What the time under the limit costs is the
+/// clusters themselves: the target under the limit stays within 30 kbit/s of the other
+/// (8 kbit/s on the instrument's average), and the limited link's queue drops no more
+/// packets than the setting's extra padding put into it. Measured here (hosted run
+/// 45622897675, the pacer's backlog kept as in this file): 5 s after the limit went the
+/// target is 2.5 Mbit/s against 351 kbit/s, 10 s after it 2.5 Mbit/s against 516 kbit/s;
+/// 148 padding packets a call against 51, 149 packets dropped at the queue against 121.
+#[test]
+fn with_recovery_probing_a_call_is_back_at_full_rate_when_the_capacity_returns() -> Result<()> {
+    for seed in seed_range(1, 3) {
+        let setup = Setup::new(seed, None)
+            .chain(Chain::Default)
+            .anchor(ANCHORS[0]);
+        let without = run(&setup)?;
+        let with = run(&setup.recovery_probing())?;
+        println!(
+            "RECOVERY-PROBING seed {seed}: target 5 / 10 / 15 / 20 s after the limit went: without {:?}, with {:?}; under the limit {} / {} bit/s; queue drops {} / {}; padding {} / {}",
+            without.recovery,
+            with.recovery,
+            without.under,
+            with.under,
+            without.queue_drops,
+            with.queue_drops,
+            without.padding_sent,
+            with.padding_sent
+        );
+        assert!(
+            without.recovery[1] < 1_000_000,
+            "seed {seed}: without the setting the climb is the controller's: {without:?}"
+        );
+        assert!(
+            with.recovery[1] >= MAX_BPS / 100 * 95,
+            "seed {seed}: with the setting the target is back at the maximum: {with:?}"
+        );
+        assert!(
+            with.under + 30_000 >= without.under,
+            "seed {seed}: the target under the limit: {} against {}",
+            with.under,
+            without.under
+        );
+        assert!(
+            with.queue_drops.saturating_sub(without.queue_drops)
+                <= with.padding_sent.saturating_sub(without.padding_sent),
+            "seed {seed}: queue drops {} against {}, padding {} against {}",
+            with.queue_drops,
+            without.queue_drops,
+            with.padding_sent,
+            without.padding_sent
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // Read through `Debug`.
 struct PathChangeOutcome {

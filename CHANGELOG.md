@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PacerBuilder::with_backlog(PacerBacklog::Keep)`. `DefaultInterceptorOptions` has a new
   public field, `pacer_backlog`: a struct literal without `..Default::default()` no longer
   compiles.
+  Performance: flush-1r
 - **media** (`conf/flush-2-receiver-gap-bound`): `SampleBuilder` gives a gap up by default.
   A builder of a video format (`Depacketizer::has_key_frames`: VP8, VP9, AV1, H.264, H.265)
   (1) waits for a missing packet at most `DEFAULT_MAX_GAP_WAIT`, 300 ms from the arrival of the
@@ -42,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured best of 300, 600 and 1000 ms, and libwebrtc's receiver (3 s without a decodable
   frame, 200 ms while waiting for a key frame) is `rtci-video`'s `ReceiveConfig::chrome()`:
   `docs/receiver-gap-policy.md`.
+  Performance: flush-2
 
 - **interceptor, peer connection** (breaker-1): `DefaultInterceptorOptions` has two new public
   fields, `circuit_breaker` and `circuit_breaker_automatic_restart` (both `true`; see "Fixed"
@@ -61,6 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's `ice` group. **Migration**: a struct literal of either adds `..Default::default()`
   or `consent_response_wait: ConsentResponseWait::Rto`. `stun::timer::RtoEstimator` is now
   `Copy` (an addition).
+  Performance: ice-26-consent
 
 - **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
@@ -396,6 +399,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feedback naming every number, requests and lost reports without end against the rate
   limit, and the sizes of what is remembered (`nack_repeat_repairs.rs`,
   `nack::responder::tests`, `twcc::sender::tests`); each rule has a mutation a test catches.
+  Performance: rtx-1r2
 
 - **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
   6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
@@ -436,6 +440,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells of 100 ms reordering at 2 Mbit/s, higher (1 %: 331 -> 340 kbit/s, 5 %: 100 -> 218);
   the rate-limited link 574 / 539 / 535 kbit/s (574 / 538 / 535). Audit row GCC-5.4-4 is
   `tested`.
+  Performance: gcc-9
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
@@ -933,6 +938,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptor / bandwidth probing: recovery probing, an opt-in** (off by default and in
+  every behaviour profile; ungoverned: it is tuning, no specification asks for it and Chrome
+  does not do it): `ProbeController::with_recovery_probing`,
+  `CongestionControlBuilder::with_recovery_probing`,
+  `DefaultInterceptorOptions::recovery_probing`. A sender that keeps up with its target is
+  asked nothing once the probes after a drop have ended (five seconds after it), so when a
+  capacity that fell comes back, the climb is the delay-based controller's 8% a second. With
+  the setting the highest rate before a large drop is remembered for a minute
+  (`PROBE_DROP_MEMORY`); while the target is below 85% of it and the estimator does not read
+  over-use (`BandwidthEstimator::usage`), a cluster at twice the target is asked for every
+  five seconds (`PROBE_RECOVERY_INTERVAL`), with follow-ons at twice the result while the
+  path carries what is asked. Paced chains only: clusters that leave as bursts are not sent
+  for it, and a path change forgets the remembered rate. WHAT A CALL GAINS AND PAYS, measured
+  on the capacity instrument (default chain, a 2.5 Mbit/s path that drops to 300 kbit/s for
+  20 s, 200 calls a cell, hosted runs 45607015088 without and 45607025736 with the setting,
+  on master f9242b4d with the two probing branches before this one): the target is back at
+  1 Mbit/s 4.9 s after the limit went (5.4 s at most) instead of 17.3 s, and at the
+  2.5 Mbit/s maximum 15 to 25 s after it instead of 1283 kbit/s on average; the same behind
+  a 100 ms queue (17.6 -> 5.0 s) and with both directions limited (16.2 -> 4.8 s); behind a
+  1000 ms queue in nine calls of ten (median 17.6 -> 5.0 s, the slowest tenth 17.5 s). It
+  costs 3% of the target under the limit (238 against 246 kbit/s), and behind a 100 ms queue
+  11 more audio packets lost a call (52 against 41) and a quarter more packets dropped at
+  the queue (201 against 159; with the pacer's backlog kept, `PacerBacklog::Keep`, behind the
+  300 ms queue 149 against 121 in the two-peer test's call); the counts of calls with an old
+  picture, a freeze or an audio gap do not move in any cell. After a limit that outlasts the minute (held 60 s) it gains
+  nothing: 17.6 s against 16.9 s, the rate not back within 20 s in 33 of 200 calls against
+  14. Sent as bursts in a chain without a pacer the gain was the same and the calls with an
+  old picture rose in every cell that had any (both directions limited: 25 -> 31 of 200), so
+  the setting does not act there. The default's figures do not move. Tests: seven in
+  `cc::probe::tests` (`recovery_probing_…`, `a_recovery_cluster_the_path_carries_is_followed_up`,
+  `without_recovery_probing_a_sender_at_its_target_is_not_probed_after_the_drop`),
+  `rtci-interceptor/tests/recovery_probing.rs`, `tests/recovery_probe_requests.rs`,
+  `tests/capacity_cap_video_rtc2rtc.rs::with_recovery_probing_a_call_is_back_at_full_rate_when_the_capacity_returns`.
 - **interceptor / bandwidth probing: the probe after a large drop has three forms**
   (`AfterDropProbe`: `Repeated`, `Libwebrtc`, `Off`), set with
   `ProbeController::with_after_drop_probe`, `CongestionControlBuilder::with_after_drop_probe`
@@ -1409,9 +1447,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the named instants, a STUN consent datagram (RFC 7675) meets the full link queue in the
   overload after the drop in 30.6 % of calls instead of 25.2 %, and a peer reports
   `disconnected` for a moment in 17.4 % instead of 12.8 % (behind a 1000 ms queue 21.2 %
-  instead of 14.0 % of 400). Each is the transient that one lost consent check gives (median
-  0.5 s, longest 1.2 s; no peer stayed disconnected, none failed), and the picture, audio and
-  recovery figures do not move. STUN does not pass the pacer; the drop is the link's.
+  instead of 14.0 % of 400). Most are the transient that one lost consent check gives (in that
+  cell: median 0.5 s, longest 1.1 s of 1000 calls; no peer stayed disconnected, none failed),
+  and the picture, audio and recovery figures do not move. Not every episode is that short:
+  over the six paced cells of the instrument's record on the landing tree (train 34 round 1,
+  629 calls with an episode, median 0.6 s) 10 calls had one longer than 2 s, the longest 6.58 s
+  behind a 100 ms queue and 9.20 s with 5 % loss on the reverse path, where 2 of 200 calls were
+  still outside `connected` at the end of the run; long single episodes and those 2 of 200 are
+  there without this change too (5.92 s and 6.31 s the longest, 2 of 200). STUN does not pass
+  the pacer; the drop is the link's.
 - **Bandwidth probing in a chain without a pacer never got a result** (in 0.1.0 too). A probe
   cluster was measured on the packets the pacer marked as the cluster's; with the pacer taken
   out of the default interceptors (or in any chain built without one) nothing marked a packet,
@@ -1606,6 +1650,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   green). The pacer now keeps the minimum that rode with the controller's last target and
   attaches it to its own announcements.
   `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
+  Performance: breaker-2
 
 - **rtci (statistics): `availableOutgoingBitrate` survives `set_parameters` during a pacer
   pause** (`conf/breaker-2-pacer-ceased-flow`). `RTCRtpSender::set_parameters` divides the
@@ -1848,6 +1893,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derives, its AES round keys, GHASH key and HMAC-SHA1 states, computed by the tests themselves,
   are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`, class C
   instead of E: see Known limits).
+- **benchmarks compared on every pull request; a performance ledger**
+  (`conf/perf-1-ledger-and-bench-gate`): the pull-request job "Benchmarks compared with the
+  base" of `bench.yml` builds the pull request and its base on one runner and runs every
+  criterion bench of both in alternating rounds (`scripts/bench-compare.sh`), and fails when a
+  bench is slower in every round than the measured noise allows unless
+  `benches/accepted-regressions.toml` accepts it with a ledger row (`scripts/bench-compare.py`).
+  New benches: every DTLS 1.2 record cipher (AES-CCM, AES-CCM-8 and ChaCha20-Poly1305 added) and
+  a whole in-memory DTLS 1.2 handshake (`rtci-dtls/benches/record_protection.rs`); the pacer, the
+  NACK responder, GCC feedback handling and ULPFEC encoding (`rtci-interceptor/benches/interceptor.rs`).
+  The once-per-merge run that feeds the published history runs on pushes to master only and now
+  includes `rtci-dtls` and `rtci-interceptor`. `docs/performance.md` records every measured
+  performance decision (accepted, queued or refused) with its figures, guard and runs; a CHANGELOG
+  entry that moves a measured figure carries a line `Performance: <row id>`, and
+  `scripts/check-performance-ledger.py` holds the tags, the allowlist and the rows' files and
+  tests to the tree.
+  Performance: perf-1
 
 - **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
   (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
