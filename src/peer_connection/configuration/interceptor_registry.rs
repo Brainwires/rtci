@@ -374,8 +374,11 @@ pub struct DefaultInterceptorOptions {
     /// negotiated; a negotiated `trr-int` replaces it. See
     /// [`RtcpSessionBuilder::with_t_rr_interval`](interceptor::RtcpSessionBuilder::with_t_rr_interval).
     pub rtcp_t_rr_interval: Duration,
-    /// Whether congestion control feedback leaves as soon as it is built (`true`, the default)
-    /// or waits its turn under RFC 4585 section 3.5.2 like other feedback. See
+    /// Whether congestion control feedback leaves as soon as it is built, outside the RTCP
+    /// bandwidth (`true`, the `Chrome` behaviour profile: libwebrtc sends it on a timer of its
+    /// own), or takes its turn under RFC 4585 section 3.5.2 like other feedback (`false`, the
+    /// default): section 3.2, "FB messages are part of the RTCP control streams and thus
+    /// subject to the RTCP bandwidth constraints". See
     /// [`RtcpSessionBuilder::with_immediate_congestion_feedback`](interceptor::RtcpSessionBuilder::with_immediate_congestion_feedback).
     pub rtcp_immediate_congestion_feedback: bool,
     /// Whether every local SSRC carries a report block for every remote SSRC and for the
@@ -583,7 +586,7 @@ impl DefaultInterceptorOptions {
             bandwidth_probing: true,
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
-            rtcp_immediate_congestion_feedback: true,
+            rtcp_immediate_congestion_feedback: false,
             rtcp_report_from_every_ssrc: false,
             twcc_rereport_received: false,
             gcc_threshold_time_base: interceptor::ThresholdTimeBase::Arrival,

@@ -864,8 +864,8 @@ governed_behaviours! {
     {
         id: "rtcp.immediate-congestion-feedback",
         setting: "DefaultInterceptorOptions::rtcp_immediate_congestion_feedback",
-        clause: "RFC 4585 3.5.2",
-        rfc: true => "true",
+        clause: "RFC 4585 3.2, 3.5.2",
+        rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
         chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::TransportSequenceNumberFeedbackGenenerator::Process @ a222406d: transport-wide feedback goes on its own timer, every 100 ms (kDefaultInterval) adjusted between 50 and 250 ms to the bitrate, outside the RTCP report schedule",

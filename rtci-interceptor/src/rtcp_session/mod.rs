@@ -1667,8 +1667,12 @@ impl RtcpSessionInterceptor {
             return false;
         }
 
-        self.rate
-            .add(now, header.marshal_size() + packet.payload.len());
+        // RFC 3550 6.2: "Bandwidth calculations for control and data traffic include lower-
+        // layer transport and network protocols (e.g., UDP and IP)".
+        self.rate.add(
+            now,
+            LOWER_LAYER_OVERHEAD + header.marshal_size() + packet.payload.len(),
+        );
         self.heard(now, arrival_ssrc, true);
         for &csrc in &header.csrc {
             self.heard(now, csrc, false);
@@ -3088,8 +3092,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                     local.stream.process_rtp(now, packet);
                     local.last_rtp = Some(now);
                     local.rtp_sent = true;
-                    self.rate
-                        .add(now, packet.header.marshal_size() + packet.payload.len());
+                    self.rate.add(
+                        now,
+                        LOWER_LAYER_OVERHEAD + packet.header.marshal_size() + packet.payload.len(),
+                    );
                     // A repair SSRC joins with its first packet.
                     self.sync(now);
                 }
