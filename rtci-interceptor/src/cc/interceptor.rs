@@ -3,7 +3,8 @@
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::probe::{
-    PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate, probe_estimate,
+    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate,
+    probe_estimate,
 };
 use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
@@ -138,6 +139,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
+    after_drop_probe: AfterDropProbe,
     send_rate_told_to_rtcp: bool,
 }
 
@@ -150,6 +152,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
+            after_drop_probe: AfterDropProbe::default(),
             send_rate_told_to_rtcp: false,
         }
     }
@@ -223,6 +226,14 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// With bandwidth probing on, what is probed for after a large drop of the target:
+    /// [`AfterDropProbe`] (the engine's repeated probe by default, libwebrtc's single one, or
+    /// none).
+    pub fn with_after_drop_probe(mut self, after_drop_probe: AfterDropProbe) -> Self {
+        self.after_drop_probe = after_drop_probe;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         self.build_with_handle().0
@@ -236,9 +247,10 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             stats: self.estimator.stats(),
             ..Shared::default()
         }));
-        let probing = self
-            .bandwidth_probing
-            .then(|| ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY));
+        let probing = self.bandwidth_probing.then(|| {
+            ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY)
+                .with_after_drop_probe(self.after_drop_probe)
+        });
         (
             CongestionControlInterceptor {
                 tmmbn_owed: false,
@@ -861,6 +873,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         };
         if path_changed {
             self.estimator.on_path_change(now);
+            self.restart_probing(now);
         }
 
         let max = [session, remb, tmmbr, breaker]
@@ -919,13 +932,26 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
     /// likewise "only reports packets sent on the new route"
     /// (`RtpTransportControllerSend::OnNetworkRouteChanged`,
     /// `TransportFeedbackAdapter::SetNetworkRoute`). The probe clusters in flight go with
-    /// them: their packets are among those forgotten.
+    /// them: their packets are among those forgotten. And probing starts over
+    /// ([`restart_probing`](Self::restart_probing)).
     fn on_new_path(&mut self, now: Instant) {
         self.estimator.on_path_change(now);
         self.history.forget_sent();
         self.probe_packets.clear();
         self.probe_clusters.clear();
         self.probe_asked = None;
+        self.restart_probing(now);
+    }
+
+    /// After the estimator started over on a new path: the probe controller starts over from
+    /// the estimator's rate now ([`ProbeController::on_path_change`]). The estimator's fall
+    /// to its starting rate is not a capacity drop to probe after, and the new path's rate is
+    /// looked for as the first path's was.
+    fn restart_probing(&mut self, now: Instant) {
+        let start = self.estimator.target_bitrate();
+        if let Some(probing) = self.probing.as_mut() {
+            probing.on_path_change(now, start);
+        }
     }
 
     /// Bits per second sent over the last second.
@@ -1029,6 +1055,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         let target = self.estimator.target_bitrate();
         let sending = self.sending_rate(now);
         let media_flowing = !self.sent.is_empty();
+        let usage = self.estimator.usage();
         let max = [self.applied_max.flatten(), self.estimator.max_bitrate()]
             .into_iter()
             .flatten()
@@ -1038,6 +1065,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             return;
         };
         probing.set_max_bitrate(max);
+        probing.set_usage(usage);
         if let Some(request) = probing.poll(now, target, sending, media_flowing) {
             self.probe_asked = Some((request.cluster, now));
             self.read_queue.push_back(request.into_packet(now));

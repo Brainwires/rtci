@@ -37,7 +37,7 @@
 //! have no result is not made again.
 
 use crate::rtpfb::acknowledgement::PacketReport;
-use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket, Usage};
 use shared::TransportContext;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -77,6 +77,55 @@ const PROBE_AFTER_DROP_DELAY: Duration = Duration::from_secs(1);
 const PROBE_AFTER_DROP_INTERVAL: Duration = Duration::from_secs(1);
 /// A probe after a drop asks for this share of the rate before it.
 const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
+/// [`AfterDropProbe::Libwebrtc`]: how long after the sender stopped being application limited
+/// a drop is still probed (libwebrtc `kAlrEndedTimeout`).
+const ALR_ENDED_TIMEOUT: Duration = Duration::from_secs(3);
+/// [`AfterDropProbe::Libwebrtc`]: the least time between two probes after a drop (libwebrtc
+/// `kMinTimeBetweenAlrProbes`).
+const LIBWEBRTC_DROP_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// [`AfterDropProbe::Libwebrtc`]: the probe is asked only when 95% of it is above the
+/// estimate (libwebrtc `kProbeUncertainty`).
+const LIBWEBRTC_PROBE_UNCERTAINTY: f64 = 0.05;
+
+/// What is probed for after a large drop of the target
+/// ([`ProbeController::with_after_drop_probe`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AfterDropProbe {
+    /// The engine's form, and the default. A drop of the target below two thirds of its high
+    /// of the last two seconds is followed, from a second on and once a second for five
+    /// seconds, by a cluster at 85% of that high while the target is still below it, whether
+    /// or not the sender is application limited.
+    ///
+    /// No specification says how to probe after a drop (RFC 8836 section 2, 1f, asks only
+    /// that a flow regain its share quickly), so the default is the form the capacity
+    /// instrument measured best (`tests/capacity_instrument.rs`; the default chain, a
+    /// 2.5 Mbit/s path that drops to 300 kbit/s for 20 s; 1000 calls in each of the two
+    /// reference cells and 200 in six others, each form against this one by the merge-point
+    /// rule of `docs/capacity-instrument.md`). Without a probe ([`Off`](Self::Off)) and with
+    /// libwebrtc's ([`Libwebrtc`](Self::Libwebrtc), which never fires for a sender that
+    /// keeps up with its target, so the two measure alike) seven figures are worse: with
+    /// both directions limited the oldest picture is 3.07 s against 2.64 s, with 5% of the
+    /// feedback lost the rate is not back within 20 s in 30 (24) of 200 calls against 2, and
+    /// the target 15 to 25 s after the limit is 1205 against 1278 kbit/s. Asking for the
+    /// highest rate of the last minute instead of the last drop's own high (the rate before
+    /// the limit, not the peak of the controller's sawtooth under it) makes fifteen figures
+    /// worse (audio packets lost 27 -> 35 a call, behind a 1000 ms queue over 2 s without a
+    /// new picture in 33 of 200 calls against 6) and was not taken. What this form costs
+    /// against no probe: behind a 1000 ms queue 96 audio packets lost a call against 66, and
+    /// under a limit that lasts a minute 74 against 45.
+    #[default]
+    Repeated,
+    /// libwebrtc's form (`ProbeController::RequestProbe`, goog_cc `probe_controller.cc`): a
+    /// drop is one update of the estimate below two thirds of the one before it; one cluster
+    /// at 85% of the estimate before the drop, asked when the delay-based detector has
+    /// returned to normal after the drop ([`ProbeController::set_usage`]: under-use, then
+    /// normal), only while the sender is application limited or was within the last three
+    /// seconds, within five seconds of the drop, at most once in five seconds, and only when
+    /// 95% of that rate is above the estimate.
+    Libwebrtc,
+    /// No probe after a drop: the climb back is the delay-based controller's.
+    Off,
+}
 
 /// A probe cluster the congestion controller asks for.
 ///
@@ -259,9 +308,9 @@ pub struct ProbeController {
     /// A further cluster owed after a result that confirmed its rate.
     further: Option<f64>,
     max_bitrate: f64,
-    /// Whether the rate before a large drop is probed for (see
-    /// [`with_probe_after_drop`](Self::with_probe_after_drop)).
-    after_drop: bool,
+    /// What is probed for after a large drop (see
+    /// [`with_after_drop_probe`](Self::with_after_drop_probe)).
+    after_drop: AfterDropProbe,
     /// The highest target of the last [`LARGE_DROP_WINDOW`], and when it was.
     peak: Option<(f64, Instant)>,
     /// The last large drop: the target before it, and when it happened.
@@ -272,6 +321,20 @@ pub struct ProbeController {
     polled_at: Option<Instant>,
     /// Whether clusters leave as bursts of padding ([`set_unpaced`](Self::set_unpaced)).
     unpaced: bool,
+    /// The target at the last [`poll`](Self::poll).
+    last_target: Option<f64>,
+    /// [`AfterDropProbe::Libwebrtc`]: the last update of the target below two thirds of the
+    /// one before it: the target before it, and when.
+    step_drop: Option<(f64, Instant)>,
+    /// [`AfterDropProbe::Libwebrtc`]: when a probe after a drop was last asked for.
+    last_drop_probe: Option<Instant>,
+    /// Whether the sender is application limited, and when it last stopped being so.
+    application_limited: bool,
+    application_limited_ended: Option<Instant>,
+    /// The estimator's reading of the path ([`set_usage`](Self::set_usage)), and whether it
+    /// has returned from under-use to normal since the last poll.
+    usage: Usage,
+    recovered_from_overuse: bool,
 }
 
 impl ProbeController {
@@ -290,17 +353,44 @@ impl ProbeController {
             last_probe: None,
             further: None,
             max_bitrate,
-            after_drop: true,
+            after_drop: AfterDropProbe::default(),
             peak: None,
             drop: None,
             drop_probe: false,
             polled_at: None,
             unpaced: false,
+            last_target: None,
+            step_drop: None,
+            last_drop_probe: None,
+            application_limited: false,
+            application_limited_ended: None,
+            usage: Usage::Normal,
+            recovered_from_overuse: false,
         }
     }
 
+    /// What is probed for after a large drop of the target: [`AfterDropProbe`].
+    pub fn with_after_drop_probe(mut self, after_drop: AfterDropProbe) -> Self {
+        self.after_drop = after_drop;
+        self
+    }
+
+    /// The estimator's reading of the path now
+    /// ([`BandwidthEstimator::usage`](crate::BandwidthEstimator::usage)).
+    /// [`AfterDropProbe::Libwebrtc`] asks for its cluster when the reading returns from
+    /// under-use to normal: the queue an over-use left has drained (libwebrtc
+    /// `DelayBasedBwe`: `recovered_from_overuse`).
+    pub fn set_usage(&mut self, usage: Usage) {
+        if self.usage == Usage::Under && usage == Usage::Normal {
+            self.recovered_from_overuse = true;
+        }
+        self.usage = usage;
+    }
+
     /// Whether the rate the target had before a large drop is probed for, for a few seconds
-    /// after it (the default), as libwebrtc's `ProbeController::RequestProbe` does.
+    /// after it: `true` is [`AfterDropProbe::Repeated`] (the default), `false`
+    /// [`AfterDropProbe::Off`]; [`with_after_drop_probe`](Self::with_after_drop_probe) names
+    /// libwebrtc's form too.
     ///
     /// A short burst of competing traffic, or a moment of loss, makes the delay-based
     /// controller back off by a third or more; once it has passed, the climb back is the
@@ -313,7 +403,11 @@ impl ProbeController {
     /// while the target is still below that. A result above the target raises it (as every
     /// probe does); one below it changes nothing: the competing traffic is still there.
     pub fn with_probe_after_drop(mut self, enabled: bool) -> Self {
-        self.after_drop = enabled;
+        self.after_drop = if enabled {
+            AfterDropProbe::Repeated
+        } else {
+            AfterDropProbe::Off
+        };
         self
     }
 
@@ -332,6 +426,54 @@ impl ProbeController {
     /// sender are still asked for.
     pub fn set_unpaced(&mut self, unpaced: bool) {
         self.unpaced = unpaced;
+    }
+
+    /// The path changed and the estimator started over at `start_bitrate`: probing starts over
+    /// too, as at the beginning of the call, and what was noted of the old path is dropped.
+    ///
+    /// The start-up clusters are owed again, at three and six times `start_bitrate` and on
+    /// while the new path carries what is asked (RFC 8836 section 2, requirement 4: the
+    /// conditions of a new path are initial conditions). The target's recent high, the drop
+    /// below it and the cluster awaiting its result belong to the path that was left: the
+    /// estimator's fall back to its starting rate is not a drop of the path's capacity, and
+    /// the rate "before" it is the old path's.
+    ///
+    /// Without this an outage ended by an ICE restart left the call at the estimator's 8% a
+    /// second on the new path (traced on the capacity instrument's outage cell, the default
+    /// chain: 1 Mbit/s 15.1 s after the new pair). While nothing is acknowledged the
+    /// estimator halves at every feedback timeout, each halving a large drop, and the probe
+    /// for the rate before the last of them (133 kbit/s, asked into the dead path half a
+    /// second before the new pair) was still awaiting its result when the path changed. It
+    /// held the controller's one slot for the half second in which the sender, still sending
+    /// at the old path's floor, counted as application limited against the new starting
+    /// rate; after it nothing was due. Without the probe after a drop that
+    /// application-limited cluster did find the path (1.0 s), but only in the calls where
+    /// one happened to be due (134 of 200; 12 to 13 s in the others).
+    ///
+    /// libwebrtc does the same on a network route change: `ProbeController::Reset`
+    /// (goog_cc `probe_controller.cc`) returns to its initial state and forgets the rate
+    /// before the last large drop, and the constraints set next start the exponential probes
+    /// again (`GoogCcNetworkController::OnNetworkRouteChange`).
+    pub fn on_path_change(&mut self, now: Instant, start_bitrate: f64) {
+        self.initial = INITIAL_PROBES
+            .iter()
+            .rev()
+            .map(|multiple| start_bitrate * multiple)
+            .collect();
+        self.started = false;
+        self.outstanding = None;
+        self.last_probe = None;
+        self.further = None;
+        self.peak = None;
+        self.drop = None;
+        self.drop_probe = false;
+        self.last_target = None;
+        self.step_drop = None;
+        // libwebrtc's `Reset` counts the change as the time of its last probe after a drop.
+        self.last_drop_probe = Some(now);
+        self.application_limited_ended = None;
+        self.usage = Usage::Normal;
+        self.recovered_from_overuse = false;
     }
 
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
@@ -356,9 +498,9 @@ impl ProbeController {
         if !media_flowing {
             return None;
         }
-        if self.after_drop {
-            self.track_drops(now, target);
-        }
+        self.track_drops(now, target);
+        self.track_application_limited(now, target, sending);
+        let recovered_from_overuse = std::mem::take(&mut self.recovered_from_overuse);
         if let Some((_, _, asked)) = self.outstanding {
             if now.saturating_duration_since(asked) < PROBE_RESULT_TIMEOUT {
                 return None;
@@ -382,6 +524,7 @@ impl ProbeController {
         } else if let Some(rate) = self.further.take() {
             Some(rate)
         } else if let Some((before, at)) = self.drop
+            && self.after_drop == AfterDropProbe::Repeated
             && !self.unpaced
             && now.saturating_duration_since(at) >= PROBE_AFTER_DROP_DELAY
             && target < PROBE_AFTER_DROP_SHARE * before
@@ -393,6 +536,10 @@ impl ProbeController {
             // gone, the path carries it again.
             self.drop_probe = true;
             Some(PROBE_AFTER_DROP_SHARE * before)
+        } else if let Some(rate) = self.libwebrtc_drop_probe(now, target, recovered_from_overuse) {
+            self.drop_probe = true;
+            self.last_drop_probe = Some(now);
+            Some(rate)
         } else if sending < APPLICATION_LIMITED_SHARE * target
             && self.last_probe.is_none_or(|last| {
                 now.saturating_duration_since(last) >= PROBE_APPLICATION_LIMITED_INTERVAL
@@ -422,8 +569,52 @@ impl ProbeController {
         })
     }
 
+    /// libwebrtc's probe after a drop (`ProbeController::RequestProbe`), when it is due: the
+    /// detector has just returned to normal, the sender is or was lately application limited,
+    /// the drop is under five seconds old, the last such probe over five seconds, and 95% of
+    /// the rate to ask for is above the target.
+    fn libwebrtc_drop_probe(
+        &self,
+        now: Instant,
+        target: f64,
+        recovered_from_overuse: bool,
+    ) -> Option<f64> {
+        if self.after_drop != AfterDropProbe::Libwebrtc || self.unpaced || !recovered_from_overuse {
+            return None;
+        }
+        let limited = self.application_limited
+            || self
+                .application_limited_ended
+                .is_some_and(|ended| now.saturating_duration_since(ended) < ALR_ENDED_TIMEOUT);
+        let (before, at) = self.step_drop?;
+        let rate = PROBE_AFTER_DROP_SHARE * before;
+        (limited
+            && (1.0 - LIBWEBRTC_PROBE_UNCERTAINTY) * rate > target
+            && now.saturating_duration_since(at) < PROBE_AFTER_DROP_TIMEOUT
+            && self.last_drop_probe.is_none_or(|last| {
+                now.saturating_duration_since(last) > LIBWEBRTC_DROP_PROBE_INTERVAL
+            }))
+        .then_some(rate)
+    }
+
+    /// Whether the sender is application limited, and when it stopped being so.
+    fn track_application_limited(&mut self, now: Instant, target: f64, sending: f64) {
+        let limited = sending < APPLICATION_LIMITED_SHARE * target;
+        if self.application_limited && !limited {
+            self.application_limited_ended = Some(now);
+        }
+        self.application_limited = limited;
+    }
+
     /// Follows the target's recent high, and notes a large drop below it.
     fn track_drops(&mut self, now: Instant, target: f64) {
+        // libwebrtc's drop: one update below two thirds of the one before it.
+        if let Some(last) = self.last_target
+            && target < LARGE_DROP_SHARE * last
+        {
+            self.step_drop = Some((last, now));
+        }
+        self.last_target = Some(target);
         match self.peak {
             Some((peak, at))
                 if target < peak && now.saturating_duration_since(at) <= LARGE_DROP_WINDOW =>
@@ -508,7 +699,7 @@ impl ProbeController {
         };
         let after_drop = self
             .drop
-            .filter(|_| !self.unpaced)
+            .filter(|_| self.after_drop == AfterDropProbe::Repeated && !self.unpaced)
             .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
         [Some(next), after_drop]
     }
@@ -827,6 +1018,235 @@ mod tests {
             .poll(at(4_000), 900_000.0, 900_000.0, true)
             .expect("paced clusters: the rate before the drop");
         assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
+    }
+
+    /// A path change starts probing over: the start-up clusters again, from the rate the
+    /// estimator starts over at, and nothing of the old path's drop. The script is an outage
+    /// ended by an ICE restart, as the default chain's estimator goes through it: at
+    /// 2.5 Mbit/s, then halved every half second while nothing is acknowledged (each halving
+    /// a large drop), a probe for the rate before the last one asked into the dead path, and
+    /// the new path while that probe still awaits its result.
+    #[test]
+    fn a_path_change_starts_probing_over_and_forgets_the_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_500_000.0, 2_500_000.0, true)
+            );
+        }
+        // The outage: 1250, 625, 312, 156 kbit/s, then the floor.
+        let mut target = 2_500_000.0;
+        for ms in (2_000..4_500).step_by(500) {
+            target = f64::max(target / 2.0, 100_000.0);
+            assert_eq!(None, controller.poll(at(ms), target, target, true));
+        }
+        assert_eq!(100_000.0, target);
+        let stale = controller
+            .poll(at(5_000), target, target, true)
+            .expect("the rate before the last halving");
+        assert_eq!(0.85 * 156_250.0, stale.bits_per_second);
+
+        // The new path, 300 ms later: the estimator starts over at 300 kbit/s.
+        controller.on_path_change(at(5_300), 300_000.0);
+        assert_eq!(None, controller.outstanding(), "the old path's cluster");
+        assert_eq!(None, controller.poll_timeout(), "nothing of the old path");
+        let first = controller
+            .poll(at(5_300), 300_000.0, 100_000.0, true)
+            .expect("the first start-up cluster, at once");
+        assert_eq!(900_000.0, first.bits_per_second);
+        assert_eq!(
+            None,
+            controller.on_result(stale.cluster, 120_000.0),
+            "a late result of the old path's cluster is nobody's"
+        );
+        assert_eq!(
+            Some(900_000.0),
+            controller.on_result(first.cluster, 900_000.0)
+        );
+        let second = controller
+            .poll(at(5_450), 900_000.0, 300_000.0, true)
+            .expect("the second start-up cluster");
+        assert_eq!(1_800_000.0, second.bits_per_second);
+        // The new path carries it: a further cluster, as at the start of the call.
+        assert_eq!(
+            Some(1_800_000.0),
+            controller.on_result(second.cluster, 1_800_000.0)
+        );
+        let third = controller
+            .poll(at(5_600), 1_800_000.0, 900_000.0, true)
+            .expect("a further cluster");
+        assert_eq!(3_600_000.0, third.bits_per_second);
+        // It found the bottleneck. From here on the sender is at its target, and nothing of
+        // the old path's drops is probed for in the seconds that follow.
+        assert_eq!(
+            Some(2_375_000.0),
+            controller.on_result(third.cluster, 2_375_000.0)
+        );
+        for ms in (5_700..12_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_375_000.0, 2_375_000.0, true),
+                "at {ms} ms"
+            );
+        }
+    }
+
+    /// The estimator's fall to its starting rate at a path change is not a drop to probe
+    /// after: from 2.5 Mbit/s to 300 kbit/s on a new path that carries no more than the
+    /// start-up clusters show, no cluster asks for the old path's rate.
+    #[test]
+    fn the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_500_000.0, 2_500_000.0, true)
+            );
+        }
+        controller.on_path_change(at(2_000), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (2_000..10_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 300_000.0, true) {
+                asked.push(request.bits_per_second);
+                // The new path is narrow: every cluster shows 350 kbit/s.
+                controller.on_result(request.cluster, 350_000.0);
+            }
+        }
+        assert_eq!(
+            vec![900_000.0, 1_800_000.0],
+            asked,
+            "the start-up clusters, and no probe for 85% of 2.5 Mbit/s"
+        );
+    }
+
+    /// [`AfterDropProbe::Libwebrtc`] across a path change: neither the old path's drop nor the
+    /// estimator's fall to its starting rate is probed after, however often the new path's
+    /// detector returns from under-use to normal (libwebrtc's `Reset` forgets the rate before
+    /// the drop and counts the change as the time of its last such probe). The start-up
+    /// clusters are all that is asked in the five seconds a drop stays eligible.
+    #[test]
+    fn libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change() {
+        let epoch = Instant::now();
+        let mut controller = dropped_libwebrtc(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        controller.set_usage(Usage::Over);
+        assert_eq!(None, controller.poll(at(1_200), 900_000.0, 450_000.0, true));
+        controller.on_path_change(at(1_300), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (1_300..6_300).step_by(100) {
+            recover_from_overuse(&mut controller);
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 150_000.0, true) {
+                asked.push(request.bits_per_second);
+                controller.on_result(request.cluster, 350_000.0);
+            }
+        }
+        assert_eq!(vec![900_000.0, 1_800_000.0], asked);
+    }
+
+    /// A controller with libwebrtc's probe after a drop, settled, application limited (it
+    /// sends half its target) at 2 Mbit/s until 1 s and dropped to 900 kbit/s at 1.1 s.
+    fn dropped_libwebrtc(epoch: Instant) -> ProbeController {
+        let mut controller = settled(epoch).with_after_drop_probe(AfterDropProbe::Libwebrtc);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 1_000_000.0, true)
+        );
+        assert_eq!(None, controller.poll(at(1_100), 900_000.0, 450_000.0, true));
+        controller
+    }
+
+    /// The detector's way back to normal after an over-use: over, under, normal.
+    fn recover_from_overuse(controller: &mut ProbeController) {
+        controller.set_usage(Usage::Over);
+        controller.set_usage(Usage::Under);
+        controller.set_usage(Usage::Normal);
+    }
+
+    /// [`AfterDropProbe::Libwebrtc`]: nothing is asked until the detector has returned from
+    /// under-use to normal; then one cluster at 85% of the target before the drop, which is
+    /// not followed up, and no second one within five seconds.
+    #[test]
+    fn libwebrtcs_probe_after_a_drop_is_one_cluster_once_overuse_has_ended() {
+        let epoch = Instant::now();
+        let mut controller = dropped_libwebrtc(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        controller.set_usage(Usage::Over);
+        for ms in (1_200..3_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 900_000.0, 450_000.0, true),
+                "still over-used at {ms} ms"
+            );
+        }
+        controller.set_usage(Usage::Under);
+        assert_eq!(None, controller.poll(at(3_000), 900_000.0, 450_000.0, true));
+        controller.set_usage(Usage::Normal);
+        let request = controller
+            .poll(at(3_100), 900_000.0, 450_000.0, true)
+            .expect("back to normal: the rate before the drop");
+        assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
+        assert_eq!(
+            Some(1_700_000.0),
+            controller.on_result(request.cluster, 1_700_000.0)
+        );
+        assert_eq!(
+            None,
+            controller.poll(at(3_300), 1_700_000.0, 850_000.0, true),
+            "no further cluster above it"
+        );
+        // A second drop and recovery a moment later: not within five seconds of the probe.
+        assert_eq!(None, controller.poll(at(3_400), 900_000.0, 450_000.0, true));
+        recover_from_overuse(&mut controller);
+        assert_eq!(None, controller.poll(at(3_600), 900_000.0, 450_000.0, true));
+    }
+
+    /// [`AfterDropProbe::Libwebrtc`] does not probe a sender that keeps up with its target
+    /// (not application limited, nor lately), nor one whose target is within 5% of the rate
+    /// it would ask for, nor a drop that is five seconds old.
+    #[test]
+    fn libwebrtcs_probe_after_a_drop_has_its_conditions() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+
+        // A sender at its target.
+        let mut controller = settled(epoch).with_after_drop_probe(AfterDropProbe::Libwebrtc);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        assert_eq!(None, controller.poll(at(1_100), 900_000.0, 900_000.0, true));
+        recover_from_overuse(&mut controller);
+        assert_eq!(None, controller.poll(at(1_300), 900_000.0, 900_000.0, true));
+
+        // The target is back at 1.65 Mbit/s: 95% of 1.7 Mbit/s is not above it.
+        let mut controller = dropped_libwebrtc(epoch);
+        recover_from_overuse(&mut controller);
+        assert_eq!(
+            None,
+            controller.poll(at(1_300), 1_650_000.0, 825_000.0, true)
+        );
+
+        // The detector is back to normal only once the drop is over five seconds old: no
+        // cluster at the rate before the drop (the one asked meanwhile is the
+        // application-limited sender's, at twice the target).
+        let mut controller = dropped_libwebrtc(epoch);
+        let mut asked = Vec::new();
+        for ms in (1_200..7_000).step_by(100) {
+            if ms == 6_200 {
+                recover_from_overuse(&mut controller);
+            }
+            if let Some(request) = controller.poll(at(ms), 900_000.0, 450_000.0, true) {
+                asked.push(request.bits_per_second);
+                controller.on_result(request.cluster, 950_000.0);
+            }
+        }
+        assert_eq!(vec![1_800_000.0], asked);
     }
 
     /// `with_probe_after_drop(false)`: a drop is left to the delay-based controller's climb.
