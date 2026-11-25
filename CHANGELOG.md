@@ -260,6 +260,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
     data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
     a lost DTLS ClientHello retransmitted after its timer).
+- **stream-driver** (runtime-1, `conf/runtime-1-trait`, on master since train 25): **`StreamDriver`
+  is no longer `Sync`, `Unpin`, `UnwindSafe` or `RefUnwindSafe`**, and `PeerDriver` no longer
+  `Unpin`; `Accepted`, `SharedAccept` and `DriverInput` are no longer `UnwindSafe` /
+  `RefUnwindSafe` (cargo-semver-checks `auto_trait_impl_removed` against v0.1.0). The driver
+  holds the injected runtime and its tasks as trait objects (`Arc<dyn Runtime>`,
+  `Box<dyn runtime::JoinHandle>`, which is `Send` but not `Sync`; TCP streams as
+  `Arc<dyn runtime::AsyncTcpStream>`) and its input queue is an `async_channel` channel, whose
+  receiver is not `Unpin`. `Send` is kept everywhere. Migration: share a driver across threads
+  behind a `Mutex` (or keep it on one task and talk to it through its handles), pin it
+  (`Box::pin` / `pin!`) where a future that owns it must be `Unpin`, and wrap it in
+  `AssertUnwindSafe` for `catch_unwind`.
 - **`StreamTransmit` has a new public field, `dscp`** (rtci-shared): the codepoint the driver
   sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
   flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
