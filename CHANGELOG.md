@@ -1447,9 +1447,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the named instants, a STUN consent datagram (RFC 7675) meets the full link queue in the
   overload after the drop in 30.6 % of calls instead of 25.2 %, and a peer reports
   `disconnected` for a moment in 17.4 % instead of 12.8 % (behind a 1000 ms queue 21.2 %
-  instead of 14.0 % of 400). Each is the transient that one lost consent check gives (median
-  0.5 s, longest 1.2 s; no peer stayed disconnected, none failed), and the picture, audio and
-  recovery figures do not move. STUN does not pass the pacer; the drop is the link's.
+  instead of 14.0 % of 400). Most are the transient that one lost consent check gives (in that
+  cell: median 0.5 s, longest 1.1 s of 1000 calls; no peer stayed disconnected, none failed),
+  and the picture, audio and recovery figures do not move. Not every episode is that short:
+  over the six paced cells of the instrument's record on the landing tree (train 34 round 1,
+  629 calls with an episode, median 0.6 s) 10 calls had one longer than 2 s, the longest 6.58 s
+  behind a 100 ms queue and 9.20 s with 5 % loss on the reverse path, where 2 of 200 calls were
+  still outside `connected` at the end of the run; long single episodes and those 2 of 200 are
+  there without this change too (5.92 s and 6.31 s the longest, 2 of 200). STUN does not pass
+  the pacer; the drop is the link's.
 - **Bandwidth probing in a chain without a pacer never got a result** (in 0.1.0 too). A probe
   cluster was measured on the packets the pacer marked as the cluster's; with the pacer taken
   out of the default interceptors (or in any chain built without one) nothing marked a packet,
