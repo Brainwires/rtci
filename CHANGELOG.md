@@ -946,8 +946,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1000 ms queue in nine calls of ten (median 17.6 -> 5.0 s, the slowest tenth 17.5 s). It
   costs 3% of the target under the limit (238 against 246 kbit/s), and behind a 100 ms queue
   11 more audio packets lost a call (52 against 41) and a quarter more packets dropped at
-  the queue (201 against 159); the counts of calls with an old picture, a freeze or an audio
-  gap do not move in any cell. After a limit that outlasts the minute (held 60 s) it gains
+  the queue (201 against 159; with the pacer's backlog kept, `PacerBacklog::Keep`, behind the
+  300 ms queue 149 against 121 in the two-peer test's call); the counts of calls with an old
+  picture, a freeze or an audio gap do not move in any cell. After a limit that outlasts the minute (held 60 s) it gains
   nothing: 17.6 s against 16.9 s, the rate not back within 20 s in 33 of 200 calls against
   14. Sent as bursts in a chain without a pacer the gain was the same and the calls with an
   old picture rose in every cell that had any (both directions limited: 25 -> 31 of 200), so
