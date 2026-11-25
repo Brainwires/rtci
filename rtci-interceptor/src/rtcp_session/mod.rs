@@ -3357,11 +3357,12 @@ mod tests {
 
         let (interval, input) = read(RtcpProfile::Avpf);
         // 5 % of 1 Mbit/s is 6250 octets a second. Nobody is a sender yet, so the receivers
-        // (both members) share three quarters of it, and one sender would have the quarter.
+        // (both members) share three quarters of it. A member that sends is one sender of
+        // two members, more than a quarter of them: then everyone shares all of it alike.
         assert!((input.rtcp_bw - 6250.0).abs() < 1e-9);
         assert_eq!(2, input.members);
         let receiver = input.avg_rtcp_size * 2.0 / (6250.0 * 0.75);
-        let sender = input.avg_rtcp_size / (6250.0 * 0.25);
+        let sender = input.avg_rtcp_size * 2.0 / 6250.0;
         assert!(receiver > MIN_INTERVAL && receiver < 0.1, "{receiver}");
         assert!((interval.receiver.as_secs_f64() - receiver).abs() < 1e-6);
         assert!((interval.sender.as_secs_f64() - sender).abs() < 1e-6);
