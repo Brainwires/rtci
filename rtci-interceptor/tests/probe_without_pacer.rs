@@ -1,0 +1,404 @@
+//! Bandwidth probing in a chain without a pacer.
+//!
+//! A probe cluster is normally the pacer's: it releases the next packets at the cluster's rate
+//! and marks them, and the congestion controller measures the cluster on the reports of the
+//! marked packets. In a chain without a pacer nothing marked a packet: the controller asked
+//! for clusters, the NACK responder sent each one's padding as a burst, and no result ever
+//! came (the start-up probes among them, so an open path was found at 8% a second).
+//!
+//! Now the responder's padding carries the cluster's mark when no pacer took the request, and
+//! a cluster that left as one burst is measured by how far apart the path delivered it, never
+//! above the rate it was asked for at. Where no cluster can be sent at all (no RTX stream to
+//! pad on), the first unanswered cluster is the last one asked for until another stream
+//! starts to send.
+//!
+//! The chain here is the NACK responder, the congestion controller and the TWCC sender that
+//! numbers the packets; the test writes media, collects what leaves and feeds the
+//! transport-wide feedback.
+
+use bytes::Bytes;
+use rtci_interceptor::{
+    AttributedPacket, BandwidthEstimator, CongestionControlBuilder, Interceptor,
+    NackResponderBuilder, Packet, PacketReport, ProbePacket, ProbeRequest, RTCPFeedback,
+    RTPHeaderExtension, Registry, Slot, StreamInfo, TaggedPacket, TwccSenderBuilder,
+};
+use rtcp::transport_feedbacks::transport_layer_cc::{
+    PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc,
+    TransportLayerCc,
+};
+use sansio::Protocol as _;
+use shared::TransportContext;
+use shared::marshal::{MarshalSize, Unmarshal};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const TRANSPORT_CC_URI: &str =
+    "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+const TWCC_ID: u8 = 5;
+const VIDEO_SSRC: u32 = 0x00A0_0001;
+const VIDEO_RTX_SSRC: u32 = 0x00A0_0002;
+const SECOND_SSRC: u32 = 0x00C0_0001;
+const SECOND_RTX_SSRC: u32 = 0x00C0_0002;
+/// The estimate the recorder reports: the start-up clusters are three and six times it.
+const TARGET: f64 = 300_000.0;
+
+/// An estimator that only records the probe results it is given.
+struct Recorder {
+    results: Arc<Mutex<Vec<f64>>>,
+}
+
+impl BandwidthEstimator for Recorder {
+    fn on_reports(&mut self, _now: Instant, _reports: &[PacketReport]) {}
+
+    fn target_bitrate(&self) -> f64 {
+        TARGET
+    }
+
+    fn on_probe_result(&mut self, _now: Instant, bits_per_second: f64) {
+        self.results.lock().unwrap().push(bits_per_second);
+    }
+}
+
+/// Video with NACK and transport-wide feedback, with or without an RTX stream.
+fn video(ssrc: u32, ssrc_rtx: Option<u32>) -> StreamInfo {
+    StreamInfo {
+        ssrc,
+        ssrc_rtx,
+        payload_type: 96,
+        payload_type_rtx: ssrc_rtx.map(|_| 97),
+        clock_rate: 90_000,
+        mime_type: "video/VP8".to_owned(),
+        rtcp_feedback: vec![
+            RTCPFeedback {
+                typ: "nack".to_owned(),
+                parameter: String::new(),
+            },
+            RTCPFeedback {
+                typ: "transport-cc".to_owned(),
+                parameter: String::new(),
+            },
+        ],
+        rtp_header_extensions: vec![RTPHeaderExtension {
+            uri: TRANSPORT_CC_URI.to_owned(),
+            id: u16::from(TWCC_ID),
+        }],
+        ..Default::default()
+    }
+}
+
+/// A packet that left the chain: its SSRC, its transport-wide number, its size on the wire
+/// and the probe cluster it was marked for.
+#[derive(Debug, Clone, Copy)]
+struct Left {
+    ssrc: u32,
+    number: u16,
+    size: usize,
+    cluster: Option<u32>,
+}
+
+struct Sender<I> {
+    chain: I,
+    results: Arc<Mutex<Vec<f64>>>,
+    sequence_number: u16,
+    /// Every probe request that reached the application end, with when.
+    requests: Vec<(Instant, ProbeRequest)>,
+}
+
+fn sender(streams: &[StreamInfo]) -> Sender<impl Interceptor + use<>> {
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let (controller, _handle) = CongestionControlBuilder::new(Recorder {
+        results: results.clone(),
+    })
+    .with_bandwidth_probing(true)
+    .build_with_handle();
+    let mut chain = Registry::new()
+        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .with(Slot::CongestionControl, controller)
+        .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+        .build();
+    for stream in streams {
+        chain.bind_local_stream(stream);
+    }
+    Sender {
+        chain,
+        results,
+        sequence_number: 0,
+        requests: Vec::new(),
+    }
+}
+
+impl<I: Interceptor> Sender<I> {
+    /// Everything the chain has to hand on at `now`, either way; returns what left for the wire.
+    fn pump(&mut self, now: Instant) -> Vec<Left> {
+        let mut left = Vec::new();
+        // The request travels application-ward (the responder fills it on the way), the
+        // padding wire-ward after it: twice round is enough for both.
+        for _ in 0..2 {
+            while let Some(read) = self.chain.poll_read() {
+                if let Some(request) = read.message.custom::<ProbeRequest>() {
+                    self.requests.push((now, *request));
+                }
+            }
+            while let Some(out) = self.chain.poll_write() {
+                let cluster = out
+                    .message
+                    .custom::<ProbePacket>()
+                    .map(|probe| probe.cluster);
+                if let Packet::Rtp(packet) = &out.message.packet
+                    && let Some(mut extension) = packet.header.get_extension(TWCC_ID)
+                {
+                    let number =
+                        rtp::extension::transport_cc_extension::TransportCcExtension::unmarshal(
+                            &mut extension,
+                        )
+                        .expect("transport-cc extension")
+                        .transport_sequence;
+                    left.push(Left {
+                        ssrc: packet.header.ssrc,
+                        number,
+                        size: packet.marshal_size(),
+                        cluster,
+                    });
+                }
+            }
+        }
+        left
+    }
+
+    /// One millisecond of the sender's life at `now`: a media packet of `ssrc` every 20 ms.
+    fn step(&mut self, now: Instant, millisecond: u64, ssrc: u32) -> Vec<Left> {
+        if millisecond.is_multiple_of(20) {
+            self.sequence_number = self.sequence_number.wrapping_add(1);
+            self.chain
+                .handle_write(TaggedPacket {
+                    now,
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                        header: rtp::header::Header {
+                            version: 2,
+                            payload_type: 96,
+                            sequence_number: self.sequence_number,
+                            timestamp: u32::from(self.sequence_number) * 3000,
+                            ssrc,
+                            ..Default::default()
+                        },
+                        payload: Bytes::from(vec![0u8; 1000]),
+                    })),
+                })
+                .unwrap();
+        }
+        self.chain.handle_timeout(now).unwrap();
+        self.pump(now)
+    }
+
+    /// Media flows until padding leaves for a probe cluster; returns the cluster's packets
+    /// and when they left.
+    fn first_cluster(&mut self, epoch: Instant) -> (Vec<Left>, Instant) {
+        for millisecond in 0..2000u64 {
+            let now = epoch + Duration::from_millis(millisecond);
+            let left = self.step(now, millisecond, VIDEO_SSRC);
+            let padding: Vec<Left> = left
+                .into_iter()
+                .filter(|packet| packet.ssrc == VIDEO_RTX_SSRC)
+                .collect();
+            if !padding.is_empty() {
+                return (padding, now);
+            }
+        }
+        panic!("no padding left for a probe cluster");
+    }
+
+    /// Transport-wide feedback at `now` on `packets` (consecutive numbers): the first arrived
+    /// at `first_arrival` after `epoch`, each further one `spacing` after the one before.
+    fn report(
+        &mut self,
+        now: Instant,
+        packets: &[Left],
+        first_arrival: Duration,
+        spacing: Duration,
+    ) {
+        let base = packets[0].number;
+        let reference_time = (first_arrival.as_micros() / 64_000) as u32;
+        let mut previous = Duration::from_micros(u64::from(reference_time) * 64_000);
+        let mut packet_chunks = Vec::new();
+        let mut recv_deltas = Vec::new();
+        for (index, packet) in packets.iter().enumerate() {
+            assert_eq!(
+                base.wrapping_add(index as u16),
+                packet.number,
+                "a report names a run of numbers"
+            );
+            let at = first_arrival + spacing * index as u32;
+            let ticks = (at.saturating_sub(previous).as_micros() / 250) as i64;
+            previous += Duration::from_micros(ticks as u64 * 250);
+            let symbol = if ticks <= 255 {
+                SymbolTypeTcc::PacketReceivedSmallDelta
+            } else {
+                SymbolTypeTcc::PacketReceivedLargeDelta
+            };
+            recv_deltas.push(RecvDelta {
+                type_tcc_packet: symbol,
+                delta: ticks * 250,
+            });
+            packet_chunks.push(PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                packet_status_symbol: symbol,
+                run_length: 1,
+            }));
+        }
+        self.chain
+            .handle_read(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerCc {
+                    sender_ssrc: 0x5E5E_5E5E,
+                    media_ssrc: VIDEO_SSRC,
+                    base_sequence_number: base,
+                    packet_status_count: packets.len() as u16,
+                    reference_time,
+                    fb_pkt_count: 0,
+                    packet_chunks,
+                    recv_deltas,
+                })])),
+            })
+            .unwrap();
+        self.pump(now);
+    }
+
+    fn results(&self) -> Vec<f64> {
+        self.results.lock().unwrap().clone()
+    }
+}
+
+/// Without a pacer the cluster is the responder's padding: every packet of it carries the
+/// cluster's mark, and the cluster is the size that was asked for.
+fn assert_the_padding_is_the_cluster<I: Interceptor>(sender: &Sender<I>, padding: &[Left]) {
+    let (_, request) = sender.requests.last().expect("a cluster was asked for");
+    assert!(
+        padding
+            .iter()
+            .all(|packet| packet.cluster == Some(request.cluster)),
+        "every padding packet carries the mark of cluster {}: {padding:?}",
+        request.cluster
+    );
+    let octets: usize = padding.iter().map(|packet| packet.size).sum();
+    assert!(
+        octets >= request.octets && padding.len() >= 5,
+        "the padding fills the cluster of {} octets: {octets} octets in {} packets",
+        request.octets,
+        padding.len()
+    );
+}
+
+/// A path wider than the cluster's rate delivers the burst closely spaced (one packet a
+/// millisecond, about 2.3 Mbit/s). The cluster has a result, and it is the rate that was
+/// asked for (three times the estimate): a burst shows the path's width, but nothing was sent
+/// to show that the path carries more than the cluster asked.
+#[test]
+fn a_cluster_without_a_pacer_is_measured_and_shows_no_more_than_was_asked() {
+    let epoch = Instant::now();
+    let mut sender = sender(&[video(VIDEO_SSRC, Some(VIDEO_RTX_SSRC))]);
+    let (padding, left_at) = sender.first_cluster(epoch);
+    assert_the_padding_is_the_cluster(&sender, &padding);
+    let asked = sender.requests[0].1.bits_per_second;
+    assert_eq!(3.0 * TARGET, asked, "the first start-up cluster");
+    assert!(sender.results().is_empty());
+
+    let arrival = left_at.duration_since(epoch) + Duration::from_millis(20);
+    sender.report(
+        left_at + Duration::from_millis(60),
+        &padding,
+        arrival,
+        Duration::from_millis(1),
+    );
+    assert_eq!(
+        vec![asked],
+        sender.results(),
+        "the burst arrived at 2.3 Mbit/s: the path carries the 900 kbit/s asked"
+    );
+}
+
+/// A path narrower than the cluster's rate holds the burst apart (one packet every 10 ms).
+/// The result is the rate the packets arrived at, less a twentieth: the link's width.
+#[test]
+fn a_cluster_without_a_pacer_shows_the_rate_the_path_spread_it_to() {
+    let epoch = Instant::now();
+    let mut sender = sender(&[video(VIDEO_SSRC, Some(VIDEO_RTX_SSRC))]);
+    let (padding, left_at) = sender.first_cluster(epoch);
+    assert_the_padding_is_the_cluster(&sender, &padding);
+
+    let spacing = Duration::from_millis(10);
+    let arrival = left_at.duration_since(epoch) + Duration::from_millis(20);
+    sender.report(
+        left_at + Duration::from_millis(400),
+        &padding,
+        arrival,
+        spacing,
+    );
+    let after_first: usize = padding[1..].iter().map(|packet| packet.size).sum();
+    let span = spacing.as_secs_f64() * (padding.len() - 1) as f64;
+    let expected = after_first as f64 * 8.0 / span * 0.95;
+    let results = sender.results();
+    assert_eq!(1, results.len(), "one cluster, one result: {results:?}");
+    assert!(
+        (results[0] - expected).abs() < 0.02 * expected && results[0] < 3.0 * TARGET,
+        "the octets after the first over the span of the arrivals, less 5%: expected about \
+         {expected:.0}, got {}",
+        results[0]
+    );
+}
+
+/// With no RTX stream the responder has nothing to pad on and there is no pacer: no packet
+/// leaves for the cluster. The controller asks once, and not again in the next twelve
+/// seconds (it asked every second or so before: the start-up sequence, then every five
+/// seconds of an application-limited sender), and it names no deadline that has passed. When
+/// a stream with an RTX stream starts to send, clusters are asked for again and are filled.
+#[test]
+fn a_cluster_nothing_can_send_is_not_asked_for_again_until_another_stream_sends() {
+    let epoch = Instant::now();
+    let mut sender = sender(&[video(VIDEO_SSRC, None)]);
+    for millisecond in 0..12_000u64 {
+        let now = epoch + Duration::from_millis(millisecond);
+        let left = sender.step(now, millisecond, VIDEO_SSRC);
+        assert!(
+            left.iter().all(|packet| packet.cluster.is_none()),
+            "nothing marks a packet in this chain"
+        );
+        if millisecond > 1_100 {
+            assert!(
+                sender.chain.poll_timeout().is_none_or(|at| at > now),
+                "a deadline in the past {millisecond} ms in"
+            );
+        }
+    }
+    assert_eq!(
+        1,
+        sender.requests.len(),
+        "one cluster went unanswered, and no more were asked for: {:?}",
+        sender.requests
+    );
+    assert!(sender.results().is_empty());
+
+    // A second stream, with RTX, starts to send.
+    sender
+        .chain
+        .bind_local_stream(&video(SECOND_SSRC, Some(SECOND_RTX_SSRC)));
+    let mut padding = Vec::new();
+    for millisecond in 12_000..15_000u64 {
+        let now = epoch + Duration::from_millis(millisecond);
+        let left = sender.step(now, millisecond, SECOND_SSRC);
+        padding.extend(
+            left.into_iter()
+                .filter(|packet| packet.ssrc == SECOND_RTX_SSRC),
+        );
+        if !padding.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        sender.requests.len() >= 2,
+        "a cluster is asked for once a stream that can carry one sends: {:?}",
+        sender.requests
+    );
+    assert_the_padding_is_the_cluster(&sender, &padding);
+}

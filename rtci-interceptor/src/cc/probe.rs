@@ -27,6 +27,14 @@
 //!   the RTX stream when the application's own media is not enough: they carry no media, so a
 //!   receiver never has a packet twice.
 //! - [`probe_estimate`] turns the receiver's reports on a cluster into a bit rate.
+//!
+//! In a chain without a pacer nothing releases a cluster at its rate. The NACK responder's
+//! padding is then the cluster: it leaves as one burst with the cluster's mark, and
+//! [`burst_estimate`] reads the rate of the narrowest link from how far apart the burst
+//! arrived, never more than the rate asked for. Where nothing sends a cluster at all (no
+//! pacer and no RTX stream to pad on), the congestion controller stops asking after the first
+//! cluster that no packet left for, until another stream starts to send: a request that can
+//! have no result is not made again.
 
 use crate::rtpfb::acknowledgement::PacketReport;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
@@ -194,6 +202,37 @@ pub fn probe_estimate(reports: &[PacketReport]) -> Option<f64> {
     } else {
         Some(send_rate.min(receive_rate))
     }
+}
+
+/// The bit rate a path showed it carries, from the reports on a cluster that left as one burst
+/// (a chain without a pacer: the NACK responder's padding, written in the same instant).
+///
+/// Such a cluster has no send rate. What the path did with it is the measurement: packets
+/// that left together arrive as far apart as the narrowest link takes to send each, so the
+/// octets after the first over the span of the arrivals is that link's rate (95% of it is
+/// taken, as [`probe_estimate`] takes of a cluster the bottleneck held apart). The cluster was
+/// asked for at `asked` bits per second and nothing was sent to show more than that: the
+/// result is never above it, and it is `asked` itself when the arrivals span no time the
+/// receiver's clock resolves.
+///
+/// `None` when fewer than four packets of the cluster arrived with a time.
+pub fn burst_estimate(reports: &[PacketReport], asked: f64) -> Option<f64> {
+    let arrived: Vec<(Duration, usize)> = reports
+        .iter()
+        .filter(|report| report.arrived)
+        .filter_map(|report| Some((report.arrival?, report.size)))
+        .collect();
+    if arrived.len() < 4 {
+        return None;
+    }
+    let total: usize = arrived.iter().map(|(_, size)| size).sum();
+    let first = arrived.iter().min_by_key(|(at, _)| *at)?;
+    let last = arrived.iter().max_by_key(|(at, _)| *at)?;
+    let span = last.0.saturating_sub(first.0).as_secs_f64();
+    if span <= 0.0 {
+        return Some(asked);
+    }
+    Some(((total - first.1) as f64 * 8.0 / span * 0.95).min(asked))
 }
 
 /// Decides when a probe cluster is sent and at what rate.
@@ -375,6 +414,13 @@ impl ProbeController {
     /// The number of the cluster whose result is awaited.
     pub fn outstanding(&self) -> Option<u32> {
         self.outstanding.map(|(cluster, _, _)| cluster)
+    }
+
+    /// The rate `cluster` was asked for at, while its result is awaited.
+    pub fn asked_rate(&self, cluster: u32) -> Option<f64> {
+        self.outstanding
+            .filter(|(outstanding, _, _)| *outstanding == cluster)
+            .map(|(_, rate, _)| rate)
     }
 
     /// The result of `cluster`: `estimate` bits per second. Returns the estimate when it is

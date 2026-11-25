@@ -3,7 +3,7 @@
 use super::send_buffer::SendBuffer;
 use super::stream_supports_nack;
 use crate::Interceptor;
-use crate::cc::probe::ProbeRequest;
+use crate::cc::probe::{ProbePacket, ProbeRequest};
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
@@ -1047,6 +1047,11 @@ impl NackResponderInterceptor {
     /// SSRC would take sequence numbers the application owns. Not charged to the NACK budget:
     /// it answers no NACK.
     ///
+    /// In a chain without a pacer (the request carries no [`ProbeFill`](crate::ProbeFill)) the
+    /// padding is the whole cluster and leaves as one burst, marked here with the cluster's
+    /// [`ProbePacket`]: without the mark the congestion controller would count no packet for
+    /// the cluster and wait for a result that cannot come.
+    ///
     /// With several RTP sessions (transports) a cluster is the session's that asked for it
     /// (the request carries its [`RtpSession`](crate::RtpSession)): it is filled on a stream of
     /// that session only, so the probe travels the path whose capacity it measures (RFC 8836
@@ -1103,10 +1108,21 @@ impl NackResponderInterceptor {
             );
             filled += packet.marshal_size();
             self.retransmissions_queued += 1;
+            let mut message =
+                AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission);
+            if fill.is_none() {
+                // No pacer took the request on its way here: nothing below releases this
+                // padding at the cluster's rate or marks it, so it leaves as one burst and
+                // carries the cluster's mark from here. The congestion controller measures
+                // such a cluster by how the path spread it (`burst_estimate`).
+                message.add(Attribute::Custom(std::sync::Arc::new(ProbePacket {
+                    cluster: request.cluster,
+                })));
+            }
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission),
+                message,
             });
         }
     }

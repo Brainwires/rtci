@@ -170,6 +170,7 @@ pub struct GccInterceptorBuilder<P> {
     min_bitrate_bps: u32,
     max_bitrate_bps: u32,
     received_rate_bound: ReceivedRateBound,
+    bandwidth_probing: bool,
     shared: Arc<Mutex<GccShared>>,
     _phantom: PhantomData<P>,
 }
@@ -193,6 +194,7 @@ impl<P> GccInterceptorBuilder<P> {
             min_bitrate_bps: 30_000,
             max_bitrate_bps: 2_500_000,
             received_rate_bound: ReceivedRateBound::default(),
+            bandwidth_probing: true,
             shared,
             _phantom: PhantomData,
         };
@@ -220,6 +222,26 @@ impl<P> GccInterceptorBuilder<P> {
         self
     }
 
+    /// Whether the path is probed for capacity above the estimate (the default), as the peer
+    /// connection's default interceptors do
+    /// ([`CongestionControlBuilder::with_bandwidth_probing`]): two clusters at the start, at
+    /// three and six times the 300 kbit/s the estimate starts at, and further ones while the
+    /// path carries what is asked, so an open path is found within a second instead of by
+    /// the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5 (300 kbit/s to 2.5 Mbit/s: 28 s).
+    /// RFC 8836 section 2, requirement 4: the algorithm "SHOULD adapt as quickly as possible
+    /// to initial network conditions at the start of a flow".
+    ///
+    /// This chain has no pacer. A cluster is the NACK responder's padding on the RTX stream,
+    /// sent as one burst and measured by how far apart the path delivers it
+    /// ([`burst_estimate`](crate::burst_estimate)); it needs a
+    /// [`NackResponderInterceptor`](crate::NackResponderInterceptor) in the chain and RTX
+    /// negotiated for the stream. Without them no cluster can be sent: the first one asked
+    /// for goes unanswered and no more are asked, and the estimate climbs as the draft has it.
+    pub fn with_bandwidth_probing(mut self, bandwidth_probing: bool) -> Self {
+        self.bandwidth_probing = bandwidth_probing;
+        self
+    }
+
     /// Build the interceptor factory closure.
     pub fn build(self) -> impl FnOnce(P) -> GccInterceptor<P> {
         move |inner| {
@@ -230,7 +252,9 @@ impl<P> GccInterceptorBuilder<P> {
             // The estimate starts at 300 kbit/s, and starts over from there on a new path.
             let estimator = Gcc::new(DEFAULT_INITIAL_BITRATE, min, max)
                 .with_received_rate_bound(self.received_rate_bound);
-            let (control, handle) = CongestionControlBuilder::new(estimator).build_with_handle();
+            let (control, handle) = CongestionControlBuilder::new(estimator)
+                .with_bandwidth_probing(self.bandwidth_probing)
+                .build_with_handle();
             GccInterceptor {
                 inner,
                 control,

@@ -123,6 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **`GccInterceptorBuilder` probes for bandwidth by default** (`with_bandwidth_probing(false)`
+  turns it off). The pull-style GCC interceptor (a chain without a pacer) never probed: its
+  estimate climbed from 300 kbit/s at 8% a second. It now sends the start-up clusters and the
+  others the default interceptors send (RFC 8836 section 2, requirement 4, SHOULD), as bursts
+  of padding on the RTX stream, when the chain has a NACK responder and RTX is negotiated;
+  without them nothing changes. Probing asks for nothing above the estimator's own maximum
+  (`BandwidthEstimator::max_bitrate`, new, default none).
+
 - **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
   section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
   the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
@@ -1166,6 +1174,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet on.
 
 ### Fixed
+
+- **Bandwidth probing in a chain without a pacer never got a result** (in 0.1.0 too). A probe
+  cluster was measured on the packets the pacer marked as the cluster's; with the pacer taken
+  out of the default interceptors (or in any chain built without one) nothing marked a packet,
+  so the congestion controller asked for clusters, the NACK responder sent each one's padding
+  as a burst, and no result ever came: the start-up clusters among them, so an open 2.5 Mbit/s
+  path was reached at the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5 (about 1.4 Mbit/s
+  after 20 s from the 300 kbit/s start) instead of within a second (RFC 8836 section 2,
+  requirement 4). Now the responder's padding carries the cluster's mark (`ProbePacket`) when no
+  pacer took the request, and a cluster whose packets left in one instant is measured by how
+  far apart the path delivered it (`burst_estimate`: the narrowest link's rate, never above the
+  rate the cluster was asked for at). Where no cluster can be sent at all (no pacer and no RTX
+  stream to pad on) the controller stops asking after the first cluster no packet left for,
+  until another stream is bound or starts to send: a request that can have no result is not
+  repeated. Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
