@@ -22,6 +22,7 @@ documentation; this page says how the instrument is used and what it found.
 | requirements the engine meets | picture, freeze and audio in ParolNet's chain, 300 runs | the same job |
 | a requirement met, too large for the job; requirements at the bound | the outage without the pacer; picture and freeze without the pacer; 300 runs each | on demand: `-- --ignored on_demand_` |
 | requirements the engine does not meet | `known_limit_*`: ignored, with the measured share in the attribute | they fail when run: `-- --ignored known_limit_` |
+| the audio guard | no run of the default chain's reference cells ends with a flow left ceased by the circuit breaker or its audio silent (`ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end`) | the same job, on every pull request since the circuit breaker's rules were corrected (breaker-1; before, 8.9 % of runs ended so) |
 | the fine comparison | the merge-point rule below | `capacity-compare.yml`, by hand |
 
 A requirement is a share: "in at most 5 % of calls ...", tested on 300 runs with at most 21
@@ -248,8 +249,8 @@ Requirements on master, by cell:
 
 | cell | picture | freeze | audio | resume |
 |---|---|---|---|---|
-| default chain, reference receiver | MISSED: 100 % (oldest picture 9.0 s in the median) | MISSED: 100 % (8.7 s) | MISSED: 8.9 % (audio ceased by the circuit breaker and never restarted) | |
-| default chain, receiver without a bound | MISSED: 100 % (8.3 s) | MISSED: 27.2 % | MISSED: 8.9 % | |
+| default chain, reference receiver | MISSED: 100 % (oldest picture 9.0 s in the median) | MISSED: 100 % (8.7 s) | met since breaker-1: 0 of 1000 (was 8.9 %: audio ceased by the circuit breaker and never restarted) | |
+| default chain, receiver without a bound | MISSED: 100 % (8.3 s) | MISSED: 27.2 % (29.1 % with breaker-1: the calls whose audio was dead froze less) | met since breaker-1: 0 of 1000 (was 8.9 %) | |
 | pacer-less chain, reference receiver | at the bound: 7.0 % (4.2 to 11.4) | at the bound: 5.5 % (3.1 to 9.6) | met: 0 of 200 | |
 | ParolNet's chain, reference receiver | met: 0 of 200 (1.33 s) | met: 0 of 200 | met: 0 of 200 | |
 | both directions capped, default chain | MISSED: 100 % (20.4 s; 8.5 % never back) | MISSED: 100 % | 2.5 % | |
