@@ -17,3 +17,15 @@
 # An entry expires when the branch is merged: from then on the base already has the cost, the
 # entry matches nothing, and the job lists it as stale. Remove it in the next branch that touches
 # this file (scripts/check-performance-ledger.py keeps every entry pointing at a ledger row).
+
+[[accepted]]
+bench = "DTLS/Setup/AES-128-GCM/*"
+max_ratio = 5.0
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x3.92 in one job against master (45665836618)"
+
+[[accepted]]
+bench = "DTLS/Setup/AES-256-CBC/*"
+max_ratio = 7.5
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x5.65 in one job against master (45665836618)"
