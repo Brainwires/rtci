@@ -23,6 +23,12 @@ pub const ULPFEC_DEFAULT_NUM_MEDIA_PACKETS: usize = 5;
 /// FEC packets produced per block of media.
 pub const ULPFEC_DEFAULT_NUM_FEC_PACKETS: usize = 1;
 
+/// The most FEC packets held back for the end of a frame
+/// ([`UlpfecSendBuilder::with_fec_after_frame`]). A stream that never sets the marker bit, or a
+/// frame of more packets than this many FEC packets protect, gets them where the count is
+/// reached.
+pub const ULPFEC_MAX_HELD_FEC_PACKETS: usize = 128;
+
 /// Where FEC data goes in a RED stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RedPlacement {
@@ -30,7 +36,8 @@ pub enum RedPlacement {
     /// sequence number of the media stream. What libwebrtc sends and the only form it reads
     /// (its receiver drops a RED packet with more than one block): the setting for a browser
     /// peer. RFC 5109 14.2 does not allow it: "the FEC MUST NOT be sent by itself for this
-    /// stream".
+    /// stream". Such packets follow the last packet of a frame, never lie inside one
+    /// ([`UlpfecSendBuilder::with_fec_after_frame`]).
     OwnPacket,
     /// A redundant block in the next media packet, ahead of its primary block: the carriage of
     /// RFC 5109 14.2 ("the FEC data ... is sent in the same packets as the protected payload")
@@ -85,6 +92,7 @@ pub struct UlpfecSendBuilder {
     level_lengths: Vec<u16>,
     one_level_only: bool,
     flush_on_marker: bool,
+    fec_after_frame: bool,
     initial_fec_sequence_number: Option<u16>,
     filter: StreamFilter,
     zero_mutable_extensions: bool,
@@ -101,6 +109,7 @@ impl UlpfecSendBuilder {
             level_lengths: Vec::new(),
             one_level_only: false,
             flush_on_marker: false,
+            fec_after_frame: true,
             initial_fec_sequence_number: None,
             filter: video_streams(),
             zero_mutable_extensions: false,
@@ -186,6 +195,32 @@ impl UlpfecSendBuilder {
         self
     }
 
+    /// With [`RedPlacement::OwnPacket`]: whether the FEC packets of the blocks that close
+    /// inside a frame wait for the frame's last packet (the one with the marker bit) and take
+    /// the sequence numbers after it (`true`, the default), or each block's FEC packets follow
+    /// the block's last packet wherever in the frame that is (`false`).
+    ///
+    /// A FEC packet of this placement takes a sequence number of the media stream. A receiver
+    /// puts a frame together from consecutive sequence numbers, so a number inside a frame
+    /// that is not media leaves the frame incomplete: libwebrtc's packet buffer finds a frame
+    /// only over packets it holds without a gap, and a received FEC packet closes a gap between
+    /// frames only (`modules/video_coding/packet_buffer.cc:168-174`, `InsertPadding`, and
+    /// `FindFrames`, at a222406d). libwebrtc's sender therefore produces FEC only at a packet
+    /// that completes a frame (`modules/rtp_rtcp/source/ulpfec_generator.cc:134` and
+    /// `:157-159`: `complete_frame = packet.Marker()`, `if (complete_frame && ...)`
+    /// `EncodeFec`), and its FEC packets follow that packet. RFC 5109 and RFC 2198 say nothing
+    /// about where in a stream a FEC packet lies: only the order on the wire changes, each FEC
+    /// packet protects the same media packets either way.
+    ///
+    /// At most [`ULPFEC_MAX_HELD_FEC_PACKETS`] FEC packets wait; they leave when that many
+    /// have gathered, so a stream that never sets the marker bit is still protected. No
+    /// effect on the other placements and carriages, whose FEC takes no sequence number of
+    /// the media stream.
+    pub fn with_fec_after_frame(mut self, fec_after_frame: bool) -> Self {
+        self.fec_after_frame = fec_after_frame;
+        self
+    }
+
     /// The first sequence number of a separate FEC stream. Random when not set, as an RTP
     /// stream's is (RFC 3550 5.1); a test pins it.
     pub fn with_initial_fec_sequence_number(mut self, sequence_number: u16) -> Self {
@@ -229,6 +264,7 @@ impl UlpfecSendBuilder {
             ),
             level_lengths,
             flush_on_marker: self.flush_on_marker,
+            fec_after_frame: self.fec_after_frame,
             initial_fec_sequence_number: self.initial_fec_sequence_number,
             filter: self.filter,
             zero_mutable_extensions: self.zero_mutable_extensions,
@@ -250,6 +286,12 @@ struct ProtectedStream {
     block: Vec<(u16, Bytes)>,
     /// RED, [`RedPlacement::WithNextMedia`]: FEC payloads waiting for the next media packet.
     pending: VecDeque<Bytes>,
+    /// FEC payloads of the blocks that closed and have not been sent: with
+    /// [`UlpfecSendBuilder::with_fec_after_frame`], until the frame's last packet.
+    held: VecDeque<Bytes>,
+    /// With a wire tap: the FEC packets of the blocks that closed at this slot since sequence
+    /// numbers were last set aside for FEC.
+    promised: usize,
     /// Separate stream: the FEC stream's packetizer.
     packetizer: Option<UlpfecStreamPacketizer>,
     /// The sequence number of the last packet sent on the media SSRC, media or FEC.
@@ -275,17 +317,28 @@ const MAX_IN_FLIGHT: usize = 4096;
 struct InFlight {
     /// Its sequence number on the wire.
     sequence_number: u16,
-    /// Set on the packet that closes a block.
-    closes: Option<BlockEnd>,
+    /// Set on the packet that closes a block: how many FEC packets the block gets, as decided
+    /// when the packet passed this slot.
+    closes: Option<usize>,
+    /// Set on the packet behind which the FEC of the blocks closed so far is sent.
+    sends: Option<BlockEnd>,
 }
 
-/// What was decided about a block's FEC when its last media packet passed this slot.
+/// What was decided about the FEC to send when the media packet it follows passed this slot.
 struct BlockEnd {
     /// RED with [`RedPlacement::OwnPacket`]: the sequence numbers of the media stream set aside
-    /// for the block's FEC packets.
+    /// for the FEC packets.
     reserved: Vec<u16>,
-    /// The RTP timestamp of the block's last media packet, which its FEC packets carry.
+    /// The RTP timestamp of the media packet the FEC follows, which the FEC packets carry.
     timestamp: u32,
+}
+
+/// With a wire tap: what a media packet that left (or never did) settles, in order.
+enum WireStep {
+    /// A block is complete: its packets as they left, and how many FEC packets it gets.
+    Block(usize, Vec<(u16, Bytes)>),
+    /// The FEC gathered so far is sent.
+    Send(BlockEnd),
 }
 
 /// Produces ULPFEC (RFC 5109) for outgoing media.
@@ -299,7 +352,9 @@ struct BlockEnd {
 ///
 /// With [`RedPlacement::OwnPacket`] a FEC packet takes a sequence number of the media stream, so
 /// every later media packet of the stream is sent with its sequence number moved up by the number
-/// of FEC packets sent so far. The NACK responder sits wire-ward of this interceptor and buffers
+/// of FEC packets sent so far. Those sequence numbers follow the last packet of a frame
+/// ([`UlpfecSendBuilder::with_fec_after_frame`]): the receiver finds no FEC packet between two
+/// packets of a frame. The NACK responder sits wire-ward of this interceptor and buffers
 /// what is on the wire, so a NACK, which names wire sequence numbers, is answered correctly. The
 /// marker bit of the media packet is kept on the RED packet, as browsers do; RFC 2198 has no
 /// field for it otherwise.
@@ -318,6 +373,8 @@ pub struct UlpfecSendInterceptor {
     rate: FecRate,
     level_lengths: Vec<u16>,
     flush_on_marker: bool,
+    /// See [`UlpfecSendBuilder::with_fec_after_frame`].
+    fec_after_frame: bool,
     initial_fec_sequence_number: Option<u16>,
     filter: StreamFilter,
     /// See [`UlpfecSendBuilder::with_mutable_extensions_zeroed`].
@@ -363,9 +420,15 @@ impl UlpfecSendInterceptor {
         self.streams.keys().copied()
     }
 
-    /// The FEC payloads for a full block, each protecting every `count`-th packet.
-    fn encode_block(&self, block: &[(u16, Bytes)], one_level_only: bool) -> Vec<Bytes> {
-        let count = self.num_fec_packets.min(block.len());
+    /// The FEC payloads for a full block: `fec_packets` of them (no more than the block has
+    /// packets), each protecting every `count`-th packet.
+    fn encode_block(
+        &self,
+        block: &[(u16, Bytes)],
+        one_level_only: bool,
+        fec_packets: usize,
+    ) -> Vec<Bytes> {
+        let count = fec_packets.min(block.len());
         if count == 0 {
             return Vec::new();
         }
@@ -482,37 +545,50 @@ impl UlpfecSendInterceptor {
         }
 
         stream.passing += 1;
+        let own_packets = matches!(stream.carriage, Carriage::Red { .. })
+            && self.placement == RedPlacement::OwnPacket;
         let closes = (stream.passing >= self.num_media_packets || (self.flush_on_marker && marker))
             .then(|| {
                 let fec_packets = self.num_fec_packets.min(stream.passing);
                 stream.passing = 0;
-                // The FEC packets of this block take the next sequence numbers of the media
-                // stream, now, so the media that follows is numbered past them.
-                let own_packets = matches!(stream.carriage, Carriage::Red { .. })
-                    && self.placement == RedPlacement::OwnPacket;
-                let reserved = if own_packets {
-                    let offset = self.sequence_offsets.entry(ssrc).or_insert(0);
-                    (0..fec_packets)
-                        .map(|_| {
-                            *offset = offset.wrapping_add(1);
-                            stream.last_wire_sequence = stream.last_wire_sequence.wrapping_add(1);
-                            stream.last_wire_sequence
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                BlockEnd {
-                    reserved,
-                    timestamp,
-                }
+                fec_packets
             });
+        stream.promised += closes.unwrap_or(0);
+        // Where the FEC goes: behind the block's last packet, or, for FEC packets that take
+        // sequence numbers of the media stream, behind the frame's last packet.
+        let send_now = if own_packets && self.fec_after_frame {
+            stream.promised > 0 && (marker || stream.promised >= ULPFEC_MAX_HELD_FEC_PACKETS)
+        } else {
+            closes.is_some()
+        };
+        let sends = send_now.then(|| {
+            let fec_packets = std::mem::take(&mut stream.promised);
+            // The FEC packets take the next sequence numbers of the media stream, now, so the
+            // media that follows is numbered past them.
+            let reserved = if own_packets {
+                let offset = self.sequence_offsets.entry(ssrc).or_insert(0);
+                (0..fec_packets)
+                    .map(|_| {
+                        *offset = offset.wrapping_add(1);
+                        stream.last_wire_sequence = stream.last_wire_sequence.wrapping_add(1);
+                        stream.last_wire_sequence
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            BlockEnd {
+                reserved,
+                timestamp,
+            }
+        });
         if stream.in_flight.len() == MAX_IN_FLIGHT {
             stream.in_flight.pop_front();
         }
         stream.in_flight.push_back(InFlight {
             sequence_number,
             closes,
+            sends,
         });
         self.write_queue.push_back(msg);
     }
@@ -554,11 +630,20 @@ impl UlpfecSendInterceptor {
         };
         // Whatever was sent before it and has not been seen never reached the wire (the pacer
         // refused it, a circuit breaker stopped the flow). A block one of those closed is
-        // closed with what did leave.
-        let mut ends = Vec::new();
+        // closed with what did leave, and the FEC that was to follow one of those is sent.
+        let mut steps = Vec::new();
         for _ in 0..position {
-            if let Some(end) = stream.in_flight.pop_front().and_then(|lost| lost.closes) {
-                ends.push((end, std::mem::take(&mut stream.block)));
+            let Some(lost) = stream.in_flight.pop_front() else {
+                break;
+            };
+            if let Some(fec_packets) = lost.closes {
+                steps.push(WireStep::Block(
+                    fec_packets,
+                    std::mem::take(&mut stream.block),
+                ));
+            }
+            if let Some(end) = lost.sends {
+                steps.push(WireStep::Send(end));
             }
         }
         let Some(arrived) = stream.in_flight.pop_front() else {
@@ -597,35 +682,59 @@ impl UlpfecSendInterceptor {
         if let Some(packetizer) = stream.packetizer.as_mut() {
             packetizer.on_media(rtp_packet.header.timestamp, now);
         }
-        if let Some(end) = arrived.closes {
-            ends.push((end, std::mem::take(&mut stream.block)));
+        if let Some(fec_packets) = arrived.closes {
+            steps.push(WireStep::Block(
+                fec_packets,
+                std::mem::take(&mut stream.block),
+            ));
+        }
+        if let Some(end) = arrived.sends {
+            steps.push(WireStep::Send(end));
         }
 
-        for (end, block) in ends {
-            self.send_block_fec(now, transport, ssrc, end, &block);
+        for step in steps {
+            match step {
+                WireStep::Block(fec_packets, block) => {
+                    self.encode_wire_block(now, ssrc, fec_packets, &block);
+                }
+                WireStep::Send(end) => self.send_held_fec(now, transport, ssrc, end),
+            }
         }
     }
 
-    /// Send the FEC of a block whose packets have left.
-    fn send_block_fec(
+    /// Compute the FEC of a block whose packets have left; it waits to be sent.
+    fn encode_wire_block(
         &mut self,
         now: Instant,
-        transport: shared::TransportContext,
         ssrc: u32,
-        end: BlockEnd,
+        fec_packets: usize,
         block: &[(u16, Bytes)],
     ) {
         let one_level_only = self
             .streams
             .get(&ssrc)
             .is_some_and(|stream| stream.one_level_only);
-        let mut fec_payloads: VecDeque<Bytes> = self.encode_block(block, one_level_only).into();
+        let fec_payloads = self.encode_block(block, one_level_only, fec_packets);
         for fec in &fec_payloads {
             self.rate.on_repair_sent(now, fec.len());
         }
+        if let Some(stream) = self.streams.get_mut(&ssrc) {
+            stream.held.extend(fec_payloads);
+        }
+    }
+
+    /// Send the FEC of the blocks whose packets have left.
+    fn send_held_fec(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        ssrc: u32,
+        end: BlockEnd,
+    ) {
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
+        let mut fec_payloads = std::mem::take(&mut stream.held);
         // Each packet with the FEC octets it carries (none: an empty block in a reserved slot).
         let mut packets = Vec::new();
         match stream.carriage {
@@ -651,7 +760,7 @@ impl UlpfecSendInterceptor {
                     return;
                 }
                 // Every sequence number set aside is used, so the stream has no hole of this
-                // interceptor's making: a slot the block gave no FEC for (packets of it never
+                // interceptor's making: a slot the blocks gave no FEC for (packets of one never
                 // left, or the encoder refused it) carries an empty FEC block.
                 for sequence_number in end.reserved {
                     let fec = fec_payloads.pop_front().unwrap_or_default();
@@ -866,23 +975,39 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             } else {
                 Vec::new()
             };
+        // FEC packets that take sequence numbers of the media stream wait for the frame's
+        // last packet.
+        let after_frame = self.fec_after_frame
+            && self.placement == RedPlacement::OwnPacket
+            && matches!(stream.carriage, Carriage::Red { .. });
 
         // The media packet goes first; the FEC protects what has already left.
         self.write_queue.push_back(msg);
-        if block.is_empty() {
-            return Ok(());
-        }
 
         let one_level_only = self
             .streams
             .get(&ssrc)
             .is_some_and(|stream| stream.one_level_only);
-        let fec_payloads = self.encode_block(&block, one_level_only);
+        let fec_payloads = if block.is_empty() {
+            Vec::new()
+        } else {
+            self.encode_block(&block, one_level_only, self.num_fec_packets)
+        };
         for fec in &fec_payloads {
             self.rate.on_repair_sent(now, fec.len());
         }
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return Ok(());
+        };
+        let fec_payloads: Vec<Bytes> = if after_frame {
+            stream.held.extend(fec_payloads);
+            if marker || stream.held.len() >= ULPFEC_MAX_HELD_FEC_PACKETS {
+                stream.held.drain(..).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            fec_payloads
         };
         for fec in fec_payloads {
             let fec_bytes = fec.len();
@@ -1006,6 +1131,8 @@ impl Interceptor for UlpfecSendInterceptor {
                 carriage,
                 block: Vec::new(),
                 pending: VecDeque::new(),
+                held: VecDeque::new(),
+                promised: 0,
                 packetizer,
                 last_wire_sequence: 0,
                 in_flight: VecDeque::new(),

@@ -33,7 +33,11 @@ const FEC_PT: u8 = 117;
 /// tests are about. The builder's default is the form of RFC 5109 14.2 (FEC with the next media
 /// packet); tests of that say so with `with_red_placement`.
 fn red_builder() -> UlpfecSendBuilder {
-    UlpfecSendBuilder::red(RED_PT, FEC_PT).with_red_placement(RedPlacement::OwnPacket)
+    UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        .with_red_placement(RedPlacement::OwnPacket)
+        // These tests are about blocks: the FEC follows each (the default, behind the
+        // frame's last packet, has a test of its own below).
+        .with_fec_after_frame(false)
 }
 
 fn stream(separate_fec: bool) -> StreamInfo {
@@ -146,6 +150,8 @@ fn receive(
             if let Packet::Rtp(rtp) = out.message.packet
                 && rtp.header.ssrc == MEDIA_SSRC
                 && rtp.header.payload_type == MEDIA_PT
+                // A FEC-only packet goes on emptied under the media's payload type.
+                && !rtp.payload.is_empty()
             {
                 delivered.push((rtp, recovered));
             }
@@ -503,5 +509,68 @@ fn a_media_packet_dropped_before_the_wire_does_not_stall_the_encoder() {
             .filter(|(_, recovered)| *recovered)
             .map(|(packet, _)| packet.header.sequence_number)
             .collect::<Vec<_>>()
+    );
+}
+
+/// With the wire tap, FEC packets of their own still follow the frame's last packet
+/// (`UlpfecSendBuilder::with_fec_after_frame`, the default): the sequence numbers behind it
+/// are set aside when it passes the encoder, the blocks that closed inside the frame are
+/// computed as their packets leave and wait, and the FEC leaves when the frame's last packet
+/// has left. No sequence number inside a frame is a FEC packet's, none is skipped or used
+/// twice, and every single loss is rebuilt as sent.
+#[test]
+fn red_fec_in_its_own_packets_follows_the_last_packet_of_the_frame() {
+    let mut chain = sender(
+        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+            .with_red_placement(RedPlacement::OwnPacket)
+            .with_num_media_packets(3)
+            .with_num_fec_packets(1)
+            .with_flush_on_marker(true),
+        false,
+    );
+    // A frame of seven packets, then one of two.
+    let now = Instant::now();
+    let mut wire = Vec::new();
+    for sequence_number in 100..109u16 {
+        let mut packet = media(sequence_number);
+        packet.header.timestamp = if sequence_number < 107 { 3_000 } else { 6_000 };
+        packet.header.marker = sequence_number == 106 || sequence_number == 108;
+        chain.handle_write(tagged(now, packet)).expect("write");
+        while let Some(out) = chain.poll_write() {
+            if let Packet::Rtp(rtp) = out.message.packet {
+                wire.push(rtp);
+            }
+        }
+    }
+
+    let is_media = |packet: &rtp::Packet| {
+        packet
+            .payload
+            .first()
+            .is_some_and(|first| first & 0x7F == MEDIA_PT)
+    };
+    let shape: String = wire
+        .iter()
+        .map(|packet| if is_media(packet) { 'M' } else { 'F' })
+        .collect();
+    assert_eq!("MMMMMMMFFFMMF", shape);
+    assert_eq!(
+        (100..113).collect::<Vec<u16>>(),
+        wire.iter()
+            .map(|packet| packet.header.sequence_number)
+            .collect::<Vec<_>>(),
+        "one sequence space, without a gap or a repeat"
+    );
+    assert!(
+        wire[7..10]
+            .iter()
+            .all(|fec| fec.header.timestamp == 3_000 && !fec.header.marker),
+        "the frame's timestamp, no marker"
+    );
+    every_single_loss_is_rebuilt_as_sent(
+        &wire,
+        || UlpfecReceiveBuilder::red(RED_PT, FEC_PT),
+        false,
+        is_media,
     );
 }

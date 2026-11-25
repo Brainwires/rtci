@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection, interceptor, media** (`conf/red-3-fec-sequence-holes`): **a ULPFEC packet
+  received in a RED stream is delivered to the application as an RTP packet without a
+  payload**, under the payload type of the stream's media, with the FEC packet's sequence
+  number and timestamp (`RTCMessage::RtpPacket` with an empty `payload`; the peer connection
+  used to drop it). ULPFEC in RED packets of its own (the form browsers send, and the `Chrome`
+  behaviour profile's) takes sequence numbers of the media stream, so an application that
+  puts frames together saw a missing packet at each of them: a frame of more than five
+  packets was never complete, and each hole between frames waited out the gap bound and
+  cost a key-frame request. Between two engines of the `Chrome` profile at 2 Mbit/s no
+  frame was usable while FEC was sent. Migration: give every packet of the stream to the
+  frame assembly, empty ones included (`SampleBuilder::push` and `rtci-video`'s receiver take
+  them as present and no media); code that reads `payload[0]` of every packet must skip an
+  empty payload. The receive interceptor's emptied packet (`UlpfecRepair`) now has the
+  media's payload type instead of the `ulpfec` one (the `ulpfec` one only before any media
+  of the stream arrived).
+- **interceptor** (`conf/red-3-fec-sequence-holes`): **with `RedPlacement::OwnPacket` the FEC
+  packets follow the last packet of a frame** (the one with the marker bit) instead of each
+  block's last packet: `UlpfecSendBuilder::with_fec_after_frame`, on by default, as libwebrtc
+  places them (`ulpfec_generator.cc:134,157-159` at a222406d). A receiver, libwebrtc's
+  included, finds a frame only over consecutive sequence numbers, so a FEC packet inside a
+  frame left it incomplete. Each FEC packet protects the same media packets as before; only
+  the order on the wire changes (RFC 5109 and RFC 2198 say nothing about it). At most
+  `ULPFEC_MAX_HELD_FEC_PACKETS` (128) FEC packets wait for a marker bit. Migration: none for
+  video with marker bits; `with_fec_after_frame(false)` restores the old order. The other
+  placements and carriages are unchanged.
+- **media** (`conf/red-3-fec-sequence-holes`): `SampleBuilder` takes **a packet without a
+  payload as present and no media**. It is left out of the sample it lies in (a sample with
+  one inside it used to be lost to a depacketizer error); it starts no sample, so a sample
+  followed by such packets waits for the next packet with a payload and has its real
+  `duration` (it used to come out at once with a duration of zero); between samples it is
+  counted in `prev_padding_packets` whatever its timestamp (only one with the last sample's
+  timestamp was); and `pop` goes on to the next sample after dropping packets that belong
+  to none (it used to return `None` once for each such run). Migration: none needed; code
+  that relied on a zero duration to spot padding reads `prev_padding_packets`.
 - **interceptor, peer connection** (`conf/flush-1r-backlog-flush-at-collapse`): **the default
   pacer discards queued video when the path's capacity collapses.** When what waits in the
   pacer would take a second or more to leave and the target is half or less of what it was
@@ -1280,6 +1314,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `an_rtx_format_whose_primary_is_a_red_format_is_numbered_with_it`. Not affected: streams
   not sent in RED with one media format (the default profile).
 
+- **media** (`conf/red-3-fec-sequence-holes`): `SampleBuilder` gave a sample a duration of
+  zero when the packet that follows it had the last sequence number before the wrap (65535):
+  the search for the next packet's timestamp ran over a range that does not wrap. It walks
+  the sequence numbers as they wrap now.
 - **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
   profile) two engines never raised their send rate** (red-1). A receiver learns a
   stream's format from the payload type of its first packet; when that is the `red` format
