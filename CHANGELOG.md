@@ -31,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   freed as they were: the SRTP AES-GCM session keys and every AES round key
   (`ring::aead::LessSafeKey`), the DTLS record keys of the AES-GCM and ChaCha20-Poly1305 suites,
   the DTLS 1.3 record-number keys (`aead::quic::HeaderProtectionKey`) and the HMAC-SHA-2 states
-  of the PRF, HKDF and cookie keys (`hmac::Key`). Key schedules and shared secrets also left copies in
+  of the PRF, HKDF and cookie keys (`hmac::Key`); the ECDHE private key, left in the freed
+  key-exchange object (`agreement::EphemeralPrivateKey`), and the certificate's Ed25519 and
+  ECDSA P-256 key pairs. Key schedules and shared secrets also left copies in
   dead stack frames that later moves carried into heap padding. All of these are now erased:
   `SecretVec` everywhere (it implements `Zeroize` and `ZeroizeOnDrop`), structs that hold keys
   derive both, buffers are sized up front, `aes`/`ctr` are built with `zeroize`, the HMAC-SHA1
@@ -44,11 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the DTLS 1.2 exporter test of `tests/dtls_srtp_keying_material_erasure.rs` (was a known
   limit), `with_ring_no_key_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
   `key_erasure_process_memory.rs` (were the `known_limit_*` tests),
-  `rtci-crypto/tests/ring_key_object_erasure.rs` (each ring key object). What remains: ring's
-  ECDHE private scalar and signing key objects are not wrapped (not measured), and stack copies
-  left while key objects are built are scrubbed but not observed by any test (a copy moved onto
-  the stack is not caught), so their absence is not guaranteed (docs/key-erasure.md). No wire or
-  handshake behaviour changes. Additions to the API:
+  `rtci-crypto/tests/ring_key_object_erasure.rs` (each ring key object, the ECDHE private key
+  drawn from a known seed through the new test-support seam `ring_key_exchange_with_seed`, the
+  signing key pairs). What remains: a ring RSA key pair keeps its private limbs in ring's own
+  heap allocations (not reachable, not measured); stack copies left while key objects are built
+  are scrubbed but not observed by any test (a copy moved onto the stack is not caught), so
+  their absence is not guaranteed (docs/key-erasure.md); RFC7714-13.1-3 stays `partial`
+  (class E) for that. No wire or handshake behaviour changes. Additions to the API:
   `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
   for `SecretVec` and `SessionKeys`. DTLS record setup costs one 32 KiB stack overwrite per
   key schedule built; per-packet costs did not move beyond noise (`rtci-srtp` and `rtci-dtls`
@@ -1631,11 +1635,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   providers' own stack temporaries are not erased by them. The engine scrubs 32 KiB of stack
   after building keyed objects; the tests see stack residue only where it reaches the heap
   (DTLS, caught) and in dead worker stacks on Linux (none found), and a copy deliberately moved
-  onto the stack is not caught, so this is a measure, not a tested guarantee. With the ring
-  provider the ECDHE private scalar (`agreement::EphemeralPrivateKey`, consumed by ring) and the
-  signing key objects are ring's and not erased (not measured). Until this branch, ring's AEAD,
-  header-protection and HMAC key objects were also left in freed memory; they are now erased
-  (Security).
+  onto the stack is not caught, so this is a measure, not a tested guarantee
+  (RFC7714-13.1-3 `partial`, class E). With the ring provider an RSA signing key keeps its
+  private limbs in ring's own heap allocations, which ring frees without erasure (not
+  measured). Until this branch, ring's AEAD, header-protection, HMAC, ECDHE and Ed25519/P-256
+  signing key objects were also left in freed memory; they are now erased (Security).
 
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of

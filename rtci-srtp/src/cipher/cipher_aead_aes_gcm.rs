@@ -56,9 +56,6 @@ fn new_aead(
     let cipher = crypto
         .new_aead(algorithm_of(profile)?, session_key)
         .map_err(crypto_error)?;
-    // Building the key schedule left copies of it in the provider's dead stack frames below
-    // this one; the object itself lives in the heap, where the provider erases it on drop.
-    crypto::scrub_stack();
     if cipher.tag_len() != CIPHER_AEAD_AES_GCM_AUTH_TAG_LEN {
         return Err(Error::Crypto(format!(
             "SRTP AES-GCM requires a {}-byte tag, provider returned {}",

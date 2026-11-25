@@ -12,7 +12,7 @@ and RFC 7714 section 13.1 (SRTP keys erased when no longer needed).
 
 | Secret | Where it lives | Erased (0.1.0) | Erased now | Test |
 |---|---|---|---|---|
-| (EC)DHE private scalar | the provider's key-exchange object (`ring::agreement::EphemeralPrivateKey`, AWS-LC) | provider | provider (ring: not erased; AWS-LC: cleansed) | none (not observable: the scalar never crosses the provider boundary) |
+| (EC)DHE private scalar | the provider's key-exchange object (`ring::agreement::EphemeralPrivateKey`, AWS-LC) | ring: no (the freed key-exchange object kept it: 1 block per exchange, X25519 and P-256, measured with the 0.1.0 code path as mutation m6) | ring: yes (`ErasedOnDrop`; `into_inner` overwrites the slot when `agree_ephemeral` consumes the key; the stack copy is scrubbed after key agreement); AWS-LC: its own, not measured | `ring_ecdhe_private_key_and_shared_secret_are_erased` (scalar drawn from a known seed through the test-support seam) |
 | (EC)DHE shared secret / DTLS 1.2 premaster secret | `SecretVec` from the provider; `State.pre_master_secret` | no: `into_bytes` to a plain `Vec`, `State` field plain, flight 4's local plain on error paths | yes: `SecretVec` end to end, forgotten once the master secret exists; the stack scrubbed after the provider computes it | `tests/dtls_secret_erasure.rs` (all DTLS 1.2 tests, process test) |
 | PSK from the application's callback, PSK premaster secret | flight 3/4 locals | no (plain `Vec`) | yes (`SecretVec` on receipt; premaster built at its size) | `dtls12_psk_and_its_premaster_secret_are_erased` |
 | DTLS 1.2 master secret | `State.master_secret`, sessions, tickets | no: `State` field plain; replaced without erasure | yes (`SecretVec`) | `dtls12_secrets_are_erased_for_every_cipher_suite_family`, ticket and serialization tests |
@@ -29,7 +29,7 @@ and RFC 7714 section 13.1 (SRTP keys erased when no longer needed).
 | External PSK (1.3) | `ExternalPsk` (`SecretVec`) | yes | yes | `dtls13_resumption_and_external_psk_secrets_are_erased` |
 | Cookie secrets (1.2 HelloVerifyRequest, 1.3 HelloRetryRequest) | `CookieSecrets` in the endpoint; the HRR secret | no: the previous secret (after a rotation) was never erased; drawn from the buffered generator, whose output buffer kept them (the current secret taken out with `take()` was not observed left behind) | yes: both overwritten in place; drawn with `RTCRandom::fill_secret` | `cookie_secrets_are_erased_with_the_endpoint` (rotates, looks for both) |
 | Serialized `State` (`marshal_binary`) | the returned bytes; `SerializedState` | intermediate copies freed as they were | intermediate copies erased, output written once at its size | `dtls12_state_serialization_leaves_no_master_secret_behind` |
-| Certificate private key (PKCS#8) | provider `SigningKey` (`pkcs8_der: SecretVec`); PEM import copy | provider; import copy plain | import copy `SecretVec` (the `pem`/`rcgen` crates' own buffers are theirs) | none |
+| Certificate private key (PKCS#8) and the provider's parsed key pair | provider `SigningKey` (`pkcs8_der: SecretVec`; ring's `Ed25519KeyPair` / `EcdsaKeyPair` / `RsaKeyPair`); PEM import copy | ring key pair: no (1 freed block per key, Ed25519 and P-256, measured with the 0.1.0 layout as mutation m7); import copy plain | ring Ed25519/P-256 key pairs: yes (`ErasedOnDrop`); `pkcs8_der` and the import copy `SecretVec`; ring's RSA key pair keeps its private limbs in heap allocations of ring's own, which the crate cannot reach (by reading ring 0.17.14; not measured); the application's own copies (`pem`/`rcgen` buffers, the PKCS#8 it supplies) are its to protect | `ring_signing_key_objects_are_erased_when_dropped` (Ed25519 secret prefix, P-256 scalar in ring's Montgomery form) |
 | SRTP master keys and salts | `SessionKeys` | yes (manual `Drop`) | yes (`Zeroize`, `ZeroizeOnDrop`) | `rtci-srtp/tests/key_erasure.rs` |
 | SRTP session keys, salts, KDF output | `SecretVec`; AES-CM keys in `AesCtr` | yes | yes | `rtci-srtp/tests/key_schedule_erasure.rs` |
 | SRTP HMAC-SHA1 states (AES-CM, NULL profiles) | ring provider: RustCrypto `hmac`; AWS-LC: `HMAC_CTX` | ring: no | yes (`Drop for RustCryptoHmacSha1` overwrites the state) | `with_ring_no_key_is_left_in_freed_rust_memory`, process test |
@@ -58,19 +58,23 @@ another heap block before the drop.
 
 What remains with ring:
 
-- `agreement::EphemeralPrivateKey` (the ECDHE private scalar) is consumed by value by
-  `agree_ephemeral`, so it cannot be kept in the crate's allocation; ring's signing key objects
-  (the certificate key) are not wrapped (an RSA key keeps its limbs in heap allocations of
-  ring's own). Neither is measured: the scalar never crosses the provider boundary.
+- The ECDHE private key (`agreement::EphemeralPrivateKey`) and the Ed25519 and ECDSA P-256
+  signing key pairs are kept in `ErasedOnDrop` too (since the second zeroize round); the
+  private key is consumed by value by `agree_ephemeral`, so `into_inner` reads it out and
+  overwrites the slot. Measured: found live, left in no freed block (before: one freed block
+  each). The shared secret is in no freed block either. An RSA signing key pair keeps its
+  private limbs in heap allocations of ring's own, freed by ring without erasure: out of the
+  crate's reach, the provider's limit (from ring 0.17.14's source; not measured).
 - Stack copies. Building a key object leaves copies in the dead stack frames of the functions
   that built it, and a value moved out of the wrapper would be a copy it cannot reach (the
   wrapper never moves its value out). The engine calls `crypto::scrub_stack()` after building
   keyed objects. What the tests show: in DTLS, copies carried from dead frames into heap padding
   were found and the scrub removes them (its removal is caught, m13 of the first round); the
   Linux process scan also searches the dead worker stacks and finds nothing after the drop. A
-  copy deliberately moved onto the stack before the drop (mutation m3) and the removal of the
-  scrub after the SRTP AES-GCM context is built (m5) were NOT caught: stack residue is not
-  observed by the tests, and its absence is not guaranteed.
+  copy deliberately moved onto the stack before the drop (mutation m3) was NOT caught, nor was
+  a scrub added after the SRTP AES-GCM context is built ever needed (its removal, m5, changed
+  nothing any test sees; it cost about 10 µs per context, so it was taken out): residue that
+  stays on the stack is not observed by the tests, and its absence is not guaranteed.
 
 The AWS-LC provider (`crypto-aws-lc-rs`) cleanses its `EVP_AEAD_CTX` and `HMAC_CTX` itself; the
 process-memory tests find nothing after the drop, for every SRTP profile and the DTLS suites
