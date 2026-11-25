@@ -222,17 +222,16 @@ fn the_first_request_waits_out_the_reordering_allowance() {
     assert_eq!(0, count(&cycles(&mut chain, base, 2..=10)));
 }
 
-/// RFC 4588 8.1: `rtx-time` is how long the sender keeps a packet for retransmission.
+/// RFC 4588 8.1: `rtx-time` is how long the sender keeps a packet for retransmission. A
+/// configured one is how old a packet may be and still be repaired, shorter or longer than the
+/// responder's own repair age (two seconds by default, `with_max_repair_age`), which is the
+/// bound only where no `rtx-time` is set; with neither a packet is repaired for as long as
+/// the buffer holds it.
 #[test]
 fn a_packet_past_rtx_time_is_not_retransmitted() {
-    let retransmitted = |max_packet_age: Option<Duration>, nack_after: Duration| {
+    let answered = |builder: NackResponderBuilder, nack_after: Duration| {
         let mut chain = Registry::new()
-            .with(
-                Slot::NackResponder,
-                NackResponderBuilder::new()
-                    .with_max_packet_age(max_packet_age)
-                    .build(),
-            )
+            .with(Slot::NackResponder, builder.build())
             .build();
         chain.bind_local_stream(&stream_info());
         let base = Instant::now();
@@ -259,10 +258,29 @@ fn a_packet_past_rtx_time_is_not_retransmitted() {
             .count()
     };
 
+    let retransmitted = |max_packet_age: Option<Duration>, nack_after: Duration| {
+        answered(
+            NackResponderBuilder::new().with_max_packet_age(max_packet_age),
+            nack_after,
+        )
+    };
     let rtx_time = Some(Duration::from_millis(500));
     assert_eq!(1, retransmitted(rtx_time, Duration::from_millis(400)));
     assert_eq!(0, retransmitted(rtx_time, Duration::from_millis(600)));
-    assert_eq!(1, retransmitted(None, Duration::from_secs(60)));
+    // Longer than the repair age: the `rtx-time` is the bound.
+    let rtx_time = Some(Duration::from_secs(5));
+    assert_eq!(1, retransmitted(rtx_time, Duration::from_secs(4)));
+    assert_eq!(0, retransmitted(rtx_time, Duration::from_secs(6)));
+    // No `rtx-time`: the repair age; and with that off too, the buffer.
+    assert_eq!(1, retransmitted(None, Duration::from_millis(1_900)));
+    assert_eq!(0, retransmitted(None, Duration::from_millis(2_100)));
+    assert_eq!(
+        1,
+        answered(
+            NackResponderBuilder::new().with_max_repair_age(None),
+            Duration::from_secs(60)
+        )
+    );
 }
 
 /// The sequence numbers each NACK cycle at `base + TICK * tick` asked for.

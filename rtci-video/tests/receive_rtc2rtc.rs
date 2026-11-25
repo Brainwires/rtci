@@ -1179,14 +1179,18 @@ fn a_capacity_drop_and_recovery_leaves_no_long_freeze() -> Result<()> {
 
 /// The same call with `GccInterceptorBuilder` as it comes: it probes at the start, so the call
 /// stands at 2.5 Mbit/s when the cap comes, and the collapse from the path's rate renders
-/// nothing for 1128 ms on this seed (hosted run 45574623720) against the one-second bound the
-/// call without probes keeps. A chain without a pacer has nothing that pauses or flushes at a
-/// collapse: the NACK responder repairs the whole backlog in order, also the packets the
-/// receiver has given up. A responder that declines repairs by age is expected to remove the
-/// limit; this test then passes, and becomes the requirement (drop the `#[ignore]` and the
-/// row in `docs/test-exclusions.md`).
+/// nothing for 1148 ms on this seed (hosted run 45605270215) against the one-second bound the
+/// call without probes keeps. It is not the repairs that hold the picture: the NACK responder
+/// gives the backlog of such a collapse up for a key frame
+/// (`NackResponderBuilder::with_repair_backlog_bound`; the run has 2 retransmissions, and it
+/// was 1128 ms before that rule), and this pipeline's receiver stops asking behind its
+/// horizon. The interval is the collapse itself, read from the run's figures and not traced:
+/// the estimate's reaction, the receiver's repair window (497 ms at most here) before it asks
+/// for a key frame, and the key frame's way through the 300 kbit/s path. When this test
+/// passes it becomes the requirement (drop the `#[ignore]` and the row in
+/// `docs/test-exclusions.md`).
 #[test]
-#[ignore = "KNOWN LIMIT: with the builder's default probing the call meets the cap at 2.5 Mbit/s and renders nothing for 1128 ms (bound 1000 ms; one seed, hosted run 45574623720); fails when run (-- --ignored known_limit_)"]
+#[ignore = "KNOWN LIMIT: with the builder's default probing the call meets the cap at 2.5 Mbit/s and renders nothing for 1148 ms (bound 1000 ms; one seed, hosted run 45605270215; 2 retransmissions: the collapse itself, not the repairs); fails when run (-- --ignored known_limit_)"]
 fn known_limit_a_capacity_drop_from_the_paths_rate_leaves_no_long_freeze() -> Result<()> {
     a_capacity_drop_and_recovery(Probing::BuilderDefault)
 }

@@ -363,6 +363,12 @@ pub struct DefaultInterceptorOptions {
     /// resume at a key frame. See
     /// [`PacerBuilder::with_backlog`](interceptor::PacerBuilder::with_backlog) and
     /// `docs/capacity-collapse.md`.
+    ///
+    /// `Keep` means "keep and repair everything" for the whole chain: it also switches off
+    /// the NACK responder's two rules that decline repairs
+    /// ([`nack_max_repair_age`](Self::nack_max_repair_age),
+    /// [`nack_repair_backlog_bound`](Self::nack_repair_backlog_bound)), whatever those are
+    /// set to, so nothing sent is ever given up for a key frame.
     pub pacer_backlog: interceptor::PacerBacklog,
     /// Whether the path is probed for capacity above the target with short clusters of
     /// packets, as libwebrtc does. `true` by default: RFC 8836 section 2 asks that a
@@ -529,6 +535,23 @@ pub struct DefaultInterceptorOptions {
     /// target (RFC 4588 section 7). See
     /// [`NackResponderBuilder::with_rate_limit`](interceptor::NackResponderBuilder::with_rate_limit).
     pub nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit,
+    /// How old a packet may be and still be retransmitted: a NACK for a packet sent longer
+    /// ago is declined, and for a video stream everything sent so far is given up and a key
+    /// frame asked for (`RTCPeerConnectionEvent::OnKeyFrameRequest`). Two seconds by default
+    /// (RFC 8834 section 6.1: the likelihood of a retransmission "arriving in time to be
+    /// useful need[s] to be considered"); `None`: no bound, also what
+    /// [`pacer_backlog`](Self::pacer_backlog) `Keep` and the `Chrome` profile give. See
+    /// [`NackResponderBuilder::with_max_repair_age`](interceptor::NackResponderBuilder::with_max_repair_age)
+    /// and `docs/capacity-collapse.md`.
+    pub nack_max_repair_age: Option<Duration>,
+    /// The backlog of retransmissions given up, with a key-frame request, when the target has
+    /// fallen to half or less within two seconds: what would take this long or more to send
+    /// at the target. Two seconds by default (RFC 4588 section 7: "If congestion is not kept
+    /// under control, then retransmission SHOULD NOT be used"); `None`: every request is
+    /// served in order, also what [`pacer_backlog`](Self::pacer_backlog) `Keep` and the
+    /// `Chrome` profile give. See
+    /// [`NackResponderBuilder::with_repair_backlog_bound`](interceptor::NackResponderBuilder::with_repair_backlog_bound).
+    pub nack_repair_backlog_bound: Option<Duration>,
     /// The wall-clock anchor the NTP times of the interceptors derive from (the RTCP sessions'
     /// sender reports and receiver reference times, the RFC 8888 report timestamps, the RFC
     /// 6051 NTP timestamp header extension): the process-wide
@@ -614,6 +637,8 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "nack_retransmission_rate_limit",
                 &self.nack_retransmission_rate_limit,
             )
+            .field("nack_max_repair_age", &self.nack_max_repair_age)
+            .field("nack_repair_backlog_bound", &self.nack_repair_backlog_bound)
             .field(
                 "rtcp_random",
                 &self.rtcp_random.as_ref().map(|provider| provider.name()),
@@ -660,6 +685,8 @@ impl DefaultInterceptorOptions {
             rtcp_random: None,
             nack_max_nacks_per_packet: 0,
             nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit::default(),
+            nack_max_repair_age: Some(interceptor::NACK_MAX_REPAIR_AGE),
+            nack_repair_backlog_bound: Some(interceptor::NACK_REPAIR_BACKLOG_BOUND),
             wall_clock: None,
         }
     }
@@ -1299,6 +1326,20 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
     )
 }
 
+/// The NACK responder's bounds on the repairs it makes (the age of a packet, the backlog after
+/// a collapse) under `options`: its own two settings, or none at all with
+/// [`PacerBacklog::Keep`](interceptor::PacerBacklog::Keep), which keeps and repairs
+/// everything.
+fn nack_repair_bounds(options: &DefaultInterceptorOptions) -> (Option<Duration>, Option<Duration>) {
+    match options.pacer_backlog {
+        interceptor::PacerBacklog::Keep => (None, None),
+        _ => (
+            options.nack_max_repair_age,
+            options.nack_repair_backlog_bound,
+        ),
+    }
+}
+
 /// [`configure_nack`] with the NACK limits of `options`.
 fn configure_nack_with(
     registry: Registry,
@@ -1321,12 +1362,14 @@ fn configure_nack_with(
     );
 
     registry
-        .with(
-            Slot::NackResponder,
+        .with(Slot::NackResponder, {
+            let (max_repair_age, repair_backlog_bound) = nack_repair_bounds(options);
             NackResponderBuilder::new()
                 .with_rate_limit(options.nack_retransmission_rate_limit)
-                .build(),
-        )
+                .with_max_repair_age(max_repair_age)
+                .with_repair_backlog_bound(repair_backlog_bound)
+                .build()
+        })
         .with(
             Slot::NackGenerator,
             NackGeneratorBuilder::new()
@@ -2499,6 +2542,35 @@ mod ulpfec_tests {
             ],
             info.section_fmtp_lines
         );
+    }
+}
+
+#[cfg(test)]
+mod nack_repair_bounds_tests {
+    use super::*;
+
+    /// `PacerBacklog::Keep` is "keep and repair everything": the NACK responder is built
+    /// without its age bound and without its backlog bound, whatever the two settings say;
+    /// with the default (`Flush`) it gets the settings as they are.
+    #[test]
+    fn pacer_backlog_keep_also_switches_off_the_nack_responders_repair_bounds() {
+        let mut options = DefaultInterceptorOptions::for_profile(BehaviourProfile::Rfc);
+        assert_eq!(
+            (
+                Some(interceptor::NACK_MAX_REPAIR_AGE),
+                Some(interceptor::NACK_REPAIR_BACKLOG_BOUND)
+            ),
+            nack_repair_bounds(&options)
+        );
+        options.nack_max_repair_age = Some(Duration::from_secs(5));
+        options.nack_repair_backlog_bound = None;
+        assert_eq!(
+            (Some(Duration::from_secs(5)), None),
+            nack_repair_bounds(&options)
+        );
+        options.nack_repair_backlog_bound = Some(Duration::from_secs(3));
+        options.pacer_backlog = interceptor::PacerBacklog::Keep;
+        assert_eq!((None, None), nack_repair_bounds(&options));
     }
 }
 
