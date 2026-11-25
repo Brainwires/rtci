@@ -1324,8 +1324,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in 27.2 % of runs (that test's two to six seeds at one phase of the cap showed 8 %, and
     passed more often than not); the picture on the screen is 8.3 s old in the median all the
     same.
-  - the audio never returns in 8.9 % of runs of the default chain (33 % with a 1000 ms queue):
-    the RTP circuit breaker ceases the audio flow at the drop and nothing restarts it.
+  - (no longer a limit, breaker-1: the audio never returned in 8.9 % of runs of the default
+    chain, 33 % with a 1000 ms queue; now no flow is left ceased in any cell, and
+    `ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end` guards it on
+    every pull request.) With a 1000 ms queue the voice is still silent for some seconds in
+    about a quarter of runs while the congestion breaker holds it (53 of 200 runs with more
+    than 1 s without audio; 3.7 s in the median): `docs/circuit-breaker.md`.
   - both directions capped: every run of the default chain misses the picture requirement
     (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
     ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
