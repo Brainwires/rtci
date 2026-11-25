@@ -1608,6 +1608,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the direction whose capacity did not change); new scenario `fbgap` (no capacity change, the
   callee's RTCP lost for 300 ms). The baseline gains three tripwires per cell (`disc_open` > 0,
   `disc_max` > 2 s, the 10th percentile of `back_mean`) when it is next recorded. Test only.
+- **Congestion control feedback inside the RTCP bandwidth, measured on a call** (row
+  RFC4585-3.5.2-5, a measured setting; the default, feedback sent as it is built, is
+  unchanged). `feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent`
+  (`tests/capacity_cap_video_rtc2rtc.rs`): with RFC 4585 section 3.5.2's timing for the
+  feedback, an audio-only call's estimate halves to its floor on a clean link (5 % of a
+  64 kbit/s session holds a feedback packet every one to four seconds; half a second without
+  feedback is taken for over-use). The capacity instrument on the same seeds: one direction
+  capped, nothing worse (oldest picture -0.33 s); both directions capped, recovery slower than
+  20 s in 64 % of runs against 18.5 %. The capacity world's `Setup` takes
+  `immediate_congestion_feedback`.
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
