@@ -237,6 +237,15 @@ impl<P> GccInterceptorBuilder<P> {
     /// [`NackResponderInterceptor`](crate::NackResponderInterceptor) in the chain and RTX
     /// negotiated for the stream. Without them no cluster can be sent: the first one asked
     /// for goes unanswered and no more are asked, and the estimate climbs as the draft has it.
+    /// Clusters are asked for at the start and while the application sends less than the
+    /// target allows; not after a large drop of the target, which a chain with the pacer
+    /// probes too (a burst of padding into the queue that caused the drop costs more than it
+    /// finds: [`ProbeController::set_unpaced`](crate::ProbeController::set_unpaced)).
+    ///
+    /// A call that finds the path's rate at the start meets a later capacity collapse from
+    /// that rate, and loses more at it than one that was still climbing (about twice the
+    /// retransmissions when 2.5 Mbit/s drop to 300 kbit/s; the changelog has the measured
+    /// figures). `with_bandwidth_probing(false)` is the start without probes.
     pub fn with_bandwidth_probing(mut self, bandwidth_probing: bool) -> Self {
         self.bandwidth_probing = bandwidth_probing;
         self

@@ -324,10 +324,12 @@ impl ProbeController {
     /// already waiting, released faster for a few milliseconds, with padding only for what
     /// is missing; a burst is five packets of padding on top of the media, at once. After a
     /// drop that is 160 ms of a 300 kbit/s link put into the queue that caused the drop, once
-    /// a second: measured on the capacity instrument, it cost the capped link's target and
-    /// the audio (the figures are with [`with_probe_after_drop`](Self::with_probe_after_drop)
-    /// in the changelog). The start-up clusters and those of an application-limited sender
-    /// are still asked for.
+    /// a second. Measured on the capacity instrument (200 calls a cell, a 2.5 Mbit/s path
+    /// that drops to 300 kbit/s): with such bursts 7 of 200 calls of ParolNet's chain were
+    /// over 2 s without a new picture against 3 without them, 172 retransmissions a call
+    /// against 142, and behind a 1000 ms queue the audio paused for over a second in 72 of
+    /// 200 calls against 21. The start-up clusters and those of an application-limited
+    /// sender are still asked for.
     pub fn set_unpaced(&mut self, unpaced: bool) {
         self.unpaced = unpaced;
     }
@@ -796,6 +798,35 @@ mod tests {
             }
         }
         assert!((3..=5).contains(&probes), "{probes} probes");
+    }
+
+    /// A chain whose clusters leave as bursts ([`ProbeController::set_unpaced`]) is not probed
+    /// after a large drop, and names no deadline for it; the same drop is probed once the
+    /// clusters are paced.
+    #[test]
+    fn a_drop_is_not_probed_while_clusters_leave_as_bursts() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        controller.set_unpaced(true);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        for ms in (1_100..4_000).step_by(100) {
+            assert_eq!(None, controller.poll(at(ms), 900_000.0, 900_000.0, true));
+            assert!(
+                controller
+                    .poll_timeout()
+                    .is_none_or(|next| next > at(ms) + Duration::from_secs(1)),
+                "a deadline for a probe that will not be asked for, at {ms} ms"
+            );
+        }
+        controller.set_unpaced(false);
+        let request = controller
+            .poll(at(4_000), 900_000.0, 900_000.0, true)
+            .expect("paced clusters: the rate before the drop");
+        assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
     }
 
     /// `with_probe_after_drop(false)`: a drop is left to the delay-based controller's climb.

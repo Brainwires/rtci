@@ -42,16 +42,17 @@ const SECOND_RTX_SSRC: u32 = 0x00C0_0002;
 /// The estimate the recorder reports: the start-up clusters are three and six times it.
 const TARGET: f64 = 300_000.0;
 
-/// An estimator that only records the probe results it is given.
+/// An estimator that only records the probe results it is given; its target is the test's.
 struct Recorder {
     results: Arc<Mutex<Vec<f64>>>,
+    target: Arc<Mutex<f64>>,
 }
 
 impl BandwidthEstimator for Recorder {
     fn on_reports(&mut self, _now: Instant, _reports: &[PacketReport]) {}
 
     fn target_bitrate(&self) -> f64 {
-        TARGET
+        *self.target.lock().unwrap()
     }
 
     fn on_probe_result(&mut self, _now: Instant, bits_per_second: f64) {
@@ -99,6 +100,8 @@ struct Left {
 struct Sender<I> {
     chain: I,
     results: Arc<Mutex<Vec<f64>>>,
+    /// The estimator's target, set by the test.
+    target: Arc<Mutex<f64>>,
     sequence_number: u16,
     /// Every probe request that reached the application end, with when.
     requests: Vec<(Instant, ProbeRequest)>,
@@ -106,8 +109,10 @@ struct Sender<I> {
 
 fn sender(streams: &[StreamInfo]) -> Sender<impl Interceptor + use<>> {
     let results = Arc::new(Mutex::new(Vec::new()));
+    let target = Arc::new(Mutex::new(TARGET));
     let (controller, _handle) = CongestionControlBuilder::new(Recorder {
         results: results.clone(),
+        target: target.clone(),
     })
     .with_bandwidth_probing(true)
     .build_with_handle();
@@ -122,6 +127,7 @@ fn sender(streams: &[StreamInfo]) -> Sender<impl Interceptor + use<>> {
     Sender {
         chain,
         results,
+        target,
         sequence_number: 0,
         requests: Vec::new(),
     }
@@ -401,4 +407,54 @@ fn a_cluster_nothing_can_send_is_not_asked_for_again_until_another_stream_sends(
         sender.requests
     );
     assert_the_padding_is_the_cluster(&sender, &padding);
+}
+
+/// A chain whose clusters leave as bursts does not probe for the rate before a large drop.
+/// The controller learns what its clusters are from the first one it measures (all of its
+/// packets left in one instant). After that the target is 2 Mbit/s and falls to 500 kbit/s:
+/// with a pacer, a cluster at 85% of the rate before the drop (1.7 Mbit/s) would be asked for
+/// a second later and once a second for five seconds
+/// (`a_large_drop_is_followed_by_a_probe_at_the_rate_before_it`); here none is, in the seven
+/// seconds after the drop. A burst is five packets of padding on top of the media, into the
+/// queue that caused the drop; a paced cluster is mostly the media itself, released faster.
+#[test]
+fn a_chain_without_a_pacer_does_not_probe_after_a_large_drop() {
+    let epoch = Instant::now();
+    let mut sender = sender(&[video(VIDEO_SSRC, Some(VIDEO_RTX_SSRC))]);
+    let (padding, left_at) = sender.first_cluster(epoch);
+    let arrival = left_at.duration_since(epoch) + Duration::from_millis(20);
+    sender.report(
+        left_at + Duration::from_millis(60),
+        &padding,
+        arrival,
+        Duration::from_millis(1),
+    );
+    assert_eq!(1, sender.results().len(), "the burst was measured");
+
+    let from = left_at.duration_since(epoch).as_millis() as u64 + 61;
+    *sender.target.lock().unwrap() = 2_000_000.0;
+    for millisecond in from..from + 1_500 {
+        sender.step(
+            epoch + Duration::from_millis(millisecond),
+            millisecond,
+            VIDEO_SSRC,
+        );
+    }
+    let before_the_drop = sender.requests.len();
+    *sender.target.lock().unwrap() = 500_000.0;
+    for millisecond in from + 1_500..from + 8_500 {
+        sender.step(
+            epoch + Duration::from_millis(millisecond),
+            millisecond,
+            VIDEO_SSRC,
+        );
+    }
+    let after: Vec<f64> = sender.requests[before_the_drop..]
+        .iter()
+        .map(|(_, request)| request.bits_per_second)
+        .collect();
+    assert!(
+        !after.contains(&(0.85 * 2_000_000.0)),
+        "a cluster at the rate before the drop was asked for: {after:?}"
+    );
 }
