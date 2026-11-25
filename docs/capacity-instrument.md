@@ -23,7 +23,7 @@ documentation; this page says how the instrument is used and what it found.
 | a requirement met, too large for the job; requirements at the bound | the outage without the pacer; picture and freeze without the pacer; 300 runs each | on demand: `-- --ignored on_demand_` |
 | requirements the engine does not meet | `known_limit_*`: ignored, with the measured share in the attribute | they fail when run: `-- --ignored known_limit_` |
 | the audio guard | no run of the default chain's reference cells ends with a flow left ceased by the circuit breaker or its audio silent (`ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end`) | the same job, on every pull request since the circuit breaker's rules were corrected (breaker-1; before, 8.9 % of runs ended so) |
-| the picture guard | no run of the default chain's reference cells ends with a flow left ceased by the circuit breaker or its audio silent (`ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end`) | the same job, on every pull request since the circuit breaker's rules were corrected (breaker-1; before, 8.9 % of runs ended so) |
+| the picture guard | at most one of the 100 runs of the default chain's reference cells shows a picture older than 2 s for more than 0.5 s (`ensemble_tripwire_picture_in_the_default_chain`): 0 of 2000 with the backlog flushed (docs/capacity-collapse.md); a tree in which 5 % of calls miss passes with probability 0.037 | the tripwire of `on_demand_requirement_picture_in_the_default_chain`, which needs 300 runs |
 | the fine comparison | the merge-point rule below | `capacity-compare.yml`, by hand |
 
 A requirement is a share: "in at most 5 % of calls ...", tested on 300 runs with at most 21
