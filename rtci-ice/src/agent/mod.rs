@@ -13,6 +13,8 @@ mod agent_candidate_pair_test;
 #[cfg(test)]
 mod agent_checklist_test;
 #[cfg(test)]
+mod agent_consent_delay_test;
+#[cfg(test)]
 mod agent_consent_test;
 #[cfg(test)]
 mod agent_mdns_exposure_test;
@@ -129,6 +131,25 @@ pub(crate) struct BindingRequest {
     pub(crate) unauthentic_response: bool,
 }
 
+/// How long a consent request sent on a pair whose RTO is `rto` waits for its response, the
+/// consent expiry being `expiry`: see [`ConsentResponseWait`].
+pub(crate) fn consent_response_wait(
+    setting: ConsentResponseWait,
+    rto: Duration,
+    expiry: Duration,
+) -> Duration {
+    match setting {
+        // RFC 8489 Section 6.2.1: "If, after the last request, a duration equal to Rm times
+        // the RTO has passed without a response [...], the client SHOULD consider the
+        // transaction to have failed." A consent request is the first and the last of its
+        // transaction. Past the consent expiry consent has either been renewed by a later
+        // response or is lost, and then every transaction is discarded (RFC 7675 Section
+        // 5.1): no transaction is kept longer.
+        ConsentResponseWait::Rto => rto.saturating_mul(STUN_RM).min(expiry),
+        ConsentResponseWait::Fixed(wait) => wait,
+    }
+}
+
 impl BindingRequest {
     /// A consent-style transaction (sent once) to `destination`, waiting until `timeout`.
     #[cfg(test)]
@@ -190,12 +211,29 @@ pub(crate) struct PreviousGeneration {
     /// When the peer last consented (a lite agent: when it last sent an authenticated request).
     pub(crate) last_consent: Instant,
     pub(crate) next_consent_at: Instant,
-    /// Consent requests sent on the old pair that may still be answered.
-    pub(crate) pending: Vec<TransactionId>,
+    /// Consent requests sent on the old pair that may still be answered: those the restart
+    /// found open on the selected pair, and those sent since.
+    pub(crate) pending: Vec<PreviousConsentRequest>,
+    /// The old pair's RTO (RFC 6298), as the pair had it at the restart and as the responses
+    /// since made it: what the wait of each request is based on.
+    pub(crate) rto: stun::timer::RtoEstimator,
 }
 
-/// Most consent transactions of a replaced generation kept open at a time.
-pub(crate) const MAX_PREVIOUS_GENERATION_TRANSACTIONS: usize = 8;
+/// One open consent transaction of a replaced generation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreviousConsentRequest {
+    pub(crate) transaction_id: TransactionId,
+    /// When the request was sent.
+    pub(crate) sent: Instant,
+    /// When the transaction ends without a response: a response from then on is for a
+    /// transaction that is no longer in progress (RFC 8489 Section 6.3).
+    pub(crate) until: Instant,
+}
+
+/// Most consent transactions of a replaced generation kept open at a time: more than the
+/// requests of one consent expiry (at least 4 seconds apart, 30 seconds), and those of
+/// libwebrtc's 60 seconds ([`ConsentResponseWait::Fixed`]).
+pub(crate) const MAX_PREVIOUS_GENERATION_TRANSACTIONS: usize = 16;
 
 /// How long data is still taken on the path an ICE restart replaced, once the restart's pair
 /// is selected: each side selects on its own (the controlled agent at the nomination request,
@@ -519,6 +557,8 @@ pub struct Agent {
     pub(crate) pacing_group: Option<Arc<PacingGroup>>,
     /// The controlling agent's consent checks carry USE-CANDIDATE (libwebrtc).
     pub(crate) nominate_on_consent_checks: bool,
+    /// How long a consent request waits for its response.
+    pub(crate) consent_response_wait: ConsentResponseWait,
     /// Error responses to unauthenticated requests, or nothing.
     pub(crate) unauthenticated_requests: UnauthenticatedRequests,
     /// The token bucket of those error responses: tokens left, and when it was last filled.
@@ -816,6 +856,7 @@ impl Agent {
             failed_nomination: config.failed_nomination,
             pacing_group: config.pacing_group.clone(),
             nominate_on_consent_checks: config.nominate_on_consent_checks,
+            consent_response_wait: config.consent_response_wait,
             unauthenticated_requests: config.unauthenticated_requests,
             unauthenticated_response_tokens: MAX_UNAUTHENTICATED_RESPONSE_BURST,
             unauthenticated_response_refill: now,
@@ -2645,7 +2686,25 @@ impl Agent {
                     next_consent_at: self
                         .next_consent_at
                         .unwrap_or_else(|| now + self.next_consent_interval()),
-                    pending: vec![],
+                    // The consent requests still open on the pair stay open on the path: the
+                    // peer answers them as it would have without the restart (RFC 7675
+                    // Section 5.1: "a response might be for a previous request").
+                    pending: self
+                        .pending_binding_requests
+                        .iter()
+                        .filter(|r| {
+                            r.consent
+                                && r.local_index == pair.local_index
+                                && r.remote_index == pair.remote_index
+                                && r.next_event > now
+                        })
+                        .map(|r| PreviousConsentRequest {
+                            transaction_id: r.transaction_id,
+                            sent: r.timestamp,
+                            until: r.next_event,
+                        })
+                        .collect(),
+                    rto: pair.rto,
                 })
             }
             _ => self.previous_generation.take(),
@@ -3130,15 +3189,18 @@ impl Agent {
         };
         let expiry = self.consent_expiry();
         let interval = self.next_consent_interval();
-        let (lite, keepalive, controlling, tie_breaker) = (
+        let (lite, keepalive, controlling, tie_breaker, response_wait) = (
             self.lite,
             self.keepalive_interval != ZERO_DURATION,
             self.is_controlling,
             self.tie_breaker,
+            self.consent_response_wait,
         );
         let Some(previous) = &mut self.previous_generation else {
             return;
         };
+        // The transactions that ended without a response.
+        previous.pending.retain(|r| r.until > now);
 
         if now.saturating_duration_since(previous.last_consent) >= expiry {
             warn!(
@@ -3187,7 +3249,12 @@ impl Agent {
         if previous.pending.len() >= MAX_PREVIOUS_GENERATION_TRANSACTIONS {
             previous.pending.remove(0);
         }
-        previous.pending.push(msg.transaction_id);
+        let wait = consent_response_wait(response_wait, previous.rto.start(now), expiry);
+        previous.pending.push(PreviousConsentRequest {
+            transaction_id: msg.transaction_id,
+            sent: now,
+            until: now + wait,
+        });
         self.write_outs.push_back(TaggedBytesMut {
             now,
             transport: TransportContext {
@@ -3282,10 +3349,12 @@ impl Agent {
         }
 
         if m.typ.class == CLASS_SUCCESS_RESPONSE || m.typ.class == CLASS_ERROR_RESPONSE {
+            // Matched by transaction id, to a transaction that is still in progress (RFC
+            // 8489 Section 6.3).
             let Some(position) = previous
                 .pending
                 .iter()
-                .position(|id| *id == m.transaction_id)
+                .position(|r| r.transaction_id == m.transaction_id && r.until > msg.now)
             else {
                 return false;
             };
@@ -3306,9 +3375,13 @@ impl Agent {
                 return true;
             }
             if let Some(previous) = &mut self.previous_generation {
-                previous.pending.remove(position);
+                let request = previous.pending.remove(position);
                 if is_success {
                     previous.last_consent = msg.now;
+                    // Each consent request is sent once: its response gives the round trip.
+                    previous
+                        .rto
+                        .sample(msg.now.saturating_duration_since(request.sent), msg.now);
                 }
             }
             return true;
