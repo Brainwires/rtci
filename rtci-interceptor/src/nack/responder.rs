@@ -213,6 +213,9 @@ fn freed_at(windows: &[&RateWindow], deficit: usize) -> Option<Instant> {
 struct PendingRetransmission {
     ssrc: u32,
     sequence_number: u16,
+    /// The packet asked for: its serial in the stream. The request is for that packet, not
+    /// for whichever has the sequence number when there is room.
+    packet: u64,
     /// The size its retransmission has on the wire.
     octets: usize,
 }
@@ -342,8 +345,86 @@ struct LocalStream {
     /// The budget's ceiling: the send buffer's size.
     retransmit_budget_max: usize,
     /// When each buffered packet was sent, by its place in the send buffer (the sequence
-    /// number modulo the buffer size), with the sequence number the entry is for.
-    sent_at: Vec<Option<(u16, Instant)>>,
+    /// number modulo the buffer size), with the sequence number the entry is for and the
+    /// packet's serial (see `written`).
+    sent_at: Vec<Option<(u16, Instant, u64)>>,
+    /// How many packets of the stream were written: each packet's serial, its place in the
+    /// order written, which no later packet of the stream has again whatever its 16-bit
+    /// sequence number (the extended sequence number, without trusting the application's
+    /// numbering to be continuous).
+    written: u64,
+    /// What is remembered of the latest retransmission of a packet, by its sequence number.
+    /// Each entry names its packet by the serial, so the packet that has the 16-bit number a
+    /// cycle later does not inherit it, and each ends by the clock (see [`RepairState`]).
+    /// Never more entries than the send buffer has places.
+    repairs: HashMap<u16, Repair>,
+    /// The sequence number each recent RTX packet of this stream was given → the packet it
+    /// repairs and when the retransmission was made, oldest first in `repairs_order`: how
+    /// RFC 8888 feedback, which reports the RTX stream under its own sequence numbers, names
+    /// a retransmission.
+    repairs_by_rtx: HashMap<u16, (u16, Instant)>,
+    repairs_order: VecDeque<(u16, Instant)>,
+}
+
+/// What is remembered of the retransmissions of one packet.
+#[derive(Debug, Clone, Copy)]
+struct Repair {
+    /// The packet: its serial in the stream.
+    packet: u64,
+    /// When the first retransmission of the packet that is still remembered was made: a
+    /// report on a retransmission made before it is about an earlier packet of the same
+    /// 16-bit number.
+    first_made: Instant,
+    /// When the latest retransmission was made.
+    made: Instant,
+    state: RepairState,
+}
+
+/// Where the latest retransmission of a packet is, as far as the sender knows. Every state
+/// ends by the engine's clock (the instant of the request, write, notice or timeout at hand),
+/// whether or not another report ever comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairState {
+    /// Waiting in the pacer since it was made, for [`IN_PACER_LIFETIME`] at most. The pacer
+    /// holds one retransmission per (SSRC, 16-bit sequence number), so this one state holds
+    /// for whatever packet has the number: nothing is made for it meanwhile.
+    InPacer,
+    /// Left toward the wire at `left`, no report yet: a request is held until two round trips
+    /// and [`REPAIR_REPORT_MARGIN`] after.
+    Unreported { left: Instant },
+    /// Left at `left`, and the wait for its report ran out: requests are answered. A report
+    /// still counts until [`RETRANSMISSION_REPORT_HORIZON`](crate::RETRANSMISSION_REPORT_HORIZON)
+    /// after it left.
+    Overdue { left: Instant },
+    /// Reported received at `reported`: requests are declined for [`DELIVERED_MEMORY`].
+    Delivered { reported: Instant },
+}
+
+impl LocalStream {
+    /// The serial of the packet now held under `sequence_number`.
+    fn packet(&self, sequence_number: u16) -> Option<u64> {
+        self.sent_at[usize::from(sequence_number) % self.sent_at.len()]
+            .filter(|(held, _, _)| *held == sequence_number)
+            .map(|(_, _, serial)| serial)
+    }
+
+    /// Remembers `repair` of the packet under `sequence_number`. The entries stay within the
+    /// send buffer's places: when they are all taken, those whose packet the buffer no longer
+    /// holds go (there is one, since a packet the buffer holds is being added).
+    fn remember_repair(&mut self, sequence_number: u16, repair: Repair) {
+        if self.repairs.len() >= self.sent_at.len() && !self.repairs.contains_key(&sequence_number)
+        {
+            let sent_at = &self.sent_at;
+            self.repairs.retain(|sequence_number, repair| {
+                sent_at[usize::from(*sequence_number) % sent_at.len()].is_some_and(
+                    |(held, _, serial)| held == *sequence_number && serial == repair.packet,
+                )
+            });
+        }
+        if self.repairs.len() < self.sent_at.len() || self.repairs.contains_key(&sequence_number) {
+            self.repairs.insert(sequence_number, repair);
+        }
+    }
 }
 
 /// The most octets one probe cluster is filled with.
@@ -372,6 +453,33 @@ pub const MIN_RETRANSMIT_INTERVAL: std::time::Duration = std::time::Duration::fr
 fn resend_interval(round_trip_time: Option<Duration>) -> Duration {
     let _ = round_trip_time;
     MIN_RETRANSMIT_INTERVAL
+}
+
+/// How long after a retransmission left the transport-wide feedback on it is waited for, beyond
+/// two round trips, before a request for the same packet is answered without it: the receiver's
+/// feedback interval (100 ms by default, `TwccReceiverBuilder`).
+pub const REPAIR_REPORT_MARGIN: Duration = Duration::from_millis(100);
+
+/// How long a retransmission the feedback reported received is remembered: a request for its
+/// packet within this long of the report crossed it and is not answered. The time is the
+/// request's own (the engine's clock), so the memory ends whether or not another report
+/// comes: a request after it is answered, which is also what bounds a receiver whose feedback
+/// reports retransmissions it did not get. It is the memory of one packet (SSRC and extended
+/// sequence number): it ends with the packet's place in the send buffer or its `rtx-time`,
+/// past which no request for it is answered anyway, and the packet that has the same 16-bit
+/// number a cycle later starts without it.
+pub const DELIVERED_MEMORY: Duration = Duration::from_secs(4);
+
+/// What a request for a packet that was retransmitted before gets
+/// ([`RetransmissionsReported`](crate::RetransmissionsReported)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// Answered as any request.
+    Answer,
+    /// Kept waiting until the feedback on the earlier retransmission comes, at most until then.
+    Hold(Instant),
+    /// Not answered: the earlier retransmission arrived.
+    Decline,
 }
 
 /// How long a retransmission is taken to wait in the pacer at most: longer than the pacer's
@@ -436,8 +544,8 @@ pub struct NackResponderInterceptor {
     round_trip_time: Option<Duration>,
     /// NACKed packets waiting for room, oldest request first.
     pending: VecDeque<PendingRetransmission>,
-    /// When each waiting packet was last asked for.
-    pending_asked: HashMap<(u32, u16), Instant>,
+    /// When each waiting packet was last asked for, and which packet it is (its serial).
+    pending_asked: HashMap<(u32, u16), (Instant, u64)>,
     /// The octets of `pending`.
     pending_octets: usize,
     /// The reserve last announced, bits per second.
@@ -445,15 +553,14 @@ pub struct NackResponderInterceptor {
     /// When the next waiting retransmission can leave, worked out since the last change:
     /// `None` when it has to be worked out again.
     release_at: Option<Option<Instant>>,
-    /// Retransmissions made and still waiting in the pacer, by (media SSRC, sequence number),
-    /// with when they were made: a NACK for one is not answered again
-    /// ([`RetransmissionsLeft`](crate::RetransmissionsLeft)).
-    in_pacer: HashMap<(u32, u16), Instant>,
     /// Whether a pacer wire-ward reports its retransmissions' departures (it has once).
     pacer_reports: bool,
     /// Whether the pacer tells the source to pause ([`PacerPause`](crate::PacerPause)): the
     /// target the application reads is zero.
     paused: bool,
+    /// Whether transport-wide feedback reports on the retransmissions
+    /// ([`RetransmissionsReported`](crate::RetransmissionsReported)): it has once.
+    repairs_reported: bool,
 }
 
 impl NackResponderInterceptor {
@@ -480,9 +587,9 @@ impl NackResponderInterceptor {
             pending_octets: 0,
             announced_reserve: 0.0,
             release_at: None,
-            in_pacer: HashMap::new(),
             pacer_reports: false,
             paused: false,
+            repairs_reported: false,
         }
     }
 
@@ -570,7 +677,7 @@ impl NackResponderInterceptor {
             let key = (entry.ssrc, entry.sequence_number);
             let fresh = asked
                 .get(&key)
-                .is_some_and(|at| now.saturating_duration_since(*at) <= lifetime);
+                .is_some_and(|(at, _)| now.saturating_duration_since(*at) <= lifetime);
             if !fresh {
                 asked.remove(&key);
                 *octets -= entry.octets;
@@ -604,8 +711,8 @@ impl NackResponderInterceptor {
             .and_then(|payload_type_rtx| self.local_rtx_times.get(&payload_type_rtx))
             .copied()
             .or(self.max_packet_age)
-            && let Some((_, sent)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
-                .filter(|(sequence_number, _)| *sequence_number == seq)
+            && let Some((_, sent, _)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
+                .filter(|(sequence_number, _, _)| *sequence_number == seq)
             && now.saturating_duration_since(sent) > max_packet_age
         {
             return None;
@@ -617,17 +724,39 @@ impl NackResponderInterceptor {
     fn release(&mut self, now: Instant) {
         let mut allowance = self.retransmission_allowance(now);
         let resend_interval = resend_interval(self.round_trip_time);
-        while let Some(entry) = self.pending.front() {
+        // Waits for the feedback that ended are over, reached below or not.
+        self.expire_repairs(now);
+        // A request held for the feedback on an earlier retransmission keeps its place; the
+        // ones behind it are served meanwhile.
+        let mut index = 0;
+        while let Some(entry) = self.pending.get(index) {
             if self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
                 break;
             }
             let (ssrc, seq) = (entry.ssrc, entry.sequence_number);
+            if !self.holds(ssrc, seq, entry.packet) {
+                // The packet asked for is gone; the one that has its number was not asked for.
+                self.remove_pending(index);
+                continue;
+            }
+            match self.repeat_state((ssrc, seq), now) {
+                Repeat::Hold(_) => {
+                    index += 1;
+                    continue;
+                }
+                Repeat::Decline => {
+                    self.remove_pending(index);
+                    continue;
+                }
+                Repeat::Answer => {}
+            }
+            let in_pacer = self.in_pacer(ssrc, seq, now);
             let current = self.streams.get(&ssrc).and_then(|stream| {
                 let recently = stream
                     .last_retransmit
                     .get(&seq)
                     .is_some_and(|at| now.saturating_duration_since(*at) < resend_interval)
-                    || self.in_pacer.contains_key(&(ssrc, seq));
+                    || in_pacer;
                 if recently {
                     None
                 } else {
@@ -637,7 +766,7 @@ impl NackResponderInterceptor {
             });
             let Some((size, budget)) = current else {
                 // Gone from the buffer, too old, its stream unbound, or just sent.
-                self.pop_pending();
+                self.remove_pending(index);
                 continue;
             };
             if budget == 0 {
@@ -650,13 +779,13 @@ impl NackResponderInterceptor {
                 }
                 *left -= size;
             }
-            self.pop_pending();
+            self.remove_pending(index);
             self.retransmit(now, ssrc, seq, size);
         }
     }
 
-    fn pop_pending(&mut self) {
-        if let Some(entry) = self.pending.pop_front() {
+    fn remove_pending(&mut self, index: usize) {
+        if let Some(entry) = self.pending.remove(index) {
             self.pending_asked
                 .remove(&(entry.ssrc, entry.sequence_number));
             self.pending_octets -= entry.octets;
@@ -666,21 +795,59 @@ impl NackResponderInterceptor {
 
     /// Queues the retransmission of `seq` of the stream `ssrc`.
     fn retransmit(&mut self, now: Instant, ssrc: u32, seq: u16, size: usize) {
+        let earlier = self.repair(ssrc, seq, now);
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
-        let Some(original_packet) = stream.send_buffer.get(seq) else {
+        if stream.send_buffer.get(seq).is_none() {
             return;
-        };
+        }
         stream.last_retransmit.insert(seq, now);
-        if self.pacer_reports {
-            self.in_pacer.insert((ssrc, seq), now);
+        if let Some(packet) = stream.packet(seq) {
+            // An earlier retransmission of this same packet still remembered: reports on it
+            // go on counting.
+            let first_made = earlier
+                .filter(|earlier| earlier.packet == packet)
+                .map_or(now, |earlier| earlier.first_made);
+            let state = if self.pacer_reports {
+                RepairState::InPacer
+            } else {
+                // Without a pacer it leaves now.
+                RepairState::Unreported { left: now }
+            };
+            stream.remember_repair(
+                seq,
+                Repair {
+                    packet,
+                    first_made,
+                    made: now,
+                    state,
+                },
+            );
         }
         stream.retransmit_budget -= 1;
         self.retransmissions_queued += 1;
+        let Some(original_packet) = stream.send_buffer.get(seq) else {
+            return;
+        };
 
         let packet =
             if let (Some(ssrc_rtx), Some(pt_rtx)) = (stream.ssrc_rtx, stream.payload_type_rtx) {
+                if stream.repairs_order.len() >= usize::from(self.size).max(1)
+                    && let Some((oldest, made)) = stream.repairs_order.pop_front()
+                    && stream
+                        .repairs_by_rtx
+                        .get(&oldest)
+                        .is_some_and(|(_, at)| *at == made)
+                {
+                    stream.repairs_by_rtx.remove(&oldest);
+                }
+                stream
+                    .repairs_by_rtx
+                    .insert(stream.rtx_sequence_number, (seq, now));
+                stream
+                    .repairs_order
+                    .push_back((stream.rtx_sequence_number, now));
                 rtx_packet(
                     &mut stream.rtx_sequence_number,
                     (stream.rid_extension_id, stream.repaired_rid_extension_id),
@@ -720,23 +887,50 @@ impl NackResponderInterceptor {
     }
 
     fn work_out_release(&self) -> Option<Instant> {
-        let target_bps = self.target_bps?;
+        // A request held for the feedback on an earlier retransmission is due when its wait
+        // ends (the feedback itself comes on the read leg); the first one not held is the
+        // head. `release` forgets the waits that ended, so these are all ahead.
+        let wait = self.report_wait();
+        let held = |entry: &PendingRetransmission| {
+            if !self.repairs_reported {
+                return None;
+            }
+            let stream = self.streams.get(&entry.ssrc)?;
+            let repair = stream.repairs.get(&entry.sequence_number)?;
+            match repair.state {
+                RepairState::Unreported { left }
+                    if stream.packet(entry.sequence_number) == Some(repair.packet) =>
+                {
+                    Some(left + wait)
+                }
+                _ => None,
+            }
+        };
+        let hold_ends = self.pending.iter().filter_map(held).min();
+        let Some(target_bps) = self.target_bps else {
+            return hold_ends;
+        };
         // With nothing waiting, the reserve falls to zero when the last retransmission leaves
         // the window.
-        let Some(entry) = self.pending.front() else {
+        if self.pending.is_empty() {
             return (self.announced_reserve > 0.0)
                 .then(|| self.retransmitted.sent.back())
                 .flatten()
                 .map(|(at, _)| *at + RETRANSMISSION_RATE_WINDOW);
-        };
+        }
         // The lifetime of the oldest request ends: due then, to drop it.
         let lifetime = self.pending_lifetime();
         let stale = self
             .pending
             .iter()
             .filter_map(|entry| self.pending_asked.get(&(entry.ssrc, entry.sequence_number)))
+            .map(|(asked, _)| *asked)
             .min()
-            .map(|asked| *asked + lifetime + Duration::from_micros(1));
+            .map(|asked| asked + lifetime + Duration::from_micros(1));
+        let stale = stale.into_iter().chain(hold_ends).min();
+        let Some(entry) = self.pending.iter().find(|entry| held(entry).is_none()) else {
+            return stale;
+        };
         if self
             .streams
             .get(&entry.ssrc)
@@ -919,12 +1113,13 @@ impl NackResponderInterceptor {
                     continue;
                 };
                 let slot = usize::from(seq) % stream.sent_at.len();
-                if let Some((sequence_number, at)) = stream.sent_at[slot]
+                if let Some((sequence_number, at, _)) = stream.sent_at[slot]
                     && sequence_number == seq
                 {
                     self.originals.forget(at, packet.marshal_size());
                     stream.sent_at[slot] = None;
                 }
+                stream.repairs.remove(&seq);
             }
         }
         let before = self.pending.len();
@@ -951,36 +1146,278 @@ impl NackResponderInterceptor {
     /// it); one that was dropped may be asked for again.
     fn retransmissions_left(&mut self, now: Instant, notice: &crate::RetransmissionsLeft) {
         self.pacer_reports = true;
-        let media_ssrc = |streams: &HashMap<u32, LocalStream>, ssrc: u32| {
-            if streams.contains_key(&ssrc) {
-                Some(ssrc)
-            } else {
-                streams
-                    .iter()
-                    .find(|(_, stream)| stream.ssrc_rtx == Some(ssrc))
-                    .map(|(media, _)| *media)
-            }
-        };
         for &(ssrc, seq) in &notice.departed {
-            let Some(media) = media_ssrc(&self.streams, ssrc) else {
+            let Some(stream) = self
+                .media_ssrc(ssrc)
+                .and_then(|media| self.streams.get_mut(&media))
+            else {
                 continue;
             };
-            if self.in_pacer.remove(&(media, seq)).is_some()
-                && let Some(stream) = self.streams.get_mut(&media)
+            let packet = stream.packet(seq);
+            if let Some(repair) = stream.repairs.get_mut(&seq)
+                && repair.state == RepairState::InPacer
             {
-                stream.last_retransmit.insert(seq, now);
+                if packet == Some(repair.packet) {
+                    repair.state = RepairState::Unreported { left: now };
+                    stream.last_retransmit.insert(seq, now);
+                } else {
+                    // The packet it repaired is no longer held: nothing of it is asked for
+                    // again, and the packet that has the number now starts afresh.
+                    stream.repairs.remove(&seq);
+                }
             }
         }
         for &(ssrc, seq) in &notice.dropped {
-            if let Some(media) = media_ssrc(&self.streams, ssrc) {
-                self.in_pacer.remove(&(media, seq));
+            if let Some(stream) = self
+                .media_ssrc(ssrc)
+                .and_then(|media| self.streams.get_mut(&media))
+                && stream
+                    .repairs
+                    .get(&seq)
+                    .is_some_and(|repair| repair.state == RepairState::InPacer)
+            {
+                stream.repairs.remove(&seq);
             }
         }
         // A pacer drops what waited its queue time bound and says so; anything older than
         // that is no longer there.
-        self.in_pacer
-            .retain(|_, made| now.saturating_duration_since(*made) < IN_PACER_LIFETIME);
+        self.expire_repairs(now);
         self.release_at = None;
+    }
+
+    /// What is remembered at `now` of the latest retransmission under `seq` of the stream
+    /// `ssrc`. A state that ran out by the clock is ended here (a wait for the report becomes
+    /// [`RepairState::Overdue`], anything else is forgotten), and so is what is remembered of
+    /// a packet the stream no longer holds under that number, except a retransmission still
+    /// in the pacer (see [`RepairState::InPacer`]).
+    fn repair(&mut self, ssrc: u32, seq: u16, now: Instant) -> Option<Repair> {
+        let wait = self.report_wait();
+        let stream = self.streams.get_mut(&ssrc)?;
+        let packet = stream.packet(seq);
+        let repair = stream.repairs.get_mut(&seq)?;
+        if Self::repair_ended(repair, packet, now, wait) {
+            stream.repairs.remove(&seq);
+            return None;
+        }
+        Some(*repair)
+    }
+
+    /// Brings `repair`, of the packet `packet` holds now, up to `now`; whether it is over.
+    fn repair_ended(
+        repair: &mut Repair,
+        packet: Option<u64>,
+        now: Instant,
+        wait: Duration,
+    ) -> bool {
+        let same = packet == Some(repair.packet);
+        let horizon = crate::RETRANSMISSION_REPORT_HORIZON.max(wait);
+        match repair.state {
+            RepairState::InPacer => now.saturating_duration_since(repair.made) >= IN_PACER_LIFETIME,
+            RepairState::Unreported { left } => {
+                if same && now >= left + wait {
+                    repair.state = RepairState::Overdue { left };
+                }
+                !same || now.saturating_duration_since(left) >= horizon
+            }
+            RepairState::Overdue { left } => {
+                !same || now.saturating_duration_since(left) >= horizon
+            }
+            RepairState::Delivered { reported } => {
+                !same || now.saturating_duration_since(reported) >= DELIVERED_MEMORY
+            }
+        }
+    }
+
+    /// Ends everything remembered of retransmissions that ran out by `now` (see
+    /// [`Self::repair`]), and the RTX sequence numbers too old for a report to count.
+    fn expire_repairs(&mut self, now: Instant) {
+        let wait = self.report_wait();
+        let horizon = IN_PACER_LIFETIME + crate::RETRANSMISSION_REPORT_HORIZON.max(wait);
+        for stream in self.streams.values_mut() {
+            let sent_at = &stream.sent_at;
+            stream.repairs.retain(|seq, repair| {
+                let packet = sent_at[usize::from(*seq) % sent_at.len()]
+                    .filter(|(held, _, _)| held == seq)
+                    .map(|(_, _, serial)| serial);
+                !Self::repair_ended(repair, packet, now, wait)
+            });
+            while let Some(&(rtx_sequence, made)) = stream.repairs_order.front() {
+                if now.saturating_duration_since(made) < horizon {
+                    break;
+                }
+                stream.repairs_order.pop_front();
+                if stream
+                    .repairs_by_rtx
+                    .get(&rtx_sequence)
+                    .is_some_and(|(_, at)| *at == made)
+                {
+                    stream.repairs_by_rtx.remove(&rtx_sequence);
+                }
+            }
+        }
+    }
+
+    /// Whether the stream `ssrc` holds the packet `packet` under `seq`.
+    fn holds(&self, ssrc: u32, seq: u16, packet: u64) -> bool {
+        self.streams
+            .get(&ssrc)
+            .is_some_and(|stream| stream.packet(seq) == Some(packet))
+    }
+
+    /// Whether a retransmission under `seq` of the stream `ssrc` waits in the pacer at `now`.
+    fn in_pacer(&mut self, ssrc: u32, seq: u16, now: Instant) -> bool {
+        self.repair(ssrc, seq, now)
+            .is_some_and(|repair| repair.state == RepairState::InPacer)
+    }
+
+    /// How long a request waits for the feedback on an earlier retransmission of its packet:
+    /// two round trips and [`REPAIR_REPORT_MARGIN`], or [`PENDING_REQUEST_LIFETIME`] before a
+    /// round trip is known.
+    fn report_wait(&self) -> Duration {
+        self.round_trip_time
+            .map_or(PENDING_REQUEST_LIFETIME, |rtt| {
+                rtt * 2 + REPAIR_REPORT_MARGIN
+            })
+    }
+
+    /// What a request for `key` gets at `now`, given what the feedback reported on its earlier
+    /// retransmission (see [`RetransmissionsReported`](crate::RetransmissionsReported)). Without
+    /// such reports every request is answered as before. A wait that ran out is forgotten.
+    fn repeat_state(&mut self, key: (u32, u16), now: Instant) -> Repeat {
+        if !self.repairs_reported {
+            return Repeat::Answer;
+        }
+        let (ssrc, seq) = key;
+        match self.repair(ssrc, seq, now).map(|repair| repair.state) {
+            Some(RepairState::Delivered { .. }) => Repeat::Decline,
+            Some(RepairState::Unreported { left }) => Repeat::Hold(left + self.report_wait()),
+            // In the pacer: not asked here (nothing is made while it waits there).
+            Some(RepairState::InPacer | RepairState::Overdue { .. }) | None => Repeat::Answer,
+        }
+    }
+
+    /// The media SSRC of `ssrc`: itself, or the stream whose retransmission SSRC it is.
+    fn media_ssrc(&self, ssrc: u32) -> Option<u32> {
+        if self.streams.contains_key(&ssrc) {
+            Some(ssrc)
+        } else {
+            self.streams
+                .iter()
+                .find(|(_, stream)| stream.ssrc_rtx == Some(ssrc))
+                .map(|(media, _)| *media)
+        }
+    }
+
+    /// The transport-wide feedback on retransmissions
+    /// ([`RetransmissionsReported`](crate::RetransmissionsReported)). RFC 4588 section 7: the
+    /// sender "MAY selectively retransmit only the packets that it deems important and ignore
+    /// NACK messages for other packets"; RFC 8834 section 6.1: "It is not appropriate to blindly
+    /// retransmit RTP packets in response to a NACK." A request for a packet whose
+    /// retransmission the receiver got crossed that retransmission on the way (the receiver
+    /// asks again while the packet is missing, and it waited in the path's queue): it is not
+    /// answered. One whose retransmission was lost is answered at once.
+    fn repairs_reported(&mut self, now: Instant, report: &crate::RetransmissionsReported) {
+        self.repairs_reported = true;
+        // The clock first: a report counts only for what is still remembered at `now`.
+        self.expire_repairs(now);
+        let mut delivered = Vec::new();
+        for reported in &report.received {
+            let Some(media) = self.media_ssrc(reported.ssrc) else {
+                continue;
+            };
+            let seq = reported.sequence_number;
+            // Of this packet (not an earlier one of the same number), and not known already:
+            // a report that comes again does not begin the memory again.
+            if let Some(repair) = self.repair(media, seq, now)
+                && self.holds(media, seq, repair.packet)
+                && reported.sent >= repair.first_made
+                && !matches!(repair.state, RepairState::Delivered { .. })
+                && let Some(repair) = self
+                    .streams
+                    .get_mut(&media)
+                    .and_then(|stream| stream.repairs.get_mut(&seq))
+            {
+                repair.state = RepairState::Delivered { reported: now };
+                delivered.push((media, seq));
+            }
+        }
+        for reported in &report.lost {
+            let Some(media) = self.media_ssrc(reported.ssrc) else {
+                continue;
+            };
+            let seq = reported.sequence_number;
+            // The latest retransmission of this packet was lost: asked for again, it is
+            // answered. The loss of an earlier one says nothing of the one on its way.
+            if let Some(repair) = self.repair(media, seq, now)
+                && reported.sent >= repair.made
+                && matches!(
+                    repair.state,
+                    RepairState::Unreported { .. } | RepairState::Overdue { .. }
+                )
+                && let Some(stream) = self.streams.get_mut(&media)
+            {
+                stream.repairs.remove(&seq);
+            }
+        }
+        if !delivered.is_empty() {
+            let asked = &mut self.pending_asked;
+            let octets = &mut self.pending_octets;
+            self.pending.retain(|entry| {
+                let key = (entry.ssrc, entry.sequence_number);
+                let keep = !delivered.contains(&key);
+                if !keep {
+                    asked.remove(&key);
+                    *octets -= entry.octets;
+                }
+                keep
+            });
+        }
+        self.release_at = None;
+    }
+
+    /// What RFC 8888 congestion control feedback (`CcFeedbackReport`) in `rtcp_packets` says
+    /// of the retransmissions: it reports the packets of the RTX stream under their own
+    /// sequence numbers, each mapped back to the packet it repaired. The counterpart of the
+    /// TWCC sender's [`RetransmissionsReported`](crate::RetransmissionsReported) for streams
+    /// whose feedback is RFC 8888.
+    fn ccfb_report(
+        &self,
+        rtcp_packets: &[Box<dyn rtcp::Packet>],
+    ) -> crate::RetransmissionsReported {
+        let mut report = crate::RetransmissionsReported::default();
+        for feedback in rtcp_packets.iter().filter_map(|packet| {
+            packet
+                .as_any()
+                .downcast_ref::<rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport>()
+        }) {
+            let (_, per_stream) = crate::rtpfb::convert::convert_ccfb(feedback);
+            for (ssrc, acknowledgements) in per_stream {
+                let Some(stream) = self
+                    .streams
+                    .values()
+                    .find(|stream| stream.ssrc_rtx == Some(ssrc))
+                else {
+                    continue;
+                };
+                for acknowledgement in acknowledgements {
+                    if let Some(&(sequence_number, sent)) =
+                        stream.repairs_by_rtx.get(&acknowledgement.sequence_number)
+                    {
+                        let reported = crate::ReportedRetransmission {
+                            ssrc,
+                            sequence_number,
+                            sent,
+                        };
+                        if acknowledgement.arrived {
+                            report.received.push(reported);
+                        } else {
+                            report.lost.push(reported);
+                        }
+                    }
+                }
+            }
+        }
+        report
     }
 
     /// Handle a NACK request by queuing retransmissions.
@@ -1026,23 +1463,45 @@ impl NackResponderInterceptor {
             let Some(stream) = self.streams.get(&ssrc) else {
                 return;
             };
-            if stream.last_retransmit.contains_key(&seq) || self.in_pacer.contains_key(&(ssrc, seq))
-            {
+            if stream.last_retransmit.contains_key(&seq) {
                 continue;
             }
             let Some(octets) = self.retransmittable(stream, seq, now) else {
                 continue;
             };
+            if self.in_pacer(ssrc, seq, now)
+                || self.repeat_state((ssrc, seq), now) == Repeat::Decline
+            {
+                continue;
+            }
+            let Some(stream) = self.streams.get(&ssrc) else {
+                return;
+            };
             let budget = stream.retransmit_budget;
+            let Some(packet) = stream.packet(seq) else {
+                continue;
+            };
+            // A request still waiting under this number for a packet since replaced ends here.
+            if self
+                .pending_asked
+                .get(&(ssrc, seq))
+                .is_some_and(|(_, waiting)| *waiting != packet)
+                && let Some(waiting) = self
+                    .pending
+                    .iter()
+                    .position(|waiting| waiting.ssrc == ssrc && waiting.sequence_number == seq)
+            {
+                self.remove_pending(waiting);
+            }
             match self.pending_asked.get_mut(&(ssrc, seq)) {
-                Some(asked) => *asked = now,
+                Some((asked, _)) => *asked = now,
                 None => {
                     // The budget (one retransmission per original sent) refuses it: not
                     // kept, the receiver asks again. Only the rate limit makes a request wait.
                     if budget == 0 || self.pending.len() >= MAX_QUEUED_RETRANSMISSIONS {
                         break;
                     }
-                    self.pending_asked.insert((ssrc, seq), now);
+                    self.pending_asked.insert((ssrc, seq), (now, packet));
                     // A stream's oldest packet first, whenever it was asked for: a receiver
                     // that plays in order waits for its oldest gap, and a packet asked for
                     // again (its repair was lost) would otherwise wait behind every newer one.
@@ -1059,6 +1518,7 @@ impl NackResponderInterceptor {
                         PendingRetransmission {
                             ssrc,
                             sequence_number: seq,
+                            packet,
                             octets,
                         },
                     );
@@ -1205,6 +1665,24 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             self.retransmissions_left(now, &notice);
         }
 
+        // What RFC 8888 feedback reports on the RTX streams: read here, where the sequence
+        // number each RTX packet was given is known.
+        if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
+            let report = self.ccfb_report(rtcp_packets);
+            if !report.received.is_empty() || !report.lost.is_empty() {
+                self.repairs_reported(now, &report);
+                self.release(now);
+            }
+        }
+
+        // What transport-wide feedback reported on the retransmissions.
+        if let Some(report) = msg.message.custom::<crate::RetransmissionsReported>() {
+            let report = report.clone();
+            self.repairs_reported(now, &report);
+            // A request held for a retransmission now reported lost leaves at once.
+            self.release(now);
+        }
+
         // Packets the pacer (wire-ward of here) discarded: never resent.
         if let Some(discard) = msg.message.custom::<crate::PacerDiscard>() {
             let discard = discard.clone();
@@ -1293,8 +1771,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         {
             stream.send_buffer.add(rtp_packet.clone());
             stream.last_sent = Some((rtp_packet.header.sequence_number, msg.now));
+            stream.written += 1;
             let slot = usize::from(rtp_packet.header.sequence_number) % stream.sent_at.len();
-            stream.sent_at[slot] = Some((rtp_packet.header.sequence_number, msg.now));
+            stream.sent_at[slot] =
+                Some((rtp_packet.header.sequence_number, msg.now, stream.written));
             stream.retransmit_budget =
                 (stream.retransmit_budget + 1).min(stream.retransmit_budget_max);
         }
@@ -1324,6 +1804,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+        // What is remembered of retransmissions ends by this clock, with or without a
+        // request or a report to end it.
+        self.expire_repairs(now);
         if !self.pending.is_empty() || self.announced_reserve > 0.0 {
             // Worked out afresh: a deadline that passed without a change must not be handed
             // back again (a driver would spin on it).
@@ -1380,6 +1863,10 @@ impl Interceptor for NackResponderInterceptor {
                     retransmit_budget: usize::from(self.size),
                     retransmit_budget_max: usize::from(self.size),
                     sent_at: vec![None; usize::from(self.size).max(1)],
+                    written: 0,
+                    repairs: HashMap::new(),
+                    repairs_by_rtx: HashMap::new(),
+                    repairs_order: VecDeque::new(),
                 },
             );
         }
@@ -1402,4 +1889,218 @@ impl Interceptor for NackResponderInterceptor {
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
 
     fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream_info::RTCPFeedback;
+    use rtcp::transport_feedbacks::transport_layer_nack::{
+        TransportLayerNack, nack_pairs_from_sequence_numbers,
+    };
+    use std::sync::Arc;
+
+    const SSRC: u32 = 0x1234;
+    const RTX_SSRC: u32 = 0x5678;
+    const SIZE: u16 = 64;
+
+    fn responder() -> NackResponderInterceptor {
+        let mut responder = NackResponderBuilder::new()
+            .with_size(SIZE)
+            .with_rate_limit(RetransmissionRateLimit::Unlimited)
+            .build();
+        responder.bind_local_stream(&StreamInfo {
+            ssrc: SSRC,
+            ssrc_rtx: Some(RTX_SSRC),
+            payload_type_rtx: Some(97),
+            payload_type: 96,
+            rtcp_feedback: vec![RTCPFeedback {
+                typ: "nack".to_string(),
+                parameter: String::new(),
+            }],
+            ..Default::default()
+        });
+        responder
+    }
+
+    fn tagged(now: Instant, message: AttributedPacket) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message,
+        }
+    }
+
+    fn original(responder: &mut NackResponderInterceptor, now: Instant, sequence_number: u16) {
+        let packet = rtp::Packet {
+            header: rtp::header::Header {
+                version: 2,
+                payload_type: 96,
+                sequence_number,
+                ssrc: SSRC,
+                ..Default::default()
+            },
+            payload: vec![0u8; 100].into(),
+        };
+        responder
+            .handle_write(tagged(now, AttributedPacket::new(Packet::Rtp(packet))))
+            .unwrap();
+    }
+
+    /// The sizes of everything the responder remembers of repairs and requests.
+    fn remembered(responder: &NackResponderInterceptor) -> [usize; 5] {
+        let stream = &responder.streams[&SSRC];
+        [
+            stream.repairs.len(),
+            stream.repairs_by_rtx.len(),
+            stream.repairs_order.len(),
+            responder.pending.len(),
+            responder.pending_asked.len(),
+        ]
+    }
+
+    /// A receiver that asks for everything, over and over, and reports whatever it likes of
+    /// the retransmissions (received, lost, both, for packets retransmitted or not, with any
+    /// instant) cannot make the responder remember more than its send buffer has places:
+    /// what is kept of repairs is at most one entry per packet held. And the engine's clock
+    /// alone empties it: with no further request or report, a timeout past the longest
+    /// memory leaves nothing.
+    #[test]
+    fn requests_and_reports_without_end_do_not_grow_what_is_remembered() {
+        let mut responder = responder();
+        let base = Instant::now();
+        let size = usize::from(SIZE);
+        let mut now = base;
+        let mut most = 0;
+        // Reports come and a pacer is there, so every state is in use. From step 10 000 the
+        // pacer says nothing more, and from step 20 000 no report comes either: every
+        // retransmission then stays "in the pacer", the one state kept for whatever packet has
+        // the number, for four seconds (8 000 steps) while the buffer turns over every 64.
+        for step in 0..30_000u32 {
+            now = base + Duration::from_micros(500) * step;
+            let sequence_number = step as u16;
+            original(&mut responder, now, sequence_number);
+            // Ask for the whole buffer, and for numbers far outside it.
+            let mut asked: Vec<u16> = (0..SIZE)
+                .map(|back| sequence_number.wrapping_sub(back))
+                .collect();
+            asked.extend((0..SIZE).map(|far| sequence_number.wrapping_add(0x4000 + far * 97)));
+            asked.sort_unstable();
+            responder
+                .handle_read(tagged(
+                    now,
+                    AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerNack {
+                        sender_ssrc: 1,
+                        media_ssrc: SSRC,
+                        nacks: nack_pairs_from_sequence_numbers(&asked),
+                    })])),
+                ))
+                .unwrap();
+            // Reports on every sequence number there is, a different mix each time.
+            let reported = |sequence_number: u16| crate::ReportedRetransmission {
+                ssrc: RTX_SSRC,
+                sequence_number,
+                sent: now,
+            };
+            let numbers =
+                (0..512u16).map(|index| index.wrapping_mul(128).wrapping_add(step as u16));
+            let report = match step % 3 {
+                0 => crate::RetransmissionsReported {
+                    received: numbers.map(reported).collect(),
+                    lost: vec![],
+                },
+                1 => crate::RetransmissionsReported {
+                    received: vec![],
+                    lost: numbers.map(reported).collect(),
+                },
+                _ => crate::RetransmissionsReported {
+                    received: asked.iter().copied().map(reported).collect(),
+                    lost: asked.iter().copied().map(reported).collect(),
+                },
+            };
+            let mut message = AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(report)));
+            if step < 10_000 && step % 7 == 0 {
+                // The pacer's notices, as arbitrary.
+                message.add(Attribute::Custom(Arc::new(crate::RetransmissionsLeft {
+                    departed: asked.iter().map(|seq| (RTX_SSRC, *seq)).collect(),
+                    dropped: vec![(RTX_SSRC, sequence_number)],
+                })));
+            }
+            if step < 20_000 {
+                responder.handle_read(tagged(now, message)).unwrap();
+            }
+            while responder.poll_write().is_some() {}
+            while responder.poll_read().is_some() {}
+            let [repairs, by_rtx, order, pending, asked] = remembered(&responder);
+            assert!(
+                repairs <= size && by_rtx <= size && order <= size,
+                "step {step}: {repairs} repairs, {by_rtx} RTX numbers ({order}) remembered, \
+                 the buffer holds {size}"
+            );
+            assert!(pending <= MAX_QUEUED_RETRANSMISSIONS && asked == pending);
+            most = most.max(repairs);
+        }
+        assert!(
+            most > size / 2,
+            "most of the buffer's places were remembered at some point: {most} of {size}"
+        );
+        // Nothing more arrives. The clock alone:
+        responder
+            .handle_timeout(now + Duration::from_secs(30))
+            .unwrap();
+        assert_eq!([0; 5], remembered(&responder));
+    }
+
+    /// What is remembered of a repair ends with the engine's clock at a timeout, with no
+    /// request and no report to end it: a retransmission reported received is forgotten four
+    /// seconds after the report.
+    #[test]
+    fn a_timeout_alone_ends_the_memory_of_a_delivered_retransmission() {
+        let mut responder = responder();
+        let base = Instant::now();
+        for sequence_number in 0..10 {
+            original(&mut responder, base, sequence_number);
+        }
+        let at = |milliseconds: u64| base + Duration::from_millis(milliseconds);
+        responder
+            .handle_read(tagged(
+                at(100),
+                AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerNack {
+                    sender_ssrc: 1,
+                    media_ssrc: SSRC,
+                    nacks: nack_pairs_from_sequence_numbers(&[3]),
+                })])),
+            ))
+            .unwrap();
+        responder
+            .handle_read(tagged(
+                at(200),
+                AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(
+                    crate::RetransmissionsReported {
+                        received: vec![crate::ReportedRetransmission {
+                            ssrc: RTX_SSRC,
+                            sequence_number: 3,
+                            sent: at(100),
+                        }],
+                        lost: vec![],
+                    },
+                ))),
+            ))
+            .unwrap();
+        let state = |responder: &NackResponderInterceptor| {
+            responder.streams[&SSRC]
+                .repairs
+                .get(&3)
+                .map(|repair| repair.state)
+        };
+        assert_eq!(
+            Some(RepairState::Delivered { reported: at(200) }),
+            state(&responder)
+        );
+        responder.handle_timeout(at(4_199)).unwrap();
+        assert!(state(&responder).is_some(), "1 ms before the memory ends");
+        responder.handle_timeout(at(4_200)).unwrap();
+        assert_eq!(None, state(&responder));
+    }
 }
