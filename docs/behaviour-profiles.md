@@ -58,8 +58,8 @@ two features, so the pick is never silent.
 
 ## 1. Defaults that differ: governed by the profile (57)
 
-57 governed behaviours: the `Chrome` value differs from `Rfc` in 37, the
-`StrictRfc` value in 17, the `Performance` value in 5. Chrome values:
+57 governed behaviours: the `Chrome` value differs from `Rfc` in 36, the
+`StrictRfc` value in 18, the `Performance` value in 5. Chrome values:
 12 observed, 45 from
 the source, 0 unverified.
 
@@ -122,7 +122,7 @@ established neither way; each says why.
 | `rtcp.minimum-session-bandwidth` | `DefaultInterceptorOptions::rtcp_minimum_session_bandwidth` | RFC 3550 6.2 | `64000` | `64000` | `64000` | `16000` | source: libwebrtc modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: the report interval is fixed (1 s video, 5 s audio, min(360 s / kbit/s, 1 s) above 72 kbit/s), no RTCP bandwidth is computed, so there is no floor to differ: the engine's value stands |
 | `cc.feedback-share` | `DefaultInterceptorOptions::congestion_feedback_share` | RFC 8888 4, RFC 3550 6.2 | `0.05` | `0.05` | `0.05` | `0.025` | source: libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: "Let TWCC reports occupy 5% of total bandwidth", twcc_bitrate = 0.05 * estimate |
 | `cc.feedback-max-interval` | `DefaultInterceptorOptions::congestion_feedback_max_interval` | RFC 8888 4, draft-holmer-rmcat-transport-wide-cc-extensions-01 3 | `250ms` | `250ms` | `250ms` | `500ms` | source: libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc @ a222406d: kMaxInterval = TimeDelta::Millis(250), the interval kTwccReportSize / twcc_bitrate held between kMinInterval 50 ms and it |
-| `rtcp.report-from-every-ssrc` | `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` | RFC 8108 5.1 | `true` | `false` | `true` | `true` | source: libwebrtc audio/channel_receive.cc (ReceiveStatistics per receive channel) and call/rtp_video_sender.cc (send modules with no receive statistics) @ a222406d: rtcp_sender.cc::RTCPSender::CreateReportBlocks reports each remote SSRC from the one receive module, not from every local SSRC. Performance: same as Rfc (RFC 8108 5.1 is a MUST while RFC 8861 reporting groups are not signalled) |
+| `rtcp.report-from-every-ssrc` | `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` | RFC 8108 5.1 | `false` | `false` | `true` | `false` | source: libwebrtc audio/channel_receive.cc (ReceiveStatistics per receive channel) and call/rtp_video_sender.cc (send modules with no receive statistics) @ a222406d: rtcp_sender.cc::RTCPSender::CreateReportBlocks reports each remote SSRC from the one receive module, not from every local SSRC |
 | `twcc.rereport-received` | `DefaultInterceptorOptions::twcc_rereport_received` | draft-holmer-rmcat-transport-wide-cc-extensions-01 3.1.1 | `false` | `true` | `false` | `false` | source: libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnReceivedPacket @ a222406d: a late packet below periodic_window_start_seq_ moves the window back, and MaybeBuildFeedbackPacket reports every packet received from there, those reported already included |
 | `rtp.abs-send-time-on-audio` | `DefaultInterceptorOptions::abs_send_time_on_audio` | RFC 8285 5 (draft-ietf-rmcat-gcc-02 3) | `false` | `true` | `false` | `false` | observed: Chromium's audio offers carry the abs-send-time extension (fixture chromium--reflect-audio-opus--1-offer.sdp) |
 | `rtcp.receiver-reference-time-on-audio` | `DefaultInterceptorOptions::receiver_reference_time_on_audio` | RFC 3611 4.4, 5.1 | `false` | `true` | `false` | `false` | observed: Chromium's audio offers carry a=rtcp-xr:rcvr-rtt=all (fixture chromium--reflect-audio-opus--1-offer.sdp) |

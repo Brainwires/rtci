@@ -369,7 +369,8 @@ fn rtcp_gets_five_percent_of_the_session_bandwidth() {
 }
 
 /// RFC 8108 5.3: the reports of several local SSRCs leave in one compound packet per
-/// interval, each SSRC keeping its own timer (5.3.2), not one packet per SSRC.
+/// interval, each SSRC keeping its own timer (5.3.2), not one packet per SSRC, and the
+/// aggregated packet begins with an SR or RR.
 #[test]
 fn several_local_ssrcs_report_together_once_per_interval() {
     let mut chain = chain(builder());
@@ -401,6 +402,8 @@ fn several_local_ssrcs_report_together_once_per_interval() {
         reporting.sort_unstable();
         assert_eq!(vec![10, 20, 30], reporting);
         assert_eq!(3, sent.cnames().len());
+        // RFC 8108 5.3: "the resulting compound RTCP packets begin with an SR or RR packet".
+        assert!(sent.is_compound());
     }
     for pair in offsets(&sent, base).windows(2) {
         assert!(pair[1] - pair[0] >= 0.9, "{:?}", offsets(&sent, base));

@@ -380,8 +380,9 @@ pub struct DefaultInterceptorOptions {
     pub rtcp_immediate_congestion_feedback: bool,
     /// Whether every local SSRC carries a report block for every remote SSRC and for the
     /// endpoint's other SSRCs (RFC 8108 section 5.1: "each SSRC will send RTCP reports for all
-    /// other SSRCs, including those co-located at the same endpoint"). `true` by default;
-    /// `false` in the `Chrome` behaviour profile (libwebrtc carries the blocks once). See
+    /// other SSRCs, including those co-located at the same endpoint"). `false` by default:
+    /// the blocks are carried once, as libwebrtc does; the RFC form was measured worse through
+    /// a capacity collapse (see the setting). `true` in the `StrictRfc` behaviour profile. See
     /// [`RtcpSessionBuilder::with_report_from_every_ssrc`](interceptor::RtcpSessionBuilder::with_report_from_every_ssrc).
     pub rtcp_report_from_every_ssrc: bool,
     /// Whether transport-wide feedback reports a packet received again when the base sequence
@@ -595,7 +596,7 @@ impl DefaultInterceptorOptions {
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
-            rtcp_report_from_every_ssrc: true,
+            rtcp_report_from_every_ssrc: false,
             twcc_rereport_received: false,
             gcc_threshold_time_base: interceptor::ThresholdTimeBase::Arrival,
             gcc_one_decrease_per_round_trip: false,

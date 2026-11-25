@@ -56,7 +56,9 @@
 //!   behaviour profile's interceptor settings), `perfshare` (the same with the share
 //!   following the send rate), `perfnoshare` (the same with it off: `perf`, since the
 //!   profile leaves it off), `chrome` (the `Chrome` behaviour profile's interceptor settings;
-//!   the media engine and the session description stay this world's);
+//!   the media engine and the session description stay this world's), `every` (the defaults
+//!   with `DefaultInterceptorOptions::rtcp_report_from_every_ssrc`: RFC 8108 section 5.1's
+//!   report blocks from every SSRC, the measurement behind that default);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
 //!   .with_max_gap_wait(300 ms)` and a PLI when the builder gives a gap up
 //!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time, which holds
@@ -419,6 +421,8 @@ enum Tuning {
     PerformanceWithoutShare,
     /// `chrome`: the `Chrome` behaviour profile's interceptor settings.
     Chrome,
+    /// `every`: the defaults with `rtcp_report_from_every_ssrc` (RFC 8108 section 5.1).
+    EverySsrc,
 }
 
 /// Everything of a run but its seed (the module's "Cells").
@@ -453,7 +457,7 @@ impl Cell {
                 other => bail!("unknown scenario {other} in {name}"),
             },
             chain: match chain {
-                "paced" | "share" | "perf" | "perfshare" | "perfnoshare" | "chrome" => {
+                "paced" | "share" | "perf" | "perfshare" | "perfnoshare" | "chrome" | "every" => {
                     Chain::Default
                 }
                 "nopacer" => Chain::DefaultWithoutPacer,
@@ -466,6 +470,7 @@ impl Cell {
                 "perfshare" => Tuning::PerformanceWithShare,
                 "perfnoshare" => Tuning::PerformanceWithoutShare,
                 "chrome" => Tuning::Chrome,
+                "every" => Tuning::EverySsrc,
                 _ => Tuning::Default,
             },
             gap_ms: number(gap, "gap")?,
@@ -493,6 +498,7 @@ impl Cell {
                 (_, Tuning::PerformanceWithShare) => "perfshare",
                 (_, Tuning::PerformanceWithoutShare) => "perfnoshare",
                 (_, Tuning::Chrome) => "chrome",
+                (_, Tuning::EverySsrc) => "every",
                 (Chain::DefaultWithoutPacer, Tuning::Default) => "nopacer",
                 (Chain::ParolNet, Tuning::Default) => "parolnet",
             },
@@ -519,6 +525,7 @@ impl Cell {
                 .profile(BehaviourProfile::Performance)
                 .share_follows_send_rate(false),
             Tuning::Chrome => setup.profile(BehaviourProfile::Chrome),
+            Tuning::EverySsrc => setup.report_from_every_ssrc(true),
         };
         match self.gap_ms {
             0 => setup,
