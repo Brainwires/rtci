@@ -1657,6 +1657,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `b=RR` of the remote description reach the session: tested, was "the SDP layer does not
   feed it").
 
+- **capacity instrument: the behaviour profiles through a collapse** (rtcpbudget-4):
+  `docs/capacity-instrument.md` has the table of the default, `Performance`, the default with
+  `rtcp_share_follows_send_rate` and `Chrome` on the same 1000 seeds, paired: RTCP on the
+  capped link 80 / 22 / 33 / 20 kbit/s, oldest picture 7.9 / 6.1 / 6.2 / 5.8 s, calls over
+  20 s to recover 128 / 0 / 0 / 18 of 1000; `Performance` pays when both directions collapse
+  (picture +1.6 s). The `Chrome` column was measured before the repair of retransmitted RED
+  packets and is marked so.
+
 - **capacity instrument** (rtcpbudget-5): chain tokens for the default chain with other
   settings, measurement only: `share` (the defaults with `rtcp_share_follows_send_rate`),
   `perf` (the `Performance` profile's interceptor settings), `perfshare`, `perfnoshare`,
