@@ -963,6 +963,11 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
     /// `TransportFeedbackAdapter::SetNetworkRoute`). The probe clusters in flight go with
     /// them: their packets are among those forgotten. And probing starts over
     /// ([`restart_probing`](Self::restart_probing)).
+    ///
+    /// What is sent on the new path before it carries anything to the other end (the two ends
+    /// do not change at the same instant) is in the same case, and a report of it as not
+    /// received is no loss of the new path's either
+    /// ([`History::before_the_path_carried`](crate::rtpfb::history::History::before_the_path_carried)).
     fn on_new_path(&mut self, now: Instant) {
         self.estimator.on_path_change(now);
         self.history.forget_sent();
