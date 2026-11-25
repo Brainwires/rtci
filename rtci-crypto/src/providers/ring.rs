@@ -15,8 +15,9 @@ use ring::hmac;
 use ring::rand::SystemRandom;
 use ring::signature::{self, KeyPair};
 use sha1::Sha1;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::Arc;
+use std::sync::atomic::{Ordering, compiler_fence};
 
 /// The built-in Ring provider bundle.
 #[derive(Default)]
@@ -158,7 +159,7 @@ impl RTCCrypto for RingCrypto {
             HmacAlgorithm::Sha1 => Ok(Box::new(RustCryptoHmacSha1::new(key))),
             HmacAlgorithm::Sha256 | HmacAlgorithm::Sha384 | HmacAlgorithm::Sha512 => {
                 Ok(Box::new(RingHmac {
-                    key: hmac::Key::new(hmac_algorithm(algorithm), key),
+                    key: ErasedOnDrop::new(hmac::Key::new(hmac_algorithm(algorithm), key)),
                     output_len: algorithm.output_len(),
                 }))
             }
@@ -208,7 +209,9 @@ impl RTCCrypto for RingCrypto {
         };
         let key = aead::quic::HeaderProtectionKey::new(backend_algorithm, key)
             .map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Box::new(RingHeaderMask { key }))
+        Ok(Box::new(RingHeaderMask {
+            key: ErasedOnDrop::new(key),
+        }))
     }
 
     fn new_cbc(
@@ -255,12 +258,70 @@ impl RTCCrypto for RingCrypto {
     }
 }
 
+/// A ring key object kept in an allocation of this crate's own, overwritten with zeros when
+/// it is dropped (RFC 7714 section 13.1, RFC 3711 section 9.3, RFC 8446 section 7.1).
+///
+/// ring keeps a key schedule inline in each key object (`aead::LessSafeKey`: the AES round
+/// keys and the GHASH table, or the ChaCha20 key; `aead::quic::HeaderProtectionKey`: the AES
+/// round keys or the ChaCha20 key; `hmac::Key`: the two SHA-2 states after `key XOR ipad` and
+/// `key XOR opad`) and does not overwrite it when the object is dropped (ring issue #15
+/// settled against destructor-based erasure). So the object is moved, once, into a
+/// `Box<MaybeUninit<T>>` that this type owns, is only ever lent out as `&T`, and when this is
+/// dropped the value is dropped in place and THEN the `size_of::<T>()` bytes of the slot are
+/// overwritten with volatile writes, before the box frees the allocation.
+///
+/// Soundness. After `assume_init_drop` the slot holds no live value: its bytes are the memory
+/// of a `MaybeUninit<T>` that this type owns, which may hold any bytes at all. Writing zeros
+/// there is a write to our own allocation through a raw byte pointer, so it is defined
+/// behaviour whatever ring's layout is (it does not depend on ring's fields, and an all-zero
+/// `T` is never read: `MaybeUninit` has no drop glue and the box is freed next). The volatile
+/// writes and the fence keep the compiler from removing them as stores to memory about to be
+/// freed.
+///
+/// What this type cannot reach, and so does not erase: a copy moved out of it (which is why
+/// it never hands the value out by move, only `&T`), and the copies that building the value
+/// left in the stack frames of the functions that built it. The engine's callers build a key
+/// object from a frame of their own and call [`crate::scrub_stack`] right after it. Bytes a
+/// provider type keeps outside the object (a heap allocation of its own, a global cache) are
+/// out of reach too; ring 0.17's AEAD, header-protection and HMAC keys keep none.
+struct ErasedOnDrop<T> {
+    slot: Box<MaybeUninit<T>>,
+}
+
+impl<T> ErasedOnDrop<T> {
+    fn new(value: T) -> Self {
+        let mut slot = Box::<T>::new_uninit();
+        MaybeUninit::write(&mut *slot, value);
+        Self { slot }
+    }
+
+    fn get(&self) -> &T {
+        // SAFETY: `new` initialized the slot, and the value is dropped only in `drop`.
+        unsafe { self.slot.assume_init_ref() }
+    }
+}
+
+impl<T> Drop for ErasedOnDrop<T> {
+    fn drop(&mut self) {
+        // SAFETY: `new` initialized the slot; the value is dropped here, once, and never used
+        // again.
+        unsafe { self.slot.assume_init_drop() };
+        let bytes = self.slot.as_mut_ptr().cast::<u8>();
+        for offset in 0..size_of::<T>() {
+            // SAFETY: `offset` is inside the slot, which this type owns and which holds no
+            // value any more; a `u8` has no validity requirement.
+            unsafe { std::ptr::write_volatile(bytes.add(offset), 0) };
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
 /// A keyed HMAC holding a `ring::hmac::Key`.
 ///
 /// `Key::new` performs the ipad/opad derivation; `Context::with_key` only clones the resulting
 /// state. Keeping the key here is what moves that derivation off the per-packet path.
 struct RingHmac {
-    key: hmac::Key,
+    key: ErasedOnDrop<hmac::Key>,
     output_len: usize,
 }
 
@@ -271,7 +332,7 @@ impl Mac for RingHmac {
 
     fn sign(&mut self, input: &[&[u8]], output: &mut [u8]) -> Result<(), CryptoError> {
         common::check_tag_len(self.output_len, output.len())?;
-        let mut context = hmac::Context::with_key(&self.key);
+        let mut context = hmac::Context::with_key(self.key.get());
         for part in input {
             context.update(part);
         }
@@ -304,7 +365,7 @@ fn hmac_algorithm(algorithm: HmacAlgorithm) -> hmac::Algorithm {
 /// computation RFC 9147 section 4.2.3 defines (AES-ECB of the sample, or the ChaCha20 block
 /// function keyed by it).
 struct RingHeaderMask {
-    key: aead::quic::HeaderProtectionKey,
+    key: ErasedOnDrop<aead::quic::HeaderProtectionKey>,
 }
 
 impl HeaderMask for RingHeaderMask {
@@ -313,13 +374,14 @@ impl HeaderMask for RingHeaderMask {
         sample: &[u8; HEADER_MASK_SAMPLE_LEN],
     ) -> Result<[u8; HEADER_MASK_LEN], CryptoError> {
         self.key
+            .get()
             .new_mask(sample)
             .map_err(|_| CryptoError::Provider("header mask generation failed".into()))
     }
 }
 
 struct RingAead {
-    key: aead::LessSafeKey,
+    key: ErasedOnDrop<aead::LessSafeKey>,
 }
 
 impl RingAead {
@@ -331,7 +393,9 @@ impl RingAead {
         let key = aead::UnboundKey::new(algorithm, key)
             .map(aead::LessSafeKey::new)
             .map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Box::new(Self { key }))
+        Ok(Box::new(Self {
+            key: ErasedOnDrop::new(key),
+        }))
     }
 }
 
@@ -357,6 +421,7 @@ impl AeadCipher for RingAead {
         })?;
         let tag = self
             .key
+            .get()
             .seal_in_place_separate_tag(nonce, aead::Aad::from(aad), plaintext_and_ciphertext)
             .map_err(|_| CryptoError::AuthenticationFailed)?;
         tag_out.copy_from_slice(tag.as_ref());
@@ -383,6 +448,7 @@ impl AeadCipher for RingAead {
             actual: tag.len(),
         })?;
         self.key
+            .get()
             .open_in_place_separate_tag(
                 nonce,
                 aead::Aad::from(aad),

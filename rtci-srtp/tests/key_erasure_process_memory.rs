@@ -312,35 +312,17 @@ mod process_memory_tests {
         assert!(left.is_empty(), "found after the drop: {left:#?}");
     }
 
-    /// With the ring provider, only ring's AES-GCM keys (the AEAD profiles' session encryption
-    /// keys, kept by `ring::aead::LessSafeKey`) are still in the process once the contexts are
-    /// dropped: the HMAC-SHA1 states of the AES-CM and NULL profiles (RustCrypto `hmac`, built
-    /// by `rtci-crypto`) and every key the crate holds are gone. In 0.1.0 the HMAC outer state
-    /// was found after the drop.
+    /// With the ring provider no key outlives its contexts anywhere in the process: every key
+    /// the contexts derive, in every form, found while the contexts are alive, is gone once
+    /// they are dropped, for every profile. That includes ring's AES-GCM key objects
+    /// (`ring::aead::LessSafeKey`: the session key and every round key), which `rtci-crypto`
+    /// keeps in an allocation of its own and overwrites after ring has dropped them (found
+    /// after the drop in 0.1.0, a known limit of that provider), and the HMAC-SHA1 states
+    /// (RustCrypto `hmac`, built by `rtci-crypto`; the outer state was found after the drop in
+    /// 0.1.0).
     #[cfg(feature = "crypto-ring")]
     #[test]
-    fn with_ring_only_its_aes_gcm_keys_outlive_the_contexts_in_process_memory() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let sessions: Vec<Session> = every_session()
-            .into_iter()
-            .filter(|s| s.provider == "ring")
-            .collect();
-        check_the_search_sees_live_keys(&sessions);
-        let left = left_behind(&sessions, |s, needle| {
-            !(s.profile.is_aead() && !needle.crate_held && needle.key.ends_with("encryption key"))
-        });
-        assert!(left.is_empty(), "found after the drop: {left:#?}");
-    }
-
-    /// KNOWN LIMIT (RFC 7714 section 13.1) with the ring provider: its AES-GCM key
-    /// (`ring::aead::LessSafeKey`: the session key and every AES round key) is still in the
-    /// process once the contexts are dropped, in freed heap memory, until the allocator reuses
-    /// it. ring's memory, not the crate's; with AWS-LC nothing outlives the contexts. Fails when
-    /// run.
-    #[cfg(feature = "crypto-ring")]
-    #[test]
-    #[ignore = "KNOWN LIMIT: with ring, AES-GCM round keys outlive the contexts in freed memory; fails when run (-- --ignored known_limit_)"]
-    fn known_limit_with_ring_no_key_outlives_its_contexts_in_process_memory() {
+    fn with_ring_no_key_outlives_its_contexts_in_process_memory() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let sessions: Vec<Session> = every_session()
             .into_iter()

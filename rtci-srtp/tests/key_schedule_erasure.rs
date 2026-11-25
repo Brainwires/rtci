@@ -271,54 +271,49 @@ fn aws_lc_leaves_no_key_in_freed_rust_memory() {
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
 
-/// Whether `finding` is a form of an AES-GCM session key, which the provider's AEAD object
-/// keeps (the AEAD profiles' encryption keys: the key, its round keys, the GHASH key).
-fn provider_aead_key(profile: ProtectionProfile, finding: &Finding) -> bool {
-    profile.is_aead()
-        && !finding.needle.crate_held
-        && finding.needle.key.ends_with("encryption key")
-}
-
-/// With the ring provider, nothing but ring's own AES-GCM key objects is left in freed
-/// memory: the HMAC-SHA1 states of the AES-CM and NULL profiles' authentication keys
-/// (RustCrypto `hmac`, which `rtci-crypto` builds for the ring provider) are overwritten
-/// when a context is dropped. They are found live first: the needles are the forms the HMAC
-/// keeps. In 0.1.0 they were left in freed memory.
+/// With the ring provider no key is left in freed memory, for every profile: the keys the
+/// crate holds, the HMAC-SHA1 states of the AES-CM and NULL profiles' authentication keys
+/// (RustCrypto `hmac`, which `rtci-crypto` builds for the ring provider and overwrites when a
+/// context is dropped; left in freed memory in 0.1.0) and ring's own AES-GCM key objects
+/// (`ring::aead::LessSafeKey`: the session key and every AES round key), which `rtci-crypto`
+/// keeps in an allocation of its own and overwrites after ring has dropped them (left in freed
+/// memory in 0.1.0, a known limit of that provider). Each is found live first: the needles are
+/// the forms the objects keep, so "not found after the drop" means erased.
 #[cfg(feature = "crypto-ring")]
 #[test]
-fn with_ring_only_its_aes_gcm_key_objects_are_left_in_freed_rust_memory() {
+fn with_ring_no_key_is_left_in_freed_rust_memory() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sessions = every_session();
-    let hmac_states_live = sessions
-        .iter()
-        .filter(|(provider, profile, _)| *provider == "ring" && !profile.is_aead())
-        .all(|(_, _, findings)| {
-            findings
-                .iter()
-                .any(|f| f.live && f.needle.form.starts_with("HMAC inner state"))
-        });
+    let ring = || {
+        sessions
+            .iter()
+            .filter(|(provider, _, _)| *provider == "ring")
+    };
+    let hmac_states_live =
+        ring()
+            .filter(|(_, profile, _)| !profile.is_aead())
+            .all(|(_, _, findings)| {
+                findings
+                    .iter()
+                    .any(|f| f.live && f.needle.form.starts_with("HMAC inner state"))
+            });
     assert!(
         hmac_states_live,
         "the HMAC-SHA1 states are found live with ring, for every AES-CM and NULL profile"
     );
-    let left = left_behind(&sessions, |provider, profile, f| {
-        provider == "ring" && !provider_aead_key(profile, f)
-    });
-    assert!(left.is_empty(), "left in freed memory: {left:#?}");
-}
-
-/// KNOWN LIMIT (RFC 7714 section 13.1 with the ring provider): ring's AES-GCM key
-/// (`ring::aead::LessSafeKey`) keeps the expanded AES key in the Rust heap and does not erase
-/// it when dropped: freed blocks hold the session key and its round keys until the allocator
-/// reuses the memory. This is ring's memory, not the crate's; the AWS-LC provider erases its
-/// keys (`aws_lc_leaves_no_key_in_freed_rust_memory`, and the process-memory test). Fails
-/// when run.
-#[cfg(feature = "crypto-ring")]
-#[test]
-#[ignore = "KNOWN LIMIT: the ring provider leaves its AES-GCM round keys in freed memory; fails when run (-- --ignored known_limit_)"]
-fn known_limit_ring_leaves_no_key_in_freed_rust_memory() {
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let sessions = every_session();
+    let aead_keys_live =
+        ring()
+            .filter(|(_, profile, _)| profile.is_aead())
+            .all(|(_, _, findings)| {
+                findings.iter().any(|f| {
+                    f.live && !f.needle.crate_held && f.needle.key.ends_with("encryption key")
+                })
+            });
+    assert!(
+        aead_keys_live,
+        "ring's AES-GCM key objects are found live (the session key or a round key), for both \
+         AEAD profiles"
+    );
     let left = left_behind(&sessions, |provider, _, _| provider == "ring");
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
