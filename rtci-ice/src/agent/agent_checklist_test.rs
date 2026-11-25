@@ -49,6 +49,11 @@ fn run_with(
     loop {
         a.handle_timeout(now).unwrap();
         while let Some(t) = a.poll_write() {
+            // An agent that publishes `.local` names also writes mDNS (from port 5353): not
+            // a connectivity check.
+            if t.transport.local_addr.port() == mdns::MDNS_PORT {
+                continue;
+            }
             let mut message = Message {
                 raw: t.message.to_vec(),
                 ..Message::default()
@@ -1441,54 +1446,6 @@ fn test_a_controlled_nomination_whose_triggered_check_gets_an_error_fails_the_ch
     assert_eq!(a.checklist_state(), ChecklistState::Failed);
 }
 
-/// RFC 7675 Section 5.1: a consent request waits for its response for a time based on the
-/// round-trip time (four times the last one, 500 ms at least); a response after that is for
-/// a transaction the agent no longer has and gives no consent.
-#[test]
-fn test_consent_response_is_awaited_for_a_time_based_on_the_rtt() {
-    let start = Instant::now();
-    let mut a = agent_with(start, config(true), &[(1, 500)]);
-    answered(&mut a, start, Duration::ZERO, Duration::from_secs(1));
-    assert!(a.get_selected_candidate_pair().is_some());
-    let consent_before = a.remote_candidates[0].last_consent().unwrap();
-
-    // The next two consent requests, unanswered for now.
-    let mut consent: Vec<TransactionId> = vec![];
-    let mut now = start + Duration::from_secs(1);
-    loop {
-        a.handle_timeout(now).unwrap();
-        consent.extend(
-            sent(&mut a)
-                .iter()
-                .filter(|(m, _)| m.typ == BINDING_REQUEST)
-                .map(|(m, _)| m.transaction_id),
-        );
-        if consent.len() >= 2 {
-            break;
-        }
-        now = a
-            .poll_timeout()
-            .unwrap()
-            .max(now + Duration::from_micros(1));
-    }
-    let (late, in_time) = (consent[0], consent[1]);
-    assert!(
-        a.pending_binding_requests
-            .iter()
-            .all(|r| r.transaction_id != late),
-        "the first one stopped waiting"
-    );
-
-    let at = now + 400 * MS;
-    let response = peer_response(BINDING_SUCCESS, late, addr(LOCAL), None);
-    let _ = deliver(&mut a, at, &response, "10.0.0.1:5000");
-    assert_eq!(a.remote_candidates[0].last_consent(), Some(consent_before));
-
-    let response = peer_response(BINDING_SUCCESS, in_time, addr(LOCAL), None);
-    deliver(&mut a, at, &response, "10.0.0.1:5000").unwrap();
-    assert_eq!(a.remote_candidates[0].last_consent(), Some(at));
-}
-
 // --- Heavy loss: a nomination whose requests or responses are all lost ---
 
 /// A controlling agent with one remote candidate and the checking timer on (the defaults):
@@ -1823,5 +1780,56 @@ fn test_agents_that_share_a_pacing_group_start_one_transaction_per_5_ms_together
     assert!(
         alone.windows(2).any(|w| w[1] == w[0]),
         "without the group two agents start together"
+    );
+}
+
+/// draft-ietf-mmusic-mdns-ice-candidates section 3.3.1: "Statistics related to ICE
+/// candidates that are accessible to the web application MUST NOT contain the IP address of a
+/// local or remote mDNS candidate". With the host address hidden behind a name
+/// (`QueryAndGather`), a local peer-reflexive candidate learnt from a mapped address that is
+/// that host address shows the name, not the address, and does not give its base in the
+/// related address; the selected pair the application reads carries neither.
+#[test]
+fn test_a_local_peer_reflexive_candidate_does_not_show_a_hidden_host_address() {
+    let start = Instant::now();
+    let hidden = addr(LOCAL).ip();
+    let mapped = SocketAddr::new(hidden, 4000);
+    let cfg = AgentConfig {
+        multicast_dns_mode: MulticastDnsMode::QueryAndGather,
+        ..config(true)
+    };
+    let mut a = agent_with(start, cfg, &[(1, 500)]);
+    run_with(&mut a, start, Duration::ZERO, 300 * MS, |_| {
+        Answer::Success(mapped)
+    });
+    let name = a.local_candidates[0].address().to_owned();
+    assert!(name.ends_with(".local"), "the host is hidden: {name}");
+    let learned = a
+        .local_candidates
+        .iter()
+        .find(|c| c.candidate_type() == CandidateType::PeerReflexive)
+        .expect("a local peer-reflexive candidate");
+    assert_eq!(
+        learned.addr(),
+        mapped,
+        "the agent itself still uses the address"
+    );
+    assert_eq!(learned.address(), name, "shown under the host's name");
+    assert_eq!(
+        learned.signalled_related_address().map(|r| r.address),
+        Some("0.0.0.0".to_owned()),
+        "its base is not shown"
+    );
+    // What the peer connection gives the application of the selected pair: the address and
+    // the signalled related address.
+    let (local, _) = a.get_selected_candidate_pair().unwrap();
+    let shown = format!(
+        "{} {:?}",
+        local.address(),
+        local.signalled_related_address()
+    );
+    assert!(
+        !shown.contains(&hidden.to_string()),
+        "the selected pair's local candidate: {shown}"
     );
 }

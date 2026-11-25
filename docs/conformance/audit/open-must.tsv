@@ -35,6 +35,7 @@ RFC6544-4.1-9	B	S	ice	A pacing test with TCP pairs (one scheduler paces both)
 RFC6544-6.1-3	D	M	ice	Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does
 RFC6544-7-1	B	S	ice	A test that TCP and UDP pairs share one checklist in priority order
 RFC6544-9.2-1	C	M	tcp (running)	After an ICE restart, tell the application to close the old selected TCP connection (driver event)
+RFC7675-1-1	C	S	ice	Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row)
 RFC6679-7.1-1	C	S	sdp	Write `nack ecn` / `ecn-sum` / the ECN attribute in offers (SDP half)
 RFC6679-7.1-3	C	S	sdp	Offer `a=rtcp-xr:ecn-sum` with ECN
 RFC6679-7.1-4	C	S	sdp	Offer `nack ecn` where ECN is offered
@@ -51,7 +52,7 @@ RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_tran
 RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
 RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
-RFC8108-5.1-1	A	S	media (running)	`setting` (measured, rtpcore-6): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; mean freeze 1.73 against 1.60 s, lag 9.03 against 8.70 s on `report_blocks_from_every_ssrc_measured_against_once`
+RFC8108-5.1-1	A	S	media (running)	`setting` (measured, rtpcore-6): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; mean freeze 1.73 against 1.60 s, lag 9.03 against 8.70 s on `measure_report_blocks_from_every_ssrc_against_once` (one sample; it asserts nothing since rtp-9), the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without`
 RFC8108-6.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC8122-6.2-5	C	S	dtls-srtp	Missing certificate: bad_certificate (RFC 8122) instead of handshake_failure (RFC 5246 7.4.6) on the peer-connection path
 RFC8122-6.2-6	C	M	dtls-srtp	Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4)

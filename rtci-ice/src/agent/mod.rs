@@ -13,6 +13,8 @@ mod agent_candidate_pair_test;
 #[cfg(test)]
 mod agent_checklist_test;
 #[cfg(test)]
+mod agent_consent_delay_test;
+#[cfg(test)]
 mod agent_consent_test;
 #[cfg(test)]
 mod agent_mdns_exposure_test;
@@ -39,6 +41,8 @@ mod agent_test;
 #[cfg(test)]
 mod agent_trickle_test;
 
+#[cfg(test)]
+mod address_policy_test;
 /// Configuration for a new [`Agent`]: servers, timeouts and role.
 pub mod agent_config;
 mod agent_proto;
@@ -82,7 +86,7 @@ use crate::rand::*;
 use crate::state::*;
 use crate::tcp_type::TcpType;
 use crate::url::*;
-use remote_policy::RemotePolicy;
+use remote_policy::{AddressPurpose, RemotePolicy};
 use shared::error::*;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 
@@ -125,6 +129,25 @@ pub(crate) struct BindingRequest {
     /// the transaction ends without one that passes, that is an integrity violation, not a
     /// timeout (RFC 8489 Section 9.1.4).
     pub(crate) unauthentic_response: bool,
+}
+
+/// How long a consent request sent on a pair whose RTO is `rto` waits for its response, the
+/// consent expiry being `expiry`: see [`ConsentResponseWait`].
+pub(crate) fn consent_response_wait(
+    setting: ConsentResponseWait,
+    rto: Duration,
+    expiry: Duration,
+) -> Duration {
+    match setting {
+        // RFC 8489 Section 6.2.1: "If, after the last request, a duration equal to Rm times
+        // the RTO has passed without a response [...], the client SHOULD consider the
+        // transaction to have failed." A consent request is the first and the last of its
+        // transaction. Past the consent expiry consent has either been renewed by a later
+        // response or is lost, and then every transaction is discarded (RFC 7675 Section
+        // 5.1): no transaction is kept longer.
+        ConsentResponseWait::Rto => rto.saturating_mul(STUN_RM).min(expiry),
+        ConsentResponseWait::Fixed(wait) => wait,
+    }
 }
 
 impl BindingRequest {
@@ -188,12 +211,29 @@ pub(crate) struct PreviousGeneration {
     /// When the peer last consented (a lite agent: when it last sent an authenticated request).
     pub(crate) last_consent: Instant,
     pub(crate) next_consent_at: Instant,
-    /// Consent requests sent on the old pair that may still be answered.
-    pub(crate) pending: Vec<TransactionId>,
+    /// Consent requests sent on the old pair that may still be answered: those the restart
+    /// found open on the selected pair, and those sent since.
+    pub(crate) pending: Vec<PreviousConsentRequest>,
+    /// The old pair's RTO (RFC 6298), as the pair had it at the restart and as the responses
+    /// since made it: what the wait of each request is based on.
+    pub(crate) rto: stun::timer::RtoEstimator,
 }
 
-/// Most consent transactions of a replaced generation kept open at a time.
-pub(crate) const MAX_PREVIOUS_GENERATION_TRANSACTIONS: usize = 8;
+/// One open consent transaction of a replaced generation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreviousConsentRequest {
+    pub(crate) transaction_id: TransactionId,
+    /// When the request was sent.
+    pub(crate) sent: Instant,
+    /// When the transaction ends without a response: a response from then on is for a
+    /// transaction that is no longer in progress (RFC 8489 Section 6.3).
+    pub(crate) until: Instant,
+}
+
+/// Most consent transactions of a replaced generation kept open at a time: more than the
+/// requests of one consent expiry (at least 4 seconds apart, 30 seconds), and those of
+/// libwebrtc's 60 seconds ([`ConsentResponseWait::Fixed`]).
+pub(crate) const MAX_PREVIOUS_GENERATION_TRANSACTIONS: usize = 16;
 
 /// How long data is still taken on the path an ICE restart replaced, once the restart's pair
 /// is selected: each side selects on its own (the controlled agent at the nomination request,
@@ -517,6 +557,8 @@ pub struct Agent {
     pub(crate) pacing_group: Option<Arc<PacingGroup>>,
     /// The controlling agent's consent checks carry USE-CANDIDATE (libwebrtc).
     pub(crate) nominate_on_consent_checks: bool,
+    /// How long a consent request waits for its response.
+    pub(crate) consent_response_wait: ConsentResponseWait,
     /// Error responses to unauthenticated requests, or nothing.
     pub(crate) unauthenticated_requests: UnauthenticatedRequests,
     /// The token bucket of those error responses: tokens left, and when it was last filled.
@@ -802,6 +844,7 @@ impl Agent {
                 allow_loopback: config.allow_loopback_remote_candidates,
                 allow_link_local: config.allow_link_local_remote_candidates,
                 filter: config.remote_address_filter.clone(),
+                address: config.address_policy.clone(),
             },
             ext_ip_mapper,
 
@@ -813,6 +856,7 @@ impl Agent {
             failed_nomination: config.failed_nomination,
             pacing_group: config.pacing_group.clone(),
             nominate_on_consent_checks: config.nominate_on_consent_checks,
+            consent_response_wait: config.consent_response_wait,
             unauthenticated_requests: config.unauthenticated_requests,
             unauthenticated_response_tokens: MAX_UNAUTHENTICATED_RESPONSE_BURST,
             unauthenticated_response_refill: now,
@@ -1482,6 +1526,19 @@ impl Agent {
     /// own `<uuid>.local` name, IPv4 and IPv6, as browsers publish host candidates: made when its
     /// first candidate is added, registered with the mDNS responder, reused for the address's
     /// other candidates (and across ICE restarts).
+    /// The `.local` name this agent gave the host address `ip` (published or not), if it hid
+    /// it behind one.
+    pub(crate) fn mdns_name_of_hidden(&self, ip: IpAddr) -> Option<String> {
+        if self.mdns_local_ip == Some(ip) {
+            return Some(self.mdns_local_name.clone());
+        }
+        self.mdns_local_names
+            .iter()
+            .chain(self.mdns_unpublished_names.iter())
+            .find(|(i, _)| *i == ip)
+            .map(|(_, name)| name.clone())
+    }
+
     fn mdns_name_for(&mut self, ip: IpAddr, network_type: NetworkType) -> MdnsHostName {
         if let Some(local_ip) = self.mdns_local_ip {
             let v4 = matches!(network_type, NetworkType::Udp4 | NetworkType::Tcp4);
@@ -1524,6 +1581,17 @@ impl Agent {
     /// at all with [`AgentConfig::multicast_dns_fail_closed`]. Names registered before stay.
     pub fn set_multicast_dns_publishing(&mut self, publishing: MulticastDnsPublishing) {
         self.mdns_publishing = publishing;
+    }
+
+    /// Declares, from now on, whether the application hands each mDNS datagram to
+    /// `handle_read` with its destination address in `local_addr` (as
+    /// [`AgentConfig::multicast_dns_destination_reported`]): the mDNS group's for one that
+    /// arrived by multicast (on the link whatever its source, RFC 6762 section 11), the host's
+    /// own for a unicast one, the unspecified address when it does not know.
+    pub fn set_multicast_dns_destination_reported(&mut self, reported: bool) {
+        if let Some(mdns_conn) = self.mdns.as_mut() {
+            mdns_conn.set_destination_reported(reported);
+        }
     }
 
     /// Whether the agent withheld the host candidates of `ip` because their mDNS name could
@@ -1671,8 +1739,12 @@ impl Agent {
                 continue;
             }
             // RFC 8445 §5.1.1.1: a candidate is a unicast transport address. One that can't be
-            // a destination, or that the application's filter refuses, is never held or paired.
-            if !self.remote_policy.allows_candidate(c.addr()) {
+            // a destination, or that the application's filter or address policy refuses, is
+            // never held or paired.
+            if !self
+                .remote_policy
+                .allows_remote(c.addr(), AddressPurpose::RemoteCandidate)
+            {
                 warn!(
                     "[{}]: ignoring remote candidate {}: its address {} is not an allowed destination",
                     self.get_name(),
@@ -2242,8 +2314,10 @@ impl Agent {
     ///
     /// Guards against accepting media from an address that has not passed a connectivity check.
     pub fn is_valid_non_stun_traffic(&mut self, now: Instant, transport: TransportContext) -> bool {
-        self.find_local_candidate(transport.local_addr, transport.transport_protocol)
-            .is_some()
+        self.remote_policy.allows_source(transport.peer_addr)
+            && self
+                .find_local_candidate(transport.local_addr, transport.transport_protocol)
+                .is_some()
             && self.validate_non_stun_traffic(now, transport.peer_addr)
     }
 
@@ -2377,6 +2451,10 @@ impl Agent {
     /// As [`Agent::accepts_data`], saying which pair the data arrived on: the one in use, or
     /// another valid pair (its local and remote candidates).
     pub fn data_path(&self, transport: TransportContext) -> Option<DataPath<'_>> {
+        // Nothing from a source the embedder's address policy refuses.
+        if !self.remote_policy.allows_source(transport.peer_addr) {
+            return None;
+        }
         let path = self.media_path()?;
         if self.data_from_selected_pair_only {
             // (The hardening compares the source only, as it always did.)
@@ -2608,7 +2686,25 @@ impl Agent {
                     next_consent_at: self
                         .next_consent_at
                         .unwrap_or_else(|| now + self.next_consent_interval()),
-                    pending: vec![],
+                    // The consent requests still open on the pair stay open on the path: the
+                    // peer answers them as it would have without the restart (RFC 7675
+                    // Section 5.1: "a response might be for a previous request").
+                    pending: self
+                        .pending_binding_requests
+                        .iter()
+                        .filter(|r| {
+                            r.consent
+                                && r.local_index == pair.local_index
+                                && r.remote_index == pair.remote_index
+                                && r.next_event > now
+                        })
+                        .map(|r| PreviousConsentRequest {
+                            transaction_id: r.transaction_id,
+                            sent: r.timestamp,
+                            until: r.next_event,
+                        })
+                        .collect(),
+                    rto: pair.rto,
                 })
             }
             _ => self.previous_generation.take(),
@@ -3093,15 +3189,18 @@ impl Agent {
         };
         let expiry = self.consent_expiry();
         let interval = self.next_consent_interval();
-        let (lite, keepalive, controlling, tie_breaker) = (
+        let (lite, keepalive, controlling, tie_breaker, response_wait) = (
             self.lite,
             self.keepalive_interval != ZERO_DURATION,
             self.is_controlling,
             self.tie_breaker,
+            self.consent_response_wait,
         );
         let Some(previous) = &mut self.previous_generation else {
             return;
         };
+        // The transactions that ended without a response.
+        previous.pending.retain(|r| r.until > now);
 
         if now.saturating_duration_since(previous.last_consent) >= expiry {
             warn!(
@@ -3150,7 +3249,12 @@ impl Agent {
         if previous.pending.len() >= MAX_PREVIOUS_GENERATION_TRANSACTIONS {
             previous.pending.remove(0);
         }
-        previous.pending.push(msg.transaction_id);
+        let wait = consent_response_wait(response_wait, previous.rto.start(now), expiry);
+        previous.pending.push(PreviousConsentRequest {
+            transaction_id: msg.transaction_id,
+            sent: now,
+            until: now + wait,
+        });
         self.write_outs.push_back(TaggedBytesMut {
             now,
             transport: TransportContext {
@@ -3245,10 +3349,12 @@ impl Agent {
         }
 
         if m.typ.class == CLASS_SUCCESS_RESPONSE || m.typ.class == CLASS_ERROR_RESPONSE {
+            // Matched by transaction id, to a transaction that is still in progress (RFC
+            // 8489 Section 6.3).
             let Some(position) = previous
                 .pending
                 .iter()
-                .position(|id| *id == m.transaction_id)
+                .position(|r| r.transaction_id == m.transaction_id && r.until > msg.now)
             else {
                 return false;
             };
@@ -3269,9 +3375,13 @@ impl Agent {
                 return true;
             }
             if let Some(previous) = &mut self.previous_generation {
-                previous.pending.remove(position);
+                let request = previous.pending.remove(position);
                 if is_success {
                     previous.last_consent = msg.now;
+                    // Each consent request is sent once: its response gives the round trip.
+                    previous
+                        .rto
+                        .sample(msg.now.saturating_duration_since(request.sent), msg.now);
                 }
             }
             return true;
@@ -3818,8 +3928,18 @@ impl Agent {
             // initiating agent will receive a Binding request prior to receiving the candidates
             // from its peer. If this happens, the agent MUST immediately generate a response
             // [...] Once the answer is received, it MUST proceed with the remaining steps."
-            // A source the destination policy refuses is not answered, now or later.
-            if !self.remote_policy.allows_candidate(remote_addr) {
+            // A source the destination policy refuses is not answered, now or later. Nor is
+            // one the embedder's address policy would refuse as a peer-reflexive candidate
+            // (what the source of a request from no known candidate becomes, Section 7.3.1.3,
+            // once the credentials are here): answered now, it would have its answer, and its
+            // reflexive address in it, before the policy was ever asked about it.
+            if !self.remote_policy.allows_candidate(remote_addr)
+                || (self.find_remote_candidate(remote_addr).is_none()
+                    && !self
+                        .remote_policy
+                        .address
+                        .allows(remote_addr, AddressPurpose::PeerReflexiveSource))
+            {
                 return Err(Error::ErrUnhandledStunpacket);
             }
             self.send_binding_success(now, m, local_index, remote_addr);
@@ -4054,7 +4174,10 @@ impl Agent {
             );
             return Ok(None);
         }
-        if !self.remote_policy.allows_candidate(remote_addr) {
+        if !self
+            .remote_policy
+            .allows_remote(remote_addr, AddressPurpose::PeerReflexiveSource)
+        {
             warn!(
                 "[{}]: ignoring peer-reflexive candidate {}: not an allowed destination",
                 self.get_name(),

@@ -112,10 +112,10 @@ use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 //TODO: use ice::agent::agent_config::{InterfaceFilterFn, IpFilterFn};
-use ice::agent::remote_policy::RemoteAddressFilter;
+use ice::agent::remote_policy::{IceAddressPolicy, RemoteAddressFilter};
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
-use ice::{FailedNomination, NominationAcceptance, UnauthenticatedRequests};
+use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
@@ -287,6 +287,8 @@ pub struct Candidates {
     pub allow_link_local_remote_candidates: bool,
     /// See `SettingEngineBuilder::with_remote_address_filter`.
     pub remote_address_filter: Option<RemoteAddressFilter>,
+    /// See `SettingEngineBuilder::with_ice_address_policy`. The default allows everything.
+    pub address_policy: IceAddressPolicy,
 }
 
 /// Where the ICE agent follows RFC 8445 / RFC 8489 by default and a browser (libwebrtc)
@@ -304,6 +306,8 @@ pub struct IceBehaviour {
     pub failed_nomination: FailedNomination,
     /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
     pub nominate_on_consent_checks: bool,
+    /// See [`SettingEngineBuilder::with_ice_consent_response_wait`].
+    pub consent_response_wait: ConsentResponseWait,
     /// See [`SettingEngineBuilder::with_ice_pacing`].
     pub pacing: Option<Duration>,
     /// See [`SettingEngineBuilder::with_ice_pacing_group`].
@@ -1903,6 +1907,36 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// How long an ICE consent request (RFC 7675) waits for its response, that is, how long a
+    /// matching, authenticated Binding success response still renews consent.
+    ///
+    /// The default, [`ConsentResponseWait::Rto`], is RFC 7675 section 5.1: "a time based on
+    /// the estimated round-trip time (RTT) [...] with an allowance for variation in network
+    /// delay", here `Rm` (16) times the candidate pair's RTO (RFC 8489 section 6.2.1, RFC
+    /// 6298), which is 8 seconds at least and grows with the round-trip time the responses
+    /// show, and never longer than the consent expiry (30 seconds). A path whose round trip
+    /// rises, even from milliseconds to seconds at once, keeps its consent: a response that
+    /// takes long is still taken, and makes the next requests wait longer.
+    ///
+    /// [`ConsentResponseWait::Fixed`] is a fixed wait; libwebrtc's is 60 seconds
+    /// (`kConnectionResponseTimeout`), which takes a response whatever the round trip was.
+    ///
+    /// Either way consent expires 30 seconds after the last response that renewed it.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use rtci::ice::ConsentResponseWait;
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_consent_response_wait(ConsentResponseWait::Fixed(Duration::from_secs(60)))
+    ///     .build();
+    /// ```
+    pub fn with_ice_consent_response_wait(mut self, wait: ConsentResponseWait) -> Self {
+        self.0.ice.consent_response_wait = wait;
+        self
+    }
+
     /// What a STUN Binding request that fails the ICE short-term credential check gets.
     ///
     /// The default, [`UnauthenticatedRequests::Reject`], is RFC 8489 section 9.1.3: 400 (Bad
@@ -2011,6 +2045,50 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_remote_address_filter(mut self, filter: RemoteAddressFilter) -> Self {
         self.0.candidates.remote_address_filter = Some(filter);
+        self
+    }
+
+    /// Sets the embedder's address policy for ICE, one predicate over a socket address, the
+    /// direction it would be used in and the purpose ([`ice::AddressPurpose`]), asked at every
+    /// point where an address enters the ICE agent or the peer connection:
+    ///
+    /// - the source of every datagram, of ICE-TCP stream data and of an ICE-TCP connection
+    ///   (inbound): what comes from a refused source is dropped before the ICE agent, DTLS or
+    ///   the media see it (no STUN response, no peer-reflexive candidate, no consent, no pair,
+    ///   no DTLS record or packet taken); a connection the driver accepted from it is refused;
+    /// - remote candidates, signalled or resolved from mDNS (outbound): one on a refused
+    ///   address is never held or paired; `add_remote_candidate` treats it as W3C webrtc-pc
+    ///   4.4.2 "administratively prohibited" (it succeeds, nothing is sent there);
+    /// - peer-reflexive sources (inbound): a refused one is not learned and not answered;
+    /// - STUN and TURN server addresses after resolution (outbound): a refused one is skipped,
+    ///   as if it had failed, and is sent nothing.
+    ///
+    /// The default allows everything and changes nothing. It composes with
+    /// [`Self::with_remote_address_filter`] (outbound remote candidates only, kept as it was)
+    /// and with the "relay" ICE transport policy: under "relay" plus a policy that refuses
+    /// private or host addresses, no datagram leaves from or goes to such an address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtci::ice::{AddressPurpose, IceAddressPolicy};
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use std::net::IpAddr;
+    ///
+    /// // Nothing to or from private, loopback or link-local addresses; servers anywhere.
+    /// let policy = IceAddressPolicy::new(|addr, _direction, purpose| {
+    ///     let private = match addr.ip() {
+    ///         IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+    ///         IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local(),
+    ///     };
+    ///     purpose == AddressPurpose::StunTurnServer || !private
+    /// });
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_address_policy(policy)
+    ///     .build();
+    /// ```
+    pub fn with_ice_address_policy(mut self, policy: IceAddressPolicy) -> Self {
+        self.0.candidates.address_policy = policy;
         self
     }
 
