@@ -369,8 +369,14 @@ fn a_receiver_does_not_wait_for_feedback_the_sender_never_answers() {
     };
     for frame in 0..FRAMES {
         let now = arrival(frame);
-        // The builder's deadlines before this arrival, as an application's timer would.
+        // The builder's deadlines before this arrival, as an application's timer would (a
+        // deadline that does not move after its pop has been served).
+        let mut served = None;
         while let Some(deadline) = builder.poll_timeout().filter(|d| *d < now) {
+            if served == Some(deadline) {
+                break;
+            }
+            served = Some(deadline);
             collect(&mut builder, deadline);
         }
         if frame != LOST {
