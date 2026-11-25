@@ -90,6 +90,14 @@ pub trait BandwidthEstimator: Send + Sync {
         None
     }
 
+    /// Whether the estimator reads the path as over-used now (more is sent than it carries:
+    /// a growing queue, or loss out of a full one). Recovery probing
+    /// ([`CongestionControlBuilder::with_recovery_probing`](crate::CongestionControlBuilder::with_recovery_probing))
+    /// asks for no cluster meanwhile. `false` for an estimator that has no such state.
+    fn overusing(&self) -> bool {
+        false
+    }
+
     /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over
     /// only while the receiver sends no per-packet feedback (no TWCC, no RFC 8888): the
     /// loss-based half of an estimator can still run on it

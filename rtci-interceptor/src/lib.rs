@@ -276,8 +276,9 @@ pub use cc::interceptor::{
 };
 pub use cc::probe::{
     PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL, PROBE_MAX_OCTETS,
-    PROBE_MIN_DURATION, PROBE_MIN_PACKETS, PROBE_RESULT_TIMEOUT, ProbeController, ProbeFill,
-    ProbePacket, ProbeRequest, burst_estimate, probe_estimate,
+    PROBE_MIN_DURATION, PROBE_MIN_PACKETS, PROBE_RECOVERY_INTERVAL, PROBE_RECOVERY_MEMORY,
+    PROBE_RESULT_TIMEOUT, ProbeController, ProbeFill, ProbePacket, ProbeRequest, burst_estimate,
+    probe_estimate,
 };
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
 pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};

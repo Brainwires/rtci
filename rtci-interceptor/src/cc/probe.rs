@@ -77,6 +77,11 @@ const PROBE_AFTER_DROP_DELAY: Duration = Duration::from_secs(1);
 const PROBE_AFTER_DROP_INTERVAL: Duration = Duration::from_secs(1);
 /// A probe after a drop asks for this share of the rate before it.
 const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
+/// How long the rate before a large drop is remembered for recovery probing
+/// ([`ProbeController::with_recovery_probing`]).
+pub const PROBE_RECOVERY_MEMORY: Duration = Duration::from_secs(60);
+/// How often a recovery cluster is sent while the target is below the remembered rate.
+pub const PROBE_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A probe cluster the congestion controller asks for.
 ///
@@ -272,6 +277,16 @@ pub struct ProbeController {
     polled_at: Option<Instant>,
     /// Whether clusters leave as bursts of padding ([`set_unpaced`](Self::set_unpaced)).
     unpaced: bool,
+    /// Whether the rate before a large drop is probed back towards for as long as it is
+    /// remembered ([`with_recovery_probing`](Self::with_recovery_probing)).
+    recovery: bool,
+    /// The rate the target had before a large drop, and when the drop was: kept for
+    /// [`PROBE_RECOVERY_MEMORY`], and through smaller drops meanwhile.
+    remembered: Option<(f64, Instant)>,
+    /// When the last recovery cluster was asked for.
+    last_recovery: Option<Instant>,
+    /// Whether the estimator reads the path as over-used ([`set_overusing`](Self::set_overusing)).
+    overusing: bool,
 }
 
 impl ProbeController {
@@ -296,6 +311,10 @@ impl ProbeController {
             drop_probe: false,
             polled_at: None,
             unpaced: false,
+            recovery: false,
+            remembered: None,
+            last_recovery: None,
+            overusing: false,
         }
     }
 
@@ -315,6 +334,40 @@ impl ProbeController {
     pub fn with_probe_after_drop(mut self, enabled: bool) -> Self {
         self.after_drop = enabled;
         self
+    }
+
+    /// Whether the path is probed back towards the rate it carried before a large drop for as
+    /// long as that rate is remembered: recovery probing. Off by default.
+    ///
+    /// A capacity that fell and comes back (a cellular link out of a tunnel, a competing
+    /// transfer that ends after half a minute) leaves a sender that keeps up with its target
+    /// at the bottom of the delay-based controller's climb: 8% a second, about 18 s from
+    /// 250 kbit/s to 1 Mbit/s. Nothing else asks: the probes after a drop
+    /// ([`with_probe_after_drop`](Self::with_probe_after_drop)) end five seconds after it, and
+    /// the periodic ones are for a sender that sends less than its target. With this, the
+    /// target before a large drop (below two thirds of its high of the last two seconds) is
+    /// remembered for [`PROBE_RECOVERY_MEMORY`] (the highest such rate, through the smaller
+    /// drops of the time under the limit), and while the target is below 85% of it and the
+    /// estimator does not read the path as over-used ([`set_overusing`](Self::set_overusing)),
+    /// a cluster at twice the target is asked for every [`PROBE_RECOVERY_INTERVAL`], with
+    /// further ones at twice the result while results confirm the rate probed. A cluster the
+    /// path does not carry changes nothing (a probe only ever raises the estimate).
+    ///
+    /// No specification asks for it (RFC 8836 section 2 names probing at the start only;
+    /// draft-ietf-rmcat-gcc-02 has no probing), and libwebrtc does not do it: its periodic
+    /// probes are for an application-limited sender, its probe after a drop is one cluster
+    /// within five seconds. It is a performance choice: it puts a cluster above the target
+    /// into a path that may still be limited, every five seconds for up to a minute. Not for
+    /// a chain whose clusters leave as bursts ([`set_unpaced`](Self::set_unpaced)).
+    pub fn with_recovery_probing(mut self, enabled: bool) -> Self {
+        self.recovery = enabled;
+        self
+    }
+
+    /// Whether the estimator reads the path as over-used now (a growing queue): no recovery
+    /// cluster is asked for meanwhile ([`with_recovery_probing`](Self::with_recovery_probing)).
+    pub fn set_overusing(&mut self, overusing: bool) {
+        self.overusing = overusing;
     }
 
     /// Whether this chain's clusters leave as one burst of padding (no pacer: the congestion
@@ -356,7 +409,7 @@ impl ProbeController {
         if !media_flowing {
             return None;
         }
-        if self.after_drop {
+        if self.after_drop || self.recovery {
             self.track_drops(now, target);
         }
         if let Some((_, _, asked)) = self.outstanding {
@@ -382,6 +435,7 @@ impl ProbeController {
         } else if let Some(rate) = self.further.take() {
             Some(rate)
         } else if let Some((before, at)) = self.drop
+            && self.after_drop
             && !self.unpaced
             && now.saturating_duration_since(at) >= PROBE_AFTER_DROP_DELAY
             && target < PROBE_AFTER_DROP_SHARE * before
@@ -393,6 +447,12 @@ impl ProbeController {
             // gone, the path carries it again.
             self.drop_probe = true;
             Some(PROBE_AFTER_DROP_SHARE * before)
+        } else if self.recovery_due(now, target) {
+            // Below the rate the path carried before a large drop that is still remembered:
+            // what limited it may have gone, and a sender at its target is not asked by
+            // anything else.
+            self.last_recovery = Some(now);
+            Some(target * FURTHER_PROBE)
         } else if sending < APPLICATION_LIMITED_SHARE * target
             && self.last_probe.is_none_or(|last| {
                 now.saturating_duration_since(last) >= PROBE_APPLICATION_LIMITED_INTERVAL
@@ -422,8 +482,36 @@ impl ProbeController {
         })
     }
 
+    /// Whether a recovery cluster is due: the setting, paced clusters, a remembered rate the
+    /// target is well below, no over-use, and the interval since the drop or the last one.
+    fn recovery_due(&self, now: Instant, target: f64) -> bool {
+        let Some(at) = self.recovery_deadline() else {
+            return false;
+        };
+        let Some((before, _)) = self.remembered else {
+            return false;
+        };
+        now >= at && !self.overusing && target < PROBE_AFTER_DROP_SHARE * before
+    }
+
+    /// When the next recovery cluster may be asked for, while a rate is remembered.
+    fn recovery_deadline(&self) -> Option<Instant> {
+        if !self.recovery || self.unpaced {
+            return None;
+        }
+        let (_, dropped) = self.remembered?;
+        let since = self.last_recovery.map_or(dropped, |last| last.max(dropped));
+        Some(since + PROBE_RECOVERY_INTERVAL)
+    }
+
     /// Follows the target's recent high, and notes a large drop below it.
     fn track_drops(&mut self, now: Instant, target: f64) {
+        if self
+            .remembered
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) > PROBE_RECOVERY_MEMORY)
+        {
+            self.remembered = None;
+        }
         match self.peak {
             Some((peak, at))
                 if target < peak && now.saturating_duration_since(at) <= LARGE_DROP_WINDOW =>
@@ -431,6 +519,12 @@ impl ProbeController {
                 if target < LARGE_DROP_SHARE * peak {
                     self.drop = Some((peak, now));
                     self.peak = Some((target, now));
+                    // The highest rate before a drop of the last minute stays the one
+                    // remembered: the smaller drops under a limit (the controller's own
+                    // sawtooth) do not replace the rate the path had before it.
+                    if self.remembered.is_none_or(|(before, _)| peak >= before) {
+                        self.remembered = Some((peak, now));
+                    }
                 }
             }
             _ => self.peak = Some((target, now)),
@@ -490,16 +584,17 @@ impl ProbeController {
     }
 
     /// The instants something may be due: a result to give up, the next cluster of a
-    /// sequence or of an application-limited sender, the next probe after a drop.
-    fn deadlines(&self) -> [Option<Instant>; 2] {
+    /// sequence or of an application-limited sender, the next probe after a drop, the next
+    /// recovery cluster.
+    fn deadlines(&self) -> [Option<Instant>; 3] {
         if !self.started {
-            return [None, None];
+            return [None, None, None];
         }
         if let Some((_, _, asked)) = self.outstanding {
-            return [Some(asked + PROBE_RESULT_TIMEOUT), None];
+            return [Some(asked + PROBE_RESULT_TIMEOUT), None, None];
         }
         let Some(last) = self.last_probe else {
-            return [None, None];
+            return [None, None, None];
         };
         let next = if !self.initial.is_empty() || self.further.is_some() {
             last + PROBE_SPACING
@@ -508,9 +603,12 @@ impl ProbeController {
         };
         let after_drop = self
             .drop
-            .filter(|_| !self.unpaced)
+            .filter(|_| self.after_drop && !self.unpaced)
             .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
-        [Some(next), after_drop]
+        let recovery = self
+            .recovery_deadline()
+            .map(|at| at.max(last + PROBE_SPACING));
+        [Some(next), after_drop, recovery]
     }
 }
 
@@ -841,6 +939,179 @@ mod tests {
         );
         for ms in (1_100..8_000).step_by(100) {
             assert_eq!(None, controller.poll(at(ms), 900_000.0, 900_000.0, true));
+        }
+    }
+
+    /// A controller with recovery probing and without the probes after a drop (so that every
+    /// cluster seen is a recovery cluster), settled, at 2 Mbit/s until 1 s and dropped to
+    /// 300 kbit/s at 1.1 s.
+    fn dropped_with_recovery(epoch: Instant) -> ProbeController {
+        let mut controller = settled(epoch)
+            .with_probe_after_drop(false)
+            .with_recovery_probing(true);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        assert_eq!(None, controller.poll(at(1_100), 300_000.0, 300_000.0, true));
+        controller
+    }
+
+    /// Recovery probing: after a large drop a sender at its target is asked for a cluster at
+    /// twice the target every five seconds, from five seconds after the drop, for as long as
+    /// the rate before the drop is remembered (a minute), and not after.
+    #[test]
+    fn recovery_probing_asks_twice_the_target_every_five_seconds_for_a_minute() {
+        let epoch = Instant::now();
+        let mut controller = dropped_with_recovery(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut asked = Vec::new();
+        for ms in (1_200..90_000).step_by(100) {
+            if ms == 5_300 {
+                assert_eq!(
+                    Some(at(6_100)),
+                    controller.poll_timeout(),
+                    "the first recovery cluster's instant is a deadline"
+                );
+            }
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 300_000.0, true) {
+                assert_eq!(600_000.0, request.bits_per_second, "at {ms} ms");
+                asked.push(ms);
+                // The path is still limited: the cluster shows less than the target.
+                controller.on_result(request.cluster, 285_000.0);
+            }
+        }
+        let expected: Vec<u64> = (0..12).map(|n| 6_100 + 5_000 * n).collect();
+        assert_eq!(
+            expected, asked,
+            "every 5 s from 5 s after the drop, for 60 s"
+        );
+    }
+
+    /// Without the setting (the default) nothing is asked of a sender at its target once the
+    /// probes after the drop have ended.
+    #[test]
+    fn without_recovery_probing_a_sender_at_its_target_is_not_probed_after_the_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch).with_probe_after_drop(false);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        for ms in (1_100..30_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 300_000.0, 300_000.0, true),
+                "at {ms} ms"
+            );
+        }
+    }
+
+    /// A recovery cluster the path carries is followed by clusters at twice the result until
+    /// one shows the bottleneck: the rate before the drop is back within a second.
+    #[test]
+    fn a_recovery_cluster_the_path_carries_is_followed_up() {
+        let epoch = Instant::now();
+        let mut controller = dropped_with_recovery(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut target = 300_000.0;
+        let mut asked = Vec::new();
+        // The path carries 2.5 Mbit/s again.
+        for ms in (1_200..8_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), target, target, true) {
+                asked.push((ms, request.bits_per_second));
+                let estimate = request.bits_per_second.min(2_500_000.0 * 0.95);
+                target = controller
+                    .on_result(request.cluster, estimate)
+                    .expect("the outstanding cluster");
+            }
+        }
+        assert_eq!(
+            vec![
+                (6_100, 600_000.0),
+                (6_200, 1_200_000.0),
+                (6_300, 2_400_000.0),
+                (6_400, 4_750_000.0)
+            ],
+            asked
+        );
+        assert_eq!(2_375_000.0, target);
+    }
+
+    /// No recovery cluster while the estimator reads over-use; the one that was due goes out
+    /// when it no longer does.
+    #[test]
+    fn recovery_probing_waits_while_the_path_is_overused() {
+        let epoch = Instant::now();
+        let mut controller = dropped_with_recovery(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        controller.set_overusing(true);
+        for ms in (1_200..9_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 300_000.0, 300_000.0, true),
+                "at {ms} ms"
+            );
+        }
+        controller.set_overusing(false);
+        let request = controller
+            .poll(at(9_000), 300_000.0, 300_000.0, true)
+            .expect("no over-use: the cluster that was due");
+        assert_eq!(600_000.0, request.bits_per_second);
+    }
+
+    /// The smaller drops under a limit (the controller's own sawtooth) do not replace the
+    /// rate remembered from before it: a target above 85% of the sawtooth's peak is still
+    /// probed, and one above 85% of the rate before the limit is not.
+    #[test]
+    fn recovery_probing_remembers_the_rate_before_the_limit_through_smaller_drops() {
+        let epoch = Instant::now();
+        let mut controller = dropped_with_recovery(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        // A sawtooth under the limit: up to 350 kbit/s, cut to 220 kbit/s (a large drop).
+        assert_eq!(None, controller.poll(at(2_000), 350_000.0, 350_000.0, true));
+        assert_eq!(None, controller.poll(at(2_100), 220_000.0, 220_000.0, true));
+        // 400 kbit/s is above the sawtooth's peak and far below the 2 Mbit/s before the limit.
+        let request = (2_200..8_000)
+            .step_by(100)
+            .find_map(|ms| controller.poll(at(ms), 400_000.0, 400_000.0, true))
+            .expect("still below the remembered rate");
+        assert_eq!(800_000.0, request.bits_per_second);
+        controller.on_result(request.cluster, 380_000.0);
+        // At 1.8 Mbit/s (over 85% of 2 Mbit/s) there is nothing left to recover.
+        for ms in (8_000..20_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 1_800_000.0, 1_800_000.0, true),
+                "at {ms} ms"
+            );
+        }
+    }
+
+    /// A chain whose clusters leave as bursts is not probed for recovery, and names no
+    /// deadline for it.
+    #[test]
+    fn recovery_probing_is_not_for_clusters_that_leave_as_bursts() {
+        let epoch = Instant::now();
+        let mut controller = dropped_with_recovery(epoch);
+        controller.set_unpaced(true);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_200..20_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 300_000.0, 300_000.0, true),
+                "at {ms} ms"
+            );
+            // The one deadline left is the application-limited cluster's, five seconds after
+            // the start-up sequence.
+            assert!(
+                controller
+                    .poll_timeout()
+                    .is_none_or(|next| next == at(5_150)),
+                "a deadline for a cluster that will not be asked for, at {ms} ms"
+            );
         }
     }
 

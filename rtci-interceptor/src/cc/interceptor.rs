@@ -126,6 +126,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
+    recovery_probing: bool,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -137,6 +138,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
+            recovery_probing: false,
         }
     }
 
@@ -198,6 +200,26 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// Whether, with bandwidth probing on, the path is probed back towards the rate it
+    /// carried before a large drop of the target for as long as that rate is remembered (a
+    /// minute): a cluster at twice the target every five seconds while the target is below
+    /// 85% of it and the estimator does not read the path as over-used
+    /// ([`BandwidthEstimator::overusing`]), with further clusters while the path carries what
+    /// is asked. Off by default; the peer connection's `Performance` profile turns it on
+    /// (`DefaultInterceptorOptions::recovery_probing`).
+    ///
+    /// Without it a sender that keeps up with its target climbs back from a limit that has
+    /// gone at the delay-based controller's 8% a second (about 18 s from 250 kbit/s to
+    /// 1 Mbit/s); with it the next cluster finds the path, within five seconds. What it
+    /// costs, why no specification asks for it and what libwebrtc does instead:
+    /// [`ProbeController::with_recovery_probing`](crate::ProbeController::with_recovery_probing).
+    /// It needs the pacer of the same chain: a chain whose clusters leave as bursts is not
+    /// probed this way.
+    pub fn with_recovery_probing(mut self, recovery_probing: bool) -> Self {
+        self.recovery_probing = recovery_probing;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         self.build_with_handle().0
@@ -211,9 +233,10 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             stats: self.estimator.stats(),
             ..Shared::default()
         }));
-        let probing = self
-            .bandwidth_probing
-            .then(|| ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY));
+        let probing = self.bandwidth_probing.then(|| {
+            ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY)
+                .with_recovery_probing(self.recovery_probing)
+        });
         (
             CongestionControlInterceptor {
                 tmmbn_owed: false,
@@ -999,6 +1022,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         let target = self.estimator.target_bitrate();
         let sending = self.sending_rate(now);
         let media_flowing = !self.sent.is_empty();
+        let overusing = self.estimator.overusing();
         let max = [self.applied_max.flatten(), self.estimator.max_bitrate()]
             .into_iter()
             .flatten()
@@ -1008,6 +1032,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             return;
         };
         probing.set_max_bitrate(max);
+        probing.set_overusing(overusing);
         if let Some(request) = probing.poll(now, target, sending, media_flowing) {
             self.probe_asked = Some((request.cluster, now));
             self.read_queue.push_back(request.into_packet(now));
