@@ -313,19 +313,34 @@ impl RateController {
                     self.convergence.reset();
                 }
                 self.convergence.on_decrease(received);
-                // What the path delivers is the received rate, or what a probe measured when
-                // the sender has less to send than that: backing off from the received rate
-                // of an application-limited sender would cut the estimate to a fraction of
-                // what it sends, and the bound below would then cut it again on every update
-                // (1.5 times a fifth of the target is less than the target). The measurement
-                // backs off with the estimate: over-use says the path carries less than the
-                // probe saw, so the estimate never climbs back above where it backed off to
-                // until a new probe measures the path, and over-use that lasts brings both
-                // down by the decrease factor each time.
-                let delivered = self
-                    .measured_rate
-                    .map_or(received, |measured| measured.max(received).min(self.target));
-                self.target = (delivered * self.decrease_factor).clamp(self.min, self.max);
+                // What the path delivers is the received rate (`A_hat(i) = beta * R_hat(i)`,
+                // section 5.5), or what a probe measured when the sender has less to send
+                // than that: backing off from the received rate of an application-limited
+                // sender would cut the estimate to a fraction of what it sends, and the bound
+                // below would then cut it again on every update (1.5 times a fifth of the
+                // target is less than the target). The measurement backs off with the
+                // estimate: over-use says the path carries less than the probe saw, so the
+                // estimate never climbs back above where it backed off to until a new probe
+                // measures the path, and over-use that lasts with a sender that still sends
+                // less than the measurement brings both down by the decrease factor each
+                // time.
+                //
+                // A sender received at the measurement or above it is not application
+                // limited: the received rate is the path's, and the estimate follows it as
+                // the draft has it, however many updates the over-use lasts. (Taking the
+                // measurement there, which is the estimate itself from the second update on,
+                // multiplied the estimate by the decrease factor on every feedback report:
+                // 268 to 100 kbit/s in six reports, 0.3 s, while 213 to 252 kbit/s arrived.)
+                // The measurement only ever lowers the estimate here: over-use does not raise
+                // an estimate that rests on a probe.
+                let decreased = match self.measured_rate {
+                    Some(measured) if received < measured => {
+                        measured.min(self.target) * self.decrease_factor
+                    }
+                    Some(_) => (received * self.decrease_factor).min(self.target),
+                    None => received * self.decrease_factor,
+                };
+                self.target = decreased.clamp(self.min, self.max);
                 if self.measured_rate.is_some() {
                     self.measured_rate = Some(self.target);
                 }
@@ -786,6 +801,36 @@ mod tests {
         at += DEFAULT_RATE_CONTROL_INTERVAL;
         let again = controller.update(at, Usage::Over, received);
         assert!((again - 0.85 * backed_off).abs() < 1.0, "{again}");
+    }
+
+    /// draft-ietf-rmcat-gcc-02 section 5.5, `A_hat(i) = beta * R_hat(i)`, while a probe's
+    /// measurement is held and the sender is received at that measurement or above it (it is
+    /// not application limited): over-use that lasts through several feedback reports keeps
+    /// the estimate at 0.85 times the received rate. It was multiplied by 0.85 on every
+    /// report instead (the measurement, which is the estimate itself after the first cut,
+    /// was taken for what the path delivers): 268 kbit/s fell to the 100 kbit/s floor in six
+    /// reports while 213 to 252 kbit/s arrived (`tests/capacity_cap_video_rtc2rtc.rs`'s
+    /// path, trace of run 45489776509).
+    #[test]
+    fn lasting_over_use_with_a_probe_measurement_follows_the_received_rate() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(268_000.0, MIN, MAX);
+        controller.set_measured_rate(Some(238_000.0));
+        let received = [
+            252_000.0, 242_000.0, 242_000.0, 252_000.0, 232_000.0, 213_000.0,
+        ];
+        let mut targets = Vec::new();
+        for (index, received) in received.into_iter().enumerate() {
+            let at = epoch + Duration::from_millis(60 * index as u64);
+            targets.push(controller.update(at, Usage::Over, Some(received)).round());
+        }
+        // 0.85 times what arrived, never raised by a later report that shows more.
+        assert_eq!(
+            vec![
+                214_200.0, 205_700.0, 205_700.0, 205_700.0, 197_200.0, 181_050.0
+            ],
+            targets
+        );
     }
 
     /// Over-use that lasts through several updates, answered by the first cut: with the
