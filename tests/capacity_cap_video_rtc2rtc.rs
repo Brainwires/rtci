@@ -1302,9 +1302,10 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
 /// exponential probes again). In the default chain, after the four-second outage and the ICE
 /// restart of [`path_change_run`], the new path is open: the start-up clusters are asked for
 /// again from the 300 kbit/s the estimate starts over at, and each peer's estimate is past
-/// 1 Mbit/s within a second of the new pair and at the 2.5 Mbit/s maximum within two, without
-/// a step down on the way. With the pacer's backlog policy as the engine has it and with the
-/// backlog kept.
+/// 1 Mbit/s within a second of the new pair and at the 2.5 Mbit/s maximum within a second
+/// and a half, without a step down on the way (measured, hosted run 45609880114: 1 Mbit/s
+/// after 0.61 s at the caller and 0.86 s at the callee, the maximum after 0.97 and 0.99 s).
+/// With the pacer's backlog policy as the engine has it and with the backlog kept.
 ///
 /// Before, the probe controller was told nothing of the new path: the probe for the rate
 /// before the outage's last halving of the target (133 kbit/s), asked into the dead path,
@@ -1350,7 +1351,7 @@ fn an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_defaul
                     "backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}: {after:?}"
                 );
                 assert!(
-                    at_max.is_some_and(|after| after <= Duration::from_secs(2)),
+                    at_max.is_some_and(|after| after <= Duration::from_millis(1_500)),
                     "backlog {backlog:?} seed {seed} {who}: the maximum after {at_max:?}: {after:?}"
                 );
                 assert_eq!(

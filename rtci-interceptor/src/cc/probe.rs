@@ -448,7 +448,7 @@ impl ProbeController {
     /// at the old path's floor, counted as application limited against the new starting
     /// rate; after it nothing was due. Without the probe after a drop that
     /// application-limited cluster did find the path (1.0 s), but only in the calls where
-    /// one happened to be due (140 of 200; 12.2 s in the others).
+    /// one happened to be due (134 of 200; 12 to 13 s in the others).
     ///
     /// libwebrtc does the same on a network route change: `ProbeController::Reset`
     /// (goog_cc `probe_controller.cc`) returns to its initial state and forgets the rate
@@ -1122,6 +1122,30 @@ mod tests {
             asked,
             "the start-up clusters, and no probe for 85% of 2.5 Mbit/s"
         );
+    }
+
+    /// [`AfterDropProbe::Libwebrtc`] across a path change: neither the old path's drop nor the
+    /// estimator's fall to its starting rate is probed after, however often the new path's
+    /// detector returns from under-use to normal (libwebrtc's `Reset` forgets the rate before
+    /// the drop and counts the change as the time of its last such probe). The start-up
+    /// clusters are all that is asked in the five seconds a drop stays eligible.
+    #[test]
+    fn libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change() {
+        let epoch = Instant::now();
+        let mut controller = dropped_libwebrtc(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        controller.set_usage(Usage::Over);
+        assert_eq!(None, controller.poll(at(1_200), 900_000.0, 450_000.0, true));
+        controller.on_path_change(at(1_300), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (1_300..6_300).step_by(100) {
+            recover_from_overuse(&mut controller);
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 150_000.0, true) {
+                asked.push(request.bits_per_second);
+                controller.on_result(request.cluster, 350_000.0);
+            }
+        }
+        assert_eq!(vec![900_000.0, 1_800_000.0], asked);
     }
 
     /// A controller with libwebrtc's probe after a drop, settled, application limited (it
