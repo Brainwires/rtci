@@ -124,6 +124,23 @@ pub trait Depacketizer {
     /// Checks if the packet is at the end of a partition.  This should
     /// return false if the result could not be determined.
     fn is_partition_tail(&self, marker: bool, payload: &Bytes) -> bool;
+
+    /// Whether frames of this format are predicted from earlier frames, so that a receiver
+    /// that lost one cannot use what follows until a key frame (a decoder refresh point, RFC
+    /// 5104 section 2.2) arrives: the video formats. `false`, the default, is a format whose
+    /// frames stand alone (audio) or one this depacketizer cannot speak for.
+    fn has_key_frames(&self) -> bool {
+        false
+    }
+
+    /// Whether the payload is the first packet of a key frame: a frame that is decoded without
+    /// reference to any earlier one, so that nothing sent before it is needed once it is
+    /// complete. `false`, the default, when the payload format does not say or the result
+    /// could not be determined; a format that can tell also returns `true` from
+    /// [`has_key_frames`](Depacketizer::has_key_frames).
+    fn is_key_frame_start(&self, _payload: &Bytes) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]

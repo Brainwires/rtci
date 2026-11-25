@@ -1,6 +1,7 @@
 //! The wall-clock bound on a gap (`SampleBuilder::with_max_gap_wait`): a missing packet is
 //! waited for as long as the bound from when the builder knew of the gap, then given up with a
-//! key-frame request (see `docs/receiver-gap-policy.md`).
+//! key-frame request (see `docs/receiver-gap-policy.md`). The bound is on by default for a
+//! format with key frames (`DEFAULT_MAX_GAP_WAIT`) and off for any other.
 
 use bytes::Bytes;
 use rtp::codec::vp8::Vp8Packet;
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-/// A VP8 packet (RFC 7741 section 4.2): `head` starts a frame (S=1, PID=0), otherwise it
-/// continues one; `marker` ends it.
+/// A VP8 packet (RFC 7741 section 4.2) of an interframe: `head` starts a frame (S=1, PID=0,
+/// then the payload header with P=1), otherwise it continues one; `marker` ends it.
 fn vp8(sequence_number: u16, timestamp: u32, head: bool, marker: bool) -> Packet {
     let descriptor = if head { 0x10 } else { 0x00 };
     Packet {
@@ -20,7 +21,7 @@ fn vp8(sequence_number: u16, timestamp: u32, head: bool, marker: bool) -> Packet
             marker,
             ..Default::default()
         },
-        payload: Bytes::from(vec![descriptor, sequence_number as u8, 0xAB]),
+        payload: Bytes::from(vec![descriptor, 0x01, sequence_number as u8]),
     }
 }
 
@@ -118,7 +119,7 @@ fn a_gap_repaired_before_the_bound_changes_nothing() {
 #[test]
 fn without_the_bound_a_gap_is_held_until_max_late() {
     let t0 = Instant::now();
-    let mut builder = SampleBuilder::new(8, Vp8Packet::default(), 90_000);
+    let mut builder = SampleBuilder::new(8, Vp8Packet::default(), 90_000).with_max_gap_wait(None);
     let mut samples = without_packet_3(&mut builder, t0);
     assert_eq!(None, builder.poll_timeout());
     samples.extend(pop_all(&mut builder, t0 + ms(10_000)));
@@ -169,7 +170,152 @@ fn the_deadline_is_the_oldest_gap_plus_the_bound() {
     pop_all(&mut builder, t0 + ms(30));
     assert_eq!(Some(t0 + ms(220)), builder.poll_timeout());
 
-    let mut unbounded = SampleBuilder::new(256, Vp8Packet::default(), 90_000);
+    let mut unbounded =
+        SampleBuilder::new(256, Vp8Packet::default(), 90_000).with_max_gap_wait(None);
     without_packet_3(&mut unbounded, t0);
     assert_eq!(None, unbounded.poll_timeout(), "no bound, no deadline");
+}
+
+/// A builder of a video format bounds the wait by default: with nothing but `new`, the gap at
+/// 3 (known at 20 ms) is held at 20 ms + the default less 1 ms and given up, with a key-frame
+/// request, at 20 ms + the default.
+#[test]
+fn a_video_builder_gives_a_gap_up_after_the_default_bound() {
+    let t0 = Instant::now();
+    let mut builder = SampleBuilder::new(256, Vp8Packet::default(), 90_000);
+    let samples = without_packet_3(&mut builder, t0);
+    assert_eq!(vec![3000], timestamps(&samples), "B waits for 3");
+    assert_eq!(
+        Some(t0 + ms(20) + DEFAULT_MAX_GAP_WAIT),
+        builder.poll_timeout()
+    );
+
+    let just_before = t0 + ms(20) + DEFAULT_MAX_GAP_WAIT - ms(1);
+    assert!(pop_all(&mut builder, just_before).is_empty());
+    assert!(!builder.take_key_frame_request());
+
+    let samples = pop_all(&mut builder, t0 + ms(20) + DEFAULT_MAX_GAP_WAIT);
+    assert_eq!(vec![9000], timestamps(&samples));
+    assert_eq!(2, samples[0].prev_dropped_packets);
+    assert!(builder.take_key_frame_request());
+    assert_eq!(1, builder.skipped_gaps());
+}
+
+/// The default bound is 300 ms: the value the capacity instrument measured
+/// (`docs/receiver-gap-policy.md`).
+#[test]
+fn the_default_bound_is_300_ms() {
+    let t0 = Instant::now();
+    let mut builder = SampleBuilder::new(256, Vp8Packet::default(), 90_000);
+    without_packet_3(&mut builder, t0);
+    assert_eq!(Some(t0 + ms(320)), builder.poll_timeout());
+}
+
+/// Reordering inside the default bound is still delivered in order: packet 3 arrives 150 ms
+/// late, B and C come out in sequence with nothing dropped and no key frame is asked for.
+#[test]
+fn reordering_inside_the_default_bound_is_delivered_in_order() {
+    let t0 = Instant::now();
+    let mut builder = SampleBuilder::new(256, Vp8Packet::default(), 90_000);
+    let mut samples = without_packet_3(&mut builder, t0);
+    builder.push(t0 + ms(170), vp8(3, 6000, false, true));
+    samples.extend(pop_all(&mut builder, t0 + ms(170)));
+    samples.extend(pop_all(&mut builder, t0 + ms(2_000)));
+
+    assert_eq!(vec![3000, 6000, 9000], timestamps(&samples));
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.prev_dropped_packets == 0)
+    );
+    assert!(!builder.take_key_frame_request());
+    assert_eq!(0, builder.skipped_gaps());
+}
+
+/// An audio builder is as it was: no bound in time unless one is set. Opus packets 1, 2, 4, 5
+/// (3 never comes): 4 and 5 are held however long nothing arrives, no deadline is named, and
+/// the gap goes when more than `max_late` (4) positions are buffered; no key frame is ever
+/// asked for. With a bound set, the same builder gives the gap up in time.
+#[test]
+fn an_audio_builder_has_no_time_bound_by_default() {
+    use rtp::codec::opus::OpusPacket;
+    fn opus(sequence_number: u16) -> Packet {
+        Packet {
+            header: Header {
+                sequence_number,
+                timestamp: 960 * u32::from(sequence_number),
+                ..Default::default()
+            },
+            payload: Bytes::from(vec![0x78, sequence_number as u8]),
+        }
+    }
+    fn run(mut builder: SampleBuilder<OpusPacket>, t0: Instant) -> SampleBuilder<OpusPacket> {
+        for sequence_number in [1u16, 2, 4, 5] {
+            builder.push(t0, opus(sequence_number));
+        }
+        builder
+    }
+    let t0 = Instant::now();
+
+    let mut builder = run(SampleBuilder::new(4, OpusPacket, 48_000), t0);
+    assert_eq!(None, builder.poll_timeout(), "no deadline");
+    let mut out: Vec<u32> = std::iter::from_fn(|| builder.pop(t0 + ms(10_000)))
+        .map(|sample| sample.packet_timestamp)
+        .collect();
+    assert_eq!(vec![960], out, "2, 4 and 5 wait for 3");
+    for sequence_number in 6..=8u16 {
+        builder.push(t0 + ms(10_000), opus(sequence_number));
+        out.extend(
+            std::iter::from_fn(|| builder.pop(t0 + ms(10_000)))
+                .map(|sample| sample.packet_timestamp),
+        );
+    }
+    assert!(out.contains(&(960 * 4)), "given up by max_late: {out:?}");
+    assert!(!builder.take_key_frame_request());
+    assert_eq!(0, builder.skipped_gaps());
+    assert_eq!(0, builder.key_frame_releases());
+
+    let mut bounded = run(
+        SampleBuilder::new(4, OpusPacket, 48_000).with_max_gap_wait(ms(100)),
+        t0,
+    );
+    assert_eq!(Some(t0 + ms(100)), bounded.poll_timeout());
+    let out: Vec<u32> = std::iter::from_fn(|| bounded.pop(t0 + ms(100)))
+        .map(|sample| sample.packet_timestamp)
+        .collect();
+    assert_eq!(vec![960, 960 * 2, 960 * 4], out);
+    assert_eq!(1, bounded.skipped_gaps());
+}
+
+/// Repairs that arrive after their gap was given up are ignored: packet 3 comes 100 ms after
+/// the bound gave it up, and a duplicate of packet 1 (long built into a sample) with it.
+/// Neither starts a gap of its own: no deadline is named, nothing more is skipped, no second
+/// key-frame request is raised, and the frames that follow come out as they arrive.
+#[test]
+fn a_packet_older_than_what_was_consumed_is_ignored() {
+    let t0 = Instant::now();
+    let mut builder =
+        SampleBuilder::new(256, Vp8Packet::default(), 90_000).with_max_gap_wait(ms(200));
+    let mut samples = without_packet_3(&mut builder, t0);
+    samples.extend(pop_all(&mut builder, t0 + ms(220)));
+    assert_eq!(vec![3000, 9000], timestamps(&samples));
+    assert!(builder.take_key_frame_request());
+    assert_eq!(
+        Some(5),
+        builder.nack_horizon(),
+        "D (5) is the oldest in use"
+    );
+
+    builder.push(t0 + ms(320), vp8(3, 6000, false, true));
+    builder.push(t0 + ms(320), vp8(1, 3000, true, true));
+    builder.push(t0 + ms(320), vp8(2, 6000, true, false));
+    assert_eq!(None, builder.poll_timeout(), "no gap of their making");
+    builder.push(t0 + ms(330), vp8(6, 15000, true, true));
+    samples.extend(pop_all(&mut builder, t0 + ms(330)));
+    samples.extend(pop_all(&mut builder, t0 + ms(5_000)));
+    assert_eq!(vec![3000, 9000, 12000], timestamps(&samples));
+    assert_eq!(0, samples[2].prev_dropped_packets);
+    assert!(!builder.take_key_frame_request(), "no second request");
+    assert_eq!(1, builder.skipped_gaps());
+    assert_eq!(Some(6), builder.nack_horizon());
 }
