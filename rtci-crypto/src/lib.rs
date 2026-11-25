@@ -7,8 +7,10 @@
 //! `ZeroizeOnDrop`, or holds each secret in [`SecretVec`]; secret keys are drawn with
 //! [`RTCRandom::fill_secret`]; [`scrub_stack`] overwrites what building a key schedule left in
 //! dead stack frames. The RustCrypto primitives the built-in providers use (`aes`, `ctr`, the
-//! HMAC-SHA1 of the ring provider) erase their key schedules when dropped; ring's own key
-//! objects do not (`docs/key-erasure.md`).
+//! HMAC-SHA1 of the ring provider) erase their key schedules when dropped. ring's own key
+//! objects (AEAD, header-protection and HMAC keys) do not erase themselves, so the ring provider
+//! keeps each in an allocation of its own and overwrites it after the drop
+//! (`docs/key-erasure.md`).
 
 mod algorithm;
 mod error;

@@ -402,7 +402,9 @@ DTLS 1.2 PRF and its outputs, master and premaster secrets, PSKs, key blocks, IV
 ticket secrets, serialized state; the RustCrypto HMAC-SHA1 states and AES key schedules), the
 stack is scrubbed after keyed objects are built, and secret keys come from the operating
 system (`RTCRandom::fill_secret`). Checked by scanning every freed heap block and, on Linux, the
-whole process. ring's own key objects are its limit.
+whole process. ring's own AEAD, header-protection and HMAC key objects, which ring does not
+erase, are kept by the ring provider in an allocation of its own that is overwritten after the
+drop.
 
 ### Dependency audit (fork only)
 

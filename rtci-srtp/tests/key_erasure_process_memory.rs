@@ -54,6 +54,15 @@ mod process_memory_tests {
         0xa4, 0x19, 0x7e, 0xd3, 0x62, 0x05, 0xbc, 0x48, 0xf7, 0x2e, 0x91, 0x6a, 0x3d, 0xc0,
     ];
 
+    /// The master key and salt for `provider`: each provider's sessions use keys of their own,
+    /// so that a search for one provider's keys never finds what the other provider's sessions
+    /// (or the other test's own computation of its needles, on a test thread that has ended)
+    /// left: every finding belongs to the session it is reported for.
+    fn master_for(provider: &str) -> ([u8; 32], [u8; 14]) {
+        let tag = if provider == "ring" { 0x00 } else { 0xa5 };
+        (MASTER_KEY.map(|b| b ^ tag), MASTER_SALT.map(|b| b ^ tag))
+    }
+
     #[allow(clippy::vec_init_then_push)]
     fn providers() -> Vec<Arc<dyn RTCCryptoProvider>> {
         let mut providers: Vec<Arc<dyn RTCCryptoProvider>> = Vec::new();
@@ -163,7 +172,8 @@ mod process_memory_tests {
     /// One session of `profile` with `provider` on a worker thread, searched for while its
     /// contexts are alive and after the worker has dropped them and exited.
     fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) -> Session {
-        let (key, salt) = super::key_material::per_profile(profile, &MASTER_KEY, &MASTER_SALT);
+        let master = master_for(provider.name());
+        let (key, salt) = super::key_material::per_profile(profile, &master.0, &master.1);
         let master_key = &key[..profile.key_len()];
         let master_salt = &salt[..if profile.is_aead() { 12 } else { 14 }];
         let needles = context_needles(profile, master_key, master_salt);
@@ -172,10 +182,11 @@ mod process_memory_tests {
         let (ready_tx, ready_rx) = mpsc::channel::<usize>();
         let (go_tx, go_rx) = mpsc::channel::<()>();
         let worker_provider = provider.clone();
+        let worker_master = master;
         let worker = std::thread::spawn(move || {
             // The master key and salt as the engine holds them: in zeroizing buffers.
             let (mut key, mut salt) =
-                super::key_material::per_profile(profile, &MASTER_KEY, &MASTER_SALT);
+                super::key_material::per_profile(profile, &worker_master.0, &worker_master.1);
             let master_key = crypto::SecretVec::new(key[..profile.key_len()].to_vec());
             let master_salt =
                 crypto::SecretVec::new(salt[..if profile.is_aead() { 12 } else { 14 }].to_vec());
@@ -228,10 +239,11 @@ mod process_memory_tests {
         }
     }
 
-    fn every_session() -> Vec<Session> {
+    /// Every profile with the provider named `name`.
+    fn every_session(name: &str) -> Vec<Session> {
         super::key_material::check_local_primitives();
         let mut sessions = Vec::new();
-        for provider in providers() {
+        for provider in providers().into_iter().filter(|p| p.name() == name) {
             for profile in ProtectionProfile::ALL {
                 let s = session(&provider, profile);
                 for (n, needle) in s.needles.iter().enumerate() {
@@ -303,10 +315,7 @@ mod process_memory_tests {
     #[test]
     fn with_aws_lc_no_key_outlives_its_contexts_in_process_memory() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let sessions: Vec<Session> = every_session()
-            .into_iter()
-            .filter(|s| s.provider == "aws-lc-rs")
-            .collect();
+        let sessions = every_session("aws-lc-rs");
         check_the_search_sees_live_keys(&sessions);
         let left = left_behind(&sessions, |_, _| true);
         assert!(left.is_empty(), "found after the drop: {left:#?}");
@@ -324,10 +333,7 @@ mod process_memory_tests {
     #[test]
     fn with_ring_no_key_outlives_its_contexts_in_process_memory() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let sessions: Vec<Session> = every_session()
-            .into_iter()
-            .filter(|s| s.provider == "ring")
-            .collect();
+        let sessions = every_session("ring");
         check_the_search_sees_live_keys(&sessions);
         let left = left_behind(&sessions, |_, _| true);
         assert!(left.is_empty(), "found after the drop: {left:#?}");

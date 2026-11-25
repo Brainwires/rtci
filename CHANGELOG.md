@@ -20,24 +20,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unwrapped from its `SecretVec`); a PSK returned by the application's callback was not erased;
   `EncryptionKeys` printed every key through `Display` and `Debug`; the record ciphers' write
   IVs were plain; the serialized `State` and ticket plaintexts left copies while being built;
-  the cookie secrets of an endpoint were not overwritten (the bytes stayed where `take()` left
-  them, the previous secret was never erased) and, like ticket keys and the DTLS 1.3
-  HelloRetryRequest cookie secret, they stayed in the buffered generator's output buffer.
+  the previous cookie secret of an endpoint (after a rotation) was never erased, and cookie
+  secrets, like ticket keys and the DTLS 1.3 HelloRetryRequest cookie secret, stayed in the
+  buffered generator's output buffer.
   DTLS 1.3: record IVs held inline in epochs that live in vectors were copied into memory the
   vectors freed. SRTP and DTLS with the ring provider: the RustCrypto HMAC-SHA1 states (the
   AES-CM and NULL profiles' authentication keys, the AES-CBC suite's MAC keys) were not erased;
   RustCrypto `aes` was built without `zeroize`, so AES-CBC and AES-CCM key schedules and the
-  per-packet AES-CM ones were not erased. Key schedules and shared secrets also left copies in
+  per-packet AES-CM ones were not erased. With the ring provider, ring's own key objects were
+  freed as they were: the SRTP AES-GCM session keys and every AES round key
+  (`ring::aead::LessSafeKey`), the DTLS record keys of the AES-GCM and ChaCha20-Poly1305 suites,
+  the DTLS 1.3 record-number keys (`aead::quic::HeaderProtectionKey`) and the HMAC-SHA-2 states
+  of the PRF, HKDF and cookie keys (`hmac::Key`). Key schedules and shared secrets also left copies in
   dead stack frames that later moves carried into heap padding. All of these are now erased:
   `SecretVec` everywhere (it implements `Zeroize` and `ZeroizeOnDrop`), structs that hold keys
   derive both, buffers are sized up front, `aes`/`ctr` are built with `zeroize`, the HMAC-SHA1
-  state is overwritten on drop, `crypto::scrub_stack` runs after keyed objects and shared
+  state is overwritten on drop, ring's key objects live in an allocation of the provider's own
+  that is overwritten after ring has dropped them (`ErasedOnDrop`; ring declines to erase them
+  itself, ring issue #15), `crypto::scrub_stack` runs after keyed objects and shared
   secrets are built, and secrets are drawn with the new `RTCRandom::fill_secret` (the built-in
   providers read the operating system for it). Tests: `tests/dtls_secret_erasure.rs` (every
   freed heap block and every block still allocated, all platforms; the whole process on Linux),
   the DTLS 1.2 exporter test of `tests/dtls_srtp_keying_material_erasure.rs` (was a known
-  limit), `with_ring_only_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
-  `key_erasure_process_memory.rs`. No wire or handshake behaviour changes. Additions to the API:
+  limit), `with_ring_no_key_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
+  `key_erasure_process_memory.rs` (were the `known_limit_*` tests),
+  `rtci-crypto/tests/ring_key_object_erasure.rs` (each ring key object). What remains: ring's
+  ECDHE private scalar and signing key objects are not wrapped (not measured), and stack copies
+  left while key objects are built are scrubbed but not observed by any test (a copy moved onto
+  the stack is not caught), so their absence is not guaranteed (docs/key-erasure.md). No wire or
+  handshake behaviour changes. Additions to the API:
   `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
   for `SecretVec` and `SessionKeys`. DTLS record setup costs one 32 KiB stack overwrite per
   key schedule built; per-packet costs did not move beyond noise (`rtci-srtp` and `rtci-dtls`
@@ -1615,16 +1626,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
-- **SRTP and DTLS key erasure (RFC 7714 section 13.1) with the ring provider**
-  (`conf/must-2-feedback-reliance-and-key-erasure`, narrowed by `conf/zeroize-1-dtls-srtp-key-erasure`):
-  ring does not erase its own key objects, so with the ring provider the AES-GCM profiles' SRTP
-  session keys and all their AES round keys (`ring::aead::LessSafeKey`), and the DTLS record
-  keys of the AES-GCM and ChaCha20-Poly1305 suites and DTLS 1.3 record-number keys, persist in
-  freed heap memory until the allocator reuses it. Everything the crates hold is erased with
-  either provider; the AWS-LC provider erases its keys too. ring's maintainer declined
-  destructor-based zeroization (ring issue #15) in favour of a zeroizing global allocator,
-  which an application can install. Tests: `known_limit_*` in
-  `rtci-srtp/tests/key_schedule_erasure.rs` and `key_erasure_process_memory.rs` (fail when run).
+- **Stack copies of key material with either provider** (`conf/zeroize-1-dtls-srtp-key-erasure`;
+  RFC 7714 section 13.1): building a key object leaves copies in dead stack frames, and the
+  providers' own stack temporaries are not erased by them. The engine scrubs 32 KiB of stack
+  after building keyed objects; the tests see stack residue only where it reaches the heap
+  (DTLS, caught) and in dead worker stacks on Linux (none found), and a copy deliberately moved
+  onto the stack is not caught, so this is a measure, not a tested guarantee. With the ring
+  provider the ECDHE private scalar (`agreement::EphemeralPrivateKey`, consumed by ring) and the
+  signing key objects are ring's and not erased (not measured). Until this branch, ring's AEAD,
+  header-protection and HMAC key objects were also left in freed memory; they are now erased
+  (Security).
 
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
