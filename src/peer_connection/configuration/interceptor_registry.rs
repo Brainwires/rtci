@@ -374,6 +374,11 @@ pub struct DefaultInterceptorOptions {
     /// (none without RTX negotiated). `false` sends only what the application writes. See
     /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
     pub bandwidth_probing: bool,
+    /// With [`Self::bandwidth_probing`], what is probed for after a large drop of the target
+    /// ([`AfterDropProbe`](interceptor::AfterDropProbe)): the engine's repeated probe, or
+    /// libwebrtc's single one (the `Chrome` profile). See
+    /// [`CongestionControlBuilder::with_after_drop_probe`](interceptor::CongestionControlBuilder::with_after_drop_probe).
+    pub probe_after_drop: interceptor::AfterDropProbe,
     /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
     /// extension on audio and video, stamped on a stream's first packets and a frame a
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
@@ -537,6 +542,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("pacer_queue_overflow", &self.pacer_queue_overflow)
             .field("pacer_backlog", &self.pacer_backlog)
             .field("bandwidth_probing", &self.bandwidth_probing)
+            .field("probe_after_drop", &self.probe_after_drop)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
             .field(
@@ -619,6 +625,7 @@ impl DefaultInterceptorOptions {
             pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
             pacer_backlog: interceptor::PacerBacklog::default(),
             bandwidth_probing: true,
+            probe_after_drop: interceptor::AfterDropProbe::Repeated,
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
@@ -789,6 +796,7 @@ pub fn register_default_interceptors_with_options(
         let transports = transports.clone();
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
+        let probe_after_drop = options.probe_after_drop;
         let threshold_time_base = options.gcc_threshold_time_base;
         let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
         let received_rate_bound = options.gcc_received_rate_bound;
@@ -802,6 +810,7 @@ pub fn register_default_interceptors_with_options(
                 .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
+                .with_after_drop_probe(probe_after_drop)
                 .with_send_rate_told_to_rtcp(send_rate_told_to_rtcp)
         }
     };

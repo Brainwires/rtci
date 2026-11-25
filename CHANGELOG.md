@@ -933,6 +933,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptor / bandwidth probing: the probe after a large drop has three forms**
+  (`AfterDropProbe`: `Repeated`, `Libwebrtc`, `Off`), set with
+  `ProbeController::with_after_drop_probe`, `CongestionControlBuilder::with_after_drop_probe`
+  and `DefaultInterceptorOptions::probe_after_drop`; the behaviour row `cc.probe-after-drop`
+  governs it (`Rfc` and `StrictRfc`: `Repeated`; `Chrome`: `Libwebrtc`).
+  `with_probe_after_drop(bool)` stays (`true` is `Repeated`, `false` is `Off`). THE DEFAULT
+  DOES NOT CHANGE: `Repeated` is what the engine did (from a second after the target fell
+  below two thirds of its 2 s high, once a second for five seconds, a cluster at 85% of that
+  high); on the capacity instrument 1400 calls in seven cells of the default chain are
+  identical to the tree before, figure for figure (hosted run 45607015088 against
+  45582695439). `Libwebrtc` is libwebrtc's `ProbeController::RequestProbe`: a drop is one
+  update of the estimate below 0.66 of the one before it, and one cluster at 0.85 of the
+  estimate before it is asked when the delay detector has returned from under-use to normal,
+  only for a sender that is application limited or was within 3 s, within 5 s of the drop, at
+  most once in 5 s, and only when 95% of it is above the estimate. For it the estimator
+  says how it reads the path: `BandwidthEstimator::usage() -> Usage` (new, default
+  `Usage::Normal`; `Gcc`: the reading of the last feedback), passed on with
+  `ProbeController::set_usage`. No specification says how to probe after a drop (RFC 8836
+  section 2, 1f, asks that a flow regain its share quickly), so the default is the form that
+  measured best. Four forms, the default chain, a 2.5 Mbit/s path that drops to 300 kbit/s
+  for 20 s, 1000 calls in each of the two reference cells and 200 in six others, each form
+  against the default by the merge-point rule of `docs/capacity-instrument.md`: without a
+  probe and with libwebrtc's (which never fires for a sender that keeps up with its target:
+  the two measure alike) seven figures are worse (both directions limited: oldest picture
+  3.07 s against 2.64 s; 5% of the feedback lost: the rate not back within 20 s in 30 and 24
+  of 200 calls against 2; target 15 to 25 s after the limit 1205 against 1278 kbit/s); the
+  repeated probe aimed at the highest rate of the last minute instead of the last drop's own
+  high makes fifteen worse (audio packets lost 27 -> 35 a call; behind a 1000 ms queue over
+  2 s without a new picture in 33 of 200 calls against 6) and was not taken. What the default
+  costs against no probe: behind a 1000 ms queue 96 audio packets lost a call against 66,
+  under a limit that lasts a minute 74 against 45. Tests:
+  `cc::probe::tests::libwebrtcs_probe_after_a_drop_is_one_cluster_once_overuse_has_ended`,
+  `libwebrtcs_probe_after_a_drop_has_its_conditions`,
+  `gcc::estimator::tests::usage_follows_the_last_feedback`,
+  `rtci-interceptor/tests/after_drop_probe_requests.rs`, `tests/default_probe_after_drop.rs`.
 - **congestion control feedback cadence as a setting** (rtcpbudget-2):
   `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
   `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
@@ -1396,6 +1431,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measurement: a path that delivers a burst as one aggregate shows no spread and is credited
   with the rate asked for; the delay-based controller corrects it once the media follows
   (`burst_estimate`). Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
+
+- **After an ICE restart onto a new path the default chain climbed at 8% a second** (in 0.1.0
+  too): bandwidth probing was told nothing of a path change. The estimator starts over at its
+  starting rate on a new selected pair (`PathChanged`, or
+  `CongestionControlHandle::notify_path_change`), but the probe controller kept what it had
+  noted of the old path. During an outage the estimator halves at every feedback timeout, and
+  each halving is a "large drop" that the probe after a drop asks about a second later: the
+  cluster for the rate before the last halving (133 kbit/s), asked into the dead path, still
+  awaited its result when the new pair was selected, held the controller's one slot through
+  the half second in which a cluster for an application-limited sender would have been due,
+  and no start-up cluster followed. On the capacity instrument's outage cell (a 4 s outage
+  ended by an ICE restart, the new path open at 2.5 Mbit/s, 200 calls) the target was back at
+  1 Mbit/s 15.1 s after the new pair and averaged 1504 kbit/s 15 to 25 s after it; with the
+  probe after a drop turned off, 1.0 s in 134 of the 200 calls and 12 to 13 s in the others. Now a
+  path change starts probing over as at the start of the call
+  (`ProbeController::on_path_change`, new): the start-up clusters again, at three and six
+  times the rate the estimator starts over at and on while the new path carries what is
+  asked, and the target's recent high, the drop below it and the cluster awaiting its result
+  are dropped with the old path (the fall to the starting rate is not a capacity drop).
+  libwebrtc does the same (`GoogCcNetworkController::OnNetworkRouteChange`:
+  `ProbeController::Reset`, then the exponential probes again). MEASURED on the same cell
+  (200 calls, hosted runs 45609964155 against 45607015088): 1 Mbit/s 0.8 s after the new pair
+  (1.02 s at most; no call slower) and the 2.5 Mbit/s maximum through the 15 to 25 s window;
+  with a receiver that has no bound on a gap the first new picture comes 2.3 s earlier in two
+  thirds of the calls (0.74 s after the new pair against 3.08 s on average). WHAT IT COSTS:
+  with the reference receiver (a gap given up after 300 ms) the first new picture comes
+  0.12 s later in those calls (0.70 s after the new pair against 0.58 s): the start-up
+  clusters share the first moments of the new path with the key frame. The chains without a
+  pacer were at 1 Mbit/s 0.5 s after the new pair before and are now (their probe after a
+  drop is off, so no cluster was outstanding). The OTHER direction gains in every chain:
+  the callee's target over the ten seconds after the new pair averages 1521 kbit/s against
+  507 with the pacer, and 1345 to 1367 against 395 without one. There the callee, which
+  selects the new pair 10 ms before the caller, loses its first cluster whole (nothing but
+  STUN crosses until both have switched); it used to ask for that one cluster only, and now
+  the next start-up cluster follows when the first is given up a second later. Every other
+  cell of the instrument is unchanged (4600 calls in fifteen cells, 0 differ). Tests:
+  `cc::probe::tests::a_path_change_starts_probing_over_and_forgets_the_drop`,
+  `the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop`,
+  `rtci-interceptor/tests/probing_across_a_path_change.rs`,
+  `libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change`,
+  `tests/capacity_cap_video_rtc2rtc.rs::an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain`,
+  `::the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost`.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every

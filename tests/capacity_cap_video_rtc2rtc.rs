@@ -1106,7 +1106,12 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     // This file's receiver plays strictly in order and its bounds were set for a sender that
     // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
     // The instrument's cells run the engine's default.
-    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
+    path_change_run_as_set(&setup.pacer_backlog(PacerBacklog::Keep))
+}
+
+/// [`path_change_run`] with `setup` as it is: the pacer's backlog policy is the setup's (the
+/// engine's default unless it names one).
+fn path_change_run_as_set(setup: &Setup) -> Result<PathChangeOutcome> {
     let mut world = World::connected(setup)?;
     let t = world.now + Duration::from_secs(10);
     world.advance(t)?;
@@ -1286,6 +1291,117 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
             "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
         );
+    }
+    Ok(())
+}
+
+/// A new selected pair is a new path for bandwidth probing too (RFC 8836 section 2,
+/// requirement 4: the algorithm "SHOULD adapt as quickly as possible to initial network
+/// conditions", and the conditions of a new path are initial ones; libwebrtc's
+/// `GoogCcNetworkController::OnNetworkRouteChange` resets its probe controller and starts the
+/// exponential probes again). In the default chain, after the four-second outage and the ICE
+/// restart of [`path_change_run`], the new path is open: the start-up clusters are asked for
+/// again from the 300 kbit/s the estimate starts over at, and each peer's estimate is past
+/// 1 Mbit/s within a second of the new pair and at the 2.5 Mbit/s maximum within a second
+/// and a half, without a step down on the way (measured, hosted run 45609880114: 1 Mbit/s
+/// after 0.61 s at the caller and 0.86 s at the callee, the maximum after 0.97 and 0.99 s).
+/// With the pacer's backlog policy as the engine has it and with the backlog kept.
+///
+/// Before, the probe controller was told nothing of the new path: the probe for the rate
+/// before the outage's last halving of the target (133 kbit/s), asked into the dead path,
+/// still awaited its result at the new pair, no start-up cluster followed, and the estimate
+/// climbed at the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5: 1 Mbit/s 15.1 s after
+/// the new pair (the capacity instrument's outage cell, 200 calls), 650 kbit/s at the end of
+/// this run.
+#[test]
+fn an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain()
+-> Result<()> {
+    for backlog in [None, Some(PacerBacklog::Keep)] {
+        for seed in seed_range(1, 3) {
+            let mut setup = Setup::new(seed, None)
+                .chain(Chain::Default)
+                .anchor(ANCHORS[0]);
+            if let Some(backlog) = backlog {
+                setup = setup.pacer_backlog(backlog);
+            }
+            let outcome = path_change_run_as_set(&setup)?;
+            assert_eq!(
+                Some(300_000),
+                outcome.at_switch,
+                "backlog {backlog:?} seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+            );
+            for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+                let after: Vec<_> = outcome.estimates[i]
+                    .iter()
+                    .filter(|(at, _)| *at >= outcome.switched_at)
+                    .copied()
+                    .collect();
+                let reached = |bps: u32| {
+                    after
+                        .iter()
+                        .find(|(_, estimate)| *estimate >= bps)
+                        .map(|(at, _)| *at - outcome.switched_at)
+                };
+                let (at_1m, at_max) = (reached(1_000_000), reached(MAX_BPS));
+                println!(
+                    "RESTART-PROBE backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}, the maximum after {at_max:?}"
+                );
+                assert!(
+                    at_1m.is_some_and(|after| after <= Duration::from_secs(1)),
+                    "backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}: {after:?}"
+                );
+                assert!(
+                    at_max.is_some_and(|after| after <= Duration::from_millis(1_500)),
+                    "backlog {backlog:?} seed {seed} {who}: the maximum after {at_max:?}: {after:?}"
+                );
+                assert_eq!(
+                    None,
+                    first_step_down(&after),
+                    "backlog {backlog:?} seed {seed} {who}: the estimate fell on the new path: {after:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The same restart in the chains without a pacer, where the peers do not take the new path
+/// into use at the same instant and the first of them loses its first cluster. The callee
+/// selects the restart's pair 10 ms before the caller, and until the caller has, nothing but
+/// STUN crosses: the callee's first start-up cluster, a burst of padding sent at its own path
+/// change, is lost whole. A cluster without a result is given up after a second and the next
+/// of the start-up sequence is asked for, so the callee finds the path a second after the
+/// caller: the caller's estimate is at the maximum within a second and a half of the new
+/// pair, the callee's within two and a half. (The paced chain's cluster lasts longer than the
+/// 10 ms, enough of it arrives, and both peers are held to a second and a half above.)
+///
+/// Before, the callee asked for one cluster at its path change (twice the starting rate,
+/// for an application-limited sender), lost it, and climbed at 8% a second: 395 kbit/s on
+/// average over the ten seconds after the new pair on the capacity instrument's outage cells
+/// (200 calls, both chains) against 1345 to 1367 kbit/s now; the caller 1515 and 1527.
+#[test]
+fn the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost()
+-> Result<()> {
+    for chain in [Chain::ParolNet, Chain::DefaultWithoutPacer] {
+        for seed in seed_range(1, 3) {
+            let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
+            let outcome = path_change_run_as_set(&setup)?;
+            for (i, (who, by)) in [("caller", 1_500), ("callee", 2_500)]
+                .into_iter()
+                .enumerate()
+            {
+                let at_max = outcome.estimates[i]
+                    .iter()
+                    .find(|(at, bps)| *at >= outcome.switched_at && *bps >= MAX_BPS)
+                    .map(|(at, _)| *at - outcome.switched_at);
+                println!("RESTART-PROBE {chain:?} seed {seed} {who}: the maximum after {at_max:?}");
+                assert!(
+                    at_max.is_some_and(|after| after <= Duration::from_millis(by)),
+                    "{chain:?} seed {seed} {who}: the maximum after {at_max:?}: {:?}",
+                    outcome.estimates[i]
+                );
+            }
+        }
     }
     Ok(())
 }
