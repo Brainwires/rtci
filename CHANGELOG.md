@@ -1563,6 +1563,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ICE: a peer that can only reach us by its own checks is not failed at end-of-candidates**
+  (ice-27, reported by a consumer's ICE-TCP tests). Since the RFC 8445 checklist (first
+  released in 0.1.0 and v0.22.0+brainwires.6), an agent failed at once when both sides had
+  signalled end-of-candidates and its checklist had no pair. Two kinds of peer have no pair
+  until their own check arrives: one whose only candidates are `tcptype active` (it dials our
+  passive TCP candidate; the agent pairs nothing with an active candidate) and one whose only
+  candidates are `.local` names the agent does not resolve (mDNS off, or the query timed
+  out). Against either the connection failed before the peer's first check could arrive, so
+  a peer that could only dial our passive ICE-TCP candidate never connected once both sides
+  sent `a=end-of-candidates`. Now the agent notes such signalled candidates, and while one of
+  them can reach a local candidate (an active one, a local passive TCP candidate of its
+  family; a `.local` name, a local candidate of its transport) the checklist stays Running
+  (RFC 8838 section 8: "MUST keep each checklist in the Running state as long as it expects
+  candidate pairs to be incrementally added"): the peer's check forms the peer-reflexive pair
+  and the agent connects, and if no check comes the checking timeout fails it as before
+  (`disconnected_timeout + failed_timeout`, 30 s by default). The peer connection now hands
+  remote active candidates to the agent instead of dropping them itself. A checklist with no
+  remote candidate at all, or whose pairs have all failed with nothing that could still dial
+  in, fails at once as before. Tests: `agent_checklist_test.rs::
+  a_peer_reached_only_by_its_own_checks_keeps_the_empty_checklist_running_and_connects`,
+  `a_peer_reached_only_by_its_own_checks_that_never_checks_fails_by_the_timeout`,
+  `an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_at_once`,
+  `an_ice_restart_forgets_the_candidates_that_could_only_dial_us`, `tests/ice_tcp_active_passive.rs::
+  test_ice_tcp_passive_side_connects_when_the_peer_signals_only_active_and_end_of_candidates`.
 - **congestion control: packets sent before a new path carried anything are not the new
   path's loss.** At a path change (the peer connection's `PathChanged`, or packets from new
   addresses) the estimate starts over and the packets sent into the path that was left are
