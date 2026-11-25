@@ -304,6 +304,17 @@ fn cap_20() -> Vec<(u64, std::ops::RangeInclusive<u64>)> {
 /// can tell the sender, and what it sends above the link's rate meanwhile is dropped. The
 /// cap that arrives after 20 s, at 1.4 Mbit/s, is
 /// [`a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`].
+///
+/// A cap can meet a call at 1 Mbit/s on a 2.5 Mbit/s path only while the estimate is still
+/// climbing, and since `GccInterceptorBuilder` probes by default it is not: the start-up
+/// clusters put it at the path's rate inside a second (the first two take it from 300 kbit/s
+/// to 1.8 Mbit/s, past this rate, 0.4 s into the call). These tests had the slow climb as
+/// their premise without saying so, because the chain did not probe. They keep their call,
+/// the cap at 1 Mbit/s, by turning probing off ([`Setup::without_bandwidth_probing`]: every
+/// figure and bound below is that call's, unchanged). What the chain's user sees at a cap
+/// with probing on, where the cap meets the path's rate, is measured by
+/// `capacity_instrument.rs` (cells `cap/parolnet/..`), and how fast the start is by
+/// [`an_open_link_is_found_within_a_second_without_a_pacer`].
 const CAP_AT_TARGET: u32 = 1_000_000;
 
 /// The cap `lengths` and their seeds under `rate_limit` (`None`: the engine's default), each
@@ -317,6 +328,7 @@ fn seeds(
         for seed in seeds {
             let mut setup = Setup::new(seed, rate_limit)
                 .anchor(ANCHORS[0])
+                .without_bandwidth_probing()
                 .capped_at_a_target_of(CAP_AT_TARGET);
             setup.cap = Duration::from_secs(cap);
             let outcome = run(&setup)?;
@@ -449,7 +461,10 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 }
 
 /// The cap that arrives after 20 s of call, when the estimate is at 1.4 Mbit/s (8% a second
-/// from 300 kbit/s: draft-ietf-rmcat-gcc-02 section 5.5), under the default rule. The video
+/// from 300 kbit/s: draft-ietf-rmcat-gcc-02 section 5.5; the call of a chain that does not
+/// probe, which this one is here by [`Setup::without_bandwidth_probing`], see
+/// [`CAP_AT_TARGET`]: with the chain's default the estimate is at the path's 2.5 Mbit/s by
+/// then), under the default rule. The video
 /// keeps playing (never 2 s without a usable frame), the capped link is used and the
 /// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
 /// and the retransmissions, held here to what was measured so that they do not grow.
@@ -486,7 +501,9 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 #[test]
 fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Result<()> {
     for seed in seed_range(1, 6) {
-        let outcome = run(&Setup::new(seed, None).anchor(ANCHORS[0]))?;
+        let outcome = run(&Setup::new(seed, None)
+            .anchor(ANCHORS[0])
+            .without_bandwidth_probing())?;
         println!("cap after 20 s seed {seed}: {outcome:?}");
         assert!(
             outcome.before >= 1_300_000,
@@ -541,6 +558,8 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 /// three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays; `20`),
 /// `RTC_CAP_PERTURB` (names in [`PERTURBATIONS`]; `none`), each a comma-separated list;
 /// `RTC_CAP_AT_TARGET` (the target in bit/s at which the cap arrives, instead of after 20 s);
+/// `RTC_CAP_NO_PROBING` (set: no chain probes for bandwidth, as the permanent tests of the
+/// call without a pacer run);
 /// `RTC_CAP_THREADS` (runs side by side; the machine's parallelism). Each run is printed as it
 /// ends, so the lines come in no fixed order.
 #[test]
@@ -586,6 +605,9 @@ fn measure_the_capacity_cap() -> Result<()> {
                             setup.cap = Duration::from_secs(seconds.parse()?);
                             if let Some(bps) = &at_target {
                                 setup = setup.capped_at_a_target_of(bps.parse()?);
+                            }
+                            if std::env::var_os("RTC_CAP_NO_PROBING").is_some() {
+                                setup = setup.without_bandwidth_probing();
                             }
                             let label = format!(
                                 "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} perturb {perturb}"
@@ -1121,6 +1143,8 @@ struct OpenLinkOutcome {
     /// Per peer: when its estimate reached 1 Mbit/s, the first time it stepped down (when,
     /// from, to), where it ended, and the bits of video its application wrote.
     reached_1m: [Option<Duration>; 2],
+    /// When it reached the maximum.
+    reached_max: [Option<Duration>; 2],
     step_down: [Option<(Duration, u32, u32)>; 2],
     last: [Option<u32>; 2],
     video_bits: [u64; 2],
@@ -1148,6 +1172,13 @@ fn open_link_run(setup: &Setup) -> Result<OpenLinkOutcome> {
                 .estimates
                 .iter()
                 .find(|(_, bps)| *bps >= 1_000_000)
+                .map(|(at, _)| *at)
+        }),
+        reached_max: [0, 1].map(|i| {
+            peers[i]
+                .estimates
+                .iter()
+                .find(|(_, bps)| *bps >= MAX_BPS)
                 .map(|(at, _)| *at)
         }),
         step_down: [0, 1].map(|i| first_step_down(&peers[i].estimates)),
@@ -1219,6 +1250,45 @@ fn the_estimate_climbs_on_an_open_link_and_never_steps_down() -> Result<()> {
                 None, outcome.target_step_down[i],
                 "seed {seed} {who}: the encoder's target stepped down: {outcome:?}"
             );
+        }
+    }
+    Ok(())
+}
+
+/// RFC 8836 section 2, requirement 4 (the algorithm "SHOULD adapt as quickly as possible to
+/// initial network conditions at the start of a flow") in a chain without a pacer, both of
+/// them: ParolNet's (`GccInterceptorBuilder`, which probes by default) and the default
+/// interceptors with the pacer's slot passed through. The start-up clusters leave as bursts
+/// of padding on the RTX stream and are measured by how the path spread them: three clusters
+/// (three times and six times the 300 kbit/s start, then twice the second's result, held to
+/// the maximum), each asked for when its predecessor's reports are in, which is a feedback
+/// interval and a round trip each. So each peer's estimate is past 1 Mbit/s within one second
+/// and at the 2.5 Mbit/s maximum within two, and it holds: it never steps down in the 35 s of
+/// the call and ends at the maximum ([`assert_the_estimate_climbs`]).
+///
+/// Before, no cluster got a result in either chain (ParolNet's asked for none; in the other
+/// the padding left unmarked): 1 Mbit/s came after 15.5 s and the maximum after 28 s, at the
+/// 8% a second of draft-ietf-rmcat-gcc-02 section 5.5.
+#[test]
+fn an_open_link_is_found_within_a_second_without_a_pacer() -> Result<()> {
+    for chain in [Chain::ParolNet, Chain::DefaultWithoutPacer] {
+        for seed in seed_range(2, 6) {
+            let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
+            let outcome = open_link_run(&setup)?;
+            println!("open link, {chain:?} seed {seed}: {outcome:?}");
+            for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+                assert!(
+                    outcome.reached_1m[i].is_some_and(|at| at <= Duration::from_secs(1)),
+                    "{chain:?} seed {seed} {who}: 1 Mbit/s at {:?}: {outcome:?}",
+                    outcome.reached_1m[i]
+                );
+                assert!(
+                    outcome.reached_max[i].is_some_and(|at| at <= Duration::from_secs(2)),
+                    "{chain:?} seed {seed} {who}: the maximum at {:?}: {outcome:?}",
+                    outcome.reached_max[i]
+                );
+            }
+            assert_the_estimate_climbs(&setup, &outcome, Duration::from_secs(1));
         }
     }
     Ok(())

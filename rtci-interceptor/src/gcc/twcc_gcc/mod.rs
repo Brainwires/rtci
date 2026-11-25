@@ -501,6 +501,18 @@ mod tests {
         (chain, handle)
     }
 
+    /// The next packet on the read leg that carries RTCP: the feedback. What comes before it
+    /// is the controller's own (a probe request, on an empty carrier: the builder probes by
+    /// default, and the first cluster is asked for with the first packets written).
+    fn next_feedback(chain: &mut impl crate::Interceptor) -> Option<TaggedPacket> {
+        while let Some(read) = chain.poll_read() {
+            if matches!(&read.message.packet, Packet::Rtcp(packets) if !packets.is_empty()) {
+                return Some(read);
+            }
+        }
+        None
+    }
+
     #[test]
     fn test_handle_returns_estimate_after_feedback() {
         let (mut chain, handle) = make_chain();
@@ -537,7 +549,7 @@ mod tests {
         );
 
         // The estimate rides out on the feedback packet, so a pacer in the chain follows it.
-        let feedback = chain.poll_read().expect("the feedback carries on");
+        let feedback = next_feedback(&mut chain).expect("the feedback carries on");
         let announced = match feedback
             .message
             .get(&crate::Attribute::TargetBitrateChanged {
@@ -593,7 +605,7 @@ mod tests {
         assert_eq!(Some(estimate), handle.estimate_bps());
         assert_eq!(Some(estimate - 100_000), handle.target_bitrate_bps());
 
-        let announced = chain.poll_read().and_then(|feedback| {
+        let announced = next_feedback(&mut chain).and_then(|feedback| {
             match feedback
                 .message
                 .get(&crate::Attribute::TargetBitrateChanged {
@@ -870,7 +882,7 @@ mod tests {
                 base + Duration::from_millis(200),
             ))
             .unwrap();
-        let feedback = chain.poll_read().expect("the feedback carries on");
+        let feedback = next_feedback(&mut chain).expect("the feedback carries on");
         assert_eq!(
             Some(&crate::MinimumTarget {
                 bits_per_second: 123_000.0
