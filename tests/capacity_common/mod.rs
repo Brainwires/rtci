@@ -28,6 +28,7 @@ use rtci::interceptor::{
 };
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorHandles, DefaultInterceptorOptions, configure_key_frame_requests,
@@ -159,9 +160,20 @@ pub struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     pub video: [bool; 2],
-    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains, the
-    /// options' default when `None`.
+    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains and
+    /// `RtcpSessionBuilder::with_report_from_every_ssrc` for ParolNet's, their default when
+    /// `None`.
     pub report_from_every_ssrc: Option<bool>,
+    /// The behaviour profile whose interceptor settings the default chains take
+    /// (`DefaultInterceptorOptions::for_profile`); the build's default when `None`. The media
+    /// engine and the session description stay this world's own.
+    pub profile: Option<BehaviourProfile>,
+    /// `DefaultInterceptorOptions::rtcp_share_follows_send_rate` for the default chains, the
+    /// profile's value when `None`.
+    pub share_follows_send_rate: Option<bool>,
+    /// `DefaultInterceptorOptions::congestion_feedback_cadence` for the default chains, the
+    /// profile's value when `None`.
+    pub feedback_cadence: Option<rtci::interceptor::CongestionFeedbackCadence>,
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
@@ -169,6 +181,10 @@ pub struct Setup {
     /// (`DefaultInterceptorOptions::pacer_backlog`, docs/capacity-collapse.md); the engine's
     /// default when `None`.
     pub pacer_backlog: Option<PacerBacklog>,
+    /// `DefaultInterceptorOptions::rtcp_immediate_congestion_feedback` for the default chains
+    /// (`false`: RFC 4585 3.2 and 3.5.2, congestion control feedback takes its turn inside
+    /// the RTCP bandwidth), the options' default when `None`.
+    pub immediate_congestion_feedback: Option<bool>,
     /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
     /// permanent tests run [`Perturbation::None`].
     pub perturbation: Perturbation,
@@ -184,6 +200,9 @@ pub struct Setup {
     /// in ParolNet's chain, `DefaultInterceptorOptions::bandwidth_probing` in the default
     /// ones); the chain's own default (on) when `None`.
     pub bandwidth_probing: Option<bool>,
+    /// Whether the default chains probe back towards the rate before a large drop
+    /// (`DefaultInterceptorOptions::recovery_probing`; off as the engine has it).
+    pub recovery_probing: bool,
 }
 
 /// What a run may change that no call's quality should depend on: the length of the ICE
@@ -236,12 +255,17 @@ impl Setup {
             cap_at_target: None,
             video: [true, true],
             report_from_every_ssrc: None,
+            profile: None,
+            share_follows_send_rate: None,
+            feedback_cadence: None,
             received_rate_bound: None,
             pacer_backlog: None,
+            immediate_congestion_feedback: None,
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
             bandwidth_probing: None,
+            recovery_probing: false,
         }
     }
 
@@ -265,6 +289,13 @@ impl Setup {
         self
     }
 
+    /// The default chains with recovery probing
+    /// (`DefaultInterceptorOptions::recovery_probing`).
+    pub fn recovery_probing(mut self) -> Self {
+        self.recovery_probing = true;
+        self
+    }
+
     /// `per_cent` of the callee's datagrams are lost.
     pub fn reverse_loss(mut self, per_cent: u32) -> Self {
         self.reverse_loss = per_cent;
@@ -274,6 +305,35 @@ impl Setup {
     /// Every local SSRC reports on every other (RFC 8108 section 5.1) or the blocks go once.
     pub fn report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = Some(every);
+        self
+    }
+
+    /// Congestion control feedback sent at once (`true`) or under RFC 4585 3.5.2's timing,
+    /// inside the RTCP bandwidth (`false`), in the default chain.
+    pub fn immediate_congestion_feedback(mut self, immediate: bool) -> Self {
+        self.immediate_congestion_feedback = Some(immediate);
+        self
+    }
+
+    /// The default chains take the interceptor settings of `profile`.
+    pub fn profile(mut self, profile: BehaviourProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
+    /// The default chains' RTCP share follows the send rate (or not), whatever the profile
+    /// says.
+    pub fn share_follows_send_rate(mut self, follows: bool) -> Self {
+        self.share_follows_send_rate = Some(follows);
+        self
+    }
+
+    /// The default chains' congestion control feedback is built with `cadence`.
+    pub fn feedback_cadence(
+        mut self,
+        cadence: rtci::interceptor::CongestionFeedbackCadence,
+    ) -> Self {
+        self.feedback_cadence = Some(cadence);
         self
     }
 
@@ -698,7 +758,16 @@ impl Peer {
             RtpCodecKind::Audio,
         )?;
         if setup.chain != Chain::ParolNet {
-            let mut options = DefaultInterceptorOptions::default();
+            let mut options = match setup.profile {
+                Some(profile) => DefaultInterceptorOptions::for_profile(profile),
+                None => DefaultInterceptorOptions::default(),
+            };
+            if let Some(follows) = setup.share_follows_send_rate {
+                options.rtcp_share_follows_send_rate = follows;
+            }
+            if let Some(cadence) = setup.feedback_cadence {
+                options.congestion_feedback_cadence = cadence;
+            }
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
             if let Some(every) = setup.report_from_every_ssrc {
@@ -715,6 +784,12 @@ impl Peer {
             }
             if let Some(probing) = setup.bandwidth_probing {
                 options.bandwidth_probing = probing;
+            }
+            if setup.recovery_probing {
+                options.recovery_probing = true;
+            }
+            if let Some(immediate) = setup.immediate_congestion_feedback {
+                options.rtcp_immediate_congestion_feedback = immediate;
             }
             let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),
@@ -760,6 +835,10 @@ impl Peer {
         let session = RtcpSessionBuilder::new()
             .with_t_rr_interval(Duration::ZERO)
             .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match setup.report_from_every_ssrc {
+            Some(every) => session.with_report_from_every_ssrc(every),
+            None => session,
+        };
         let session = match wall_clock {
             Some(anchor) => session.with_wall_clock(anchor),
             None => session,

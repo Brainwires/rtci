@@ -410,6 +410,24 @@ impl ProbeController {
     /// within five seconds. It is a performance choice: it puts a cluster above the target
     /// into a path that may still be limited, every five seconds for up to a minute. Not for
     /// a chain whose clusters leave as bursts ([`set_unpaced`](Self::set_unpaced)).
+    ///
+    /// Measured on the capacity instrument (`tests/capacity_instrument.rs`; the default
+    /// chain, a 2.5 Mbit/s path that drops to 300 kbit/s for 20 s, 200 calls a cell, without
+    /// the setting against with it). WHAT IT GAINS: the target is back at 1 Mbit/s 4.9 s
+    /// after the limit went (5.4 s at most) instead of 17.3 s, and at the 2.5 Mbit/s maximum
+    /// through the window 15 to 25 s after it instead of 1283 kbit/s on average; the same
+    /// behind a 100 ms queue (17.6 -> 5.0 s) and with both directions limited (16.2 -> 4.8 s);
+    /// behind a 1000 ms queue in nine calls of ten (median 17.6 -> 5.0 s, the slowest tenth
+    /// 17.5 s: the deep queue is still draining when the first clusters come). The five
+    /// seconds are the interval: the wait is anywhere up to it. WHAT IT COSTS: under the
+    /// limit the target is 238 kbit/s against 246 (3%), behind a 100 ms queue 52 audio
+    /// packets are lost a call against 41 and 201 packets dropped at the queue against 159;
+    /// the counts of calls with an old picture, a freeze or an audio gap do not move in any
+    /// cell. WHERE IT GAINS NOTHING: a limit that outlasts the minute the rate is remembered
+    /// (held 60 s: 17.6 s against 16.9 s, and the rate not back within 20 s in 33 of 200
+    /// calls against 14). As bursts in a chain without a pacer the gain was the same and
+    /// the calls with an old picture rose in every cell that had any (both directions
+    /// limited 25 -> 31 of 200), which is why it is the paced chain's only.
     pub fn with_recovery_probing(mut self, enabled: bool) -> Self {
         self.recovery = enabled;
         self
@@ -472,6 +490,57 @@ impl ProbeController {
     /// sender are still asked for.
     pub fn set_unpaced(&mut self, unpaced: bool) {
         self.unpaced = unpaced;
+    }
+
+    /// The path changed and the estimator started over at `start_bitrate`: probing starts over
+    /// too, as at the beginning of the call, and what was noted of the old path is dropped.
+    ///
+    /// The start-up clusters are owed again, at three and six times `start_bitrate` and on
+    /// while the new path carries what is asked (RFC 8836 section 2, requirement 4: the
+    /// conditions of a new path are initial conditions). The target's recent high, the drop
+    /// below it and the cluster awaiting its result belong to the path that was left: the
+    /// estimator's fall back to its starting rate is not a drop of the path's capacity, and
+    /// the rate "before" it is the old path's.
+    ///
+    /// Without this an outage ended by an ICE restart left the call at the estimator's 8% a
+    /// second on the new path (traced on the capacity instrument's outage cell, the default
+    /// chain: 1 Mbit/s 15.1 s after the new pair). While nothing is acknowledged the
+    /// estimator halves at every feedback timeout, each halving a large drop, and the probe
+    /// for the rate before the last of them (133 kbit/s, asked into the dead path half a
+    /// second before the new pair) was still awaiting its result when the path changed. It
+    /// held the controller's one slot for the half second in which the sender, still sending
+    /// at the old path's floor, counted as application limited against the new starting
+    /// rate; after it nothing was due. Without the probe after a drop that
+    /// application-limited cluster did find the path (1.0 s), but only in the calls where
+    /// one happened to be due (134 of 200; 12 to 13 s in the others).
+    ///
+    /// libwebrtc does the same on a network route change: `ProbeController::Reset`
+    /// (goog_cc `probe_controller.cc`) returns to its initial state and forgets the rate
+    /// before the last large drop, and the constraints set next start the exponential probes
+    /// again (`GoogCcNetworkController::OnNetworkRouteChange`).
+    pub fn on_path_change(&mut self, now: Instant, start_bitrate: f64) {
+        self.initial = INITIAL_PROBES
+            .iter()
+            .rev()
+            .map(|multiple| start_bitrate * multiple)
+            .collect();
+        self.started = false;
+        self.outstanding = None;
+        self.last_probe = None;
+        self.further = None;
+        self.peak = None;
+        self.drop = None;
+        self.drop_probe = false;
+        self.last_target = None;
+        self.step_drop = None;
+        // libwebrtc's `Reset` counts the change as the time of its last probe after a drop.
+        self.last_drop_probe = Some(now);
+        self.application_limited_ended = None;
+        self.usage = Usage::Normal;
+        self.recovered_from_overuse = false;
+        // The rate remembered for recovery probing was the old path's.
+        self.remembered = None;
+        self.last_recovery = None;
     }
 
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
@@ -1062,6 +1131,134 @@ mod tests {
         assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
     }
 
+    /// A path change starts probing over: the start-up clusters again, from the rate the
+    /// estimator starts over at, and nothing of the old path's drop. The script is an outage
+    /// ended by an ICE restart, as the default chain's estimator goes through it: at
+    /// 2.5 Mbit/s, then halved every half second while nothing is acknowledged (each halving
+    /// a large drop), a probe for the rate before the last one asked into the dead path, and
+    /// the new path while that probe still awaits its result.
+    #[test]
+    fn a_path_change_starts_probing_over_and_forgets_the_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_500_000.0, 2_500_000.0, true)
+            );
+        }
+        // The outage: 1250, 625, 312, 156 kbit/s, then the floor.
+        let mut target = 2_500_000.0;
+        for ms in (2_000..4_500).step_by(500) {
+            target = f64::max(target / 2.0, 100_000.0);
+            assert_eq!(None, controller.poll(at(ms), target, target, true));
+        }
+        assert_eq!(100_000.0, target);
+        let stale = controller
+            .poll(at(5_000), target, target, true)
+            .expect("the rate before the last halving");
+        assert_eq!(0.85 * 156_250.0, stale.bits_per_second);
+
+        // The new path, 300 ms later: the estimator starts over at 300 kbit/s.
+        controller.on_path_change(at(5_300), 300_000.0);
+        assert_eq!(None, controller.outstanding(), "the old path's cluster");
+        assert_eq!(None, controller.poll_timeout(), "nothing of the old path");
+        let first = controller
+            .poll(at(5_300), 300_000.0, 100_000.0, true)
+            .expect("the first start-up cluster, at once");
+        assert_eq!(900_000.0, first.bits_per_second);
+        assert_eq!(
+            None,
+            controller.on_result(stale.cluster, 120_000.0),
+            "a late result of the old path's cluster is nobody's"
+        );
+        assert_eq!(
+            Some(900_000.0),
+            controller.on_result(first.cluster, 900_000.0)
+        );
+        let second = controller
+            .poll(at(5_450), 900_000.0, 300_000.0, true)
+            .expect("the second start-up cluster");
+        assert_eq!(1_800_000.0, second.bits_per_second);
+        // The new path carries it: a further cluster, as at the start of the call.
+        assert_eq!(
+            Some(1_800_000.0),
+            controller.on_result(second.cluster, 1_800_000.0)
+        );
+        let third = controller
+            .poll(at(5_600), 1_800_000.0, 900_000.0, true)
+            .expect("a further cluster");
+        assert_eq!(3_600_000.0, third.bits_per_second);
+        // It found the bottleneck. From here on the sender is at its target, and nothing of
+        // the old path's drops is probed for in the seconds that follow.
+        assert_eq!(
+            Some(2_375_000.0),
+            controller.on_result(third.cluster, 2_375_000.0)
+        );
+        for ms in (5_700..12_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_375_000.0, 2_375_000.0, true),
+                "at {ms} ms"
+            );
+        }
+    }
+
+    /// The estimator's fall to its starting rate at a path change is not a drop to probe
+    /// after: from 2.5 Mbit/s to 300 kbit/s on a new path that carries no more than the
+    /// start-up clusters show, no cluster asks for the old path's rate.
+    #[test]
+    fn the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_500_000.0, 2_500_000.0, true)
+            );
+        }
+        controller.on_path_change(at(2_000), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (2_000..10_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 300_000.0, true) {
+                asked.push(request.bits_per_second);
+                // The new path is narrow: every cluster shows 350 kbit/s.
+                controller.on_result(request.cluster, 350_000.0);
+            }
+        }
+        assert_eq!(
+            vec![900_000.0, 1_800_000.0],
+            asked,
+            "the start-up clusters, and no probe for 85% of 2.5 Mbit/s"
+        );
+    }
+
+    /// [`AfterDropProbe::Libwebrtc`] across a path change: neither the old path's drop nor the
+    /// estimator's fall to its starting rate is probed after, however often the new path's
+    /// detector returns from under-use to normal (libwebrtc's `Reset` forgets the rate before
+    /// the drop and counts the change as the time of its last such probe). The start-up
+    /// clusters are all that is asked in the five seconds a drop stays eligible.
+    #[test]
+    fn libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change() {
+        let epoch = Instant::now();
+        let mut controller = dropped_libwebrtc(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        controller.set_usage(Usage::Over);
+        assert_eq!(None, controller.poll(at(1_200), 900_000.0, 450_000.0, true));
+        controller.on_path_change(at(1_300), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (1_300..6_300).step_by(100) {
+            recover_from_overuse(&mut controller);
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 150_000.0, true) {
+                asked.push(request.bits_per_second);
+                controller.on_result(request.cluster, 350_000.0);
+            }
+        }
+        assert_eq!(vec![900_000.0, 1_800_000.0], asked);
+    }
+
     /// A controller with libwebrtc's probe after a drop, settled, application limited (it
     /// sends half its target) at 2 Mbit/s until 1 s and dropped to 900 kbit/s at 1.1 s.
     fn dropped_libwebrtc(epoch: Instant) -> ProbeController {
@@ -1222,6 +1419,29 @@ mod tests {
         assert_eq!(
             expected, asked,
             "every 5 s from 5 s after the drop, for 60 s"
+        );
+    }
+
+    /// The rate remembered for recovery probing is the path's: after a path change the
+    /// start-up clusters look for the new path's rate, and when they show it to be narrow
+    /// nothing goes on asking for the rate the old path had.
+    #[test]
+    fn recovery_probing_forgets_the_old_paths_rate_at_a_path_change() {
+        let epoch = Instant::now();
+        let mut controller = dropped_with_recovery(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        controller.on_path_change(at(2_000), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (2_000..30_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 300_000.0, true) {
+                asked.push(request.bits_per_second);
+                controller.on_result(request.cluster, 285_000.0);
+            }
+        }
+        assert_eq!(
+            vec![900_000.0, 1_800_000.0],
+            asked,
+            "the start-up clusters, and no recovery cluster for the old path's 2 Mbit/s"
         );
     }
 

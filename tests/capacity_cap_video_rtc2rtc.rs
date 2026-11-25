@@ -1068,6 +1068,61 @@ fn with_the_backlog_kept_a_capacity_collapse_asks_the_application_for_nothing() 
     Ok(())
 }
 
+/// Recovery probing (`DefaultInterceptorOptions::recovery_probing`, off by default) in the
+/// default chain, through the peer connection's option: after the 20 s at 300 kbit/s the
+/// path is open again. Without the setting a sender that keeps up with its target is asked
+/// nothing more once the probes after the drop have ended, and climbs at the 8% a second of
+/// draft-ietf-rmcat-gcc-02 section 5.5: ten seconds after the limit went its target is still
+/// under 1 Mbit/s (over 1000 calls of the capacity instrument's reference cell the earliest
+/// 1 Mbit/s is 12.3 s after it, the median 17.3 s). With the setting the next cluster, five
+/// seconds at most after the limit went, finds the path and its follow-ons take the target
+/// to the maximum: at the ten-second reading it is there (on the instrument 4.9 s in the
+/// median, 5.4 s at most, of 200 calls), and the time under the limit is not paid for with
+/// the picture: no more queue drops than without the setting plus a tenth, and a target
+/// under the limit within 30 kbit/s of the other (8 kbit/s on the instrument's average).
+#[test]
+fn with_recovery_probing_a_call_is_back_at_full_rate_when_the_capacity_returns() -> Result<()> {
+    for seed in seed_range(1, 3) {
+        let setup = Setup::new(seed, None)
+            .chain(Chain::Default)
+            .anchor(ANCHORS[0]);
+        let without = run(&setup)?;
+        let with = run(&setup.recovery_probing())?;
+        println!(
+            "RECOVERY-PROBING seed {seed}: target 5 / 10 / 15 / 20 s after the limit went: without {:?}, with {:?}; under the limit {} / {} bit/s; queue drops {} / {}; padding {} / {}",
+            without.recovery,
+            with.recovery,
+            without.under,
+            with.under,
+            without.queue_drops,
+            with.queue_drops,
+            without.padding_sent,
+            with.padding_sent
+        );
+        assert!(
+            without.recovery[1] < 1_000_000,
+            "seed {seed}: without the setting the climb is the controller's: {without:?}"
+        );
+        assert!(
+            with.recovery[1] >= MAX_BPS / 100 * 95,
+            "seed {seed}: with the setting the target is back at the maximum: {with:?}"
+        );
+        assert!(
+            with.under + 30_000 >= without.under,
+            "seed {seed}: the target under the limit: {} against {}",
+            with.under,
+            without.under
+        );
+        assert!(
+            with.queue_drops * 10 <= without.queue_drops * 11 + 50,
+            "seed {seed}: queue drops {} against {}",
+            with.queue_drops,
+            without.queue_drops
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // Read through `Debug`.
 struct PathChangeOutcome {
@@ -1106,7 +1161,12 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     // This file's receiver plays strictly in order and its bounds were set for a sender that
     // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
     // The instrument's cells run the engine's default.
-    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
+    path_change_run_as_set(&setup.pacer_backlog(PacerBacklog::Keep))
+}
+
+/// [`path_change_run`] with `setup` as it is: the pacer's backlog policy is the setup's (the
+/// engine's default unless it names one).
+fn path_change_run_as_set(setup: &Setup) -> Result<PathChangeOutcome> {
     let mut world = World::connected(setup)?;
     let t = world.now + Duration::from_secs(10);
     world.advance(t)?;
@@ -1286,6 +1346,117 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
             "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
         );
+    }
+    Ok(())
+}
+
+/// A new selected pair is a new path for bandwidth probing too (RFC 8836 section 2,
+/// requirement 4: the algorithm "SHOULD adapt as quickly as possible to initial network
+/// conditions", and the conditions of a new path are initial ones; libwebrtc's
+/// `GoogCcNetworkController::OnNetworkRouteChange` resets its probe controller and starts the
+/// exponential probes again). In the default chain, after the four-second outage and the ICE
+/// restart of [`path_change_run`], the new path is open: the start-up clusters are asked for
+/// again from the 300 kbit/s the estimate starts over at, and each peer's estimate is past
+/// 1 Mbit/s within a second of the new pair and at the 2.5 Mbit/s maximum within a second
+/// and a half, without a step down on the way (measured, hosted run 45609880114: 1 Mbit/s
+/// after 0.61 s at the caller and 0.86 s at the callee, the maximum after 0.97 and 0.99 s).
+/// With the pacer's backlog policy as the engine has it and with the backlog kept.
+///
+/// Before, the probe controller was told nothing of the new path: the probe for the rate
+/// before the outage's last halving of the target (133 kbit/s), asked into the dead path,
+/// still awaited its result at the new pair, no start-up cluster followed, and the estimate
+/// climbed at the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5: 1 Mbit/s 15.1 s after
+/// the new pair (the capacity instrument's outage cell, 200 calls), 650 kbit/s at the end of
+/// this run.
+#[test]
+fn an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain()
+-> Result<()> {
+    for backlog in [None, Some(PacerBacklog::Keep)] {
+        for seed in seed_range(1, 3) {
+            let mut setup = Setup::new(seed, None)
+                .chain(Chain::Default)
+                .anchor(ANCHORS[0]);
+            if let Some(backlog) = backlog {
+                setup = setup.pacer_backlog(backlog);
+            }
+            let outcome = path_change_run_as_set(&setup)?;
+            assert_eq!(
+                Some(300_000),
+                outcome.at_switch,
+                "backlog {backlog:?} seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+            );
+            for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+                let after: Vec<_> = outcome.estimates[i]
+                    .iter()
+                    .filter(|(at, _)| *at >= outcome.switched_at)
+                    .copied()
+                    .collect();
+                let reached = |bps: u32| {
+                    after
+                        .iter()
+                        .find(|(_, estimate)| *estimate >= bps)
+                        .map(|(at, _)| *at - outcome.switched_at)
+                };
+                let (at_1m, at_max) = (reached(1_000_000), reached(MAX_BPS));
+                println!(
+                    "RESTART-PROBE backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}, the maximum after {at_max:?}"
+                );
+                assert!(
+                    at_1m.is_some_and(|after| after <= Duration::from_secs(1)),
+                    "backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}: {after:?}"
+                );
+                assert!(
+                    at_max.is_some_and(|after| after <= Duration::from_millis(1_500)),
+                    "backlog {backlog:?} seed {seed} {who}: the maximum after {at_max:?}: {after:?}"
+                );
+                assert_eq!(
+                    None,
+                    first_step_down(&after),
+                    "backlog {backlog:?} seed {seed} {who}: the estimate fell on the new path: {after:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The same restart in the chains without a pacer, where the peers do not take the new path
+/// into use at the same instant and the first of them loses its first cluster. The callee
+/// selects the restart's pair 10 ms before the caller, and until the caller has, nothing but
+/// STUN crosses: the callee's first start-up cluster, a burst of padding sent at its own path
+/// change, is lost whole. A cluster without a result is given up after a second and the next
+/// of the start-up sequence is asked for, so the callee finds the path a second after the
+/// caller: the caller's estimate is at the maximum within a second and a half of the new
+/// pair, the callee's within two and a half. (The paced chain's cluster lasts longer than the
+/// 10 ms, enough of it arrives, and both peers are held to a second and a half above.)
+///
+/// Before, the callee asked for one cluster at its path change (twice the starting rate,
+/// for an application-limited sender), lost it, and climbed at 8% a second: 395 kbit/s on
+/// average over the ten seconds after the new pair on the capacity instrument's outage cells
+/// (200 calls, both chains) against 1345 to 1367 kbit/s now; the caller 1515 and 1527.
+#[test]
+fn the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost()
+-> Result<()> {
+    for chain in [Chain::ParolNet, Chain::DefaultWithoutPacer] {
+        for seed in seed_range(1, 3) {
+            let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
+            let outcome = path_change_run_as_set(&setup)?;
+            for (i, (who, by)) in [("caller", 1_500), ("callee", 2_500)]
+                .into_iter()
+                .enumerate()
+            {
+                let at_max = outcome.estimates[i]
+                    .iter()
+                    .find(|(at, bps)| *at >= outcome.switched_at && *bps >= MAX_BPS)
+                    .map(|(at, _)| *at - outcome.switched_at);
+                println!("RESTART-PROBE {chain:?} seed {seed} {who}: the maximum after {at_max:?}");
+                assert!(
+                    at_max.is_some_and(|after| after <= Duration::from_millis(by)),
+                    "{chain:?} seed {seed} {who}: the maximum after {at_max:?}: {:?}",
+                    outcome.estimates[i]
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1684,6 +1855,55 @@ fn the_received_rate_bound_as_a_clamp_pulls_an_audio_only_estimate_down() -> Res
             );
         }
     }
+    Ok(())
+}
+
+/// RFC 4585 section 3.2 ("FB messages are part of the RTCP control streams and thus subject
+/// to the RTCP bandwidth constraints") and 3.5.2 read onto congestion control feedback
+/// (`rtcp_immediate_congestion_feedback: false`, the `StrictRfc` profile's form,
+/// RFC4585-3.5.2-5) on the camera call of
+/// `an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain`: while only audio is
+/// sent the session bandwidth is its 64 kbit/s floor, 5 % of it holds a feedback packet
+/// every one to four seconds, the sender's estimator hears nothing for half a second
+/// (RFC 8888 section 5, RFC 8836 requirement 10: missing feedback is taken for over-use)
+/// and halves, again and again, on a link that loses and queues nothing. The default (the
+/// feedback leaves as it is built) keeps the start rate. The second measurement behind the
+/// default; the first is `rfc_4585_timing_of_congestion_feedback_measured_against_immediate`.
+#[test]
+fn feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent() -> Result<()> {
+    let seed = 1;
+    let setup = Setup::new(seed, None)
+        .chain(Chain::Default)
+        .anchor(ANCHORS[0]);
+    let default = camera_run(&setup)?;
+    let in_budget = camera_run(&setup.immediate_congestion_feedback(false))?;
+    println!(
+        "default lowest {:?}, step down {:?}, at off {:?}; inside the RTCP bandwidth lowest {:?}, step down {:?}, at off {:?}",
+        default.lowest,
+        default.step_down,
+        default.at_off,
+        in_budget.lowest,
+        in_budget.step_down,
+        in_budget.at_off
+    );
+    for i in 0..2 {
+        assert!(
+            default.lowest[i].is_some_and(|lowest| lowest >= 300_000),
+            "{default:?}"
+        );
+        assert_eq!(None, default.step_down[i], "{default:?}");
+    }
+    assert!(
+        in_budget
+            .lowest
+            .iter()
+            .any(|lowest| lowest.is_some_and(|lowest| lowest <= 150_000)),
+        "{in_budget:?}"
+    );
+    assert!(
+        in_budget.step_down.iter().any(Option::is_some),
+        "{in_budget:?}"
+    );
     Ok(())
 }
 

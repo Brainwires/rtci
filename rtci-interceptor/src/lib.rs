@@ -270,9 +270,12 @@ pub use audio_red::{
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
 pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
 pub use cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
+pub use cc::feedback_cadence::{
+    CongestionFeedbackCadence, PER_FRAME_INTERVAL, PER_FRAME_MAX_INTERVAL,
+};
 pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
-    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
+    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT, SendEstimate,
 };
 pub use cc::probe::{
     AfterDropProbe, PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL,
@@ -418,8 +421,8 @@ pub use rtcp_session::identity::{RtcpRandom, generate_rtcp_cname};
 pub use rtcp_session::{
     RTCP_SESSION_DEFAULT_MTU, RTCP_SESSION_DEFAULT_T_RR_INTERVAL, RTCP_SESSION_MIN_BANDWIDTH,
     RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH,
-    RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpReportingInterval, RtcpSessionBuilder,
-    RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
+    RepeatInRegularReports, RtcpBandwidth, RtcpBandwidthShare, RtcpProfile, RtcpReportingInterval,
+    RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
 };
 pub use rtp_session::{PathChanged, PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};

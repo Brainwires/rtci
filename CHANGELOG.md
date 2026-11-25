@@ -924,6 +924,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptor / bandwidth probing: recovery probing, an opt-in** (off by default and in
+  every behaviour profile; ungoverned: it is tuning, no specification asks for it and Chrome
+  does not do it): `ProbeController::with_recovery_probing`,
+  `CongestionControlBuilder::with_recovery_probing`,
+  `DefaultInterceptorOptions::recovery_probing`. A sender that keeps up with its target is
+  asked nothing once the probes after a drop have ended (five seconds after it), so when a
+  capacity that fell comes back, the climb is the delay-based controller's 8% a second. With
+  the setting the highest rate before a large drop is remembered for a minute
+  (`PROBE_DROP_MEMORY`); while the target is below 85% of it and the estimator does not read
+  over-use (`BandwidthEstimator::usage`), a cluster at twice the target is asked for every
+  five seconds (`PROBE_RECOVERY_INTERVAL`), with follow-ons at twice the result while the
+  path carries what is asked. Paced chains only: clusters that leave as bursts are not sent
+  for it, and a path change forgets the remembered rate. WHAT A CALL GAINS AND PAYS, measured
+  on the capacity instrument (default chain, a 2.5 Mbit/s path that drops to 300 kbit/s for
+  20 s, 200 calls a cell, hosted runs 45607015088 without and 45607025736 with the setting,
+  on master f9242b4d with the two probing branches before this one): the target is back at
+  1 Mbit/s 4.9 s after the limit went (5.4 s at most) instead of 17.3 s, and at the
+  2.5 Mbit/s maximum 15 to 25 s after it instead of 1283 kbit/s on average; the same behind
+  a 100 ms queue (17.6 -> 5.0 s) and with both directions limited (16.2 -> 4.8 s); behind a
+  1000 ms queue in nine calls of ten (median 17.6 -> 5.0 s, the slowest tenth 17.5 s). It
+  costs 3% of the target under the limit (238 against 246 kbit/s), and behind a 100 ms queue
+  11 more audio packets lost a call (52 against 41) and a quarter more packets dropped at
+  the queue (201 against 159); the counts of calls with an old picture, a freeze or an audio
+  gap do not move in any cell. After a limit that outlasts the minute (held 60 s) it gains
+  nothing: 17.6 s against 16.9 s, the rate not back within 20 s in 33 of 200 calls against
+  14. Sent as bursts in a chain without a pacer the gain was the same and the calls with an
+  old picture rose in every cell that had any (both directions limited: 25 -> 31 of 200), so
+  the setting does not act there. The default's figures do not move. Tests: seven in
+  `cc::probe::tests` (`recovery_probing_…`, `a_recovery_cluster_the_path_carries_is_followed_up`,
+  `without_recovery_probing_a_sender_at_its_target_is_not_probed_after_the_drop`),
+  `rtci-interceptor/tests/recovery_probing.rs`, `tests/recovery_probe_requests.rs`,
+  `tests/capacity_cap_video_rtc2rtc.rs::with_recovery_probing_a_call_is_back_at_full_rate_when_the_capacity_returns`.
+- **interceptor / bandwidth probing: the probe after a large drop has three forms**
+  (`AfterDropProbe`: `Repeated`, `Libwebrtc`, `Off`), set with
+  `ProbeController::with_after_drop_probe`, `CongestionControlBuilder::with_after_drop_probe`
+  and `DefaultInterceptorOptions::probe_after_drop`; the behaviour row `cc.probe-after-drop`
+  governs it (`Rfc` and `StrictRfc`: `Repeated`; `Chrome`: `Libwebrtc`).
+  `with_probe_after_drop(bool)` stays (`true` is `Repeated`, `false` is `Off`). THE DEFAULT
+  DOES NOT CHANGE: `Repeated` is what the engine did (from a second after the target fell
+  below two thirds of its 2 s high, once a second for five seconds, a cluster at 85% of that
+  high); on the capacity instrument 1400 calls in seven cells of the default chain are
+  identical to the tree before, figure for figure (hosted run 45607015088 against
+  45582695439). `Libwebrtc` is libwebrtc's `ProbeController::RequestProbe`: a drop is one
+  update of the estimate below 0.66 of the one before it, and one cluster at 0.85 of the
+  estimate before it is asked when the delay detector has returned from under-use to normal,
+  only for a sender that is application limited or was within 3 s, within 5 s of the drop, at
+  most once in 5 s, and only when 95% of it is above the estimate. For it the estimator
+  says how it reads the path: `BandwidthEstimator::usage() -> Usage` (new, default
+  `Usage::Normal`; `Gcc`: the reading of the last feedback), passed on with
+  `ProbeController::set_usage`. No specification says how to probe after a drop (RFC 8836
+  section 2, 1f, asks that a flow regain its share quickly), so the default is the form that
+  measured best. Four forms, the default chain, a 2.5 Mbit/s path that drops to 300 kbit/s
+  for 20 s, 1000 calls in each of the two reference cells and 200 in six others, each form
+  against the default by the merge-point rule of `docs/capacity-instrument.md`: without a
+  probe and with libwebrtc's (which never fires for a sender that keeps up with its target:
+  the two measure alike) seven figures are worse (both directions limited: oldest picture
+  3.07 s against 2.64 s; 5% of the feedback lost: the rate not back within 20 s in 30 and 24
+  of 200 calls against 2; target 15 to 25 s after the limit 1205 against 1278 kbit/s); the
+  repeated probe aimed at the highest rate of the last minute instead of the last drop's own
+  high makes fifteen worse (audio packets lost 27 -> 35 a call; behind a 1000 ms queue over
+  2 s without a new picture in 33 of 200 calls against 6) and was not taken. What the default
+  costs against no probe: behind a 1000 ms queue 96 audio packets lost a call against 66,
+  under a limit that lasts a minute 74 against 45. Tests:
+  `cc::probe::tests::libwebrtcs_probe_after_a_drop_is_one_cluster_once_overuse_has_ended`,
+  `libwebrtcs_probe_after_a_drop_has_its_conditions`,
+  `gcc::estimator::tests::usage_follows_the_last_feedback`,
+  `rtci-interceptor/tests/after_drop_probe_requests.rs`, `tests/default_probe_after_drop.rs`.
+- **congestion control feedback cadence as a setting** (rtcpbudget-2):
+  `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
+  `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
+  `DefaultInterceptorOptions::congestion_feedback_cadence` and the governed behaviour
+  `cc.feedback-cadence`. **The default does not change**: feedback every 50 to 250 ms, sized
+  to 5% of the media received (`ReceivedMedia`), which is the engine's own choice and no
+  specification's. `PerFrame` is the drafts' cadence (draft-ietf-rmcat-gcc-02 section 3,
+  draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: a lone video stream is
+  reported when each frame ends, anything else every 30 ms, up to 100 ms where this
+  endpoint's share of the RTCP bandwidth does not hold that), on in the `StrictRfc` profile;
+  as the default it measured worse in the capacity instrument (send target under a 300
+  kbit/s cap 210 -> 186 kbit/s, the picture requirement of the pacer-less chain missed in
+  36 instead of 4 of 200 calls, RTCP 122 -> 135 kbit/s on an open call), and so did 100 ms
+  always and two forms between (audit rows TWCC-3-4 and GCC-3-2: `setting`, measured).
+  `SendEstimate` is libwebrtc's cadence (50 to 250 ms from 5% of the endpoint's own send
+  estimate, 100 ms before one is known), **now the `Chrome` profile's** (a behaviour change
+  for that profile only: its feedback was sized to the media received). New attributes on
+  what the chain hands application-ward: `RtcpBandwidthShare` (this endpoint's share of the
+  RTCP bandwidth, from the RTCP session) and `SendEstimate` (the congestion controller's
+  estimate beside `TargetBitrateChanged`). The capacity instrument's chain token `perframe`
+  runs the drafts' form.
+
+- **interceptors** (rtcpbudget-5): an option, off by default and in every behaviour profile,
+  for an endpoint's own share of the RTCP bandwidth to follow the rate its congestion
+  controller allows it to send at: `RtcpSessionBuilder::with_share_following_send_rate`,
+  `DefaultInterceptorOptions::rtcp_share_follows_send_rate`,
+  `RtcpSessionControl::SendRate` and `CongestionControlBuilder::with_send_rate_told_to_rtcp`
+  (the congestion controller tells the RTCP session of its chain the estimate whenever it has
+  moved by a twentieth). **It is tuning with no specification behind it**: RFC 3550 section
+  6.2 sizes the RTCP bandwidth from the session bandwidth (here the media measured both
+  ways) and section 6.3.1 shares it equally among the members whatever each direction
+  carries, so an endpoint whose uplink has collapsed to 300 kbit/s while the other direction
+  still carries 2.5 Mbit/s keeps sending about 80 kbit/s of RTCP on it. With the option the
+  endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which
+  every endpoint sends at this endpoint's rate (5% x send rate x members / local SSRCs, no
+  less than 5% of the minimum session bandwidth); the intervals calculated for the other
+  members (`RtcpReportingInterval`, what the circuit breaker takes for the peer's reporting
+  interval), member timeouts, BYE and sender status keep RFC 3550's value, and congestion
+  control feedback is not slowed. Measured in the capacity instrument (default chain, one
+  direction capped at 300 kbit/s): RTCP on the capped link 80 -> 34 kbit/s, the open call
+  unchanged (122 kbit/s); figures for the picture and the recovery are in
+  `docs/capacity-instrument.md`. The `Performance` profile does not take it: its
+  `T_rr_interval` of one second already brings that RTCP to 22 kbit/s, and beside it the
+  option changed nothing that was measured. Tests
+  `the_rtcp_share_follows_the_send_rate_the_session_is_told`,
+  `the_interval_calculated_for_the_peer_does_not_follow_the_send_rate`.
+
 - **interceptor** (collapse-2): `ProbeFill`, an attribute the pacer adds to a `ProbeRequest`'s
   carrier on its way application-ward: the padding the cluster needs beyond the media and
   retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
@@ -1312,6 +1426,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the rate asked for; the delay-based controller corrects it once the media follows
   (`burst_estimate`). Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
 
+- **After an ICE restart onto a new path the default chain climbed at 8% a second** (in 0.1.0
+  too): bandwidth probing was told nothing of a path change. The estimator starts over at its
+  starting rate on a new selected pair (`PathChanged`, or
+  `CongestionControlHandle::notify_path_change`), but the probe controller kept what it had
+  noted of the old path. During an outage the estimator halves at every feedback timeout, and
+  each halving is a "large drop" that the probe after a drop asks about a second later: the
+  cluster for the rate before the last halving (133 kbit/s), asked into the dead path, still
+  awaited its result when the new pair was selected, held the controller's one slot through
+  the half second in which a cluster for an application-limited sender would have been due,
+  and no start-up cluster followed. On the capacity instrument's outage cell (a 4 s outage
+  ended by an ICE restart, the new path open at 2.5 Mbit/s, 200 calls) the target was back at
+  1 Mbit/s 15.1 s after the new pair and averaged 1504 kbit/s 15 to 25 s after it; with the
+  probe after a drop turned off, 1.0 s in 134 of the 200 calls and 12 to 13 s in the others. Now a
+  path change starts probing over as at the start of the call
+  (`ProbeController::on_path_change`, new): the start-up clusters again, at three and six
+  times the rate the estimator starts over at and on while the new path carries what is
+  asked, and the target's recent high, the drop below it and the cluster awaiting its result
+  are dropped with the old path (the fall to the starting rate is not a capacity drop).
+  libwebrtc does the same (`GoogCcNetworkController::OnNetworkRouteChange`:
+  `ProbeController::Reset`, then the exponential probes again). MEASURED on the same cell
+  (200 calls, hosted runs 45609964155 against 45607015088): 1 Mbit/s 0.8 s after the new pair
+  (1.02 s at most; no call slower) and the 2.5 Mbit/s maximum through the 15 to 25 s window;
+  with a receiver that has no bound on a gap the first new picture comes 2.3 s earlier in two
+  thirds of the calls (0.74 s after the new pair against 3.08 s on average). WHAT IT COSTS:
+  with the reference receiver (a gap given up after 300 ms) the first new picture comes
+  0.12 s later in those calls (0.70 s after the new pair against 0.58 s): the start-up
+  clusters share the first moments of the new path with the key frame. The chains without a
+  pacer were at 1 Mbit/s 0.5 s after the new pair before and are now (their probe after a
+  drop is off, so no cluster was outstanding). The OTHER direction gains in every chain:
+  the callee's target over the ten seconds after the new pair averages 1521 kbit/s against
+  507 with the pacer, and 1345 to 1367 against 395 without one. There the callee, which
+  selects the new pair 10 ms before the caller, loses its first cluster whole (nothing but
+  STUN crosses until both have switched); it used to ask for that one cluster only, and now
+  the next start-up cluster follows when the first is given up a second later. Every other
+  cell of the instrument is unchanged (4600 calls in fifteen cells, 0 differ). Tests:
+  `cc::probe::tests::a_path_change_starts_probing_over_and_forgets_the_drop`,
+  `the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop`,
+  `rtci-interceptor/tests/probing_across_a_path_change.rs`,
+  `libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change`,
+  `tests/capacity_cap_video_rtc2rtc.rs::an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain`,
+  `::the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost`.
+
+- **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
+  (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
+  it receives, so a peer that follows it (this engine with
+  `rtcp_report_from_every_ssrc`, the `StrictRfc` profile) sends several report blocks about
+  each flow in one compound packet, the same reception each time. The RFC 8083 breaker took
+  each copy for a report of its own: the media timeout's count of reports without progress
+  was reached in a fraction of the reporting intervals, a loss interval's packets were taken
+  by the first copy and the others showed none, and the spacing between copies read as a
+  reporting interval of zero. A flow now follows one reporting SSRC and takes another only
+  once the one it follows has been silent for the RTCP timeout (the reporter left or changed
+  its SSRC). With a peer that reports once (the default, libwebrtc) nothing changes. Tests
+  `every_ssrc_of_the_receiver_reporting_counts_as_one_report`,
+  `another_reporting_ssrc_is_followed_once_the_first_has_been_silent_for_the_rtcp_timeout`.
+
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
   report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the
@@ -1672,6 +1842,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the direction whose capacity did not change); new scenario `fbgap` (no capacity change, the
   callee's RTCP lost for 300 ms). The baseline gains three tripwires per cell (`disc_open` > 0,
   `disc_max` > 2 s, the 10th percentile of `back_mean`) when it is next recorded. Test only.
+- **Congestion control feedback inside the RTCP bandwidth, measured on a call** (row
+  RFC4585-3.5.2-5, a measured setting; the default, feedback sent as it is built, is
+  unchanged). `feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent`
+  (`tests/capacity_cap_video_rtc2rtc.rs`): with RFC 4585 section 3.5.2's timing for the
+  feedback, an audio-only call's estimate halves to its floor on a clean link (5 % of a
+  64 kbit/s session holds a feedback packet every one to four seconds; half a second without
+  feedback is taken for over-use). The capacity instrument on the same seeds: one direction
+  capped, nothing worse (oldest picture -0.33 s); both directions capped, recovery slower than
+  20 s in 64 % of runs against 18.5 %. The capacity world's `Setup` takes
+  `immediate_congestion_feedback`.
+- **audit and capacity instrument** (rtcpbudget-4): RFC 8108 section 5.1's report blocks
+  from every SSRC stay a setting (`rtcp.report-from-every-ssrc`: `StrictRfc` on, the default
+  and `Chrome` once), now on the capacity instrument's evidence in place of a two-seed
+  print: as the default it made the picture through a capacity collapse 0.53 s older
+  (8.00 -> 8.53 s, 1000 seeds), the send target under the cap 24 kbit/s lower and three
+  times as many calls slow to recover (81 -> 244 of 1000), because its compound packets are
+  twice the size (RTCP of an endpoint 122 -> 149 kbit/s on an open 2.5 Mbit/s call). The
+  instrument's chain token `every` runs it; the ParolNet chain of the capacity world takes
+  `Setup::report_from_every_ssrc` too. Audit rows corrected: RFC8108-5.3-2 (an aggregated
+  compound packet begins with SR or RR: tested, was "no aggregation"), RFC8108-5.3.1-1 (the
+  conditional limit of two aggregated reports for non-updated peers: missing, was "met by
+  not aggregating"), RFC8108-5.3.2-5 (untested, was "no step b"), RFC4585-4.3-1 (`b=RS` /
+  `b=RR` of the remote description reach the session: tested, was "the SDP layer does not
+  feed it").
+
+- **capacity instrument: the behaviour profiles through a collapse** (rtcpbudget-4):
+  `docs/capacity-instrument.md` has the table of the default, `Performance`, the default with
+  `rtcp_share_follows_send_rate` and `Chrome` on the same 1000 seeds, paired: RTCP on the
+  capped link 80 / 22 / 33 / 20 kbit/s, oldest picture 7.9 / 6.1 / 6.2 / 5.8 s, calls over
+  20 s to recover 128 / 0 / 0 / 18 of 1000; `Performance` pays when both directions collapse
+  (picture +1.6 s). The `Chrome` column was measured before the repair of retransmitted RED
+  packets and is marked so.
+
+- **capacity instrument** (rtcpbudget-5): chain tokens for the default chain with other
+  settings, measurement only: `share` (the defaults with `rtcp_share_follows_send_rate`),
+  `perf` (the `Performance` profile's interceptor settings), `perfshare`, `perfnoshare`,
+  `chrome` (the `Chrome` profile's); `Setup::profile` and `Setup::share_follows_send_rate`
+  in the capacity world.
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
