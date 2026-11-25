@@ -3,7 +3,7 @@
 use super::pacer::Pacer as LeakyBucket;
 use crate::Interceptor;
 use crate::StreamInfo;
-use crate::cc::probe::{ProbePacket, ProbeRequest};
+use crate::cc::probe::{ProbeFill, ProbePacket, ProbeRequest};
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
@@ -226,15 +226,30 @@ impl PacerBuilder {
 ///
 /// Padding is outside the queue time bound: it never counts toward raising the pacing rate
 /// (with [`QueueOverflow::Drain`]), is never dropped as overdue nor released over the budget,
-/// and so never goes ahead of media or past the rate the congestion controller set. Padding older than the bound
-/// is **sent late, not dropped**. Each padding packet already holds the next sequence number
-/// of its RTX stream (the responder numbers it when it fills the cluster), so dropping it
-/// would leave a hole in that stream which a receiver counts as lost (RFC 3550 appendix A.3,
-/// expected minus received) and the RTCP reports carry back as loss nobody had on the path.
-/// Sent late it costs nothing: it leaves only from budget no media wants. A padding queue
-/// that reaches the queue limit (4096 packets, far beyond what probing writes while media
-/// waits) discards the padding that arrives, counted by [`PacerInterceptor::padding_discarded`]:
-/// the one place padding can leave a hole, preferred to letting it go over the budget.
+/// and so never goes ahead of media or past the rate the congestion controller set.
+///
+/// **A cluster's padding belongs to the cluster.** The pacer tells the responder how much
+/// padding a cluster needs beyond the media already queued ([`ProbeFill`]), so a cluster asked
+/// while a backlog waits (the pause) is made of that backlog and no padding is written for
+/// it. Padding written for a cluster that could not leave in it (media written meanwhile took
+/// its place, or the cluster timed out) is **discarded when the cluster ends**, counted by
+/// [`PacerInterceptor::padding_discarded`]: outside its cluster it measures nothing, and sent
+/// later it is worse than nothing. Each padding packet holds the sequence number of the RTX
+/// stream it was given when it was made; kept until budget was spare (seconds, while media
+/// waited) it left far behind the stream's newest number, where a receiver's replay
+/// protection (RFC 3711 section 3.3.2) and its feedback window no longer take it, inside
+/// whatever cluster was being sent then: that cluster's packets were never all reported and
+/// the probe gave no result (every cluster after a capacity drop in
+/// `tests/capacity_cap_video_rtc2rtc.rs`, 191 stale padding packets queued, and an estimate
+/// that stayed at its floor for want of a probe result). Discarding leaves a hole in the RTX
+/// stream's sequence numbers, which the receiver's reports count as lost (RFC 3550 appendix
+/// A.3); the sender's own readers of those reports take the numbers that never left out of
+/// the count (`NeverSent`, in the circuit breaker and the receiver-report fallback of the
+/// congestion controller), as for media the pacer discards.
+///
+/// Padding written while no cluster is being sent (an application's own) keeps its place
+/// until budget is spare, however long that takes: it is sent late, not dropped. A padding
+/// queue that reaches the queue limit (4096 packets) discards the padding that arrives.
 ///
 /// # Pausing the source
 ///
@@ -327,10 +342,14 @@ pub struct PacerInterceptor {
     /// [`Self::pacer_mut`]).
     raised_from: Option<f64>,
     queue: VecDeque<TaggedPacket>,
-    /// Padding-only packets, released only while `queue` is empty (see the order of service).
-    padding: VecDeque<TaggedPacket>,
-    /// Padding refused because the padding queue was full.
+    /// Padding-only packets, released only while `queue` is empty (see the order of service),
+    /// each with the probe cluster it was written for (the one being sent when it arrived).
+    padding: VecDeque<(Option<u32>, TaggedPacket)>,
+    /// Padding discarded: left over when its cluster ended, or refused by a full queue.
     padding_discarded: u64,
+    /// When the cluster that ended last was asked for: its padding is written at that instant
+    /// and, arriving after the cluster ended, is not queued.
+    ended_cluster_asked: Option<Instant>,
     /// The bits waiting in `queue` (padding not counted).
     queued_bits: f64,
     queue_limit: usize,
@@ -385,6 +404,7 @@ impl PacerInterceptor {
             queue: VecDeque::new(),
             padding: VecDeque::new(),
             padding_discarded: 0,
+            ended_cluster_asked: None,
             queued_bits: 0.0,
             queue_limit: queue_limit.max(1),
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
@@ -421,7 +441,9 @@ impl PacerInterceptor {
         self.queue.len() + self.padding.len()
     }
 
-    /// How many padding-only packets were discarded because the padding queue was full.
+    /// How many padding-only packets were discarded: left over when the probe cluster they
+    /// were written for ended (see "A cluster's padding belongs to the cluster" on
+    /// [`PacerInterceptor`]), or refused because the padding queue was full.
     pub fn padding_discarded(&self) -> u64 {
         self.padding_discarded
     }
@@ -558,7 +580,7 @@ impl PacerInterceptor {
     /// padding while no media waits (padding has no queue time bound to wake for).
     fn next_release(&self) -> Option<Instant> {
         let Some(head) = self.queue.front() else {
-            let head = self.padding.front()?;
+            let (_, head) = self.padding.front()?;
             return self.bucket().releasable_at(Self::bits_of(head));
         };
         let by_budget = self.bucket().releasable_at(Self::bits_of(head)).map(|at| {
@@ -610,9 +632,23 @@ impl PacerInterceptor {
         if let Some(probe) = self.probe.as_mut() {
             probe.bucket.refill(now);
             if now.saturating_duration_since(probe.started) > PROBE_CLUSTER_TIMEOUT {
-                self.probe = None;
+                self.end_probe();
             }
         }
+    }
+
+    /// The probe cluster being sent is over (sent in full, timed out, or replaced by the next
+    /// one): the padding written for it that did not leave in it is discarded (see "A
+    /// cluster's padding belongs to the cluster").
+    fn end_probe(&mut self) {
+        let Some(probe) = self.probe.take() else {
+            return;
+        };
+        self.ended_cluster_asked = Some(probe.started);
+        let before = self.padding.len();
+        self.padding
+            .retain(|(cluster, _)| *cluster != Some(probe.cluster));
+        self.padding_discarded += (before - self.padding.len()) as u64;
     }
 
     /// A packet leaves at `now`: marked as part of the probe cluster while one is being sent.
@@ -629,7 +665,7 @@ impl PacerInterceptor {
             })));
             probe.remaining_bits -= bits;
             if probe.remaining_bits <= 0.0 {
-                self.probe = None;
+                self.end_probe();
             }
         }
         self.released.push_back(packet);
@@ -972,7 +1008,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         // A probe cluster the congestion controller asks for: the next packets leave at its
         // rate, on top of the target's budget, and carry its mark. Observed, not consumed:
         // the NACK responder above reads the same request and fills the cluster.
-        if let Some(request) = msg.message.custom::<ProbeRequest>() {
+        if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
+            // A cluster still being sent is over: the new one takes its place.
+            self.end_probe();
             let mut bucket = LeakyBucket::new(request.bits_per_second)
                 .with_burst_bits(crate::pacing::pacer::MIN_BURST_BITS);
             bucket.refill(msg.now);
@@ -982,6 +1020,13 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                 remaining_bits: request.octets as f64 * 8.0,
                 started: msg.now,
             });
+            // What waits in the media queue leaves first and fills the cluster: the
+            // responder is asked for the rest only.
+            let queued_octets = (self.queued_bits.max(0.0) / 8.0) as usize;
+            msg.message.add(Attribute::Custom(Arc::new(ProbeFill {
+                cluster: request.cluster,
+                octets: request.octets.saturating_sub(queued_octets),
+            })));
         }
 
         self.read_queue.push_back(msg);
@@ -1055,6 +1100,12 @@ impl PacerInterceptor {
 
         // Padding waits behind every other packet, and nothing waits behind it.
         let padding = Self::is_padding(&msg);
+        // Written for a cluster that has ended already (filled by media in the instant it
+        // was asked for): it would only leave late.
+        if padding && self.probe.is_none() && self.ended_cluster_asked == Some(msg.now) {
+            self.padding_discarded += 1;
+            return Ok(());
+        }
 
         // The rest of a frame already discarded is worth nothing either.
         let new_media = !padding && !msg.message.has(&Attribute::Retransmission);
@@ -1081,7 +1132,8 @@ impl PacerInterceptor {
             if self.padding.len() >= self.queue_limit {
                 self.padding_discarded += 1;
             } else {
-                self.padding.push_back(msg);
+                let cluster = self.probe.as_ref().map(|probe| probe.cluster);
+                self.padding.push_back((cluster, msg));
             }
             return Ok(());
         }
@@ -1223,12 +1275,12 @@ impl PacerInterceptor {
         if self.queue.is_empty() {
             self.queued_bits = 0.0;
             // No media waits: padding leaves from what the budget has left, never over it.
-            while let Some(head) = self.padding.front() {
+            while let Some((_, head)) = self.padding.front() {
                 let bits = Self::bits_of(head);
                 if !self.try_spend(bits) {
                     break;
                 }
-                let mut packet = self.padding.pop_front().expect("front just checked");
+                let (_, mut packet) = self.padding.pop_front().expect("front just checked");
                 packet.now = now;
                 self.release(packet, bits);
             }
