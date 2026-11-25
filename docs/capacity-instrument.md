@@ -302,3 +302,62 @@ chain, +14 +-20 without the pacer and -30 +-23 in ParolNet's chain, the time to 
 by +0.03 +-0.31, -0.17 +-0.22 and +0.31 +-0.24 s. The merge-point rule holds. The picture
 requirement is still missed in every run of the default chain, and the audio is still left dead
 in 8.9 %.
+
+## The profiles through a collapse
+
+What the RTCP settings of each behaviour profile cost and buy when one direction of a 2.5 Mbit/s
+audio and video call collapses to 300 kbit/s. Tree: train 32 at 0c3554da (master 2afcb762 with
+breaker-1 and breaker-2) with `conf/rtcpbudget-5`, `-2`, `-4` and `conf/rtcpbudget-6` at
+de2415f5 (the feedback of a stream received as RED). Chains are the instrument's chain tokens:
+`paced` (the default, `Rfc`), `perf` (`Performance`: `T_rr_interval` 1 s), `share` (the default
+with `rtcp_share_follows_send_rate`, an opt-in no profile takes), `chrome` (`Chrome`). Reference
+cell `cap/<chain>/gap300/up/q300/rl0`, seeds 1 to 1000 (runs 45568103716, 45568110747); both
+directions capped, `cap/<chain>/gap300/both/q300/rl0`, seeds 1 to 200 (45568123064). Means; in
+brackets the difference from the default on the same seeds and its 95 % half-width. RTCP is what
+the endpoint behind the cap sends, with UDP/IP and SRTCP, seed 1 (run 45568130991). The
+default's own rows are those of the base tree to the digit (45563704606).
+
+| | default | Performance | default + share follows send rate | Chrome (before the RED repair fix) |
+|---|---|---|---|---|
+| RTCP, open call, kbit/s | 121.9 | 22.5 | 122.2 | 20.3 |
+| RTCP under the cap | 79.9 | 22.3 | 32.9 | 19.8 |
+| RTCP of the other endpoint during the cap | 72.6 | 12.8 | 72.1 | 20.6 |
+| oldest picture, s | 7.92 | 6.07 (-1.85 +-0.05) | 6.21 (-1.70 +-0.06) | 5.82 (-2.09 +-0.11) |
+| freeze, s | 7.60 | 5.77 (-1.84 +-0.05) | 5.90 (-1.70 +-0.06) | 6.18 (-1.43 +-0.12) |
+| audio gap over 1 s (runs); audio packets lost | 0; 27.2 | 0; 22.8 (-4.3 +-0.3) | 0; 24.4 (-2.8 +-0.4) | 0; 26.3 (-0.9 +-0.4) |
+| target under the cap, kbit/s | 237 | 296 (+58.5 +-0.5) | 283 (+46.0 +-0.6) | 208 (-29.3 +-3.1) |
+| time to detect, s | 0.590 | 0.589 | 0.590 | 0.592 |
+| time to recover, s; runs over 20 s | 17.93; 128 | 16.14 (-1.79 +-0.14); 0 | 16.14 (-1.79 +-0.16); 0 | 14.37 (-3.56 +-0.19); 18 |
+| target 15 to 25 s after, kbit/s | 1216 | 1394 (+178 +-14) | 1397 (+182 +-16) | 1397 (+181 +-17) |
+| flows ceased by the circuit breaker (`cb`) | 0 | 0 | 0 | 0 |
+| runs in which a peer left Connected | 128 | 178 | 159 | 188 |
+| both capped: oldest picture, s | 12.88 | 14.51 (+1.63 +-1.00) | 12.89 (+0.02 +-0.81) | 9.71 (-3.17 +-0.73) |
+| both capped: target under the cap | 157 | 94 (-63 +-21) | 159 (+2 +-20) | 131 (-26 +-18) |
+| both capped: audio gap over 1 s; packets lost | 2; 63.6 | 6; 69.0 (+5.4 +-7.7) | 2; 64.8 (+1.3 +-4.0) | 0; 76.1 (+12.6 +-4.8) |
+| both capped: time to recover; over 20 s | 16.61; 2 | 16.30 (-0.31 +-0.31); 1 | 16.56 (-0.05 +-0.28); 1 | 14.33 (-2.28 +-0.56); 0 |
+
+A hand-built chain (ParolNet's, `parolnet`) takes no profile: 52.6 kbit/s of RTCP open, 68.8
+under the cap.
+
+- **Default.** The picture is about 8 s old at its worst, one call in eight needs more than
+  20 s to get its rate back, and RTCP takes 80 of the 300 kbit/s that are left: RFC 3550's
+  equal share of a session whose other direction still carries 2.5 Mbit/s, with
+  `T_rr_interval` 0.
+- **Performance.** The picture is 1.85 s fresher, no call needs more than 20 s, RTCP is 22
+  kbit/s. It pays when both directions collapse: the picture 1.6 s older, the target under the
+  cap 63 kbit/s lower.
+- **Default with the share following the send rate.** Most of that gain when one direction
+  collapses (1.70 s, RTCP 33 kbit/s) with the open call and the both-capped call as the
+  default's. No specification asks for it; no profile takes it.
+- **Chrome.** Recovers soonest (3.6 s sooner) and does best when both directions collapse, at
+  a lower rate under the cap. Its video is sent in RED with ULPFEC: the send target of an open
+  call is the 2.5 Mbit/s maximum less the FEC (2.05 Mbit/s), and in this column a lost RED
+  packet that was retransmitted could not be used by the receiver (45 unusable frames a call
+  against 9, 20 key frames against 4): the column is to be measured again with that repaired
+  (`conf/rtcpbudget-6`).
+
+Two settings the default does not take, same cell, seeds 1 to 200: the drafts' feedback cadence
+(`perframe`, on in `StrictRfc`) picture -0.18 +-0.11 s, audio packets lost +5.4 +-1.4, and it
+breaks the pacer-less chain (CHANGELOG, rtcpbudget-2); report blocks from every SSRC (`every`,
+on in `StrictRfc`) picture +0.50 +-0.10 s, target under the cap -21 +-1 kbit/s, 24 of 200 calls
+over 20 s to recover against 25 on the same seeds (recovery +0.81 +-0.29 s).

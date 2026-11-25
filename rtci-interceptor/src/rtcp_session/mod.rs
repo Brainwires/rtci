@@ -483,9 +483,16 @@ impl RtcpSessionBuilder {
     /// remote SSRC and for each of the endpoint's other SSRCs that has sent (`true`, the
     /// `StrictRfc` behaviour profile). Default `false`: the blocks are carried once, by the
     /// first local media SSRC, and none about the co-located SSRCs, as libwebrtc does and as
-    /// RFC 8861 reporting groups allow where they are signalled; the larger compound packets
-    /// of the RFC form were measured to cost the video through a capacity cap
-    /// (`measure_report_blocks_from_every_ssrc_against_once` in the root crate's tests).
+    /// RFC 8861 reporting groups allow where they are signalled.
+    ///
+    /// The default is a measured choice. The RFC form's compound packets are about twice the
+    /// size, and RFC 3550 section 6.3's interval does not make up for all of it (the average
+    /// packet size it is computed from counts the small congestion control feedback packets
+    /// too): an endpoint of a 2.5 Mbit/s audio and video call sent 149 instead of 122 kbit/s
+    /// of RTCP, and 93 instead of 80 kbit/s on a link that had collapsed to 300 kbit/s. In
+    /// the capacity instrument (`tests/capacity_instrument.rs`, chain `every` against `paced`,
+    /// the same seeds) the picture through the collapse was 0.5 s older, the send target
+    /// under the cap 24 kbit/s lower and three times as many calls took over 20 s to recover.
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self
