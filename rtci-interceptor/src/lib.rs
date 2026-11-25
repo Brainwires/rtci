@@ -432,7 +432,9 @@ pub use twcc::sender::{
     TwccSenderBuilder, TwccSenderInterceptor,
 };
 pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
-pub use ulpfec::sender::{ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS};
+pub use ulpfec::sender::{
+    ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS, ULPFEC_MAX_HELD_FEC_PACKETS,
+};
 pub use ulpfec::{
     FEC_HEADER_LENGTH as ULPFEC_HEADER_LENGTH, FecSessionPacket,
     LONG_MASK_BITS as ULPFEC_LONG_MASK_BITS, MAX_LEVELS as ULPFEC_MAX_LEVELS,

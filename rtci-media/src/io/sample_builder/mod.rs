@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod sample_builder_empty_packet_test;
+#[cfg(test)]
 mod sample_builder_frame_start_test;
 #[cfg(test)]
 mod sample_builder_gap_wait_test;
@@ -54,6 +56,14 @@ fn older_than(sequence_number: u16, reference: u16) -> bool {
 /// - at once when a complete key frame is buffered behind it
 ///   ([`Self::with_key_frame_release`], on by default; [`Depacketizer::is_key_frame_start`]):
 ///   nothing before a key frame is needed to decode it or what follows it.
+///
+/// A packet without a payload is present and is not media: it is no gap, it is left out of the
+/// sample it lies in, it starts no sample (the sample before it lasts until the next packet
+/// with a payload), and between samples it is counted in [`Sample::prev_padding_packets`]. The
+/// padding libwebrtc sends is such a packet, and so is what `rtci` delivers for a sequence
+/// number of a video stream that a FEC packet took (ULPFEC in RED packets of its own, the form
+/// browsers send): give the builder every packet of the stream, empty ones included, or each
+/// of those sequence numbers is a missing packet to it.
 pub struct SampleBuilder<T: Depacketizer> {
     /// how many packets to wait until we get a valid Sample
     max_late: u16,
@@ -663,9 +673,12 @@ impl<T: Depacketizer> SampleBuilder<T> {
         let sample_timestamp = self.fetch_timestamp(&self.active).unwrap_or(0);
         let mut after_timestamp = sample_timestamp;
 
-        // scan for any packet after the current and use that time stamp as the diff point
+        // scan for any packet after the current and use that time stamp as the diff point.
+        // A packet without a payload is not media and starts no sample: it is passed over.
         for i in consume.tail..self.active.tail {
-            if let Some(ref packet) = self.buffer[i as usize] {
+            if let Some(ref packet) = self.buffer[i as usize]
+                && !packet.payload.is_empty()
+            {
                 after_timestamp = packet.header.timestamp;
                 break;
             }
@@ -678,14 +691,13 @@ impl<T: Depacketizer> SampleBuilder<T> {
             .map(|p| &p.payload)
             .ok_or(BuildError::GapInSegment)?;
         if !self.depacketizer.is_partition_head(head_payload) {
-            // libWebRTC will sometimes send several empty padding packets to smooth out send
-            // rate. These packets don't carry any media payloads.
-            let is_padding = consume.range(&self.buffer).all(|p| {
-                p.map(|p| {
-                    self.last_sample_timestamp == Some(p.header.timestamp) && p.payload.is_empty()
-                })
-                .unwrap_or(false)
-            });
+            // Packets without a payload carry no media: the padding libwebrtc sends to smooth
+            // its send rate, and a sequence number of the stream that a FEC packet took
+            // (ULPFEC in RED, RFC 5109 section 14.2 as browsers send it), which the engine
+            // delivers emptied. Whatever their timestamp, they are not lost media.
+            let is_padding = consume
+                .range(&self.buffer)
+                .all(|p| p.is_some_and(|p| p.payload.is_empty()));
 
             self.dropped_packets = self.dropped_packets.saturating_add(consume.count());
             if is_padding {
@@ -698,6 +710,23 @@ impl<T: Depacketizer> SampleBuilder<T> {
             self.active.head = consume.tail;
             self.consumed_to(consume.tail);
             return Err(BuildError::InvalidPartition(consume));
+        }
+
+        // The sample lasts until the next one starts, and a packet without a payload starts
+        // none: the sample waits for media behind such packets as it waits behind its own
+        // last packet (unless it has to be released right now).
+        if !purging_buffers {
+            let mut next = consume.tail;
+            loop {
+                if next == self.filled.tail {
+                    return Err(BuildError::PendingTimestampPacket);
+                }
+                match &self.buffer[next as usize] {
+                    None => return Err(BuildError::PendingTimestampPacket),
+                    Some(packet) if packet.payload.is_empty() => next = next.wrapping_add(1),
+                    Some(_) => break,
+                }
+            }
         }
 
         // the head set of packets is now fully consumed
@@ -727,6 +756,13 @@ impl<T: Depacketizer> SampleBuilder<T> {
                     .as_ref()
                     .map(|p| &p.payload)
                     .ok_or(BuildError::GapInSegment)?;
+                // A packet without a payload inside the sample (a sequence number a FEC
+                // packet took between two packets of a frame) is present and carries none of
+                // the sample.
+                if payload.is_empty() {
+                    i = i.wrapping_add(1);
+                    continue;
+                }
 
                 let p = self
                     .depacketizer
@@ -766,7 +802,10 @@ impl<T: Depacketizer> SampleBuilder<T> {
     /// returns the next valid sample (or None if no sample is compiled).
     pub fn pop(&mut self, now: Instant) -> Option<Sample> {
         self.give_up_gaps(now);
-        let _ = self.build_sample(now, false);
+        // Packets that belong to no sample (padding, a sequence number a FEC packet took, what
+        // is left of a frame whose start was lost) are dropped on the way to the next sample:
+        // they are nothing to wait behind.
+        while let Err(BuildError::InvalidPartition(_)) = self.build_sample(now, false) {}
 
         if self.prepared.empty() {
             return None;
