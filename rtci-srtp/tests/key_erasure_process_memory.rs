@@ -13,6 +13,11 @@
 //! stack for the next thread). The test thread's own stack, where the test computed the keys
 //! it looks for, and the scan buffer are not searched.
 //!
+//! Stack frames are searched too (the worker's whole stack): the AES counter-mode schedules
+//! the AES-CM profiles build per packet on the stack (RustCrypto `aes`, both providers) were not
+//! found there, before or after the drop, in the runs recorded in the audit; nothing erases
+//! them, so that is an observation, not a guarantee.
+//!
 //! macOS and Windows would need `mach_vm_read`/`mach_vm_region` or
 //! `VirtualQuery`/`ReadProcessMemory` on the process itself; the providers' code is the same
 //! there, so the statement is "measured on Linux".
@@ -99,30 +104,38 @@ fn search(needles: &[Needle], test_stack: usize, worker_stack: usize) -> Vec<Vec
         } else {
             region.name.clone()
         };
-        let mut at = region.start;
-        while at < region.end {
-            let len = (region.end - at).min(CHUNK + MAX_NEEDLE);
-            let chunk_range = at..at + len;
-            let overlaps_buffer =
-                chunk_range.start < buffer_range.end && buffer_range.start < chunk_range.end;
-            if !overlaps_buffer && mem.read_exact_at(&mut buffer[..len], at as u64).is_ok() {
-                let chunk = &buffer[..len];
-                for i in 0..len.saturating_sub(1) {
-                    if !prefixes[u16::from_le_bytes([chunk[i], chunk[i + 1]]) as usize] {
-                        continue;
-                    }
-                    for (n, needle) in needles.iter().enumerate() {
-                        if needle.prefix() == u16::from_le_bytes([chunk[i], chunk[i + 1]])
-                            && i + needle.len() <= len
-                            && needle.found_in(&chunk[i..i + needle.len()])
-                            && !found[n].contains(&label)
-                        {
-                            found[n].push(label.clone());
+        // The scan buffer is a hole in its region: the parts on either side are searched.
+        let mut segments = vec![(region.start, region.end)];
+        if region.start < buffer_range.end && buffer_range.start < region.end {
+            segments = vec![
+                (region.start, buffer_range.start.max(region.start)),
+                (buffer_range.end.min(region.end), region.end),
+            ];
+        }
+        for (start, end) in segments {
+            let mut at = start;
+            while at < end {
+                let len = (end - at).min(CHUNK + MAX_NEEDLE);
+                if mem.read_exact_at(&mut buffer[..len], at as u64).is_ok() {
+                    let chunk = &buffer[..len];
+                    for i in 0..len.saturating_sub(1) {
+                        let prefix = u16::from_le_bytes([chunk[i], chunk[i + 1]]);
+                        if !prefixes[prefix as usize] {
+                            continue;
+                        }
+                        for (n, needle) in needles.iter().enumerate() {
+                            if needle.prefix() == prefix
+                                && i + needle.len() <= len
+                                && needle.found_in(&chunk[i..i + needle.len()])
+                                && !found[n].contains(&label)
+                            {
+                                found[n].push(label.clone());
+                            }
                         }
                     }
                 }
+                at += CHUNK;
             }
-            at += CHUNK;
         }
     }
     buffer.fill(0);
@@ -270,33 +283,36 @@ fn left_behind(sessions: &[Session], keep: impl Fn(&Session, &Needle) -> bool) -
         .collect()
 }
 
-/// AWS-LC erases its AES-GCM contexts: the session keys of the AEAD profiles, their round keys
-/// and the GHASH key, found in the process while the contexts are alive, are nowhere in it once
-/// they are dropped (`EVP_AEAD_CTX_cleanup`, and `OPENSSL_free` cleanses what it frees).
+/// With the AWS-LC provider no key outlives its contexts anywhere in the process: every key
+/// the contexts derive, in every form (the session keys, the AES round keys and GHASH key in
+/// AWS-LC's `EVP_AEAD_CTX`, which `EVP_AEAD_CTX_cleanup` and `OPENSSL_free` cleanse, the
+/// HMAC-SHA1 states in its `HMAC_CTX`, cleansed by `HMAC_CTX_cleanup`), found while the contexts
+/// are alive, is gone once they are dropped, for every profile.
 #[cfg(feature = "crypto-aws-lc-rs")]
 #[test]
-fn aws_lc_erases_its_aes_gcm_contexts_from_process_memory() {
+fn with_aws_lc_no_key_outlives_its_contexts_in_process_memory() {
     let sessions: Vec<Session> = every_session()
         .into_iter()
         .filter(|s| s.provider == "aws-lc-rs")
         .collect();
     check_the_search_sees_live_keys(&sessions);
-    let left = left_behind(&sessions, |s, needle| {
-        s.profile.is_aead() && needle.key != "master key"
-    });
+    let left = left_behind(&sessions, |_, _| true);
     assert!(left.is_empty(), "found after the drop: {left:#?}");
 }
 
-/// KNOWN LIMIT (RFC 7714 section 13.1): not every key is gone from the process once the
-/// contexts are dropped, with either provider. What is left, and where, is the table this
-/// prints: the AES counter-mode schedules the AES-CM profiles build per packet on the stack
-/// (RustCrypto `aes` without its `zeroize` feature, both providers), the master key's schedule
-/// built the same way by the key derivation, and with the ring provider its AES-GCM key and the
-/// HMAC-SHA1 states in freed heap blocks. Fails when run.
+/// KNOWN LIMIT (RFC 7714 section 13.1) with the ring provider: its AES-GCM key
+/// (`ring::aead::LessSafeKey`: the session key and every AES round key) and the HMAC-SHA1
+/// state of the AES-CM and NULL profiles' authentication keys (RustCrypto `hmac`) are still in
+/// the process once the contexts are dropped, in freed heap memory, until the allocator reuses
+/// it. Fails when run.
+#[cfg(feature = "crypto-ring")]
 #[test]
-#[ignore = "KNOWN LIMIT: AES schedules on the stack (both providers) and ring's AES-GCM and HMAC-SHA1 state in freed memory outlive the contexts; fails when run (-- --ignored known_limit_)"]
-fn known_limit_no_key_outlives_its_contexts_in_process_memory() {
-    let sessions = every_session();
+#[ignore = "KNOWN LIMIT: with ring, AES-GCM round keys and HMAC-SHA1 states outlive the contexts in freed memory; fails when run (-- --ignored known_limit_)"]
+fn known_limit_with_ring_no_key_outlives_its_contexts_in_process_memory() {
+    let sessions: Vec<Session> = every_session()
+        .into_iter()
+        .filter(|s| s.provider == "ring")
+        .collect();
     check_the_search_sees_live_keys(&sessions);
     let left = left_behind(&sessions, |_, _| true);
     assert!(left.is_empty(), "found after the drop: {left:#?}");
