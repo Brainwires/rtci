@@ -54,9 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their absence is not guaranteed (docs/key-erasure.md); RFC7714-13.1-3 stays `partial`
   (class E) for that. No wire or handshake behaviour changes. Additions to the API:
   `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
-  for `SecretVec` and `SessionKeys`. DTLS record setup costs one 32 KiB stack overwrite per
-  key schedule built; per-packet costs did not move beyond noise (`rtci-srtp` and `rtci-dtls`
-  benchmarks against master in one run).
+  for `SecretVec` and `SessionKeys`. Cost (`rtci-srtp` and `rtci-dtls` benchmarks against master
+  6939a3e8, same runner, run 45647996020): per packet within noise (SRTP AES-CM RTP +0.3 % /
+  +0.4 %, RTCP -2.3 % / -3.9 %; SRTP AES-128-GCM +0.6 % / +1.4 %, the wrapper's extra
+  indirection; DTLS AES-128-GCM -0.9 % / -1.6 %, AES-256-CBC +0.3 % / 0.0 %); setup: SRTP
+  AES-CM context +6.9 % (1.28 µs), SRTP AES-128-GCM context unchanged once the trial scrub was
+  removed (the wrapper adds one allocation), DTLS record setup 15.0 µs (AES-128-GCM) and
+  24.4 µs (AES-256-CBC) against about 0.4 µs on master: almost all of it is the 32 KiB stack
+  overwrite (`crypto::scrub_stack`, a volatile byte-by-byte write) run after each key schedule
+  is built.
 
 ### Breaking changes
 
