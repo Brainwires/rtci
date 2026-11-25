@@ -809,6 +809,12 @@ pub(crate) enum RTCEventInternal {
     /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`).
     SrtpRekeyingDue,
 
+    /// An SRTP master key has no more packets left than it protects, at the rate it is used,
+    /// in the time a re-keying needs (measured on the handshake that keyed it), and that is
+    /// more than the sixteenth of its lifetime the lifetime warning leaves: the re-keying
+    /// starts as at that warning (`SettingEngineBuilder::with_srtp_key_lifetime`).
+    SrtpRekeyingMarginReached,
+
     /// The application bytes that left a stream's send queue, reported once as the stream is
     /// closed or lost (just before its `SCTPStreamFailed` / `SCTPStreamClosed`, or before
     /// signalling closes the association), so the channel's final `bufferedAmount` stays
