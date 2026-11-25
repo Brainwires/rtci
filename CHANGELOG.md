@@ -1604,6 +1604,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
+- **SRTP key erasure (RFC 7714 section 13.1) with the ring provider, and the DTLS 1.2 exporter**
+  (`conf/must-2-feedback-reliance-and-key-erasure`): with the ring provider, the AES-GCM
+  profiles' session keys and all their AES round keys (`ring::aead::LessSafeKey`) and, for the
+  AES-CM and NULL profiles, the two HMAC-SHA1 hash states of each authentication key (RustCrypto
+  `hmac`) are freed without being overwritten, so they persist in freed heap memory until the
+  allocator reuses it; with DTLS 1.2, `prf_p_hash` leaves the exported SRTP keying material in
+  freed heap memory the same way. Tests: `known_limit_*` in `rtci-srtp/tests/key_schedule_erasure.rs`,
+  `rtci-srtp/tests/key_erasure_process_memory.rs` and `tests/dtls_srtp_keying_material_erasure.rs`
+  (fail when run). The AWS-LC provider and DTLS 1.3 leave nothing.
+
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
   the entry below): the default chain now meets the picture and freeze requirements in the
@@ -1676,6 +1686,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **RFC 4585 section 4.2: receivers do not rely on a reaction to feedback; RFC 7714 section 13.1:
+  every key form searched for after the drop** (`conf/must-2-feedback-reliance-and-key-erasure`;
+  tests and audit only, no engine behaviour change). `tests/feedback_not_negotiated_rtc2rtc.rs`
+  and `sample_builder_gap_wait_test.rs::a_receiver_does_not_wait_for_feedback_the_sender_never_answers`:
+  with no feedback negotiated and a sender that reacts to nothing, the receiving engine sends no
+  feedback, audio is delivered in the `handle_read` that brought it, video after a loss is
+  delivered within `DEFAULT_MAX_GAP_WAIT` and decoding resumes at the sender's next scheduled key
+  frame (RFC4585-4.2-7 `tested`, out of class E). `rtci-srtp/tests/key_schedule_erasure.rs`
+  (freed Rust heap, every platform), `rtci-srtp/tests/key_erasure_process_memory.rs` (the whole
+  process, Linux) and `tests/dtls_srtp_keying_material_erasure.rs`: every key an SRTP context
+  derives, its AES round keys, GHASH key and HMAC-SHA1 states, computed by the tests themselves,
+  are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`, class C
+  instead of E: see Known limits).
 
 - **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
   (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
