@@ -119,7 +119,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   17.85 -> 18.30, 90th percentile 19.10 -> 20.40, per seed +0.26 +-0.24 s; target 15-25 s after
   the cap 1215 -> 1195 kbit/s; 200 calls), and calls over 20 s go from 3 to 31 of 200 since the
   climb clusters at 17-21 s; with both directions capped the 15-25 s target is 44-66 kbit/s
-  lower (not significant) against 89-90 kbit/s more target while the cap holds. Fixed with it: a probe cluster asked for while
+  lower (not significant) against 89-90 kbit/s more target while the cap holds. Paced chains
+  move too on the tree this landed on (train 34 round 7, 58ba8a93, against round 6's rows; the
+  branch's own base showed the paced cells identical): the rules decline repairs there as well,
+  a declined repair leaving an unusable frame that a key frame answers. Both directions capped
+  (`cap/paced/gap300/both/q300/rl0`, 111 of 200 calls move): unusable frames 1.07 -> 2.75 a
+  call, key frames 4.9 -> 5.1, target 15-25 s after the cap 1375 -> 1369 kbit/s, against
+  retransmissions 4.8 -> 2.7 and an oldest picture 2.49 -> 2.44 s; 5 % loss on the reverse path
+  (`cap/paced/gap300/up/q300/rl5`, 107 of 200): target 15-25 s after 1367 -> 1354 kbit/s,
+  seconds to 1000 kbit/s 16.44 -> 16.53, a peer outside `connected` at the end 1 -> 2 of 200;
+  the 4 s outage (`outage/paced/gap300/up/q300/rl0`, 66 of 200: the calls whose picture the
+  restart of probing at a path change had made older) gains: oldest picture 4.76 -> 4.32 s,
+  retransmissions 133 -> 36, first picture after the new pair 0.71 -> 0.26 s. The reference
+  cells (1000 calls each) and the 100 ms queue are identical; the 1000 ms queue moves in 2 of
+  200 (instrument runs 45695138492 / 45695149408 against 45686735759 / 45686744374; the
+  merge-point rule holds, nothing flagged). Fixed with it: a probe cluster asked for while
   the responder's buffer is empty (after a give-up or the pacer's flush, before the next
   packet is written) is still padded, under the header of the newest packet the buffer held;
   before, no padding left, and a chain without a pacer stopped probing.
