@@ -11,8 +11,8 @@
 
 use rtci_interceptor::{
     Attribute, AttributedPacket, CircuitBreakerNotice, CircuitBreakerReason, Interceptor,
-    PacerBuilder, PacerDiscard, PacerPause, PacerQueueOverflow as QueueOverflow, Packet, Registry,
-    RetransmissionsLeft, Slot, StreamInfo, TaggedPacket,
+    MinimumTarget, PacerBuilder, PacerDiscard, PacerPause, PacerQueueOverflow as QueueOverflow,
+    Packet, Registry, RetransmissionsLeft, Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
@@ -1236,6 +1236,100 @@ fn a_source_above_the_target_is_paused_before_anything_waits_the_bound() {
         harness.released().len(),
         "every packet left"
     );
+}
+
+/// The target the pacer announces itself, when a pause begins and when it ends, is the
+/// congestion controller's said again: it carries the minimum that rode with the controller's
+/// last target ([`MinimumTarget`]). The NACK responder takes the minimum from every target it
+/// reads and never tells the original media less; without it on the pacer's announcement the
+/// end of a pause read as "no minimum", and a target at the controller's floor went
+/// application-ward lowered by the whole retransmission reserve (`availableOutgoingBitrate`
+/// 46 850 bit/s against a floor of 100 000). A controller's target without a minimum takes
+/// the minimum off the next announcement.
+#[test]
+fn the_target_the_pacer_announces_carries_the_controllers_minimum() {
+    let minimum_of = |reads: &[TaggedPacket]| -> Vec<(f64, Option<f64>)> {
+        reads
+            .iter()
+            .filter_map(|read| {
+                read.message
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        Attribute::TargetBitrateChanged { bits_per_second } => Some((
+                            *bits_per_second,
+                            read.message
+                                .custom::<MinimumTarget>()
+                                .map(|minimum| minimum.bits_per_second),
+                        )),
+                        _ => None,
+                    })
+            })
+            .collect()
+    };
+    let target = |harness: &mut Harness, at: Duration, minimum: Option<f64>| {
+        let mut msg = TaggedPacket {
+            now: harness.epoch + at,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![])),
+        };
+        msg.message.add(Attribute::TargetBitrateChanged {
+            bits_per_second: BITRATE,
+        });
+        if let Some(bits_per_second) = minimum {
+            msg.message.add(Attribute::Custom(Arc::new(MinimumTarget {
+                bits_per_second,
+            })));
+        }
+        harness.chain.handle_read(msg).expect("handle_read");
+    };
+    // Writes at twice the target from `from` until the pause begins, then waits for its end:
+    // the targets the pacer announced, and when the last came.
+    let pause_and_resume = |harness: &mut Harness, from: Duration, first: u16| {
+        let mut announced = Vec::new();
+        let mut paused_at = None;
+        for n in 0..2000u16 {
+            let at = from + ms(5 * u64::from(n));
+            harness.advance_to(at);
+            harness.send(at, first + n);
+            harness.drain();
+            announced.extend(minimum_of(&harness.reads()));
+            if !announced.is_empty() {
+                paused_at = Some(at);
+                break;
+            }
+        }
+        let mut at = paused_at.expect("the source was paused");
+        let end = at + ms(5_000);
+        while at < end && announced.len() < 2 {
+            at += ms(5);
+            harness.advance_to(at);
+            announced.extend(minimum_of(&harness.reads()));
+        }
+        (announced, at)
+    };
+
+    let mut harness = Harness::new();
+    target(&mut harness, ms(0), Some(100_000.0));
+    assert_eq!(
+        vec![(BITRATE, Some(100_000.0))],
+        minimum_of(&harness.reads()),
+        "the controller's target passes as it came"
+    );
+    let (announced, resumed_at) = pause_and_resume(&mut harness, ms(0), 0);
+    assert_eq!(
+        vec![(0.0, Some(100_000.0)), (BITRATE, Some(100_000.0))],
+        announced,
+        "the pause and its end, each with the controller's minimum"
+    );
+
+    // The controller's next target has no minimum: neither has what the pacer says after it.
+    let again = resumed_at + ms(1_000);
+    harness.advance_to(again);
+    target(&mut harness, again, None);
+    assert_eq!(vec![(BITRATE, None)], minimum_of(&harness.reads()));
+    let (announced, _) = pause_and_resume(&mut harness, again, 3000);
+    assert_eq!(vec![(0.0, None), (BITRATE, None)], announced);
 }
 
 /// A retransmission of a packet whose retransmission already waits in the queue is not queued

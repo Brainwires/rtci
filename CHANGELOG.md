@@ -1053,6 +1053,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`,
   `pacing.rs::a_flow_the_circuit_breaker_ceased_is_not_charged_to_the_budget`.
 
+- **interceptors (pacer): the target the pacer announces carries the congestion controller's
+  minimum** (`conf/breaker-2-pacer-ceased-flow`). When a pause of the source begins or ends
+  the pacer says the controller's target again application-ward
+  (`Attribute::TargetBitrateChanged`), and it did so without the controller's minimum
+  (`MinimumTarget`). The NACK responder takes the minimum from each target it reads and never
+  tells the original media less; from the end of a pause until the controller's next target
+  it read "no minimum" and lowered the target by its whole retransmission reserve, floor or
+  not, and the peer connection reported that as `availableOutgoingBitrate` (46 850 bit/s with
+  the estimator at its 100 000 bit/s floor: a 53 150 bit/s reserve announced before the
+  target reached the floor; hosted run 45501349668, the reason `conf/collapse-4` was not
+  green). The pacer now keeps the minimum that rode with the controller's last target and
+  attaches it to its own announcements.
+  `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
+
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
   one run in fifty (28 of 1500 runs on master, alike under every crypto feature set; in CI it

@@ -327,6 +327,10 @@ pub struct PacerInterceptor {
     /// raised: the target to come back to (the congestion controller's, or one set through
     /// [`Self::pacer_mut`]).
     raised_from: Option<f64>,
+    /// The congestion controller's minimum that rode with its last target
+    /// ([`MinimumTarget`](crate::MinimumTarget)), to ride with the target this pacer announces
+    /// itself when a pause begins or ends.
+    minimum: Option<crate::MinimumTarget>,
     queue: VecDeque<TaggedPacket>,
     /// Padding-only packets, released only while `queue` is empty (see the order of service).
     padding: VecDeque<TaggedPacket>,
@@ -385,6 +389,7 @@ impl PacerInterceptor {
             write_queue: VecDeque::new(),
             released: VecDeque::new(),
             raised_from: None,
+            minimum: None,
             pacer,
             queue: VecDeque::new(),
             padding: VecDeque::new(),
@@ -736,6 +741,13 @@ impl PacerInterceptor {
                 AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
                     bits_per_second: self.target(),
                 });
+            // The controller's target said again, so with the minimum the controller gave it:
+            // a reader that takes the minimum from each target (the NACK responder, which never
+            // tells the original media less than it) would otherwise read "no minimum" here,
+            // and lower the target by its whole retransmission reserve when a pause ends.
+            if let Some(minimum) = self.minimum {
+                message.add(Attribute::Custom(Arc::new(minimum)));
+            }
             self.tag_target(&mut message);
             self.read_queue.push_back(TaggedPacket {
                 now,
@@ -968,6 +980,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                 Some(target) => *target = *bits_per_second,
                 None => self.pacer.set_target_bitrate(*bits_per_second),
             }
+            self.minimum = msg.message.custom::<crate::MinimumTarget>().copied();
             // A new rate changes how long the queue takes to leave: the pause may begin or
             // end, and the application reads it on this packet.
             self.update_pause(msg.now);
