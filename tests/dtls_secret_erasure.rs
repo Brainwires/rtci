@@ -596,15 +596,24 @@ fn derive_needles(provider: &dyn RTCCryptoProvider, extra: &[Needle]) -> Derived
     for needle in extra {
         derived.push(needle.what.clone(), &needle.inverted);
     }
-    for record in &records {
+    for (index, record) in records.iter().enumerate() {
         let what = match record.kind {
-            Kind::Hmac(_) => "an HMAC key",
-            Kind::Aead(_) => "an AEAD key",
-            Kind::Cbc => "a CBC key",
-            Kind::Stream => "a stream cipher key",
-            Kind::HeaderMask => "a record-number key",
-            Kind::Block => "a block cipher key",
-            Kind::SharedSecret => "an (EC)DHE shared secret",
+            Kind::Hmac(_) => {
+                let first = record
+                    .inputs
+                    .first()
+                    .map(|input| {
+                        String::from_utf8_lossy(&invert(&input[..input.len().min(12)])).into_owned()
+                    })
+                    .unwrap_or_default();
+                format!("an HMAC key (record {index}, first input {first:?})")
+            }
+            Kind::Aead(_) => "an AEAD key".to_owned(),
+            Kind::Cbc => "a CBC key".to_owned(),
+            Kind::Stream => "a stream cipher key".to_owned(),
+            Kind::HeaderMask => "a record-number key".to_owned(),
+            Kind::Block => "a block cipher key".to_owned(),
+            Kind::SharedSecret => "an (EC)DHE shared secret".to_owned(),
         };
         derived.push(what, &record.inverted);
         let Kind::Hmac(algorithm) = record.kind else {
@@ -1534,6 +1543,24 @@ mod process_memory_tests {
                     if mem.read_exact_at(&mut buffer[..len], at as u64).is_ok() {
                         for needle in prefixes.found_in(needles, &buffer[..len]) {
                             found.push(format!("{} in {name}", needle.describe()));
+                            if std::env::var_os("RTCI_ERASURE_DUMP").is_some() {
+                                let i = (0..len)
+                                    .find(|i| needle.at(&buffer[..len], *i))
+                                    .unwrap_or(0);
+                                let from = i.saturating_sub(96);
+                                let hex: String = buffer[from..(i + 64).min(len)]
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect();
+                                println!(
+                                    "PDUMP {} at {:#x} in {name} {:#x}-{:#x} (from -{}): {hex}",
+                                    needle.describe(),
+                                    at + i,
+                                    region.start,
+                                    region.end,
+                                    i - from
+                                );
+                            }
                         }
                     }
                     at += CHUNK;
