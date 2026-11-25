@@ -3,7 +3,8 @@
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::probe::{
-    PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate, probe_estimate,
+    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate,
+    probe_estimate,
 };
 use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
@@ -126,6 +127,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
+    after_drop_probe: AfterDropProbe,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -137,6 +139,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
+            after_drop_probe: AfterDropProbe::default(),
         }
     }
 
@@ -198,6 +201,14 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// With bandwidth probing on, what is probed for after a large drop of the target:
+    /// [`AfterDropProbe`] (the engine's repeated probe by default, libwebrtc's single one, or
+    /// none).
+    pub fn with_after_drop_probe(mut self, after_drop_probe: AfterDropProbe) -> Self {
+        self.after_drop_probe = after_drop_probe;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         self.build_with_handle().0
@@ -211,9 +222,10 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             stats: self.estimator.stats(),
             ..Shared::default()
         }));
-        let probing = self
-            .bandwidth_probing
-            .then(|| ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY));
+        let probing = self.bandwidth_probing.then(|| {
+            ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY)
+                .with_after_drop_probe(self.after_drop_probe)
+        });
         (
             CongestionControlInterceptor {
                 tmmbn_owed: false,
@@ -999,6 +1011,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         let target = self.estimator.target_bitrate();
         let sending = self.sending_rate(now);
         let media_flowing = !self.sent.is_empty();
+        let usage = self.estimator.usage();
         let max = [self.applied_max.flatten(), self.estimator.max_bitrate()]
             .into_iter()
             .flatten()
@@ -1008,6 +1021,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             return;
         };
         probing.set_max_bitrate(max);
+        probing.set_usage(usage);
         if let Some(request) = probing.poll(now, target, sending, media_flowing) {
             self.probe_asked = Some((request.cluster, now));
             self.read_queue.push_back(request.into_packet(now));

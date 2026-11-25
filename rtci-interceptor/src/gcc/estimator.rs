@@ -135,6 +135,9 @@ pub struct Gcc {
     loss_at_queue_limit_is_overuse: bool,
     queue_limit: QueueLimitDetector,
     threshold_time_base: ThresholdTimeBase,
+    /// How the last feedback read the path (the detector's signal, over-use too for a loss
+    /// out of a queue at its limit).
+    usage: Usage,
 }
 
 impl Default for Gcc {
@@ -197,6 +200,7 @@ impl Gcc {
             loss_at_queue_limit_is_overuse: true,
             queue_limit: QueueLimitDetector::new(),
             threshold_time_base: ThresholdTimeBase::default(),
+            usage: Usage::Normal,
         }
     }
 
@@ -389,6 +393,7 @@ impl BandwidthEstimator for Gcc {
         if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
             usage = Usage::Over;
         }
+        self.usage = usage;
         let delay_target = self.delay_control.update(now, usage, received);
 
         // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
@@ -456,6 +461,10 @@ impl BandwidthEstimator for Gcc {
 
     fn max_bitrate(&self) -> Option<f64> {
         Some(self.max)
+    }
+
+    fn usage(&self) -> Usage {
+        self.usage
     }
 
     fn set_external_bounds(&mut self, min: Option<f64>, max: Option<f64>) {
@@ -528,6 +537,7 @@ impl BandwidthEstimator for Gcc {
         self.newest_arrival = None;
         self.queue_limit = QueueLimitDetector::new();
         self.delay_control.reset_convergence();
+        self.usage = Usage::Normal;
         self.feedback_deadline = None;
         self.target = self.initial.clamp(self.min, self.max);
         self.delay_control.set_target(self.target);
