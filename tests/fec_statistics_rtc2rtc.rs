@@ -157,8 +157,15 @@ struct World {
     now: Instant,
     /// The RTP packets of the first peer the network lost.
     lost: u64,
-    /// RTP packets of the first peer that crossed the wire, lost ones included.
+    /// RTP packets of the first peer that crossed the wire, lost ones included: each
+    /// sequence number once. The default interceptors negotiate NACK for video, and without an
+    /// RTX stream a repair is the packet again (RFC 4585 section 6.2.1), which this network
+    /// loses as it lost the first.
     sent_rtp: u64,
+    /// The sequence numbers counted in `sent_rtp`.
+    seen: std::collections::HashSet<u16>,
+    /// Packets sent again under a sequence number already seen.
+    sent_again: u64,
 }
 
 impl World {
@@ -185,9 +192,16 @@ impl World {
                     && let Some(header) = wire_rtp_header(&data)
                     && header.payload_type == RED_PT
                 {
-                    self.sent_rtp += 1;
+                    let first = self.seen.insert(header.sequence_number);
+                    if first {
+                        self.sent_rtp += 1;
+                    } else {
+                        self.sent_again += 1;
+                    }
                     if header.sequence_number % 5 == 2 {
-                        self.lost += 1;
+                        if first {
+                            self.lost += 1;
+                        }
                         continue;
                     }
                 }
@@ -252,6 +266,8 @@ impl World {
             now: Instant::now(),
             lost: 0,
             sent_rtp: 0,
+            seen: std::collections::HashSet::new(),
+            sent_again: 0,
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -356,10 +372,12 @@ fn fec_in_red_is_counted_by_both_ends_and_what_it_rebuilt_is_reported() -> Resul
     // One FEC packet per two media packets.
     assert_eq!(sent[0].fec_packets_sent, 30, "{sent:?}");
     assert!(sent[0].fec_bytes_sent > 30 * 200, "{sent:?}");
-    assert_eq!(
-        world.sent_rtp,
-        60 + 30,
-        "every media and FEC packet left once"
+    assert_eq!(world.sent_rtp, 60 + 30, "every media and FEC packet left");
+    // A lost packet asked for again is sent again, as it was (no RTX stream here): it
+    // reaches the wire, where it used to be refused by the SRTP sender.
+    assert!(
+        world.sent_again > 0,
+        "the repairs the receiver asked for left too"
     );
 
     let now = world.now;
