@@ -26,6 +26,7 @@
 //! | `settle` | from the capacity's return to the last instant the screen was more than 0.5 s old |
 //! | `audio_gap` | the longest time without an Opus packet arriving, from the drop on (audio that never comes back: the rest of the run) |
 //! | `audio_share`, `audio_back` | the share of the audio of the time from the drop on that arrived: the caller's at the callee, the callee's at the caller |
+//! | `audio_tail` | at the end of the run, how long since the last Opus packet arrived (audio silent to the end: the rest of the call) |
 //! | `audio_lost` | the caller's Opus packets of that time that did not arrive (20 ms each) |
 //! | `audio_delay` | the most an Opus packet was delayed beyond the call's best |
 //! | `cb`, `cb_audio` | flows (of either peer) the RTP circuit breaker (RFC 8083) had ceased at the end, and how many of them are audio: the engine drops what is written on a ceased flow |
@@ -247,6 +248,9 @@ struct Audio {
     share: f64,
     /// The longest time without an arrival.
     gap: Duration,
+    /// How long before `to` the last packet arrived: audio silent to the end is the whole
+    /// rest of the call.
+    tail: Duration,
     /// The most a packet was delayed beyond the least delayed packet of the call (a packet
     /// leaves every 20 ms, one sequence number each).
     delay: Duration,
@@ -280,6 +284,14 @@ fn audio(arrivals: &[(Duration, u16)], from: Duration, to: Duration) -> Audio {
             (arrived as f64 / sent as f64).min(1.0)
         },
         gap,
+        tail: to.saturating_sub(
+            times
+                .iter()
+                .rev()
+                .find(|at| **at <= to)
+                .copied()
+                .unwrap_or_default(),
+        ),
         delay: Duration::from_micros(delay.max(0) as u64),
     }
 }
@@ -317,7 +329,7 @@ fn paused(targets: &[(Duration, u32)], from: Duration, to: Duration) -> Duration
 // ---------------------------------------------------------------------------------------------
 
 /// The figures of a run, in the order they are printed (the module's table).
-const NAMES: [&str; 34] = [
+const NAMES: [&str; 35] = [
     "max_age",
     "age_p50",
     "age_p95",
@@ -351,6 +363,7 @@ const NAMES: [&str; 34] = [
     "pc_failed",
     "audio_share",
     "audio_back",
+    "audio_tail",
     "end",
 ];
 
@@ -619,6 +632,7 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
         f64::from(u8::from(caller.failed || callee.failed)),
         sound.share,
         audio(&caller.audio_arrivals, dropped_at, end).share,
+        seconds(sound.tail),
         seconds(end),
     ];
     Ok(Figures(figures))
@@ -1112,6 +1126,47 @@ fn known_limit_freeze_in_the_default_chain() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN)
 }
 
+/// THE AUDIO GUARD: in the default chain's two reference cells of the pull-request ensemble
+/// (100 runs), no run ends with a flow left ceased by the circuit breaker (`cb`) or with the
+/// audio silent (`audio_tail` over 1 s). Not a share: one such run fails it (with 100 runs, a
+/// tree in which 3 % of calls end so fails with probability 0.95). A KNOWN LIMIT today: the
+/// breaker ceases the audio at the drop in 8.9 % of runs and nothing restarts it. Until then
+/// the tripwires `cb > 0` and `audio_tail > 1` hold that share on every pull request (they
+/// fail above 15 of 60 runs in the reference cell). The change that makes the breaker restart
+/// a flow turns this into the guard of every pull request: rename it
+/// `ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end`, give it the
+/// attribute of the other `ensemble_` tests, change its row in docs/test-exclusions.md
+/// likewise, and re-record the baseline.
+#[test]
+#[ignore = "KNOWN LIMIT: a flow left ceased by the circuit breaker or audio silent to the end in 8.9 % of the default chain's runs on master (required: in none)"]
+fn known_limit_no_flow_is_left_ceased_and_audio_is_alive_at_the_end() -> Result<()> {
+    let mut dead = Vec::new();
+    for cell in [DEFAULT_CHAIN, DEFAULT_CHAIN_NO_BOUND] {
+        for row in pr_rows(cell)? {
+            let ceased = row.value("cb").is_none_or(|flows| flows > 0.0);
+            let silent = row.value("audio_tail").is_none_or(|tail| tail > 1.0);
+            if ceased || silent {
+                dead.push(format!(
+                    "{cell} seed {}: {} flow(s) ceased, {} of them audio; audio silent for the \
+                     last {} s",
+                    row.seed,
+                    row.value("cb").unwrap_or(f64::NAN),
+                    row.value("cb_audio").unwrap_or(f64::NAN),
+                    row.value("audio_tail").unwrap_or(f64::NAN),
+                ));
+            }
+        }
+    }
+    assert!(
+        dead.is_empty(),
+        "REQUIREMENT not met: no call ends with a flow left ceased or its audio dead; {} \
+         run(s) did:\n{}",
+        dead.len(),
+        dead.join("\n")
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "KNOWN LIMIT: more than 1 s without audio in 89 of 1000 runs on master 63e1b8b8, 8.9 % (required: at most 5 %): the circuit breaker ceases the audio and it never returns"]
 fn known_limit_audio_in_the_default_chain() -> Result<()> {
@@ -1421,10 +1476,13 @@ fn audio_is_measured_by_what_arrived() {
         .collect();
     let sound = audio(&dead, ms(9_000), ms(20_000));
     assert_eq!((500, ms(20_000 - 9_990)), (sound.lost, sound.gap));
+    assert_eq!(ms(20_000 - 9_990), sound.tail);
+    assert_eq!(ms(10), audio(&arrivals, ms(9_000), ms(20_000)).tail);
     assert!((sound.share - 50.0 / 550.0).abs() < 1e-9, "{sound:?}");
     // Nothing at all.
     let none = audio(&[], ms(1_000), ms(6_000));
     assert_eq!((250, 0.0, ms(5_000)), (none.lost, none.share, none.gap));
+    assert_eq!(ms(6_000), none.tail);
 }
 
 #[test]

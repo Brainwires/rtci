@@ -4,13 +4,16 @@ use super::{flow_ssrcs, stream_supports_twcc};
 use crate::Interceptor;
 use crate::cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use crate::stream_info::StreamInfo;
-use crate::{Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
+use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
 use sansio::Protocol;
+use shared::TransportContext;
 use shared::error::Error;
 use shared::marshal::Marshal;
-use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Builder for the [`TwccSenderInterceptor`].
 ///
@@ -88,6 +91,55 @@ impl LocalStream {
     }
 }
 
+/// One retransmission the feedback reported on: the SSRC it left on, the sequence number of the
+/// packet it repairs (the original sequence number on an RTX stream, RFC 4588 section 4; the
+/// key the pacer's [`RetransmissionsLeft`](crate::RetransmissionsLeft) uses), and when that
+/// retransmission was made. A 16-bit sequence number names a different packet every cycle;
+/// the instant lets the reader tell a report on a retransmission of the packet it holds now
+/// from one on an earlier packet of the same number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedRetransmission {
+    /// The SSRC the retransmission left on.
+    pub ssrc: u32,
+    /// The sequence number of the packet it repairs.
+    pub sequence_number: u16,
+    /// When the retransmission was made (the instant on the packet as it was numbered).
+    pub sent: Instant,
+}
+
+/// What transport-wide feedback reported on the retransmissions this interceptor numbered,
+/// since the last notice. The TWCC sender sends it application-ward on an empty RTCP carrier
+/// when a feedback packet reports on one; the NACK responder does not repair again a packet
+/// whose repair arrived, and answers at once a request for one whose repair was lost. Probe
+/// padding (no payload) is not reported. Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+///
+/// A transport-wide number is a retransmission's only until it is handed out again
+/// (65536 packets later), until the numbering is half a cycle past it, and for
+/// [`RETRANSMISSION_REPORT_HORIZON`] at most: feedback that names the number after that is
+/// about another packet, or too late to mean anything, and is not reported.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RetransmissionsReported {
+    /// The receiver got the retransmission.
+    pub received: Vec<ReportedRetransmission>,
+    /// The receiver reported it missing.
+    pub lost: Vec<ReportedRetransmission>,
+}
+
+/// The most retransmissions whose transport-wide number is remembered for the feedback.
+const REMEMBERED_RETRANSMISSIONS: usize = REMEMBERED;
+
+/// How long after a retransmission was made the feedback on it still counts: longer than the
+/// pacer's queue time bound (2 s by default) and a round trip of a path in real-time use
+/// together. The clock is the engine's (the instant on every packet and timeout that passes),
+/// not the arrival of a later report: a number whose feedback was lost is forgotten all the
+/// same.
+pub const RETRANSMISSION_REPORT_HORIZON: Duration = Duration::from_secs(4);
+
+/// Half the cycle of transport-wide numbers: a number this far behind the newest can no
+/// longer be told from one ahead of it.
+const HALF_CYCLE: u16 = 1 << 15;
+
 /// Numbers every departing RTP packet so the remote can report on it
 /// ([`draft-holmer-rmcat-transport-wide-cc-extensions-01`]).
 ///
@@ -112,6 +164,13 @@ pub struct TwccSenderInterceptor {
     /// Outbound packets ready for the next interceptor: what passed through, plus
     /// anything this one generated.
     write_queue: VecDeque<TaggedPacket>,
+    /// The retransmission (RTX) SSRCs of the numbered streams.
+    repair_flows: HashSet<u32>,
+    /// Transport-wide number → the retransmission it was given to, as
+    /// [`RetransmissionsReported`] names it; the numbers with the instant each was
+    /// remembered, oldest first, in `retransmission_order`.
+    retransmissions: HashMap<u16, ReportedRetransmission>,
+    retransmission_order: VecDeque<(u16, Instant)>,
 }
 
 impl TwccSenderInterceptor {
@@ -122,6 +181,38 @@ impl TwccSenderInterceptor {
             ..Default::default()
         }
     }
+
+    /// Forgets the retransmissions whose feedback can no longer be told from another
+    /// packet's: older than [`RETRANSMISSION_REPORT_HORIZON`] at `now`, or numbered half a
+    /// cycle of transport-wide numbers ago.
+    fn forget_old_retransmissions(&mut self, now: Instant) {
+        while let Some(&(number, sent)) = self.retransmission_order.front() {
+            let old = now.saturating_duration_since(sent) >= RETRANSMISSION_REPORT_HORIZON
+                || self.next_sequence_number.wrapping_sub(number) >= HALF_CYCLE
+                || self.retransmission_order.len() > REMEMBERED_RETRANSMISSIONS;
+            if !old {
+                break;
+            }
+            self.retransmission_order.pop_front();
+            // The number may have been given to a later retransmission since (one sent as it
+            // was keeps its original's number): that one has its own place in the order.
+            if self
+                .retransmissions
+                .get(&number)
+                .is_some_and(|entry| entry.sent == sent)
+            {
+                self.retransmissions.remove(&number);
+            }
+        }
+    }
+
+    /// How many retransmissions are remembered for the feedback.
+    #[cfg(test)]
+    fn remembered_retransmissions(&self) -> usize {
+        self.retransmissions
+            .len()
+            .max(self.retransmission_order.len())
+    }
 }
 
 impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
@@ -131,8 +222,49 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
     type Error = Error;
     type Time = Instant;
 
+    /// Transport-wide feedback passes on to the congestion controller's readers as it is; what
+    /// it reports on the retransmissions numbered here follows it on a carrier of its own
+    /// ([`RetransmissionsReported`]).
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        let now = msg.now;
+        self.forget_old_retransmissions(now);
+        let mut report = RetransmissionsReported::default();
+        if !self.retransmissions.is_empty()
+            && let Packet::Rtcp(ref packets) = msg.message.packet
+        {
+            for feedback in packets
+                .iter()
+                .filter_map(|packet| packet.as_any().downcast_ref::<TransportLayerCc>())
+            {
+                for acknowledgement in crate::rtpfb::convert::convert_twcc(feedback) {
+                    if let Some(key) = self
+                        .retransmissions
+                        .remove(&acknowledgement.sequence_number)
+                    {
+                        if acknowledgement.arrived {
+                            report.received.push(key);
+                        } else {
+                            report.lost.push(key);
+                        }
+                    }
+                }
+            }
+        }
         self.read_queue.push_back(msg);
+        if !report.received.is_empty() || !report.lost.is_empty() {
+            let retransmissions = &self.retransmissions;
+            self.retransmission_order.retain(|(number, sent)| {
+                retransmissions
+                    .get(number)
+                    .is_some_and(|entry| entry.sent == *sent)
+            });
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                    .with(Attribute::Custom(Arc::new(report))),
+            });
+        }
         Ok(())
     }
 
@@ -141,6 +273,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
     }
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let retransmission = msg.message.has(&Attribute::Retransmission);
+        let now = msg.now;
+        self.forget_old_retransmissions(now);
         if let Packet::Rtp(ref mut rtp_packet) = msg.message.packet
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
@@ -157,9 +292,37 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
                     let seq = self.next_sequence_number;
                     self.next_sequence_number = self.next_sequence_number.wrapping_add(1);
                     stream.remember(rtp_packet.header.sequence_number, seq);
+                    // The number is this packet's now: feedback that names it is no longer
+                    // about the retransmission that had it a cycle ago.
+                    self.retransmissions.remove(&seq);
                     seq
                 }
             };
+
+            // A retransmission with media in it (probe padding has none): remembered under its
+            // number, for the feedback to report on.
+            if retransmission {
+                let ssrc = rtp_packet.header.ssrc;
+                let repaired = if self.repair_flows.contains(&ssrc) {
+                    rtp_packet
+                        .payload
+                        .get(..2)
+                        .map(|osn| u16::from_be_bytes([osn[0], osn[1]]))
+                } else {
+                    Some(rtp_packet.header.sequence_number)
+                };
+                if let Some(sequence_number) = repaired {
+                    self.retransmissions.insert(
+                        seq,
+                        ReportedRetransmission {
+                            ssrc,
+                            sequence_number,
+                            sent: now,
+                        },
+                    );
+                    self.retransmission_order.push_back((seq, now));
+                }
+            }
 
             let tcc_ext = rtp::extension::transport_cc_extension::TransportCcExtension {
                 transport_sequence: seq,
@@ -173,6 +336,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
                     .set_extension_upgrading(stream.hdr_ext_id, ext_data.freeze());
             }
         }
+        // Over the count, or the numbering now half a cycle on: the oldest go.
+        self.forget_old_retransmissions(now);
         self.write_queue.push_back(msg);
         Ok(())
     }
@@ -181,7 +346,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
         self.write_queue.pop_front()
     }
 
-    fn handle_timeout(&mut self, _now: Instant) -> Result<(), Self::Error> {
+    fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+        self.forget_old_retransmissions(now);
         Ok(())
     }
 
@@ -213,12 +379,16 @@ impl Interceptor for TwccSenderInterceptor {
             for ssrc in flow_ssrcs(info) {
                 self.streams.insert(ssrc, LocalStream::new(hdr_ext_id));
             }
+            self.repair_flows.extend(info.ssrc_rtx);
         }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         for ssrc in flow_ssrcs(info) {
             self.streams.remove(&ssrc);
+        }
+        if let Some(ssrc_rtx) = info.ssrc_rtx {
+            self.repair_flows.remove(&ssrc_rtx);
         }
     }
 
@@ -236,7 +406,7 @@ mod tests {
     use sansio::Protocol;
     use shared::TransportContext;
     use shared::marshal::Unmarshal;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     const TWCC_URI: &str =
         "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
@@ -361,6 +531,146 @@ mod tests {
         }
         assert_eq!(tags.first(), Some(&0));
         assert_eq!(tags.last(), Some(&(REMEMBERED as u16 + 9)));
+    }
+
+    fn retransmission(sequence_number: u16, ssrc: u32, now: Instant) -> TaggedPacket {
+        let mut tagged = packet(sequence_number, ssrc);
+        tagged.now = now;
+        tagged.message.add(Attribute::Retransmission);
+        tagged
+    }
+
+    /// Transport-wide feedback: `number` arrived.
+    fn arrived(number: u16, now: Instant) -> TaggedPacket {
+        use rtcp::transport_feedbacks::transport_layer_cc::{
+            PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc,
+        };
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerCc {
+                sender_ssrc: 9,
+                media_ssrc: 1,
+                base_sequence_number: number,
+                packet_status_count: 1,
+                reference_time: 1,
+                fb_pkt_count: 0,
+                packet_chunks: vec![PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                    type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                    packet_status_symbol: SymbolTypeTcc::PacketReceivedSmallDelta,
+                    run_length: 1,
+                })],
+                recv_deltas: vec![RecvDelta {
+                    type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                    delta: 1000,
+                }],
+            })])),
+        }
+    }
+
+    /// The reports on retransmissions `sender` passes on for `feedback`.
+    fn reports(
+        sender: &mut TwccSenderInterceptor,
+        feedback: TaggedPacket,
+    ) -> Vec<RetransmissionsReported> {
+        sender.handle_read(feedback).unwrap();
+        let mut reports = Vec::new();
+        while let Some(read) = sender.poll_read() {
+            if let Some(report) = read.message.custom::<RetransmissionsReported>() {
+                reports.push(report.clone());
+            }
+        }
+        reports
+    }
+
+    /// However many retransmissions pass with no feedback on any (it is lost, or the receiver
+    /// sends none), the numbers remembered for the feedback stay within their count, and the
+    /// engine's clock alone ends them: four seconds after the last, at a timeout, none is left.
+    #[test]
+    fn the_retransmissions_remembered_are_bounded_and_end_by_the_clock_alone() {
+        let mut sender = TwccSenderBuilder::new().build();
+        sender.bind_local_stream(&stream_info(1, 5));
+        let base = Instant::now();
+        let mut most = 0;
+        for sent in 0..5_000u16 {
+            let now = base + Duration::from_micros(100) * u32::from(sent);
+            sender.handle_write(retransmission(sent, 1, now)).unwrap();
+            while sender.poll_write().is_some() {}
+            most = most.max(sender.remembered_retransmissions());
+        }
+        assert_eq!(REMEMBERED_RETRANSMISSIONS, most);
+        let last = base + Duration::from_micros(100) * 4_999;
+        sender
+            .handle_timeout(last + RETRANSMISSION_REPORT_HORIZON - Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            10,
+            sender.remembered_retransmissions(),
+            "the last millisecond's"
+        );
+        sender
+            .handle_timeout(last + RETRANSMISSION_REPORT_HORIZON)
+            .unwrap();
+        assert_eq!(0, sender.remembered_retransmissions());
+    }
+
+    /// A transport-wide number handed out again is the new packet's, whatever else is still
+    /// remembered. A retransmission sent as it was (no RTX) keeps its original's number,
+    /// which can be most of a cycle old while a younger retransmission is remembered ahead of
+    /// it: when the numbering comes round to that number, feedback on it is about the packet
+    /// that has it now.
+    #[test]
+    fn a_number_kept_by_a_retransmission_is_the_next_packets_once_handed_out_again() {
+        let mut sender = TwccSenderBuilder::new().build();
+        sender.bind_local_stream(&stream_info(1, 5));
+        sender.bind_local_stream(&stream_info(2, 5));
+        let now = Instant::now();
+        let write = |sender: &mut TwccSenderInterceptor, tagged: TaggedPacket| -> u16 {
+            sender.handle_write(tagged).unwrap();
+            let mut number = None;
+            while let Some(out) = sender.poll_write() {
+                number = tag_of(&out, 5);
+            }
+            number.expect("numbered")
+        };
+        let mut original = packet(7, 1);
+        original.now = now;
+        assert_eq!(0, write(&mut sender, original));
+        let mut other = 0u16;
+        let mut on_the_other_stream = |sender: &mut TwccSenderInterceptor, count: u32| -> u16 {
+            let mut number = 0;
+            for _ in 0..count {
+                let mut tagged = packet(other, 2);
+                tagged.now = now;
+                other = other.wrapping_add(1);
+                number = write(sender, tagged);
+            }
+            number
+        };
+        assert_eq!(40_000, on_the_other_stream(&mut sender, 40_000));
+        // A retransmission with a number of its own, then packet 7 again as it was.
+        assert_eq!(40_001, write(&mut sender, retransmission(500, 1, now)));
+        assert_eq!(0, write(&mut sender, retransmission(7, 1, now)));
+        // The numbering comes round: the 25 535th packet from here has number 0.
+        assert_eq!(0, on_the_other_stream(&mut sender, 25_535));
+        let reported = reports(&mut sender, arrived(0, now));
+        assert!(
+            reported.is_empty(),
+            "feedback on the packet now numbered 0 was reported as the old retransmission's: \
+             {reported:?}"
+        );
+        // The younger retransmission is still reported on.
+        assert_eq!(
+            vec![RetransmissionsReported {
+                received: vec![ReportedRetransmission {
+                    ssrc: 1,
+                    sequence_number: 500,
+                    sent: now,
+                }],
+                lost: vec![],
+            }],
+            reports(&mut sender, arrived(40_001, now))
+        );
     }
 
     /// The counter is transport-wide: one sequence across every stream, not one per SSRC.
