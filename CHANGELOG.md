@@ -1652,6 +1652,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file keeps its other checks: retransmissions, the rate under the cap, the recovery after the
   cap, the pacer's pause and discards, the path change, the cameras, the open link.
 
+- **browser cell: a browser's video in RED is repaired by NACK and RTX** (rtcpbudget-6):
+  `loss recovery with the browser's video in RED: NACK and RTX repair it under netem`
+  (`scripts/test-env/interop/scenarios.spec.mjs`; the peer with `?video_red_ulpfec=1`,
+  Chromium and WebKit, which keep VP8 in RED with NACK on): the wire carries the `red`
+  payload type, the browser counts the engine's NACKs and its own retransmissions. Without
+  the feedback of the carried format on a stream bound under `red` the engine sent none.
+
 ### Test environment and documentation
 
 - **video** (`conf/vp-9r-vp8-partitions`): the golden-stream tests of `rtci-video`

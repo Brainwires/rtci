@@ -177,6 +177,63 @@ test("ULPFEC in RED from the browser: its FEC rebuilds video netem drops, withou
   expect(inbound?.w3c?.fecPacketsDiscarded, JSON.stringify(inbound)).toBe(f.fecPacketsDiscarded);
 });
 
+// A browser's video that arrives in RED is repaired by NACK and RTX like any other: the engine
+// learns the stream from a RED packet and binds it under the `red` format, which has no
+// `a=rtcp-fb` lines of its own, so the feedback negotiated for the format it carries (NACK
+// here) is what applies to it. Before that was so the engine sent no NACK about such a stream
+// and what netem dropped stayed missing (FEC apart). libwebrtc keeps VP8 in RED with NACK on
+// (hybrid NACK / FEC), which the wire's payload types confirm.
+test("loss recovery with the browser's video in RED: NACK and RTX repair it under netem", async ({ page }) => {
+  await skipUnlessRedUlpfec(page);
+  await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, { media: "reflect", video: "VP8" });
+    window.S = s;
+    const tr = s.pc.addTransceiver(Interop.canvasStream(640, 480).getVideoTracks()[0], { direction: "sendrecv" });
+    const keep = ["video/vp8", "video/rtx", "video/red", "video/ulpfec"];
+    tr.setCodecPreferences(
+      RTCRtpReceiver.getCapabilities("video").codecs.filter((c) => keep.includes(c.mimeType.toLowerCase())),
+    );
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    await s.negotiate();
+    await s.connected();
+  }, `${WS}/?video_red_ulpfec=1`);
+  const answer = await page.evaluate(() => S.pc.remoteDescription.sdp);
+  const dropsBefore = netemDrops();
+  const restore = impair(rustUdpPort(answer));
+  let r;
+  try {
+    r = await page.evaluate(async () => {
+      await Interop.sleep(12000);
+      let out = null;
+      (await S.pc.getStats()).forEach((x) => {
+        if (x.type === "outbound-rtp" && x.kind === "video") out = x;
+      });
+      return { out, report: await S.report() };
+    });
+  } finally {
+    restore();
+  }
+  const drops = netemDrops() - dropsBefore;
+  await page.evaluate(() => S.close());
+  expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
+  const red = (answer.match(/^a=rtpmap:(\d+) red\/90000\r?$/m) || [])[1];
+  expect(red, "the Rust answer keeps red").toBeTruthy();
+  expect(answer, "the Rust answer keeps NACK").toMatch(/^a=rtcp-fb:\d+ nack\r?$/m);
+  // The browser's video crossed the wire under the red payload type.
+  const wire = r.report.wireRtp?.received ?? {};
+  expect(Object.keys(wire), `no RED on the wire: ${JSON.stringify(r.report.wireRtp)}`).toContain(red);
+  const out = r.out && {
+    packetsSent: r.out.packetsSent,
+    nackCount: r.out.nackCount,
+    pliCount: r.out.pliCount,
+    retransmittedPacketsSent: r.out.retransmittedPacketsSent,
+  };
+  console.log(`[loss recovery in RED] browser outbound-rtp: ${JSON.stringify(out)}; netem drops: ${drops}; wire received: ${JSON.stringify(wire)}; fec: ${JSON.stringify(r.report.fec?.received)}`);
+  // The engine asked for what was lost and the browser retransmitted it.
+  expect(r.out?.nackCount ?? 0, `the engine sent no NACK about a RED stream: ${JSON.stringify(out)}`).toBeGreaterThan(0);
+  expect(r.out?.retransmittedPacketsSent ?? 0, JSON.stringify(out)).toBeGreaterThan(0);
+});
+
 // Rust sends VP8 in RED with ULPFEC (libwebrtc's form: a RED packet of its own per FEC packet,
 // in the media stream's sequence space) and the browser rebuilds what was lost. The loss is
 // Rust's own (`?drop_video_every=10`): every tenth media packet is discarded at the wire after
