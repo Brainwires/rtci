@@ -170,6 +170,7 @@ pub struct GccInterceptorBuilder<P> {
     min_bitrate_bps: u32,
     max_bitrate_bps: u32,
     received_rate_bound: ReceivedRateBound,
+    bandwidth_probing: bool,
     shared: Arc<Mutex<GccShared>>,
     _phantom: PhantomData<P>,
 }
@@ -193,6 +194,7 @@ impl<P> GccInterceptorBuilder<P> {
             min_bitrate_bps: 30_000,
             max_bitrate_bps: 2_500_000,
             received_rate_bound: ReceivedRateBound::default(),
+            bandwidth_probing: true,
             shared,
             _phantom: PhantomData,
         };
@@ -220,6 +222,35 @@ impl<P> GccInterceptorBuilder<P> {
         self
     }
 
+    /// Whether the path is probed for capacity above the estimate (the default), as the peer
+    /// connection's default interceptors do
+    /// ([`CongestionControlBuilder::with_bandwidth_probing`]): two clusters at the start, at
+    /// three and six times the 300 kbit/s the estimate starts at, and further ones while the
+    /// path carries what is asked, so an open path is found within a second instead of by
+    /// the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5 (300 kbit/s to 2.5 Mbit/s: 28 s).
+    /// RFC 8836 section 2, requirement 4: the algorithm "SHOULD adapt as quickly as possible
+    /// to initial network conditions at the start of a flow".
+    ///
+    /// This chain has no pacer. A cluster is the NACK responder's padding on the RTX stream,
+    /// sent as one burst and measured by how far apart the path delivers it
+    /// ([`burst_estimate`](crate::burst_estimate)); it needs a
+    /// [`NackResponderInterceptor`](crate::NackResponderInterceptor) in the chain and RTX
+    /// negotiated for the stream. Without them no cluster can be sent: the first one asked
+    /// for goes unanswered and no more are asked, and the estimate climbs as the draft has it.
+    /// Clusters are asked for at the start and while the application sends less than the
+    /// target allows; not after a large drop of the target, which a chain with the pacer
+    /// probes too (a burst of padding into the queue that caused the drop costs more than it
+    /// finds: [`ProbeController::set_unpaced`](crate::ProbeController::set_unpaced)).
+    ///
+    /// A call that finds the path's rate at the start meets a later capacity collapse from
+    /// that rate, and loses more at it than one that was still climbing (about twice the
+    /// retransmissions when 2.5 Mbit/s drop to 300 kbit/s; the changelog has the measured
+    /// figures). `with_bandwidth_probing(false)` is the start without probes.
+    pub fn with_bandwidth_probing(mut self, bandwidth_probing: bool) -> Self {
+        self.bandwidth_probing = bandwidth_probing;
+        self
+    }
+
     /// Build the interceptor factory closure.
     pub fn build(self) -> impl FnOnce(P) -> GccInterceptor<P> {
         move |inner| {
@@ -230,7 +261,9 @@ impl<P> GccInterceptorBuilder<P> {
             // The estimate starts at 300 kbit/s, and starts over from there on a new path.
             let estimator = Gcc::new(DEFAULT_INITIAL_BITRATE, min, max)
                 .with_received_rate_bound(self.received_rate_bound);
-            let (control, handle) = CongestionControlBuilder::new(estimator).build_with_handle();
+            let (control, handle) = CongestionControlBuilder::new(estimator)
+                .with_bandwidth_probing(self.bandwidth_probing)
+                .build_with_handle();
             GccInterceptor {
                 inner,
                 control,
@@ -477,6 +510,18 @@ mod tests {
         (chain, handle)
     }
 
+    /// The next packet on the read leg that is not a probe request: the feedback. The
+    /// controller's requests come first (each on a carrier of its own: the builder probes by
+    /// default, and the first cluster is asked for with the first packets written).
+    fn next_feedback(chain: &mut impl crate::Interceptor) -> Option<TaggedPacket> {
+        while let Some(read) = chain.poll_read() {
+            if read.message.custom::<crate::ProbeRequest>().is_none() {
+                return Some(read);
+            }
+        }
+        None
+    }
+
     #[test]
     fn test_handle_returns_estimate_after_feedback() {
         let (mut chain, handle) = make_chain();
@@ -513,7 +558,7 @@ mod tests {
         );
 
         // The estimate rides out on the feedback packet, so a pacer in the chain follows it.
-        let feedback = chain.poll_read().expect("the feedback carries on");
+        let feedback = next_feedback(&mut chain).expect("the feedback carries on");
         let announced = match feedback
             .message
             .get(&crate::Attribute::TargetBitrateChanged {
@@ -569,7 +614,7 @@ mod tests {
         assert_eq!(Some(estimate), handle.estimate_bps());
         assert_eq!(Some(estimate - 100_000), handle.target_bitrate_bps());
 
-        let announced = chain.poll_read().and_then(|feedback| {
+        let announced = next_feedback(&mut chain).and_then(|feedback| {
             match feedback
                 .message
                 .get(&crate::Attribute::TargetBitrateChanged {
@@ -846,7 +891,7 @@ mod tests {
                 base + Duration::from_millis(200),
             ))
             .unwrap();
-        let feedback = chain.poll_read().expect("the feedback carries on");
+        let feedback = next_feedback(&mut chain).expect("the feedback carries on");
         assert_eq!(
             Some(&crate::MinimumTarget {
                 bits_per_second: 123_000.0
