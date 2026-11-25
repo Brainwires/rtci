@@ -1308,6 +1308,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its SSRC). With a peer that reports once (the default, libwebrtc) nothing changes. Tests
   `every_ssrc_of_the_receiver_reporting_counts_as_one_report`,
   `another_reporting_ssrc_is_followed_once_the_first_has_been_silent_for_the_rtcp_timeout`.
+- **interceptor / pacer** (pacing-3): the deadline the pacer names is an instant at which the
+  packet leaves, at every rate. Where a packet's wait is not a whole number of nanoseconds
+  (12 000 bits at 840 kbit/s) the budget, refilled to the named instant, could be a fraction
+  of a nanosecond's worth short: the packet stayed, and `poll_timeout` named the same instant
+  again, so a driver that follows the deadlines exactly span (the test worlds hid it by
+  pushing their clock on). The budget now covers a packet to within what the rate adds in
+  two nanoseconds. `pacer::tests::a_packet_is_releasable_at_the_instant_named_for_it`,
+  `pacer_deadline.rs::every_deadline_the_pacer_names_releases_a_packet_and_the_next_is_later`.
+  Known effect, measured with the capacity instrument (1000 seeds each way, a capacity drop
+  from 2.5 Mbit/s to 300 kbit/s behind a 300 ms drop-tail queue): with packets leaving at
+  the named instants, a STUN consent datagram (RFC 7675) meets the full link queue in the
+  overload after the drop in 30.6 % of calls instead of 25.2 %, and a peer reports
+  `disconnected` for a moment in 17.4 % instead of 12.8 % (behind a 1000 ms queue 21.2 %
+  instead of 14.0 % of 400). Each is the transient that one lost consent check gives (median
+  0.5 s, longest 1.2 s; no peer stayed disconnected, none failed), and the picture, audio and
+  recovery figures do not move. STUN does not pass the pacer; the drop is the link's.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
