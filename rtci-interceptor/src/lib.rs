@@ -234,6 +234,7 @@ pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
 pub(crate) mod fec_sent;
 pub(crate) mod fec_session;
+pub(crate) mod first_transmission;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
 pub(crate) mod intervalpli;

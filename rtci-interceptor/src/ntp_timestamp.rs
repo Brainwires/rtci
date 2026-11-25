@@ -103,6 +103,7 @@ impl NtpTimestampBuilder {
             interval: self.interval,
             wall_clock: self.wall_clock,
             streams: HashMap::new(),
+            first: Default::default(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
         }
@@ -128,6 +129,10 @@ pub struct NtpTimestampInterceptor {
     wall_clock: Option<SystemInstant>,
     /// By media SSRC.
     streams: HashMap<u32, Stamped>,
+    /// What each recent packet left with (the extension's value, or none): a packet that
+    /// passes again (a retransmission sent as it was, no RTX negotiated) leaves with the
+    /// same. See [`crate::first_transmission`].
+    first: crate::first_transmission::FirstTransmissions<Option<bytes::Bytes>>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -178,33 +183,50 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NtpTimestampInterceptor {
     }
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
-        // A retransmission keeps the header extensions of its first transmission.
+        // A retransmission keeps the header extensions of its first transmission: an RTX
+        // packet carries the original's (the NACK responder copies them, and this one was
+        // not among them yet), and a packet sent again as it was (no RTX negotiated) leaves
+        // with the timestamp its first transmission was given, or without one as that did.
+        // Anything else would make it a different packet under the SRTP index of the first
+        // transmission, which the SRTP sender refuses (RFC 3711 section 3.3.1).
         let retransmission = msg
             .message
             .attributes
             .iter()
             .any(|attribute| matches!(attribute, Attribute::Retransmission));
         if let Packet::Rtp(packet) = &mut msg.message.packet
-            && !retransmission
             && let Some(mut stream) = self.streams.get(&packet.header.ssrc).copied()
         {
-            if self.wanted(&mut stream, packet.header.timestamp, msg.now) {
-                let ntp = self
-                    .wall_clock
-                    .unwrap_or_else(|| SystemInstant::shared(msg.now))
-                    .ntp(msg.now);
-                let value = if stream.short {
-                    Ntp56Extension::new(ntp).marshal()
-                } else {
-                    Ntp64Extension { ntp_time: ntp }.marshal()
-                };
-                if let Ok(value) = value {
+            let (ssrc, sequence_number) = (packet.header.ssrc, packet.header.sequence_number);
+            if retransmission {
+                if let Some(Some(value)) = self.first.of(ssrc, sequence_number) {
                     let _ = packet
                         .header
-                        .set_extension_upgrading(stream.id, value.freeze());
+                        .set_extension_upgrading(stream.id, value.clone());
                 }
+            } else {
+                let mut written = None;
+                if self.wanted(&mut stream, packet.header.timestamp, msg.now) {
+                    let ntp = self
+                        .wall_clock
+                        .unwrap_or_else(|| SystemInstant::shared(msg.now))
+                        .ntp(msg.now);
+                    let value = if stream.short {
+                        Ntp56Extension::new(ntp).marshal()
+                    } else {
+                        Ntp64Extension { ntp_time: ntp }.marshal()
+                    };
+                    if let Ok(value) = value {
+                        let value = value.freeze();
+                        let _ = packet
+                            .header
+                            .set_extension_upgrading(stream.id, value.clone());
+                        written = Some(value);
+                    }
+                }
+                self.first.remember(ssrc, sequence_number, written);
+                self.streams.insert(ssrc, stream);
             }
-            self.streams.insert(packet.header.ssrc, stream);
         }
         self.write_queue.push_back(msg);
         Ok(())
@@ -252,6 +274,7 @@ impl Interceptor for NtpTimestampInterceptor {
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         self.streams.remove(&info.ssrc);
+        self.first.forget(info.ssrc);
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
