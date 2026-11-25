@@ -129,8 +129,9 @@ struct Finding {
 /// derive, whether it was found in a live block before the drop and in how many blocks freed
 /// during it.
 fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) -> Vec<Finding> {
-    let master_key = &MASTER_KEY[..profile.key_len()];
-    let master_salt = &MASTER_SALT[..if profile.is_aead() { 12 } else { 14 }];
+    let (key, salt) = key_material::per_profile(profile, &MASTER_KEY, &MASTER_SALT);
+    let master_key = &key[..profile.key_len()];
+    let master_salt = &salt[..if profile.is_aead() { 12 } else { 14 }];
     let needles = context_needles(profile, master_key, master_salt);
     assert!(needles.len() <= MAX_NEEDLES);
     for counter in &FREED {

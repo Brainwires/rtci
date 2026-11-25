@@ -494,6 +494,19 @@ pub fn check_local_primitives() {
     );
 }
 
+/// A master key and salt of their own for each profile (each byte of `key` and `salt` XORed
+/// with the profile's code point), so that what one session leaves behind is never taken for
+/// a key of the next: two profiles that differ only in their tag length derive the same keys
+/// from the same master key.
+pub fn per_profile(
+    profile: ProtectionProfile,
+    key: &[u8; 32],
+    salt: &[u8; 14],
+) -> ([u8; 32], [u8; 14]) {
+    let tag = profile as u16 as u8;
+    (key.map(|b| b ^ tag), salt.map(|b| b ^ tag))
+}
+
 /// An RTP packet (RFC 3550 section 5.1) with a short payload.
 pub fn rtp(sequence_number: u16) -> Vec<u8> {
     let mut packet = vec![0x80, 96];

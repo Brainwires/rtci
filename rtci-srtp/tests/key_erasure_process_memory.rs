@@ -140,8 +140,9 @@ struct Session {
 /// One session of `profile` with `provider` on a worker thread, searched for while its
 /// contexts are alive and after the worker has dropped them and exited.
 fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) -> Session {
-    let master_key = &MASTER_KEY[..profile.key_len()];
-    let master_salt = &MASTER_SALT[..if profile.is_aead() { 12 } else { 14 }];
+    let (key, salt) = key_material::per_profile(profile, &MASTER_KEY, &MASTER_SALT);
+    let master_key = &key[..profile.key_len()];
+    let master_salt = &salt[..if profile.is_aead() { 12 } else { 14 }];
     let needles = context_needles(profile, master_key, master_salt);
     let test_stack = &needles as *const _ as usize;
 
@@ -149,11 +150,18 @@ fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) ->
     let (go_tx, go_rx) = mpsc::channel::<()>();
     let worker_provider = provider.clone();
     let worker = std::thread::spawn(move || {
+        // The master key and salt as the engine holds them: in zeroizing buffers.
+        let (mut key, mut salt) = key_material::per_profile(profile, &MASTER_KEY, &MASTER_SALT);
+        let master_key = crypto::SecretVec::new(key[..profile.key_len()].to_vec());
+        let master_salt =
+            crypto::SecretVec::new(salt[..if profile.is_aead() { 12 } else { 14 }].to_vec());
+        key_material::wipe(&mut key);
+        key_material::wipe(&mut salt);
         let context = || {
             Box::new(
                 Context::new(
-                    &MASTER_KEY[..profile.key_len()],
-                    &MASTER_SALT[..if profile.is_aead() { 12 } else { 14 }],
+                    master_key.as_ref(),
+                    master_salt.as_ref(),
                     profile,
                     None,
                     None,
@@ -179,6 +187,8 @@ fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) ->
         go_rx.recv().expect("the test thread says when");
         drop(sender);
         drop(receiver);
+        drop(master_key);
+        drop(master_salt);
     });
     let worker_stack = ready_rx.recv().expect("the worker is ready");
     let before = search(&needles, test_stack, worker_stack);
