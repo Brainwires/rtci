@@ -546,11 +546,21 @@ fn build_pc(
     configure_receiver_reference_time(&mut media_engine);
     let registry = configure_key_frame_requests(registry);
     let (gcc, handle) = GccInterceptorBuilder::new();
+    // Without bandwidth probing (the builder probes by default). This file is about the
+    // receiving pipeline, and its calls are those of a sender that does not probe: most send
+    // at a fixed rate, and the one that follows the estimate
+    // (`a_capacity_drop_and_recovery_leaves_no_long_freeze`) meets its cap 10 s into the call
+    // while the estimate is still climbing at 8% a second, which is the call its one-second
+    // bound was set on. With the start-up clusters that call stands at 2.5 Mbit/s when the
+    // cap comes and its one seed renders nothing for 1.13 s: the price of a collapse from
+    // the path's rate, which `tests/capacity_instrument.rs` measures over ensembles (cells
+    // `cap/parolnet/..`) and the changelog states.
     let registry = configure_twcc(registry, &mut media_engine)?.with(
         Slot::CongestionControl,
         PassThroughInterceptor::new().with(
             gcc.with_min_bitrate(100_000)
                 .with_max_bitrate(2_500_000)
+                .with_bandwidth_probing(false)
                 .build(),
         ),
     );

@@ -135,19 +135,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later capacity collapse from a higher rate, as a call through the default interceptors
   always has. Measured with the capacity instrument (200 calls a cell, the path drops from
   2.5 Mbit/s to 300 kbit/s for 20 s; train 32 round 3 with `conf/instrument-4`, hosted runs
-  45568561644 / 45568566803 before, 45568576304 after), ParolNet's chain with the reference
+  45568561644 / 45568566803 before, 45568576304 after, and round 4 with the sender's flush,
+  45574610547 / 45574618542: the same figures to the digit), ParolNet's chain with the reference
   receiver (a gap given up after 300 ms, the default since the receiver's bounded wait): the
   three requirements are met before and after (a picture over 2 s old for more than 0.5 s,
   over 2 s without a new picture, over 1 s without audio: 0 of 200 calls each); the target
   under the cap 249 -> 229 kbit/s, retransmissions 67 -> 142 a call, audio packets lost 28 ->
   39, the oldest picture 1.09 -> 1.18 s; 1000 kbit/s is reached 17.5 s after the capacity
   returns (18.2 s before). With a receiver that waits without a bound in time the oldest
-  picture is 7.9 s where it was 3.6 s (the default chain's: 7.2 s): the repairs of a
+  picture is 7.9 s where it was 3.6 s: the repairs of a
   collapse from 2.5 Mbit/s take that much longer than from 1.4. Behind a short queue (100 ms
   at the capped rate) the repairs take about 12 s instead of 5.5 s and more than half of
   them are dropped at the queue again (263 retransmissions a call against 145), during
   which the encoder's target is at its floor: a known limit of a chain without a pacer at a
   collapse from full rate (nothing pauses or flushes; the NACK responder repairs in order).
+  With both directions capped, 25 of 200 calls of ParolNet's chain show a picture over 2 s
+  old for more than 0.5 s where 3 did (the same limit: the feedback path is capped too).
+  One seeded call of `rtci-video/tests/receive_rtc2rtc.rs` rendered nothing for 1.13 s at
+  such a collapse (bound 1 s): that file's sender keeps the start without probes.
   THE WAY BACK: `GccInterceptorBuilder::with_bandwidth_probing(false)` gives the old start
   (8% a second) and the old figures.
   A chain without a pacer probes at the start and while the application sends less than the
