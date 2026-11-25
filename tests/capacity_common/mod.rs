@@ -180,6 +180,10 @@ pub struct Setup {
     /// Per cent of the datagrams the callee sends (its media and all its feedback: the
     /// caller's reverse path) that are lost, drawn from the run's seed. Zero: none.
     pub reverse_loss: u32,
+    /// Whether the chain probes for bandwidth (`GccInterceptorBuilder::with_bandwidth_probing`
+    /// in ParolNet's chain, `DefaultInterceptorOptions::bandwidth_probing` in the default
+    /// ones); the chain's own default (on) when `None`.
+    pub bandwidth_probing: Option<bool>,
 }
 
 /// What a run may change that no call's quality should depend on: the length of the ICE
@@ -237,6 +241,7 @@ impl Setup {
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
+            bandwidth_probing: None,
         }
     }
 
@@ -249,6 +254,14 @@ impl Setup {
     /// The receivers give a gap up after `wait` and ask for a key frame.
     pub fn gap_wait(mut self, wait: Duration) -> Self {
         self.gap_wait = Some(wait);
+        self
+    }
+
+    /// The chain does not probe for bandwidth: the estimate climbs from its 300 kbit/s as the
+    /// delay-based controller raises it (8% a second, draft-ietf-rmcat-gcc-02 section 5.5),
+    /// which is how a call meets a cap at a chosen rate below the path's.
+    pub fn without_bandwidth_probing(mut self) -> Self {
+        self.bandwidth_probing = Some(false);
         self
     }
 
@@ -700,6 +713,9 @@ impl Peer {
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;
             }
+            if let Some(probing) = setup.bandwidth_probing {
+                options.bandwidth_probing = probing;
+            }
             let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),
                 &mut media_engine,
@@ -754,6 +770,10 @@ impl Peer {
         let (gcc, handle) = GccInterceptorBuilder::new();
         let gcc = match setup.received_rate_bound {
             Some(bound) => gcc.with_received_rate_bound(bound),
+            None => gcc,
+        };
+        let gcc = match setup.bandwidth_probing {
+            Some(probing) => gcc.with_bandwidth_probing(probing),
             None => gcc,
         };
         let registry = configure_twcc(registry, &mut media_engine)?.with(

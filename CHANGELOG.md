@@ -170,6 +170,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **`GccInterceptorBuilder` probes for bandwidth by default** (`with_bandwidth_probing(false)`
+  turns it off). The pull-style GCC interceptor (a chain without a pacer) never probed: its
+  estimate climbed from 300 kbit/s at 8% a second. It now sends the start-up clusters and the
+  others the default interceptors send (RFC 8836 section 2, requirement 4, SHOULD), as bursts
+  of padding on the RTX stream, when the chain has a NACK responder and RTX is negotiated;
+  without them nothing changes. Probing asks for nothing above the estimator's own maximum
+  (`BandwidthEstimator::max_bitrate`, new, default none).
+  WHAT CHANGES FOR A CALL: a chain without a pacer now reaches the path's rate at the start
+  (2.5 Mbit/s 0.5 s into the call, where it was at 1.4 Mbit/s after 20 s), and so meets a
+  later capacity collapse from a higher rate, as a call through the default interceptors
+  always has. Measured with the capacity instrument (200 calls a cell, the path drops from
+  2.5 Mbit/s to 300 kbit/s for 20 s; train 32 round 3 with `conf/instrument-4`, hosted runs
+  45568561644 / 45568566803 before, 45568576304 after, and round 4 with the sender's flush,
+  45574610547 / 45574618542: the same figures to the digit), ParolNet's chain with the reference
+  receiver (a gap given up after 300 ms, the default since the receiver's bounded wait): the
+  three requirements are met before and after (a picture over 2 s old for more than 0.5 s,
+  over 2 s without a new picture, over 1 s without audio: 0 of 200 calls each); the target
+  under the cap 249 -> 229 kbit/s, retransmissions 67 -> 142 a call, audio packets lost 28 ->
+  39, the oldest picture 1.09 -> 1.18 s; 1000 kbit/s is reached 17.5 s after the capacity
+  returns (18.2 s before). With a receiver that waits without a bound in time the oldest
+  picture is 7.9 s where it was 3.6 s: the repairs of a
+  collapse from 2.5 Mbit/s take that much longer than from 1.4. Behind a short queue (100 ms
+  at the capped rate) the repairs take about 12 s instead of 5.5 s and more than half of
+  them are dropped at the queue again (263 retransmissions a call against 145), during
+  which the encoder's target is at its floor: a known limit of a chain without a pacer at a
+  collapse from full rate (nothing pauses or flushes; the NACK responder repairs in order).
+  With both directions capped, 25 of 200 calls of ParolNet's chain show a picture over 2 s
+  old for more than 0.5 s where 3 did (the same limit: the feedback path is capped too).
+  One seeded call of `rtci-video/tests/receive_rtc2rtc.rs` rendered nothing for 1.13 s at
+  such a collapse (bound 1 s): that file's calls keep a sender without probes, and the same
+  call with the builder as it comes stands beside it as the ignored
+  `known_limit_a_capacity_drop_from_the_paths_rate_leaves_no_long_freeze`
+  (`docs/test-exclusions.md`), which fails until the limit is gone.
+  THE WAY BACK: `GccInterceptorBuilder::with_bandwidth_probing(false)` gives the old start
+  (8% a second) and the old figures.
+  A chain without a pacer probes at the start and while the application sends less than the
+  target allows, not after a large drop of the target (`ProbeController::set_unpaced`, set
+  by the congestion controller when it measures a cluster that left as one burst): a burst
+  is padding on top of the media into the queue that caused the drop, where a paced cluster
+  is mostly the media itself (measured, same instrument: with such bursts 7 of 200 calls
+  were over 2 s without a new picture against 3, and behind a 1000 ms queue the audio paused
+  for over a second in 72 of 200 calls against 21). A chain with the pacer probes after a
+  drop as before.
+
 - **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
   section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
   the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
@@ -1247,6 +1291,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet on.
 
 ### Fixed
+
+- **Bandwidth probing in a chain without a pacer never got a result** (in 0.1.0 too). A probe
+  cluster was measured on the packets the pacer marked as the cluster's; with the pacer taken
+  out of the default interceptors (or in any chain built without one) nothing marked a packet,
+  so the congestion controller asked for clusters, the NACK responder sent each one's padding
+  as a burst, and no result ever came: the start-up clusters among them, so an open 2.5 Mbit/s
+  path was reached at the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5 (about 1.4 Mbit/s
+  after 20 s from the 300 kbit/s start) instead of within a second (RFC 8836 section 2,
+  requirement 4). Now the responder's padding carries the cluster's mark (`ProbePacket`) when no
+  pacer took the request, and a cluster whose packets left in one instant is measured by how
+  far apart the path delivered it (`burst_estimate`: the narrowest link's rate, never above the
+  rate the cluster was asked for at). Where no cluster can be sent at all (no pacer and no RTX
+  stream to pad on) the controller stops asking after the first cluster no packet left for,
+  until another stream is bound or starts to send: a request that can have no result is not
+  repeated. The start is now 1 Mbit/s after 0.37 s and the 2.5 Mbit/s maximum after 0.47 s
+  in both chains without a pacer (`tests/capacity_cap_video_rtc2rtc.rs::
+  an_open_link_is_found_within_a_second_without_a_pacer`). A known limit of the burst
+  measurement: a path that delivers a burst as one aggregate shows no spread and is credited
+  with the rate asked for; the delay-based controller corrects it once the media follows
+  (`burst_estimate`). Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every

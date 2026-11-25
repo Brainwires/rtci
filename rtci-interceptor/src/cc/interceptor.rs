@@ -2,7 +2,9 @@
 
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
-use super::probe::{ProbeController, ProbePacket, probe_estimate};
+use super::probe::{
+    PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate, probe_estimate,
+};
 use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
 use crate::Interceptor;
@@ -223,6 +225,10 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 probing,
                 probe_packets: HashMap::new(),
                 probe_clusters: HashMap::new(),
+                probe_asked: None,
+                probe_marked: None,
+                probe_unanswered: false,
+                probe_senders: std::collections::HashSet::new(),
                 sent: VecDeque::new(),
                 last_target: None,
                 estimator: self.estimator,
@@ -408,6 +414,17 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     probe_packets: HashMap<(u32, u16), u32>,
     /// What is known of each cluster in flight.
     probe_clusters: HashMap<u32, ProbeCluster>,
+    /// The cluster last asked for, and when.
+    probe_asked: Option<(u32, Instant)>,
+    /// The newest cluster a packet left for that feedback will report.
+    probe_marked: Option<u32>,
+    /// Whether the last cluster asked for went unanswered: no packet left with its mark, so
+    /// nothing in this chain sends clusters as it is (no pacer, and no RTX stream for the
+    /// NACK responder to pad on). No cluster is asked for while this is so; it ends when
+    /// another stream is bound or starts to send.
+    probe_unanswered: bool,
+    /// The SSRCs that have sent since probing began.
+    probe_senders: std::collections::HashSet<u32>,
     /// Departures of the last second with their sizes, for the rate being sent.
     sent: VecDeque<(Instant, usize)>,
     circuit_breaker: Option<CircuitBreakerHandle>,
@@ -878,6 +895,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         self.history.forget_sent();
         self.probe_packets.clear();
         self.probe_clusters.clear();
+        self.probe_asked = None;
     }
 
     /// Bits per second sent over the last second.
@@ -923,7 +941,27 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             let Some(state) = self.probe_clusters.remove(&cluster) else {
                 continue;
             };
-            if let Some(estimate) = probe_estimate(&state.reports)
+            // A cluster whose packets all left in one instant was not paced (no pacer in
+            // the chain: the NACK responder's padding): it is measured by how the path
+            // spread it, up to the rate it was asked for at.
+            let burst = state
+                .reports
+                .first()
+                .is_some_and(|first| state.reports.iter().all(|r| r.departure == first.departure));
+            if !state.reports.is_empty()
+                && let Some(probing) = self.probing.as_mut()
+            {
+                probing.set_unpaced(burst);
+            }
+            let estimate = if burst {
+                self.probing
+                    .as_ref()
+                    .and_then(|probing| probing.asked_rate(cluster))
+                    .and_then(|asked| burst_estimate(&state.reports, asked))
+            } else {
+                probe_estimate(&state.reports)
+            };
+            if let Some(estimate) = estimate
                 && let Some(probing) = self.probing.as_mut()
                 && let Some(estimate) = probing.on_result(cluster, estimate)
             {
@@ -944,15 +982,34 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         if self.probing.is_none() {
             return;
         }
+        // A cluster that no packet left for by the time its result is given up: nothing in
+        // this chain sends clusters. Asking again would be asking for a result that cannot
+        // come.
+        if let Some((cluster, asked)) = self.probe_asked
+            && now.saturating_duration_since(asked) >= PROBE_RESULT_TIMEOUT
+        {
+            self.probe_asked = None;
+            if self.probe_marked != Some(cluster) {
+                self.probe_unanswered = true;
+            }
+        }
+        if self.probe_unanswered {
+            return;
+        }
         let target = self.estimator.target_bitrate();
         let sending = self.sending_rate(now);
         let media_flowing = !self.sent.is_empty();
-        let max = self.applied_max.flatten().unwrap_or(f64::INFINITY);
+        let max = [self.applied_max.flatten(), self.estimator.max_bitrate()]
+            .into_iter()
+            .flatten()
+            .reduce(f64::min)
+            .unwrap_or(f64::INFINITY);
         let Some(probing) = self.probing.as_mut() else {
             return;
         };
         probing.set_max_bitrate(max);
         if let Some(request) = probing.poll(now, target, sending, media_flowing) {
+            self.probe_asked = Some((request.cluster, now));
             self.read_queue.push_back(request.into_packet(now));
         }
     }
@@ -1106,6 +1163,11 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                 }
 
                 if self.probing.is_some() {
+                    // Another stream has started to send: a cluster may be answered now
+                    // where none was (video with its RTX stream after audio alone).
+                    if self.probe_senders.insert(rtp_packet.header.ssrc) {
+                        self.probe_unanswered = false;
+                    }
                     self.sent.push_back((msg.now, size));
                     if self.sent.len() > 4096 {
                         self.sent.pop_front();
@@ -1130,6 +1192,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                             .or_insert_with(|| ProbeCluster::new(msg.now));
                         state.sent += 1;
                         state.last_sent = msg.now;
+                        self.probe_marked = Some(probe.cluster);
                     }
                 }
             }
@@ -1189,6 +1252,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
             self.remb.map(|(_, at)| at + REMB_TIMEOUT),
             self.probing
                 .as_ref()
+                .filter(|_| !self.probe_unanswered)
                 .and_then(ProbeController::poll_timeout),
         ]
         .into_iter()
@@ -1213,6 +1277,8 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
         } else {
             0
         };
+        // Another stream may bring what a probe cluster needs (an RTX stream to pad on).
+        self.probe_unanswered = false;
         for ssrc in flow_ssrcs(info) {
             self.streams.insert(
                 ssrc,
