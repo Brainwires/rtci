@@ -30,6 +30,7 @@ crypto.workspace = true
 
 byteorder.workspace = true
 bytes.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

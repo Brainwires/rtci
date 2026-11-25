@@ -70,7 +70,7 @@ fn state_of(recording: &Recording, is_client: bool) -> State {
     let mut state = State::new(provider(), is_client);
     state.local_random = HandshakeRandom::unmarshal(&mut local.as_slice()).unwrap();
     state.remote_random = HandshakeRandom::unmarshal(&mut remote.as_slice()).unwrap();
-    state.master_secret = recording.master_secret.to_vec();
+    state.master_secret = crypto::SecretVec::new(recording.master_secret.to_vec());
     state.cipher_suite = Some(cipher_suite_for_id(recording.suite).unwrap());
     state.extended_master_secret = true;
     state.local_epoch = 1;
@@ -186,13 +186,14 @@ fn extended_master_secret_matches_the_recorded_psk_handshakes() {
             .unwrap();
         let master_secret = prf_extended_master_secret(
             provider.crypto(),
-            &prf_psk_pre_master_secret(&PSK),
+            prf_psk_pre_master_secret(&PSK).as_ref(),
             &session_hash,
             CipherSuiteHash::Sha256,
         )
         .unwrap();
         assert_eq!(
-            master_secret, recording.master_secret,
+            master_secret.as_ref(),
+            recording.master_secret,
             "{}",
             recording.suite
         );

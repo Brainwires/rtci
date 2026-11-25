@@ -15,6 +15,7 @@ use ring::hmac;
 use ring::rand::SystemRandom;
 use ring::signature::{self, KeyPair};
 use sha1::Sha1;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 /// The built-in Ring provider bundle.
@@ -651,16 +652,36 @@ type HmacSha1 = ::hmac::Hmac<Sha1>;
 /// composite (AES-CTR, CCM, CBC and MD5 come from RustCrypto too), so HMAC-SHA1 is composed the
 /// same way rather than making the slower backend the default. `aws-lc-rs` has fast SHA-1 and
 /// keeps its own.
+///
+/// The keyed state is the key in another form: the SHA-1 states after `key XOR ipad` and
+/// `key XOR opad` compute any MAC under it. RustCrypto `hmac` 0.12 has no `zeroize` support, so
+/// the state is overwritten here when this is dropped (RFC 7714 section 13.1; RFC 3711 section
+/// 9.3 for SRTP; the record MAC keys of the DTLS CBC suite).
 pub(crate) struct RustCryptoHmacSha1 {
-    keyed: HmacSha1,
+    keyed: ManuallyDrop<HmacSha1>,
 }
 
 impl RustCryptoHmacSha1 {
     pub(crate) fn new(key: &[u8]) -> Self {
         Self {
             // HMAC accepts any key length: it hashes longer keys and zero-pads shorter ones.
-            keyed: <HmacSha1 as RustCryptoMac>::new_from_slice(key)
-                .expect("HMAC accepts keys of any length"),
+            keyed: ManuallyDrop::new(
+                <HmacSha1 as RustCryptoMac>::new_from_slice(key)
+                    .expect("HMAC accepts keys of any length"),
+            ),
+        }
+    }
+}
+
+impl Drop for RustCryptoHmacSha1 {
+    fn drop(&mut self) {
+        // SAFETY: the state is dropped once, here, and never used again: `ManuallyDrop` keeps
+        // the drop glue from touching it after the overwrite. `Hmac<Sha1>` is plain data (block
+        // buffers and hash words; no pointers, no heap), so overwriting its bytes once it has
+        // been dropped is a write to memory this value owns.
+        unsafe {
+            ManuallyDrop::drop(&mut self.keyed);
+            zeroize::zeroize_flat_type(&mut self.keyed as *mut ManuallyDrop<HmacSha1>);
         }
     }
 }
@@ -672,7 +693,7 @@ impl Mac for RustCryptoHmacSha1 {
 
     fn sign(&mut self, input: &[&[u8]], output: &mut [u8]) -> Result<(), CryptoError> {
         check_tag_len(20, output.len())?;
-        let mut mac = self.keyed.clone();
+        let mut mac = HmacSha1::clone(&self.keyed);
         for part in input {
             mac.update(part);
         }

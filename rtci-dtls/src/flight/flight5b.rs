@@ -56,7 +56,7 @@ impl Flight for Flight5b {
         if state.local_verify_data.is_empty() {
             state.local_verify_data = prf_verify_data_client(
                 cfg.provider().crypto(),
-                &state.master_secret,
+                state.master_secret.as_ref(),
                 &abbreviated_transcript(cache, cfg, true),
                 cipher_suite.hash_func(),
             )

@@ -176,9 +176,9 @@ pub(crate) struct RecordKeys {
 
 impl Drop for RecordKeys {
     fn drop(&mut self) {
-        // The AEAD and mask keys are the provider's to clear; the IV is ours.
-        drop(crypto::SecretVec::new(self.iv.to_vec()));
-        self.iv = [0; 12];
+        // The AEAD and mask keys are the provider's to clear; the IV is ours. A plain store
+        // before the memory is freed may be optimised away; `zeroize` writes volatilely.
+        zeroize::Zeroize::zeroize(&mut self.iv);
     }
 }
 

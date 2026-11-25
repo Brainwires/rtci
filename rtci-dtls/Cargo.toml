@@ -36,6 +36,7 @@ rkyv.workspace = true
 bytecheck.workspace = true
 log.workspace = true
 pem.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

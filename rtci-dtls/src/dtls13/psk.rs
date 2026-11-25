@@ -459,7 +459,25 @@ impl TicketIssuer {
         peer_certificates: &[Vec<u8>],
         max_early_data: u32,
     ) -> Result<Option<Vec<u8>>> {
-        let mut plaintext = vec![TICKET_VERSION];
+        // Sized up front, so that it never grows: a buffer that grew would leave the secret
+        // in the allocation it moved from.
+        let mut plaintext = Vec::with_capacity(
+            1 + 2
+                + 8
+                + 4
+                + 4
+                + 1
+                + secret.len()
+                + 2
+                + server_name.len()
+                + 3
+                + 4
+                + peer_certificates
+                    .iter()
+                    .map(|der| 3 + der.len())
+                    .sum::<usize>(),
+        );
+        plaintext.push(TICKET_VERSION);
         put_u16(&mut plaintext, suite as u16);
         plaintext.extend_from_slice(&self.ms(now).to_be_bytes());
         plaintext.extend_from_slice(&(self.lifetime.as_secs() as u32).to_be_bytes());
@@ -495,7 +513,10 @@ impl TicketIssuer {
             .crypto()
             .new_aead(AeadAlgorithm::Aes256Gcm, key.as_ref())
             .map_err(crypto_error)?;
-        let mut ticket = nonce.to_vec();
+        // The plaintext is encrypted in place: sized up front, so that no allocation it
+        // moved from keeps it.
+        let mut ticket = Vec::with_capacity(TICKET_NONCE_LEN + plaintext.len() + TICKET_TAG_LEN);
+        ticket.extend_from_slice(&nonce);
         ticket.extend_from_slice(plaintext.as_ref());
         let mut tag = [0u8; TICKET_TAG_LEN];
         aead.seal_in_place(&nonce, aad, &mut ticket[TICKET_NONCE_LEN..], &mut tag)
@@ -546,7 +567,24 @@ impl TicketIssuer {
         now: Instant,
         session: &Dtls12Session,
     ) -> Result<Option<Vec<u8>>> {
-        let mut plaintext = vec![DTLS12_TICKET_VERSION];
+        // Sized up front, so that it never grows (see `seal`).
+        let mut plaintext = Vec::with_capacity(
+            1 + 2
+                + 8
+                + 4
+                + 1
+                + 1
+                + session.master_secret.len()
+                + 2
+                + session.server_name.len()
+                + 3
+                + session
+                    .peer_certificates
+                    .iter()
+                    .map(|der| 3 + der.len())
+                    .sum::<usize>(),
+        );
+        plaintext.push(DTLS12_TICKET_VERSION);
         put_u16(&mut plaintext, session.cipher_suite as u16);
         plaintext.extend_from_slice(&self.ms(now).to_be_bytes());
         plaintext.extend_from_slice(&(self.lifetime.as_secs() as u32).to_be_bytes());

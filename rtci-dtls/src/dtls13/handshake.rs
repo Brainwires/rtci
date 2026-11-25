@@ -515,7 +515,7 @@ impl Conn13 {
                     .into_iter()
                     .find(|keypair| keypair.curve as u16 == group)
                     .ok_or_else(|| illegal(Error::ErrInvalidNamedCurve))?;
-                SecretVec::new(keypair.complete(key_exchange).map_err(illegal)?)
+                keypair.complete(key_exchange).map_err(illegal)?
             }
             // psk_ke: the (EC)DHE input of the key schedule is zeros (RFC 8446 section 7.1).
             None if psk.is_some() => {

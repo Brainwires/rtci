@@ -17,6 +17,7 @@ use crypto::{HmacAlgorithm, RTCCryptoProvider};
 use shared::error::{Error, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
+use zeroize::Zeroize;
 
 /// The length of a cookie: an HMAC-SHA-256 tag cut to 160 bits.
 pub(crate) const STATELESS_COOKIE_LENGTH: usize = 20;
@@ -160,14 +161,28 @@ pub(crate) struct CookieSecrets {
 
 impl Drop for CookieSecrets {
     fn drop(&mut self) {
-        // Overwritten on the way out, like every other secret here.
-        if let Some((secret, _)) = self.current.take() {
-            drop(crypto::SecretVec::new(secret.to_vec()));
-        }
+        // Overwritten in place on the way out, like every other secret here: taking the
+        // value out of the `Option` would leave its bytes where they were.
+        self.forget_current();
+        self.forget_previous();
     }
 }
 
 impl CookieSecrets {
+    fn forget_current(&mut self) {
+        if let Some((secret, _)) = &mut self.current {
+            secret.zeroize();
+        }
+        self.current = None;
+    }
+
+    fn forget_previous(&mut self) {
+        if let Some(secret) = &mut self.previous {
+            secret.zeroize();
+        }
+        self.previous = None;
+    }
+
     /// Makes the first secret, or a new one once the current one has served its lifetime.
     fn rotate(&mut self, now: Instant, provider: &dyn RTCCryptoProvider) -> Result<()> {
         let age = self
@@ -183,12 +198,13 @@ impl CookieSecrets {
             // The secret before stays good for one more lifetime; one that has been idle for
             // two is too old to vouch for anything.
             let recent = age.is_some_and(|age| age < 2 * COOKIE_SECRET_LIFETIME);
-            self.previous = self
-                .current
-                .take()
-                .filter(|_| recent)
-                .map(|(secret, _)| secret);
+            self.forget_previous();
+            if recent && let Some((current, _)) = &self.current {
+                self.previous = Some(*current);
+            }
+            self.forget_current();
             self.current = Some((secret, now));
+            secret.zeroize();
         }
         Ok(())
     }

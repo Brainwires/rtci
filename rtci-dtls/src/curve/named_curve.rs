@@ -40,14 +40,13 @@ pub struct NamedCurveKeypair {
 }
 
 impl NamedCurveKeypair {
-    pub(crate) fn complete(&mut self, peer_public_key: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn complete(&mut self, peer_public_key: &[u8]) -> Result<crypto::SecretVec> {
         let active = self
             .active
             .take()
             .ok_or(Error::ErrNamedCurveAndPrivateKeyMismatch)?;
         active
             .complete(peer_public_key)
-            .map(|secret| secret.into_bytes())
             .map_err(|error| Error::Crypto(error.to_string()))
     }
 }

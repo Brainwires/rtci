@@ -325,7 +325,8 @@ impl Flight for Flight4 {
                     let _ = state.remote_random.marshal(&mut writer);
                 }
 
-                let mut pre_master_secret = vec![];
+                // Zeroized however this returns.
+                let mut pre_master_secret = crypto::SecretVec::new(vec![]);
                 if state.is_cipher_suite_psk() {
                     let Some(local_psk_callback) = &cfg.local_psk_callback else {
                         return Err((
@@ -338,7 +339,7 @@ impl Flight for Flight4 {
                     };
 
                     let psk = match local_psk_callback(&client_key_exchange.identity_hint) {
-                        Ok(psk) => psk,
+                        Ok(psk) => crypto::SecretVec::new(psk),
                         Err(err) => {
                             return Err((
                                 Some(Alert {
@@ -353,7 +354,7 @@ impl Flight for Flight4 {
                     state
                         .identity_hint
                         .clone_from(&client_key_exchange.identity_hint);
-                    pre_master_secret = prf_psk_pre_master_secret(&psk);
+                    pre_master_secret = prf_psk_pre_master_secret(psk.as_ref());
                 } else if let Some(local_keypair) = &mut state.local_keypair {
                     let curve = local_keypair.curve;
                     pre_master_secret = match prf_pre_master_secret(
@@ -396,7 +397,7 @@ impl Flight for Flight4 {
 
                     state.master_secret = match prf_extended_master_secret(
                         cfg.provider().crypto(),
-                        &pre_master_secret,
+                        pre_master_secret.as_ref(),
                         &session_hash,
                         cipher_suite_hash_func,
                     ) {
@@ -414,7 +415,7 @@ impl Flight for Flight4 {
                 } else {
                     state.master_secret = match prf_master_secret(
                         cfg.provider().crypto(),
-                        &pre_master_secret,
+                        pre_master_secret.as_ref(),
                         &client_random,
                         &server_random,
                         cipher_suite_hash_func,
@@ -434,12 +435,12 @@ impl Flight for Flight4 {
 
                 // RFC 5246 8.1: the premaster secret is deleted once the master secret has
                 // been computed.
-                drop(crypto::SecretVec::new(pre_master_secret));
+                drop(pre_master_secret);
 
                 if let Some(cipher_suite) = &mut state.cipher_suite
                     && let Err(err) = cipher_suite.init(
                         cfg.provider().clone(),
-                        &state.master_secret,
+                        state.master_secret.as_ref(),
                         &client_random,
                         &server_random,
                         false,
@@ -877,7 +878,7 @@ pub(crate) fn verify_client_finished(
     };
     let expected_verify_data = prf_verify_data_client(
         cfg.provider().crypto(),
-        &state.master_secret,
+        state.master_secret.as_ref(),
         &plain_text,
         cipher_suite.hash_func(),
     )

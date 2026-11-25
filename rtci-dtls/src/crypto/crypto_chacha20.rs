@@ -12,9 +12,13 @@ const CRYPTO_CHACHA20_NONCE_LENGTH: usize = 12;
 
 // State needed to handle encrypted input/output
 /// ChaCha20-Poly1305 authenticated encryption for DTLS records, holding the per-direction keys.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct CryptoChaCha20 {
+    #[zeroize(skip)]
     local_cc: Box<dyn AeadCipher>,
+    #[zeroize(skip)]
     remote_cc: Box<dyn AeadCipher>,
+    /// The write IVs of the key block (RFC 7905 section 2): key material.
     local_write_iv: Vec<u8>,
     remote_write_iv: Vec<u8>,
 }

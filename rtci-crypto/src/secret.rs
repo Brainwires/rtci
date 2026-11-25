@@ -1,9 +1,21 @@
 use std::fmt;
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// An owned byte vector that zeroizes its allocation when dropped.
+///
+/// The whole allocation is overwritten, spare capacity included. A `SecretVec` never grows: a
+/// buffer that does (`Vec::extend`, `push`) moves to a new allocation and leaves the old one
+/// behind unerased, so build key material in a buffer sized up front and wrap it here.
 pub struct SecretVec(Zeroizing<Vec<u8>>);
+
+impl Zeroize for SecretVec {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecretVec {}
 
 impl SecretVec {
     /// Wraps secret bytes.

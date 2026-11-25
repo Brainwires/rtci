@@ -30,10 +30,15 @@ pub enum CryptoCcmTagLen {
 }
 
 /// AES-CCM authenticated encryption for DTLS records, holding the per-direction keys.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct CryptoCcm {
+    #[zeroize(skip)]
     provider: Arc<dyn RTCCryptoProvider>,
+    #[zeroize(skip)]
     local_ccm: Box<dyn AeadCipher>,
+    #[zeroize(skip)]
     remote_ccm: Box<dyn AeadCipher>,
+    /// The implicit nonce parts of the key block (RFC 6655 section 3): key material.
     local_write_iv: Vec<u8>,
     remote_write_iv: Vec<u8>,
 }

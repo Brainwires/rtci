@@ -980,8 +980,12 @@ fn ecdhe_secrets_keep_their_leading_zeros() -> Result<()> {
             let our_secret = ours.complete(&theirs.public_key)?;
             let their_secret = theirs.complete(&ours.public_key)?;
             assert_eq!(our_secret.len(), length, "{curve:?}");
-            assert_eq!(our_secret, their_secret, "{curve:?}: both sides agree");
-            if our_secret[0] == 0 {
+            assert_eq!(
+                our_secret.as_ref(),
+                their_secret.as_ref(),
+                "{curve:?}: both sides agree"
+            );
+            if our_secret.as_ref()[0] == 0 {
                 found = Some(our_secret);
                 break;
             }

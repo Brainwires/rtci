@@ -17,10 +17,15 @@ const CRYPTO_GCM_TAG_LENGTH: usize = 16;
 const CRYPTO_GCM_NONCE_LENGTH: usize = 12;
 
 /// AES-GCM authenticated encryption for DTLS records, holding the per-direction keys.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct CryptoGcm {
+    #[zeroize(skip)]
     provider: Arc<dyn RTCCryptoProvider>,
+    #[zeroize(skip)]
     local_gcm: Box<dyn AeadCipher>,
+    #[zeroize(skip)]
     remote_gcm: Box<dyn AeadCipher>,
+    /// The implicit nonce parts of the key block (RFC 5288 section 3): key material.
     local_write_iv: Vec<u8>,
     remote_write_iv: Vec<u8>,
 }
