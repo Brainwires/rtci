@@ -1385,6 +1385,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
+  (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
+  capacity's return until the target is at 1000 kbit/s; `recover` waits for 0.4 of the target
+  before the drop, which is a different rate in a chain that met the drop lower, so it does not
+  compare chains) and `startup` (seconds from the start of the call until the target is within
+  5 % of the 2.5 Mbit/s maximum; 99 when not before the drop); new scenario `cap60` (the cap
+  held 60 s instead of 20; measurement only). The baseline gains two tripwires per cell (the
+  90th percentile of each new figure) when it is next recorded. Test only.
+
 - **capacity instrument: how long a peer is disconnected, the direction that was not capped,
   a feedback outage** (`conf/instrument-3-disconnect-and-reverse-columns`): new figures
   `disc_time`, `disc_max`, `disc_open` (episodes outside Connected: total, longest, still open

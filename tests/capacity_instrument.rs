@@ -3,8 +3,8 @@
 //!
 //! The call: audio and video each way, open for 20 s, then the caller's uplink drops from
 //! whatever the estimate had reached (2.5 Mbit/s with the pacer) to 300 kbit/s, stays there for
-//! 20 s after the sender reacted, and opens again for 25 s. A second scenario takes the whole
-//! path away for 4 s and brings it back with an ICE restart.
+//! 20 s after the sender reacted (60 s in the scenario `cap60`), and opens again for 25 s. A
+//! second scenario takes the whole path away for 4 s and brings it back with an ICE restart.
 //!
 //! # Figures
 //!
@@ -35,7 +35,9 @@
 //! | `stun_lost` | STUN datagrams (ICE consent checks and their responses, RFC 7675) that did not arrive: dropped at a link's queue or lost on the reverse path. One lost check makes its sender `disconnected` when the next check's answer comes later than 5 s after it |
 //! | `low`, `mean10` | kbit/s: the caller's lowest target in the 5 s after the drop (a pause left out), and its mean over the 10 s after |
 //! | `back_low`, `back_mean` | the same of the callee's target: the direction whose capacity did not change unless the cell is `both` (its feedback crosses the capped link) |
-//! | `recover` | from the capacity's return until the encoder's target is back to 0.4 of what it was before the drop; 99 when not within the 25 s observed |
+//! | `recover` | from the capacity's return until the encoder's target is back to 0.4 of what it was before the drop; 99 when not within the 25 s observed. RELATIVE: two chains or trees whose `before` differs wait for different rates (0.4 of 2.5 Mbit/s is 1000 kbit/s, of 1.4 Mbit/s 565), so it compares them only where `before` is the same |
+//! | `to1000` | from the capacity's return until the encoder's target is at 1000 kbit/s; 99 when not within the 25 s observed. ABSOLUTE: the same rate in every chain and on every tree |
+//! | `startup` | from the start of the call (the peers connected) until the encoder's target is within 5 % of the 2.5 Mbit/s maximum (2375 kbit/s); 99 when not before the drop |
 //! | `before`, `under`, `window` | kbit/s: the target before the drop, its median under the cap, its mean 15 to 25 s after the cap |
 //! | `reacted` | from the drop until the target is under 400 kbit/s (99: not within 5 s); in the outage, from the restart to the new pair |
 //! | `paused` | time the target was zero (the pacer's pause), from the drop on |
@@ -52,9 +54,11 @@
 //!
 //! A cell names everything but the seed: `scenario/chain/gapN/direction/qN/rlN`.
 //!
-//! - scenario: `cap`, `outage`, or `fbgap` (the capacity does not change; none of the callee's
-//!   RTCP arrives for 300 ms: what a gap in the feedback alone costs the caller's target, read
-//!   in `low` and `mean10`);
+//! - scenario: `cap`, `cap60` (the cap stays 60 s instead of 20: what a sender does to a path
+//!   that does not come back for a long time, and whether trying for the old rate meanwhile
+//!   costs anything; measurement only), `outage`, or `fbgap` (the capacity does not change;
+//!   none of the callee's RTCP arrives for 300 ms: what a gap in the feedback alone costs the
+//!   caller's target, read in `low` and `mean10`);
 //! - chain: `paced` (the engine's default interceptors), `nopacer` (the same without the pacer),
 //!   `parolnet` (ParolNet's chain; measurement only);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
@@ -319,6 +323,15 @@ fn recovered_after(
         .map(|(at, _)| *at - from)
 }
 
+/// When the target was first at `level` or more, counted from the start of the call; `None`
+/// when not by `by`.
+fn reached_by(targets: &[(Duration, u32)], level: u32, by: Duration) -> Option<Duration> {
+    targets
+        .iter()
+        .find(|(at, bps)| *at <= by && *bps >= level)
+        .map(|(at, _)| *at)
+}
+
 /// The lowest target in `from..to`, a pause (zero) left out: the estimate's own low point.
 fn lowest(targets: &[(Duration, u32)], from: Duration, to: Duration) -> u32 {
     let mut low = target_at(targets, from);
@@ -387,7 +400,7 @@ fn paused(targets: &[(Duration, u32)], from: Duration, to: Duration) -> Duration
 // ---------------------------------------------------------------------------------------------
 
 /// The figures of a run, in the order they are printed (the module's table).
-const NAMES: [&str; 43] = [
+const NAMES: [&str; 45] = [
     "max_age",
     "age_p50",
     "age_p95",
@@ -431,6 +444,8 @@ const NAMES: [&str; 43] = [
     "mean10",
     "back_low",
     "back_mean",
+    "to1000",
+    "startup",
 ];
 
 /// What stands for "it never happened" in a figure that is a time until something.
@@ -441,6 +456,14 @@ const FRESH: Duration = Duration::from_secs(1);
 
 /// The share of the target before the drop that [`NAMES`]' `recover` waits for.
 const RECOVERED_SHARE: f64 = 0.4;
+
+/// The rate [`NAMES`]' `to1000` waits for after the capacity's return, bit/s.
+const RECOVERED_RATE: u32 = 1_000_000;
+
+/// The rate [`NAMES`]' `startup` waits for from the start of the call: within 5 % of the
+/// maximum the chains are given (a target that follows the estimate less a reserve for
+/// retransmissions still counts as there).
+const STARTED_RATE: u32 = MAX_BPS / 100 * 95;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Figures([f64; NAMES.len()]);
@@ -458,6 +481,8 @@ impl Figures {
 enum Scenario {
     /// The capacity drops to 300 kbit/s and comes back.
     Cap,
+    /// The same, and the capacity stays down for 60 s ([`LONG_CAP_HELD`]).
+    LongCap,
     /// The path is gone for 4 s and comes back with an ICE restart.
     Outage,
     /// The capacity does not change: none of the callee's RTCP (the feedback about the
@@ -492,6 +517,7 @@ impl Cell {
         Ok(Self {
             scenario: match scenario {
                 "cap" => Scenario::Cap,
+                "cap60" => Scenario::LongCap,
                 "outage" => Scenario::Outage,
                 "fbgap" => Scenario::FeedbackGap,
                 other => bail!("unknown scenario {other} in {name}"),
@@ -518,6 +544,7 @@ impl Cell {
             "{}/{}/gap{}/{}/q{}/rl{}",
             match self.scenario {
                 Scenario::Cap => "cap",
+                Scenario::LongCap => "cap60",
                 Scenario::Outage => "outage",
                 Scenario::FeedbackGap => "fbgap",
             },
@@ -557,6 +584,7 @@ fn phase_of(seed: u64) -> u64 {
 /// the call goes on after the capacity is back.
 const OPEN_BEFORE: Duration = Duration::from_secs(20);
 const CAP_HELD: Duration = Duration::from_secs(20);
+const LONG_CAP_HELD: Duration = Duration::from_secs(60);
 const OPEN_AFTER: Duration = Duration::from_secs(25);
 const OUTAGE: Duration = Duration::from_secs(4);
 const FEEDBACK_GAP: Duration = Duration::from_millis(300);
@@ -571,7 +599,11 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
     let before = target_at(&world.peers[0].targets, world.elapsed());
     let dropped_at = world.elapsed();
     let (reacted, under, back_at) = match cell.scenario {
-        Scenario::Cap => {
+        Scenario::Cap | Scenario::LongCap => {
+            let held = match cell.scenario {
+                Scenario::LongCap => LONG_CAP_HELD,
+                _ => CAP_HELD,
+            };
             let capped = LinkProfile {
                 delay: Duration::from_millis(30),
                 rate_bps: Some(300_000),
@@ -590,7 +622,7 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
                 let t = world.now + Duration::from_millis(10);
                 world.advance(t)?;
             }
-            let t = world.now + CAP_HELD;
+            let t = world.now + held;
             world.advance(t)?;
             let mut samples = Vec::new();
             let mut at = dropped_at + Duration::from_secs(8);
@@ -725,6 +757,13 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
         f64::from(mean_target(&caller.targets, dropped_at, ten) / 1000),
         f64::from(lowest(&callee.targets, dropped_at, after) / 1000),
         f64::from(mean_target(&callee.targets, dropped_at, ten) / 1000),
+        or_never(recovered_after(
+            &caller.targets,
+            RECOVERED_RATE,
+            back_at,
+            end,
+        )),
+        or_never(reached_by(&caller.targets, STARTED_RATE, dropped_at)),
     ];
     Ok(Figures(figures))
 }
@@ -885,7 +924,7 @@ fn quantile(values: &[f64], q: f64) -> f64 {
 }
 
 /// The figures a table shows.
-const TABLE: [&str; 13] = [
+const TABLE: [&str; 15] = [
     "max_age",
     "stale1",
     "stale2",
@@ -897,6 +936,8 @@ const TABLE: [&str; 13] = [
     "audio_share",
     "audio_lost",
     "recover",
+    "to1000",
+    "startup",
     "under",
     "rtx",
 ];
@@ -1603,6 +1644,15 @@ fn recovery_and_pause_are_read_from_the_target() {
     );
     assert_eq!(ms(8_000), paused(&targets, ms(20_000), end));
     assert_eq!(ms(4_000), paused(&targets, ms(25_000), end));
+    // The start-up: the first time at the level, from the start of the call, and only when
+    // it came before the drop.
+    assert_eq!(
+        Some(ms(15_000)),
+        reached_by(&targets, STARTED_RATE, ms(20_000))
+    );
+    assert_eq!(None, reached_by(&targets, STARTED_RATE, ms(14_900)));
+    assert_eq!(Some(ms(0)), reached_by(&targets, 300_000, ms(20_000)));
+    assert_eq!(2_375_000, STARTED_RATE);
 }
 
 #[test]
@@ -1624,6 +1674,9 @@ fn a_cell_has_one_name() -> Result<()> {
     let gap = "fbgap/paced/gap300/up/q300/rl0";
     assert_eq!(gap, Cell::parse(gap)?.name());
     assert_eq!(Scenario::FeedbackGap, Cell::parse(gap)?.scenario);
+    let long = "cap60/parolnet/gap300/up/q300/rl0";
+    assert_eq!(long, Cell::parse(long)?.name());
+    assert_eq!(Scenario::LongCap, Cell::parse(long)?.scenario);
     assert!(Cell::parse("cap/paced/gap300/up/q300").is_err());
     assert!(Cell::parse("cap/paced/wait300/up/q300/rl0").is_err());
     // A third of the seeds at each phase.
@@ -1837,6 +1890,35 @@ fn the_same_seed_gives_the_same_figures() -> Result<()> {
             here.get("end") > 65.0 && here.get("end") < 71.0,
             "{name}: {here:?}"
         );
+        // The absolute recovery figure waits for 1000 kbit/s, which is never less than the
+        // relative one's 0.4 of a target that cannot be above the 2.5 Mbit/s maximum, and
+        // the rate was not there when the capacity came back.
+        assert!(
+            here.get("to1000") >= here.get("recover"),
+            "{name}: {here:?}"
+        );
+        assert!(here.get("to1000") > 1.0, "{name}: {here:?}");
     }
+    // The default chain probes at the start: the maximum is found long before the drop.
+    let paced = run_cell(Cell::parse(PR_CELLS[0].0)?, 1, 11)?;
+    assert!(paced.get("startup") < 5.0, "{paced:?}");
+    assert_eq!(2_500.0, paced.get("before"), "{paced:?}");
+    assert_eq!(paced.get("recover"), paced.get("to1000"), "{paced:?}");
+    Ok(())
+}
+
+/// The scenario `cap60` is the cap held for a minute: the call is 40 s longer than the
+/// reference scenario's, the target is under the capped link's rate through it, and it is
+/// not back at 1000 kbit/s the moment the capacity returns.
+#[test]
+fn the_long_cap_holds_the_capacity_down_for_a_minute() -> Result<()> {
+    let cell = Cell::parse("cap60/parolnet/gap300/up/q300/rl0")?;
+    let figures = run_cell(cell, 1, 11)?;
+    assert!(
+        figures.get("end") > 105.0 && figures.get("end") < 111.0,
+        "{figures:?}"
+    );
+    assert!(figures.get("under") < 300.0, "{figures:?}");
+    assert!(figures.get("to1000") > 1.0, "{figures:?}");
     Ok(())
 }

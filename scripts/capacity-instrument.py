@@ -93,7 +93,7 @@ GATED_MEANS = [
 FAMILY_ALPHA = 0.01
 
 # What the tables show as percentiles.
-TABLE_FIGURES = ["max_age", "age_p50", "stale1", "stale2", "fresh_gap", "freeze", "audio_gap", "audio_share", "audio_lost", "recover", "under", "window", "paused", "rtx"]
+TABLE_FIGURES = ["max_age", "age_p50", "stale1", "stale2", "fresh_gap", "freeze", "audio_gap", "audio_share", "audio_lost", "recover", "to1000", "startup", "under", "window", "paused", "rtx"]
 
 # The tripwires a baseline records: (figure, direction, levels). A level is a percentile of the
 # measurement (0.5, 0.9, 0.1) or ("limit", value).
@@ -109,6 +109,8 @@ BASELINE = [
     ("audio_gap", "hi", [0.9, ("limit", 1.0)]),
     ("audio_lost", "hi", [0.9]),
     ("recover", "hi", [0.9]),
+    ("to1000", "hi", [0.9]),
+    ("startup", "hi", [0.9]),
     ("rtx", "hi", [0.9]),
     ("discards", "hi", [("limit", 0.0)]),
     ("cb", "hi", [("limit", 0.0)]),
