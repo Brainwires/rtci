@@ -400,6 +400,142 @@ fn a_target_that_halves_during_a_pause_flushes_the_queue_and_ends_the_pause() {
     assert!(video.is_empty(), "{video:?}");
 }
 
+/// Audio is not part of a flush. A call with a voice stream beside the video: at the
+/// collapse the voice packet written with the backlog still leaves at once, the flush names
+/// the video stream only, no key frame is asked of the audio stream, and the voice packets
+/// written after it leave as they are written.
+#[test]
+fn a_flush_leaves_the_audio_stream_alone() {
+    const AUDIO: u32 = 0x9abc;
+    let voice = |now: Instant, sequence_number: u16| TaggedPacket {
+        now,
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+            header: rtp::header::Header {
+                version: 2,
+                payload_type: 111,
+                sequence_number,
+                timestamp: u32::from(sequence_number) * 960,
+                ssrc: AUDIO,
+                ..Default::default()
+            },
+            payload: Bytes::from(vec![0u8; 160]),
+        })),
+    };
+    let audio_left = |chain: &mut dyn Interceptor| -> Vec<u16> {
+        let mut left = Vec::new();
+        while let Some(packet) = chain.poll_write() {
+            if let Packet::Rtp(rtp) = &packet.message.packet
+                && rtp.header.ssrc == AUDIO
+            {
+                left.push(rtp.header.sequence_number);
+            }
+        }
+        left
+    };
+    let epoch = Instant::now();
+    let mut chain = pacer(PacerBacklog::Flush);
+    chain.bind_local_stream(&StreamInfo {
+        ssrc: AUDIO,
+        clock_rate: 48000,
+        mime_type: "audio/opus".to_string(),
+        payload_type: 111,
+        ..Default::default()
+    });
+    backlog_at_the_high_rate(&mut chain, epoch);
+    chain.handle_write(voice(epoch + ms(5), 1)).unwrap();
+    assert_eq!(vec![1], audio_left(&mut chain), "behind a video backlog");
+    let fall = epoch + ms(10);
+    chain.handle_read(target(fall, LOW)).unwrap();
+    chain.handle_timeout(fall).unwrap();
+    let mut seen = Reads::default();
+    reads(&mut chain, &mut seen);
+    assert_eq!(vec![vec![VIDEO]], seen.flushes, "{seen:?}");
+    assert_eq!(vec![VIDEO], seen.key_frames, "{seen:?}");
+    assert!(
+        seen.discards.iter().all(|(ssrc, _)| *ssrc == VIDEO),
+        "{seen:?}"
+    );
+    for (index, sequence_number) in (2..6u16).enumerate() {
+        let now = fall + ms(20 * (index as u64 + 1));
+        chain.handle_write(voice(now, sequence_number)).unwrap();
+        assert_eq!(vec![sequence_number], audio_left(&mut chain));
+    }
+    let mut after = Reads::default();
+    reads(&mut chain, &mut after);
+    assert!(
+        after.flushes.is_empty() && after.key_frames.is_empty() && after.discards.is_empty(),
+        "{after:?}"
+    );
+}
+
+/// Ten retransmissions written at `at`, of packets sent before; what the pacer told the
+/// application side, and the RTX sequence numbers that left within two seconds.
+fn ten_repairs(chain: &mut impl Interceptor, at: Instant) -> (Reads, Vec<u16>) {
+    for index in 0..10u16 {
+        chain
+            .handle_write(retransmission(at, 900 + index, 500 + index))
+            .unwrap();
+    }
+    let mut seen = Reads::default();
+    reads(chain, &mut seen);
+    let (_, rtx) = run_until(chain, at + ms(2_000));
+    reads(chain, &mut seen);
+    (seen, rtx)
+}
+
+/// The repairs of what a collapse left behind are a backlog too. The target falls from
+/// 1.2 Mbit/s to 100 kbit/s with nothing queued (the source followed), and half a second
+/// later the receiver's NACKs arrive (behind a deep queue on the path they come a second
+/// late): ten retransmissions, 1.2 s at the new target, of packets written for the old one.
+/// They are flushed like queued media: dropped, the responder told to forget the stream, a
+/// key frame asked for, and no pause.
+#[test]
+fn repairs_queued_within_the_queue_time_bound_of_a_collapse_are_flushed() {
+    let epoch = Instant::now();
+    let mut chain = pacer(PacerBacklog::Flush);
+    chain.handle_read(target(epoch, HIGH)).unwrap();
+    chain.handle_read(target(epoch + ms(10), LOW)).unwrap();
+    let mut seen = Reads::default();
+    reads(&mut chain, &mut seen);
+    assert!(
+        seen.flushes.is_empty() && seen.key_frames.is_empty(),
+        "nothing queued, nothing flushed: {seen:?}"
+    );
+    let (seen, rtx) = ten_repairs(&mut chain, epoch + ms(500));
+    assert_eq!(vec![vec![VIDEO]], seen.flushes, "{seen:?}");
+    assert_eq!(vec![VIDEO], seen.key_frames, "{seen:?}");
+    assert!(
+        seen.targets.iter().all(|(read, _)| *read != 0.0),
+        "the source is not paused: {seen:?}"
+    );
+    assert!(
+        seen.dropped.len() >= 8 && seen.dropped.len() + rtx.len() == 10,
+        "the repairs waiting were dropped: {seen:?}, left {rtx:?}"
+    );
+}
+
+/// The same repairs longer after the fall than the queue time bound (2 s) are a long queue
+/// at a steady target: the source is paused and they are delivered.
+#[test]
+fn repairs_queued_later_than_the_queue_time_bound_after_a_fall_are_paused_and_delivered() {
+    let epoch = Instant::now();
+    let mut chain = pacer(PacerBacklog::Flush);
+    chain.handle_read(target(epoch, HIGH)).unwrap();
+    chain.handle_read(target(epoch + ms(10), LOW)).unwrap();
+    reads(&mut chain, &mut Reads::default());
+    let (seen, rtx) = ten_repairs(&mut chain, epoch + ms(2_100));
+    assert!(
+        seen.flushes.is_empty() && seen.key_frames.is_empty() && seen.dropped.is_empty(),
+        "{seen:?}"
+    );
+    assert!(
+        seen.targets.contains(&(0.0, Some(LOW))),
+        "the source is paused: {seen:?}"
+    );
+    assert_eq!(10, rtx.len(), "all of them left: {rtx:?}");
+}
+
 /// With `PacerBacklog::Keep` the collapse of the first test pauses the source and keeps the
 /// queue: nothing is discarded, and all of it leaves in order.
 #[test]

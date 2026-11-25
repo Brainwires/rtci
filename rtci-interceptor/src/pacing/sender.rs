@@ -56,8 +56,8 @@ pub enum QueueOverflow {
 }
 
 /// What the pacer does with what it holds when the path's capacity collapses: the target has
-/// fallen to half or less of what the queued media was written for, and the queue would now
-/// take half the queue time bound or more to leave (see "A capacity collapse" on
+/// fallen to half or less of what it was when the queued media was written or within the
+/// queue time bound, and the queue would now take half the queue time bound or more to leave (see "A capacity collapse" on
 /// [`PacerInterceptor`]). It applies with [`QueueOverflow::Drop`]; [`QueueOverflow::Drain`]
 /// never discards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -300,16 +300,21 @@ impl PacerBuilder {
 /// `tests/capacity_cap_video_rtc2rtc.rs`). The queue time bound and the discard below are for
 /// media written into a pause: a source that does not follow it.
 ///
-/// **Known limit.** After a sudden drop the picture a receiver shows can be seconds old while
-/// those retransmissions leave: in that test (2.5 Mbit/s into a path that drops to
+/// **What that costs, and why it is not the default at a collapse.** This paragraph and the
+/// one before describe a queue kept through a sudden drop: [`Backlog::Keep`], and by default
+/// a long queue whose target did not collapse. By default a collapse flushes the queue
+/// instead (next section; `docs/capacity-collapse.md`). After a sudden drop the picture a
+/// receiver shows can be seconds old while those retransmissions leave: in that test, which
+/// runs [`Backlog::Keep`] (2.5 Mbit/s into a path that drops to
 /// 300 kbit/s) the receiver never went 2 s without a usable frame (0.75 to 1.13 s), but the
 /// oldest picture it showed was 4.14 to 6.58 s old, against 2.90 to 3.20 s in a chain without
 /// a pacer. The 55 to 62 video packets the path dropped are repaired inside an estimate of 100
 /// to 250 kbit/s of which the audio takes 76, under every retransmission rule (59 to 80
 /// retransmissions; a request for a packet whose retransmission the feedback reports received
 /// is not answered, see the NACK responder). Dropping the repairs and asking for a key frame
-/// instead is worse for a receiver that plays in order (measured: frozen for 8 s, as it holds
-/// the gap for its whole packet window).
+/// instead is worse for a receiver that plays in order and waits for a gap by packet count
+/// (measured: frozen for 8 s, as it holds the gap for its whole packet window): such a
+/// receiver is what [`Backlog::Keep`] is for.
 ///
 /// **A target of zero means: produce nothing until the next target.** An encoder skips (does
 /// not encode) the frames captured meanwhile; it does not need a key frame to resume, because
@@ -328,7 +333,10 @@ impl PacerBuilder {
 /// target: a key frame larger than a second of the target, a source that is slow to follow.
 /// When the queue is long because **the target collapsed** (a pause would begin or is in
 /// force, and the target is now half or less of the highest target in force since the oldest
-/// queued new media was written), the pacer does not pause, or ends the pause. It
+/// queued new media was written or in the last queue time bound, two seconds by default,
+/// whichever reaches further back), the pacer does not pause, or ends the pause. The queue
+/// may hold new media, retransmissions or both: the repairs asked for a second after a drop,
+/// behind a deep queue on the path, are of media written for the old rate as well. It
 /// **flushes**: every queued packet is
 /// discarded (new media and FEC through [`PacerDiscard`], whole frames, as below; queued
 /// retransmissions through [`RetransmissionsLeft`]), a [`PacerFlush`] tells the NACK responder
@@ -348,9 +356,11 @@ impl PacerBuilder {
 /// the RTP queues are drained quickly". A decoder refresh point "completely resets the
 /// decoder" (RFC 5104 section 2.2): nothing sent before it is needed after it.
 ///
-/// A flush is not repeated for what was written after it: the key frame the application
-/// writes in answer was written at the fallen target, so a queue it fills is a pause, not a
-/// collapse, and is delivered. The target has to halve again for another flush. The receiver
+/// A flush is not repeated for what was written after it: no target from before a flush
+/// counts again, and the key frame the application writes in answer was written at the fallen
+/// target, so a queue it fills is a pause, not a collapse, and is delivered. The target has to
+/// halve again, from what it was at the flush, for another one: at most log2(highest /
+/// lowest target) flushes in a row, four from 2.5 Mbit/s to a 100 kbit/s floor. The receiver
 /// sees a gap in the sequence numbers (the application numbered the discarded packets) and
 /// its NACKs for it go unanswered; one that waits for missing packets has to bound that wait
 /// in time or resume at the key frame (`docs/capacity-collapse.md`).
@@ -777,20 +787,19 @@ impl PacerInterceptor {
     /// Whether the pause should begin or end now (see "Pausing the source"); `true` when it
     /// changed.
     fn update_pause(&mut self, now: Instant) -> bool {
+        if self.collapsed(now) {
+            // Not a queue to wait out: the rate it was written for is gone. Also when the
+            // target goes on falling during a pause that began before it had halved.
+            self.flush(now);
+            // A pause in force ends with its queue.
+            return std::mem::replace(&mut self.paused, false);
+        }
         let expected = self.expected_queue_time();
         let change = match self.queue_time_limit {
             Some(limit) if !self.paused => expected >= limit.mul_f64(PAUSE_AT),
             Some(limit) => expected <= limit.mul_f64(RESUME_AT),
             None => self.paused,
         };
-        if (self.paused || change) && self.collapsed() {
-            // Not a queue to wait out: the rate it was written for is gone. Also when the
-            // target goes on falling during a pause that began before it had halved.
-            self.flush(now);
-            // A pause in force ends with its queue.
-            let was_paused = std::mem::replace(&mut self.paused, false);
-            return was_paused;
-        }
         if change {
             self.paused = !self.paused;
             if self.paused {
@@ -801,20 +810,36 @@ impl PacerInterceptor {
         change
     }
 
-    /// Records the target set at `now`, and drops the targets older than the one in force
-    /// when the oldest queued new media was written.
+    /// Records the target set at `now`, and drops the targets too old to count.
     fn note_target(&mut self, now: Instant, bits_per_second: f64) {
         if self.targets.back().map(|(_, target)| *target) != Some(bits_per_second) {
             self.targets.push_back((now, bits_per_second));
         }
-        self.forget_targets();
+        self.forget_targets(now);
     }
 
-    /// Drops the targets that no queued new media was written under: all but the last with
-    /// none queued, otherwise those replaced before the oldest was written.
-    fn forget_targets(&mut self) {
+    /// The instant from which the targets count toward a collapse at `now`: when the oldest
+    /// queued new media was written, or the queue time bound ago, whichever is earlier. What
+    /// waits here was written since, and so was what a retransmission queued now repairs,
+    /// as far as it is still worth sending (media that waited the bound is discarded as
+    /// stale). No target set before the last flush is kept ([`Self::flush`]), so the
+    /// horizon never reaches behind one.
+    fn collapse_horizon(&self, now: Instant) -> Option<Instant> {
         let oldest = self.oldest_new_media();
-        while self.targets.len() > 1 && oldest.is_none_or(|written| self.targets[1].0 <= written) {
+        let look_back = self
+            .queue_time_limit
+            .and_then(|limit| now.checked_sub(limit));
+        match (oldest, look_back) {
+            (Some(oldest), Some(look_back)) => Some(oldest.min(look_back)),
+            (oldest, look_back) => oldest.or(look_back),
+        }
+    }
+
+    /// Drops the targets replaced before [`Self::collapse_horizon`]; all but the last when
+    /// none counts.
+    fn forget_targets(&mut self, now: Instant) {
+        let horizon = self.collapse_horizon(now);
+        while self.targets.len() > 1 && horizon.is_none_or(|from| self.targets[1].0 <= from) {
             self.targets.pop_front();
         }
         // Far more changes than a queue's lifetime holds: the oldest are let go (the collapse
@@ -824,23 +849,30 @@ impl PacerInterceptor {
         }
     }
 
-    /// Whether the queue is long because the target collapsed: new media waits, and the
-    /// target is at most [`COLLAPSE_AT`] of the highest in force since the oldest of it was
-    /// written (see "A capacity collapse").
-    fn collapsed(&self) -> bool {
+    /// Whether the queue is long because the target collapsed: what waits (new media or
+    /// retransmissions) would take the pause mark or more to leave, whether a pause is in
+    /// force or about to begin, and the target is at most [`COLLAPSE_AT`] of the highest in force since
+    /// [`Self::collapse_horizon`] (see "A capacity collapse").
+    fn collapsed(&self, now: Instant) -> bool {
         if self.backlog != Backlog::Flush || self.queue_overflow != QueueOverflow::Drop {
             return false;
         }
-        let Some(oldest) = self.oldest_new_media() else {
+        let Some(limit) = self.queue_time_limit else {
+            return false;
+        };
+        if self.queue.is_empty() || self.expected_queue_time() < limit.mul_f64(PAUSE_AT) {
+            return false;
+        }
+        let Some(horizon) = self.collapse_horizon(now) else {
             return false;
         };
         let mut written_for: f64 = 0.0;
         for (index, (_, target)) in self.targets.iter().enumerate() {
-            // In force when the oldest was written (the last set at or before it), or since.
+            // In force at the horizon (the last set at or before it), or since.
             let superseded = self
                 .targets
                 .get(index + 1)
-                .is_some_and(|(next, _)| *next <= oldest);
+                .is_some_and(|(next, _)| *next <= horizon);
             if !superseded {
                 written_for = written_for.max(*target);
             }
@@ -895,7 +927,12 @@ impl PacerInterceptor {
             message: AttributedPacket::new(Packet::Rtcp(vec![]))
                 .with(Attribute::Custom(Arc::new(PacerFlush { ssrcs }))),
         });
-        self.forget_targets();
+        // What is written from here on is written for the target now: no earlier target
+        // counts again, so the key frame that answers this flush, however long it takes to
+        // leave, is a pause and not another collapse.
+        let target = self.target();
+        self.targets.clear();
+        self.targets.push_back((now, target));
     }
 
     /// Whether new media written at `written` is what a source that follows the pause left
@@ -1111,7 +1148,8 @@ pub struct PacerFlush {
     pub ssrcs: Vec<u32>,
 }
 
-/// A collapse is a target at most this share of what the queued media was written for: half.
+/// A collapse is a target at most this share of the highest in force since the queued media
+/// was written (or within the queue time bound, for what its retransmissions repair): half.
 /// One decrease of the delay-based controller is 0.85 and the loss-based controller cuts by
 /// at most half a report, so a target that halved within the life of the queue (two seconds
 /// at most) is a path that lost its capacity, not a controller adapting; and a queue a
