@@ -208,8 +208,10 @@ jobs:
         run: python3 scripts/open-must.py --check
       - name: The behaviour profile table is what the code says (docs/behaviour-profiles.md)
         run: python3 scripts/behaviour-profiles.py --check
-      - name: Released CHANGELOG sections equal the latest release tag's
+      - name: Released CHANGELOG sections equal the latest release tag's (the newest tag that is an ancestor)
         run: python3 scripts/check-changelog-released.py
+      - name: The released-sections gate's unit tests (which tag it compares with)
+        run: python3 scripts/test_check_changelog_released.py
       - name: The committed nested Cargo.lock files resolve their manifests (--locked)
         run: python3 scripts/check-nested-locks.py
 

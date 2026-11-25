@@ -1687,6 +1687,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **The released-sections gate compares with the newest release tag that is an ancestor of the
+  commit**, not the newest tag in the repository (`scripts/check-changelog-released.py`). A
+  maintenance release of an earlier line, tagged on its own branch after this line's last
+  release (`v0.22.0+brainwires.5.1`, 2026-11-25), made the gate ask every tree of this line for
+  a section its history never had. In a shallow checkout the script fetches the history first;
+  `--tag` still names a tag outright. Tests: `scripts/test_check_changelog_released.py` (a
+  throwaway repository with a release on main and a newer tag on a side branch), run in CI
+  beside the gate.
 - **RFC 4585 section 4.2: receivers do not rely on a reaction to feedback; RFC 7714 section 13.1:
   every key form searched for after the drop** (`conf/must-2-feedback-reliance-and-key-erasure`;
   tests and audit only, no engine behaviour change). `tests/feedback_not_negotiated_rtc2rtc.rs`
