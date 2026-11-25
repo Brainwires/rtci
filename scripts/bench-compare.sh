@@ -102,6 +102,11 @@ for r in $(seq 1 "$rounds"); do
   done
 done
 echo "benchmarks ran for $((SECONDS - start)) s"
+for f in "$out"/base-*.txt "$out"/head-*.txt; do
+  echo "::group::$(basename "$f"): $(grep -c '^test ' "$f") bench lines"
+  cat "$f"
+  echo "::endgroup::"
+done
 
 base_files=() head_files=()
 for r in $(seq 1 "$rounds"); do
