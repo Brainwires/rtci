@@ -1,8 +1,9 @@
 //! FEC statistics between two `rtci` peer connections in virtual time: VP8 in RED with ULPFEC
 //! in RED packets of its own (RFC 2198, RFC 5109 section 14.2, the form libwebrtc sends), a
 //! fixed amount of FEC, and a network that loses packets (NACK is on, the default interceptors
-//! negotiate it for video; the first test's stream has no RTX, so its repairs are the packets
-//! again, which the network loses as it lost the first). What the receiver's
+//! negotiate it for video; the first test's stream has no RTX, so a repair would be the packet
+//! again: none leaves there, FEC rebuilds each lost media packet before it is asked for and a
+//! lost FEC packet is not sent again without RTX). What the receiver's
 //! webrtc-stats say (`fecPacketsReceived`, `fecBytesReceived`, `fecPacketsDiscarded`, 8.5)
 //! and what the engine's own FEC counts say (`RTCPeerConnection::fec_stats`) are checked
 //! against what crossed the wire.
@@ -168,8 +169,8 @@ struct World {
     lost: u64,
     /// RTP packets of the first peer that crossed the wire, lost ones included: each
     /// sequence number once. The default interceptors negotiate NACK for video, and without an
-    /// RTX stream a repair is the packet again (RFC 4585 section 6.2.1), which this network
-    /// loses as it lost the first.
+    /// RTX stream a repair is the packet again (RFC 4585 section 6.2.1), counted in
+    /// `sent_again` and lost by this network as the first was.
     sent_rtp: u64,
     /// The payload type of every RTP packet of the first peer that was not under the RED
     /// payload type and carried a payload (retransmissions, not a probe's padding; none of
@@ -431,11 +432,16 @@ fn fec_in_red_is_counted_by_both_ends_and_what_it_rebuilt_is_reported() -> Resul
     assert_eq!(sent[0].fec_packets_sent, 30, "{sent:?}");
     assert!(sent[0].fec_bytes_sent > 30 * 200, "{sent:?}");
     assert_eq!(world.sent_rtp, 60 + 30, "every media and FEC packet left");
-    // A lost packet asked for again is sent again, as it was (no RTX stream here): it
-    // reaches the wire, where it used to be refused by the SRTP sender.
-    assert!(
-        world.sent_again > 0,
-        "the repairs the receiver asked for left too"
+    // Nothing left twice. There is no RTX stream here, so a repair would be the packet again
+    // under its own sequence number (it reaches the wire since the stampers keep a packet
+    // sent again as it was: `tests/nack_without_rtx_rtc2rtc.rs`). The network lost one RED
+    // packet in five, never two of a block: FEC rebuilt every lost media packet before a
+    // repair of it was due (`packets_recovered` below), and the FEC data
+    // of a lost FEC packet is not sent again (without RTX its sequence number is not
+    // answered either), although the receiver asks for it.
+    assert_eq!(
+        world.sent_again, 0,
+        "no FEC packet is sent again, and FEC rebuilt the media before it was asked for"
     );
 
     let now = world.now;
