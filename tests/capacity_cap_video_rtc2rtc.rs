@@ -1365,6 +1365,47 @@ fn an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_defaul
     Ok(())
 }
 
+/// The same restart in the chains without a pacer, where the peers do not take the new path
+/// into use at the same instant and the first of them loses its first cluster. The callee
+/// selects the restart's pair 10 ms before the caller, and until the caller has, nothing but
+/// STUN crosses: the callee's first start-up cluster, a burst of padding sent at its own path
+/// change, is lost whole. A cluster without a result is given up after a second and the next
+/// of the start-up sequence is asked for, so the callee finds the path a second after the
+/// caller: the caller's estimate is at the maximum within a second and a half of the new
+/// pair, the callee's within two and a half. (The paced chain's cluster lasts longer than the
+/// 10 ms, enough of it arrives, and both peers are held to a second and a half above.)
+///
+/// Before, the callee asked for one cluster at its path change (twice the starting rate,
+/// for an application-limited sender), lost it, and climbed at 8% a second: 395 kbit/s on
+/// average over the ten seconds after the new pair on the capacity instrument's outage cells
+/// (200 calls, both chains) against 1345 to 1367 kbit/s now; the caller 1515 and 1527.
+#[test]
+fn the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost()
+-> Result<()> {
+    for chain in [Chain::ParolNet, Chain::DefaultWithoutPacer] {
+        for seed in seed_range(1, 3) {
+            let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
+            let outcome = path_change_run_as_set(&setup)?;
+            for (i, (who, by)) in [("caller", 1_500), ("callee", 2_500)]
+                .into_iter()
+                .enumerate()
+            {
+                let at_max = outcome.estimates[i]
+                    .iter()
+                    .find(|(at, bps)| *at >= outcome.switched_at && *bps >= MAX_BPS)
+                    .map(|(at, _)| *at - outcome.switched_at);
+                println!("RESTART-PROBE {chain:?} seed {seed} {who}: the maximum after {at_max:?}");
+                assert!(
+                    at_max.is_some_and(|after| after <= Duration::from_millis(by)),
+                    "{chain:?} seed {seed} {who}: the maximum after {at_max:?}: {:?}",
+                    outcome.estimates[i]
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The first step down of a series of (time, bit rate), with the value before it.
 fn first_step_down(series: &[(Duration, u32)]) -> Option<(Duration, u32, u32)> {
     series

@@ -1387,12 +1387,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.12 s later in those calls (0.70 s after the new pair against 0.58 s): the start-up
   clusters share the first moments of the new path with the key frame. The chains without a
   pacer were at 1 Mbit/s 0.5 s after the new pair before and are now (their probe after a
-  drop is off, so no cluster was outstanding); every other cell of the instrument is
-  unchanged (4600 calls in fifteen cells, 0 differ). Tests:
+  drop is off, so no cluster was outstanding). The OTHER direction gains in every chain:
+  the callee's target over the ten seconds after the new pair averages 1521 kbit/s against
+  507 with the pacer, and 1345 to 1367 against 395 without one. There the callee, which
+  selects the new pair 10 ms before the caller, loses its first cluster whole (nothing but
+  STUN crosses until both have switched); it used to ask for that one cluster only, and now
+  the next start-up cluster follows when the first is given up a second later. Every other
+  cell of the instrument is unchanged (4600 calls in fifteen cells, 0 differ). Tests:
   `cc::probe::tests::a_path_change_starts_probing_over_and_forgets_the_drop`,
   `the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop`,
   `rtci-interceptor/tests/probing_across_a_path_change.rs`,
-  `tests/capacity_cap_video_rtc2rtc.rs::an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain`.
+  `libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change`,
+  `tests/capacity_cap_video_rtc2rtc.rs::an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain`,
+  `::the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost`.
 
 - **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
   (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
