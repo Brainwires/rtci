@@ -531,6 +531,8 @@ pub struct Peer {
     /// ([`World::tolerate_failure`]).
     pub left_connected: u32,
     pub failed: bool,
+    /// Every connection state the application was told of, and when.
+    pub states: Vec<(Duration, RTCPeerConnectionState)>,
     pub decoder: ModelDecoder,
     pub usable_at: Vec<Duration>,
     /// How long after its capture each usable frame came out of the decoder.
@@ -832,6 +834,7 @@ impl Peer {
             gap_wait: setup.gap_wait,
             audio_arrivals: Vec::new(),
             left_connected: 0,
+            states: Vec::new(),
             failed: false,
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
@@ -1112,6 +1115,19 @@ pub struct World {
     /// A peer connection that fails does not end the run ([`Peer::failed`] records it): for
     /// a measurement that reports the failure as a figure. Off: the run ends with an error.
     pub tolerate_failure: bool,
+    /// The STUN datagrams (ICE consent checks and their responses, RFC 7675) that did not
+    /// arrive: dropped at a link's queue, or lost on the reverse path.
+    pub stun_lost: u32,
+    /// Until then none of the callee's RTCP reaches the link: a feedback outage with the
+    /// capacity unchanged (the instrument's `fbgap` scenario).
+    pub feedback_outage_until: Option<Instant>,
+    /// The RTCP datagrams that outage took.
+    pub feedback_outage_lost: u32,
+}
+
+/// Whether a datagram is SRTCP (RFC 7983 first octet, RFC 5761 packet type).
+pub fn is_rtcp(data: &[u8]) -> bool {
+    matches!(data, [b0, b1, ..] if (128..=191).contains(b0) && (192..=223).contains(b1))
 }
 
 impl World {
@@ -1146,6 +1162,11 @@ impl World {
                     let lost = i == 1
                         && self.reverse_loss > 0
                         && self.loss_rng.next_u64() % 100 < u64::from(self.reverse_loss);
+                    let in_outage = i == 1
+                        && self.feedback_outage_until.is_some_and(|t| self.now < t)
+                        && is_rtcp(&msg.message);
+                    self.feedback_outage_lost += u32::from(in_outage);
+                    let lost = lost || in_outage;
                     let arrives = if lost {
                         None
                     } else {
@@ -1167,6 +1188,9 @@ impl World {
                     }
                     if payload_type == Some(OPUS_PT) {
                         self.uplinks[i].audio_dropped += u64::from(arrives.is_none());
+                    }
+                    if stun && arrives.is_none() {
+                        self.stun_lost += 1;
                     }
                     let Some(at) = arrives else { continue };
                     self.order += 1;
@@ -1227,6 +1251,7 @@ impl World {
             moved = true;
             match event {
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
+                    peer.states.push((at, state));
                     if state == RTCPeerConnectionState::Failed {
                         if !tolerate_failure {
                             bail!("peer {i} failed");
@@ -1562,6 +1587,9 @@ impl World {
             media: false,
             video_on: setup.video,
             trace: Vec::new(),
+            stun_lost: 0,
+            feedback_outage_until: None,
+            feedback_outage_lost: 0,
             blackhole: false,
             stun_only: false,
             sampling: false,
