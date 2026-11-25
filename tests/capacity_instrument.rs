@@ -136,6 +136,7 @@ mod capacity_common;
 
 use anyhow::{Result, anyhow, bail};
 use capacity_common::*;
+use rtci::peer_connection::configuration::BehaviourProfile;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -396,11 +397,28 @@ enum Scenario {
     Outage,
 }
 
+/// The settings a cell's default chain is built with, beside the chain itself: the chain
+/// token of the cell's name says both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Tuning {
+    /// The engine's defaults (`paced`, `nopacer`, `parolnet`).
+    Default,
+    /// `share`: the defaults with `rtcp_share_follows_send_rate`.
+    Share,
+    /// `perf`: the `Performance` behaviour profile's interceptor settings.
+    Performance,
+    /// `perfnoshare`: the same with `rtcp_share_follows_send_rate` off.
+    PerformanceWithoutShare,
+    /// `chrome`: the `Chrome` behaviour profile's interceptor settings.
+    Chrome,
+}
+
 /// Everything of a run but its seed (the module's "Cells").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Cell {
     scenario: Scenario,
     chain: Chain,
+    tuning: Tuning,
     /// The receiver's bound on a gap in ms; 0 for none.
     gap_ms: u64,
     /// Both directions capped, or the caller's uplink alone.
@@ -427,10 +445,17 @@ impl Cell {
                 other => bail!("unknown scenario {other} in {name}"),
             },
             chain: match chain {
-                "paced" => Chain::Default,
+                "paced" | "share" | "perf" | "perfnoshare" | "chrome" => Chain::Default,
                 "nopacer" => Chain::DefaultWithoutPacer,
                 "parolnet" => Chain::ParolNet,
                 other => bail!("unknown chain {other} in {name}"),
+            },
+            tuning: match chain {
+                "share" => Tuning::Share,
+                "perf" => Tuning::Performance,
+                "perfnoshare" => Tuning::PerformanceWithoutShare,
+                "chrome" => Tuning::Chrome,
+                _ => Tuning::Default,
             },
             gap_ms: number(gap, "gap")?,
             both: match direction {
@@ -450,10 +475,14 @@ impl Cell {
                 Scenario::Cap => "cap",
                 Scenario::Outage => "outage",
             },
-            match self.chain {
-                Chain::Default => "paced",
-                Chain::DefaultWithoutPacer => "nopacer",
-                Chain::ParolNet => "parolnet",
+            match (self.chain, self.tuning) {
+                (Chain::Default, Tuning::Default) => "paced",
+                (_, Tuning::Share) => "share",
+                (_, Tuning::Performance) => "perf",
+                (_, Tuning::PerformanceWithoutShare) => "perfnoshare",
+                (_, Tuning::Chrome) => "chrome",
+                (Chain::DefaultWithoutPacer, Tuning::Default) => "nopacer",
+                (Chain::ParolNet, Tuning::Default) => "parolnet",
             },
             self.gap_ms,
             if self.both { "both" } else { "up" },
@@ -467,6 +496,15 @@ impl Cell {
             .chain(self.chain)
             .anchor(ANCHORS[0])
             .reverse_loss(self.reverse_loss);
+        let setup = match self.tuning {
+            Tuning::Default => setup,
+            Tuning::Share => setup.share_follows_send_rate(true),
+            Tuning::Performance => setup.profile(BehaviourProfile::Performance),
+            Tuning::PerformanceWithoutShare => setup
+                .profile(BehaviourProfile::Performance)
+                .share_follows_send_rate(false),
+            Tuning::Chrome => setup.profile(BehaviourProfile::Chrome),
+        };
         match self.gap_ms {
             0 => setup,
             ms => setup.gap_wait(Duration::from_millis(ms)),
