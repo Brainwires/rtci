@@ -53,9 +53,11 @@
 //!   `parolnet` (ParolNet's chain; measurement only);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
 //!   .with_max_gap_wait(300 ms)` and a PLI when the builder gives a gap up
-//!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time, which holds
-//!   a gap for 256 packets: the second, documented cell, because it is the one configuration in
-//!   which discarding a stale repair is catastrophic, and a policy must be measured on both.
+//!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time
+//!   (`with_max_gap_wait(None)`), which holds a gap for 256 packets or until a complete key
+//!   frame releases it (the builder's rule for every receiver): the second, documented cell,
+//!   because it is the one configuration in which discarding a stale repair is costly, and a
+//!   policy must be measured on both.
 //!   Why 300 ms: the NACK generator asks every 100 ms and a repair comes back a round trip
 //!   later, so on the open path (20 ms round trip) 300 ms is two whole request rounds with
 //!   margin, and it is inside the 200 ms to 1 s of playout delay that page gives for
@@ -1124,6 +1126,43 @@ fn ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end() -
     Ok(())
 }
 
+/// THE PICTURE GUARD: in the default chain's two reference cells of the pull-request ensemble
+/// (100 runs) at most ONE run shows a picture older than 2 s for more than 0.5 s. With the
+/// backlog flushed at a collapse (docs/capacity-collapse.md) none does (0 of 2000 runs of
+/// these two cells; 2000 of 2000 with the pause). The requirement itself, at most 5 % of
+/// calls on 300 runs, is `on_demand_requirement_picture_in_the_default_chain`, which does not
+/// fit the job; this is its tripwire: a tree in which 5 % of calls miss passes it with
+/// probability 0.037 (0.95^100 + 100 x 0.05 x 0.95^99), one in which none does never fails.
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_tripwire_picture_in_the_default_chain() -> Result<()> {
+    const ALLOWED: usize = 1;
+    let mut missed = Vec::new();
+    for cell in [DEFAULT_CHAIN, DEFAULT_CHAIN_NO_BOUND] {
+        for row in pr_rows(cell)? {
+            if row
+                .value(PICTURE.figure)
+                .is_none_or(|stale| stale > PICTURE.limit)
+            {
+                missed.push(format!(
+                    "{cell} seed {}: a picture older than 2 s for {} s",
+                    row.seed,
+                    row.value(PICTURE.figure).unwrap_or(f64::NAN),
+                ));
+            }
+        }
+    }
+    assert!(
+        missed.len() <= ALLOWED,
+        "TRIPWIRE: {} of the default chain's runs miss the picture requirement ({}), at most \
+         {ALLOWED} allowed:\n{}",
+        missed.len(),
+        PICTURE.claim,
+        missed.join("\n")
+    );
+    Ok(())
+}
+
 /// The 1 s audio requirement in the default chain: met since breaker-1 (0 of 1000 runs with
 /// more than 1 s without audio, hosted run 45525698919; 89 of 1000 before). On 300 runs, on
 /// demand: the reference cell has 60 runs in the pull-request ensemble, where
@@ -1163,21 +1202,28 @@ fn on_demand_requirement_freeze_without_the_pacer() -> Result<()> {
 // on master, CHANGELOG "Known limits" tracks it, and the tripwires of the cell hold today's
 // level. When the engine meets one, its test moves up among the `ensemble_requirement_` ones.
 
+/// The picture requirement in the default chain: met since the pacer flushes its backlog at a
+/// collapse (docs/capacity-collapse.md): 0 of 200 runs, oldest picture 1.33 s in the median
+/// (200 of 200 and 7.9 s with the pause). On 300 runs, on demand; the reference cell's
+/// tripwires hold it on every pull request.
 #[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); the oldest picture is 7.9 s in the median"]
-fn known_limit_picture_in_the_default_chain() -> Result<()> {
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_picture_in_the_default_chain() -> Result<()> {
     PICTURE.test(DEFAULT_CHAIN)
 }
 
+/// Met with the flush as well: 0 of 200 runs with more than 2 s without a picture.
 #[test]
-#[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); 7.6 s in the median"]
-fn known_limit_freeze_in_the_default_chain() -> Result<()> {
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_freeze_in_the_default_chain() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN)
 }
 
+/// Met with the flush and the builder's key-frame release: 0 of 200 runs, 1.33 s in the median.
 #[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); the oldest picture is 7.2 s in the median"]
-fn known_limit_picture_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_picture_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()>
+{
     PICTURE.test(DEFAULT_CHAIN_NO_BOUND)
 }
 
@@ -1192,14 +1238,15 @@ fn on_demand_requirement_freeze_in_the_default_chain_with_a_receiver_without_a_b
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 200 of 200 runs on master 0ca11557 (required: at most 5 %); 17.4 s in the median, and 8.5 % of runs never show a new picture again"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 119 of 200 runs with the backlog flushed (200 of 200 before; required: at most 5 %); 2.6 s in the median: the estimate falls only by the missing-feedback rule (docs/capacity-collapse.md)"]
 fn known_limit_picture_with_both_directions_capped() -> Result<()> {
     PICTURE.test(BOTH_DIRECTIONS)
 }
 
+/// Met with the flush for the bounded receiver: 0 of 200 runs (134 with the pause).
 #[test]
-#[ignore = "KNOWN LIMIT: no new picture within 2 s of the new pair in 134 of 200 runs on master 0ca11557, 67 % (required: at most 5 %)"]
-fn known_limit_resume_after_an_outage_in_the_default_chain() -> Result<()> {
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_resume_after_an_outage_in_the_default_chain() -> Result<()> {
     RESUME.test(OUTAGE_DEFAULT_CHAIN)
 }
 
