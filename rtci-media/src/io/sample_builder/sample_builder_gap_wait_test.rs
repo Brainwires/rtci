@@ -319,3 +319,104 @@ fn a_packet_older_than_what_was_consumed_is_ignored() {
     assert_eq!(1, builder.skipped_gaps());
     assert_eq!(Some(6), builder.nack_horizon());
 }
+
+/// RFC 4585 section 4.2: "The RTP receivers MUST NOT rely on the RTP senders reacting to any
+/// of the FB messages." A VP8 stream at 30 frames a second, one packet a frame, a key frame
+/// every 30 frames on the sender's own schedule, from a sender that reacts to no feedback (the
+/// session negotiated none); the packet of frame 35 is lost for good. A builder with nothing
+/// but `new` delivers frame 36 and every frame after the gap within the default bound of their
+/// arrival, raises its key-frame request (which nobody answers), and a decoder that needs
+/// every reference resumes at frame 60, the sender's next scheduled key frame: nothing waits
+/// for a retransmission or for an answer to the request.
+#[test]
+fn a_receiver_does_not_wait_for_feedback_the_sender_never_answers() {
+    const FRAMES: u16 = 100;
+    const KEY_FRAME_INTERVAL: u16 = 30;
+    const LOST: u16 = 35;
+    let t0 = Instant::now();
+    let interval = ms(33);
+    let arrival = |frame: u16| t0 + interval * u32::from(frame);
+    let packet = |frame: u16| {
+        let key = frame.is_multiple_of(KEY_FRAME_INTERVAL);
+        Packet {
+            header: Header {
+                sequence_number: 1000 + frame,
+                timestamp: 3000 * u32::from(frame),
+                marker: true,
+                ..Default::default()
+            },
+            // RFC 7741: the descriptor with S=1, then the payload header, P=0 on a key frame.
+            payload: Bytes::from(vec![0x10, if key { 0x00 } else { 0x01 }, frame as u8]),
+        }
+    };
+
+    let mut builder = SampleBuilder::new(256, Vp8Packet::default(), 90_000);
+    // (frame, when the application got it, packets dropped before it)
+    let mut delivered: Vec<(u16, Instant, u16)> = Vec::new();
+    let mut requests = 0;
+    let mut collect = |builder: &mut SampleBuilder<Vp8Packet>, now: Instant| {
+        while let Some(sample) = builder.pop(now) {
+            delivered.push((
+                (sample.packet_timestamp / 3000) as u16,
+                now,
+                sample.prev_dropped_packets,
+            ));
+        }
+        if builder.take_key_frame_request() {
+            // The application would send a PLI; the sender reacts to none.
+            requests += 1;
+        }
+    };
+    for frame in 0..FRAMES {
+        let now = arrival(frame);
+        // The builder's deadlines before this arrival, as an application's timer would.
+        while let Some(deadline) = builder.poll_timeout().filter(|d| *d < now) {
+            collect(&mut builder, deadline);
+        }
+        if frame != LOST {
+            builder.push(now, packet(frame));
+        }
+        collect(&mut builder, now);
+    }
+    collect(&mut builder, arrival(FRAMES) + ms(1_000));
+
+    // Every frame after the gap reaches the application within the bound of its arrival
+    // (the last one waits for a successor to end it, as every frame does: 33 ms).
+    for frame in LOST + 1..FRAMES - 1 {
+        let Some((_, at, _)) = delivered.iter().find(|(f, _, _)| *f == frame) else {
+            panic!("frame {frame} never delivered: {delivered:?}");
+        };
+        assert!(
+            *at <= arrival(frame) + DEFAULT_MAX_GAP_WAIT,
+            "frame {frame} held {:?} after its arrival",
+            *at - arrival(frame)
+        );
+    }
+    assert!(requests >= 1, "a key frame is asked for");
+
+    // A decoder that needs every reference: a key frame decodes; any other frame only after
+    // the frame before it decoded with nothing dropped between them.
+    let mut decoded = Vec::new();
+    let mut previous: Option<u16> = None;
+    for (frame, _, dropped) in &delivered {
+        let key = frame.is_multiple_of(KEY_FRAME_INTERVAL);
+        let decodable = key || (*dropped == 0 && previous == Some(frame - 1));
+        if decodable {
+            decoded.push(*frame);
+            previous = Some(*frame);
+        } else {
+            previous = None;
+        }
+    }
+    let after_gap: Vec<u16> = decoded.iter().copied().filter(|f| *f > LOST).collect();
+    assert_eq!(
+        Some(&60),
+        after_gap.first(),
+        "decoding resumes at the sender's next scheduled key frame"
+    );
+    assert_eq!(
+        (60..FRAMES - 1).collect::<Vec<u16>>(),
+        after_gap[..after_gap.len().min((FRAMES - 61) as usize)].to_vec(),
+        "and every frame from it decodes"
+    );
+}

@@ -106,6 +106,7 @@ static ALLOCATOR: Recording = Recording;
 /// One test at a time looks at the allocator.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+#[allow(clippy::vec_init_then_push)]
 fn providers() -> Vec<Arc<dyn RTCCryptoProvider>> {
     let mut providers: Vec<Arc<dyn RTCCryptoProvider>> = Vec::new();
     #[cfg(feature = "crypto-ring")]

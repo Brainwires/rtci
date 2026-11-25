@@ -342,14 +342,9 @@ fn aes_needles(
     out.push(Needle::new(key_name, "the key", crate_held, key));
     let schedule = Schedule::expand(key);
     let nk = key.len() / 4;
-    for i in 0..=schedule.rounds {
+    for (i, name) in ROUND_KEYS.iter().enumerate().take(schedule.rounds + 1) {
         if 4 * i >= nk {
-            out.push(Needle::new(
-                key_name,
-                ROUND_KEYS[i],
-                false,
-                schedule.round_key(i),
-            ));
+            out.push(Needle::new(key_name, name, false, schedule.round_key(i)));
         }
     }
     if gcm {

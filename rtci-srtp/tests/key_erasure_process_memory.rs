@@ -39,6 +39,7 @@ const MASTER_SALT: [u8; 14] = [
     0xa4, 0x19, 0x7e, 0xd3, 0x62, 0x05, 0xbc, 0x48, 0xf7, 0x2e, 0x91, 0x6a, 0x3d, 0xc0,
 ];
 
+#[allow(clippy::vec_init_then_push)]
 fn providers() -> Vec<Arc<dyn RTCCryptoProvider>> {
     let mut providers: Vec<Arc<dyn RTCCryptoProvider>> = Vec::new();
     #[cfg(feature = "crypto-ring")]
