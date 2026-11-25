@@ -52,9 +52,11 @@
 //!   `parolnet` (ParolNet's chain; measurement only);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
 //!   .with_max_gap_wait(300 ms)` and a PLI when the builder gives a gap up
-//!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time, which holds
-//!   a gap for 256 packets: the second, documented cell, because it is the one configuration in
-//!   which discarding a stale repair is catastrophic, and a policy must be measured on both.
+//!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time
+//!   (`with_max_gap_wait(None)`), which holds a gap for 256 packets or until a complete key
+//!   frame releases it (the builder's rule for every receiver): the second, documented cell,
+//!   because it is the one configuration in which discarding a stale repair is costly, and a
+//!   policy must be measured on both.
 //!   Why 300 ms: the NACK generator asks every 100 ms and a repair comes back a round trip
 //!   later, so on the open path (20 ms round trip) 300 ms is two whole request rounds with
 //!   margin, and it is inside the 200 ms to 1 s of playout delay that page gives for

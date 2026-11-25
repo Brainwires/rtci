@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media** (`conf/flush-2-receiver-gap-bound`): `SampleBuilder` gives a gap up by default.
+  A builder of a video format (`Depacketizer::has_key_frames`: VP8, VP9, AV1, H.264, H.265)
+  (1) waits for a missing packet at most `DEFAULT_MAX_GAP_WAIT`, 300 ms from the arrival of the
+  first packet after it, then gives the gap up and raises `take_key_frame_request()` (it held
+  a gap for `max_late` packets, which were 8.6 s at 100 kbit/s); (2) gives up everything
+  before a complete key frame the moment the key frame is whole
+  (`Depacketizer::is_key_frame_start`), with no request; and every builder (3) ignores a packet
+  older than what it has already built or given up (it buffered it, where it looked like a new
+  gap). An audio builder is otherwise unchanged. An application that drives the builder
+  without a clock should call `pop(now)` at `poll_timeout()` and send a PLI when
+  `take_key_frame_request()` says so. **Migration** (the old behaviour):
+  `SampleBuilder::new(..).with_max_gap_wait(None).with_key_frame_release(false)`.
+  `with_max_gap_wait` now takes `impl Into<Option<Duration>>`: a call with a `Duration`
+  compiles as before. No RFC sets the bound; 300 ms is the value the capacity instrument
+  measured best of 300, 600 and 1000 ms, and libwebrtc's receiver (3 s without a decodable
+  frame, 200 ms while waiting for a key frame) is `rtci-video`'s `ReceiveConfig::chrome()`:
+  `docs/receiver-gap-policy.md`.
+
 - **interceptor, peer connection** (breaker-1): `DefaultInterceptorOptions` has two new public
   fields, `circuit_breaker` and `circuit_breaker_automatic_restart` (both `true`; see "Fixed"
   and "Added"). **Migration**: a struct literal adds them or builds on
@@ -742,6 +760,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     decode out of order).
 
 ### Added
+
+- **rtp, media** (`conf/flush-2-receiver-gap-bound`): `Depacketizer::has_key_frames()` and
+  `Depacketizer::is_key_frame_start(payload)` (both with a default of `false`, so an
+  implementation outside the workspace compiles unchanged): the first packet of a key frame by
+  the payload format's own rule, for VP8 (P=0 in the payload header, RFC 7741 section 4.3),
+  VP9 (P=0 at the start of a base-layer frame, RFC 9628 section 4.2), AV1 (the aggregation
+  header's N bit), H.264 (the first slice of an IDR picture, alone, in an FU-A / FU-B or an
+  STAP-A / STAP-B; `IDR_NALU_TYPE`, `SEI_NALU_TYPE`) and H.265 (the first slice segment of an
+  IRAP picture, alone, in a fragmentation unit or an aggregation packet, with or without
+  DONL). `SampleBuilder`: `DEFAULT_MAX_GAP_WAIT`, `with_key_frame_release(bool)`,
+  `key_frame_releases() -> u64`, and `nack_horizon() -> Option<u16>` (the oldest sequence
+  number still of use, for `RTCRtpReceiver::set_nack_horizon`). Tests:
+  `rtci-rtp/src/codec/key_frame_start_test.rs`,
+  `rtci-media/src/io/sample_builder/sample_builder_key_frame_test.rs`,
+  `sample_builder_gap_wait_test.rs`.
 
 - **interceptors** (breaker-1): `CircuitBreakerBuilder::with_automatic_restart` and
   `DefaultInterceptorOptions::circuit_breaker_automatic_restart` (on by default: RFC 8083

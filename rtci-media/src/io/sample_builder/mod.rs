@@ -5,6 +5,8 @@ mod sample_builder_gap_wait_test;
 #[cfg(test)]
 mod sample_builder_h26x_test;
 #[cfg(test)]
+mod sample_builder_key_frame_test;
+#[cfg(test)]
 mod sample_builder_test;
 #[cfg(test)]
 mod sample_sequence_location_test;
@@ -19,7 +21,39 @@ use rtp::Packet;
 use rtp::packetizer::Depacketizer;
 use std::time::{Duration, Instant};
 
+/// How long a [`SampleBuilder`] of a format with key frames
+/// ([`Depacketizer::has_key_frames`]) waits for a missing packet unless told otherwise
+/// ([`SampleBuilder::with_max_gap_wait`]).
+///
+/// No RFC gives a number. RFC 8834 section 6.1 has a retransmission be useful only when it
+/// "arrives in time", and RFC 8836 section 2 puts interactive media "within a very limited
+/// time window (no more delay than hundreds of milliseconds end-to-end)". 300 ms is the value
+/// the repository's capacity instrument measured best of 300, 600 and 1000 ms (a picture older
+/// than 2 s in 8, 10 and 37 per cent of runs without a pacer; no difference with one):
+/// `docs/receiver-gap-policy.md`. libwebrtc's receiver has no such bound on a packet: it asks
+/// for a key frame after 3 s without a decodable frame, 200 ms while it waits for a key frame
+/// (`video/video_receive_stream2.h:74-75` at a222406d); `rtci-video`'s
+/// `ReceiveConfig::chrome()` is that receiver.
+pub const DEFAULT_MAX_GAP_WAIT: Duration = Duration::from_millis(300);
+
+/// Whether `sequence_number` comes before `reference` (RFC 3550 appendix A.1 wrap-around: up
+/// to 32767 behind it).
+fn older_than(sequence_number: u16, reference: u16) -> bool {
+    (1..0x8000).contains(&reference.wrapping_sub(sequence_number))
+}
+
 /// SampleBuilder buffers packets until media frames are complete.
+///
+/// Samples come out in sequence-number order. A missing packet holds back what follows it
+/// until it arrives, or until the builder gives it up:
+///
+/// - when more than `max_late` packets are buffered behind it ([`Self::new`]), or more than
+///   [`Self::with_max_time_delay`] of media time;
+/// - when it has been missing for [`Self::with_max_gap_wait`], by default
+///   [`DEFAULT_MAX_GAP_WAIT`] for a format with key frames and never for another (audio);
+/// - at once when a complete key frame is buffered behind it
+///   ([`Self::with_key_frame_release`], on by default; [`Depacketizer::is_key_frame_start`]):
+///   nothing before a key frame is needed to decode it or what follows it.
 pub struct SampleBuilder<T: Depacketizer> {
     /// how many packets to wait until we get a valid Sample
     max_late: u16,
@@ -69,6 +103,17 @@ pub struct SampleBuilder<T: Depacketizer> {
 
     /// How many gaps the time bound gave up.
     skipped_gaps: u64,
+
+    /// Whether a complete key frame releases what is missing before it
+    /// ([`Self::with_key_frame_release`]).
+    key_frame_release: bool,
+
+    /// How many times a complete key frame released what was missing before it.
+    key_frame_releases: u64,
+
+    /// The sequence number after the newest packet consumed (built into a sample or given
+    /// up): a packet before it has nothing left to belong to. `None` until one is consumed.
+    next_wanted: Option<u16>,
 }
 
 impl<T: Depacketizer> SampleBuilder<T> {
@@ -77,7 +122,17 @@ impl<T: Depacketizer> SampleBuilder<T> {
     /// `max_late` is measured in RTP packet sequence numbers.
     /// A large max_late will result in less packet loss but higher latency.
     /// The depacketizer extracts media samples from RTP packets.
+    ///
+    /// With a depacketizer of a format that has key frames ([`Depacketizer::has_key_frames`]:
+    /// VP8, VP9, AV1, H.264, H.265) a missing packet is also given up once it has been
+    /// missing for [`DEFAULT_MAX_GAP_WAIT`] ([`Self::with_max_gap_wait`] changes or removes
+    /// that bound), and a complete key frame releases what is missing before it
+    /// ([`Self::with_key_frame_release`]). Any other builder (audio) waits by `max_late` and
+    /// [`Self::with_max_time_delay`] alone.
     pub fn new(max_late: u16, depacketizer: T, sample_rate: u32) -> Self {
+        let max_gap_wait = depacketizer
+            .has_key_frames()
+            .then_some(DEFAULT_MAX_GAP_WAIT);
         Self {
             max_late,
             max_late_timestamp: 0,
@@ -92,42 +147,75 @@ impl<T: Depacketizer> SampleBuilder<T> {
             dropped_packets: 0,
             padding_packets: 0,
             consumed_any: false,
-            max_gap_wait: None,
-            arrivals: Vec::new(),
+            max_gap_wait,
+            arrivals: match max_gap_wait {
+                Some(_) => vec![None; u16::MAX as usize + 1],
+                None => Vec::new(),
+            },
             key_frame_requested: false,
             skipped_gaps: 0,
+            key_frame_release: true,
+            key_frame_releases: 0,
+            next_wanted: None,
         }
     }
 
     /// Sets how long a missing packet is waited for, in wall-clock time, before the builder
-    /// gives up on it. Off by default: without it a gap is held until `max_late` packets (or
-    /// [`Self::with_max_time_delay`] of media time) have arrived behind it.
+    /// gives up on it; `None` removes the bound, and a gap is then held until `max_late`
+    /// packets (or [`Self::with_max_time_delay`] of media time) have arrived behind it, or a
+    /// key frame releases it ([`Self::with_key_frame_release`]). The default is
+    /// [`DEFAULT_MAX_GAP_WAIT`] for a format with key frames
+    /// ([`Depacketizer::has_key_frames`]) and no bound for any other.
     ///
     /// A receiver without a time bound freezes for the length of its packet window on a gap
     /// that never fills: the window is a time only at one bit rate, and 256 packets were 8.6 s
-    /// at 100 kbit/s in `tests/capacity_cap_video_rtc2rtc.rs`. Set this to about the repair
-    /// window (a few round-trip times, no more than the playout delay accepted); see
+    /// at 100 kbit/s in `tests/capacity_cap_video_rtc2rtc.rs`. The bound should be about the
+    /// repair window (a few round-trip times, no more than the playout delay accepted); see
     /// `docs/receiver-gap-policy.md`.
     ///
     /// The wait for the oldest missing packet runs from when the builder first knew of the gap:
     /// the arrival of the first packet after it. Once it has lasted the bound, the gap is given
     /// up as `max_late` gives it up: the samples complete before it are built, the incomplete
     /// one and the missing packets are dropped, and building resumes at the next packet that
-    /// starts a sample ([`Depacketizer::is_partition_head`]). The [`Depacketizer`] cannot tell
-    /// a key frame from another, so that sample may be one that refers to what was lost: the
-    /// builder raises a key-frame request ([`Self::take_key_frame_request`]) for the
-    /// application to send (PLI, RFC 4585 section 6.3.1). The next sample counts the packets
-    /// skipped in [`Sample::prev_dropped_packets`]. A gap filled before the bound changes
-    /// nothing.
+    /// starts a sample ([`Depacketizer::is_partition_head`]). That sample may be one that
+    /// refers to what was lost, so the builder raises a key-frame request
+    /// ([`Self::take_key_frame_request`]) for the application to send (PLI, RFC 4585 section
+    /// 6.3.1): the builder is not in the engine and sends nothing itself. The next sample
+    /// counts the packets skipped in [`Sample::prev_dropped_packets`]. A gap filled before the
+    /// bound changes nothing.
     ///
     /// The bound is checked when [`Self::push`] and [`Self::pop`] are called, with the `now`
     /// they are given: nothing here reads a clock. While a gap waits, [`Self::poll_timeout`]
     /// names the instant to call [`Self::pop`] at if no packet arrives first.
-    pub fn with_max_gap_wait(mut self, max_gap_wait: Duration) -> Self {
-        self.max_gap_wait = Some(max_gap_wait);
-        if self.arrivals.is_empty() {
-            self.arrivals = vec![None; u16::MAX as usize + 1];
+    pub fn with_max_gap_wait(mut self, max_gap_wait: impl Into<Option<Duration>>) -> Self {
+        self.max_gap_wait = max_gap_wait.into();
+        match self.max_gap_wait {
+            Some(_) if self.arrivals.is_empty() => {
+                self.arrivals = vec![None; u16::MAX as usize + 1];
+            }
+            Some(_) => {}
+            None => self.arrivals = Vec::new(),
         }
+        self
+    }
+
+    /// Whether a complete key frame releases what is missing before it. On by default; it
+    /// acts only with a depacketizer that can tell a key frame
+    /// ([`Depacketizer::is_key_frame_start`]: VP8, VP9, AV1, H.264, H.265).
+    ///
+    /// A key frame is decoded without reference to any earlier frame (RFC 7741 section 3; a
+    /// decoder refresh point "completely resets the decoder to a known state", RFC 5104
+    /// section 2.2), so once every packet of one is buffered nothing older can still help the
+    /// picture, and a sender that discarded its backlog and sent a key frame will never fill
+    /// the gap. When one is complete behind a gap, the samples complete before the gap are
+    /// built, everything from the gap up to the key frame is dropped (the missing packets,
+    /// and frames between them and the key frame, which a decoder could not use without what
+    /// is missing), and the key frame is the next sample, with what was dropped counted in
+    /// [`Sample::prev_dropped_packets`]. No key-frame request is raised: the key frame is
+    /// there. With `false` a gap is held until a bound gives it up, whatever follows it (a
+    /// recorder that wants every frame that can still be repaired).
+    pub fn with_key_frame_release(mut self, key_frame_release: bool) -> Self {
+        self.key_frame_release = key_frame_release;
         self
     }
 
@@ -140,6 +228,135 @@ impl<T: Depacketizer> SampleBuilder<T> {
     /// How many gaps the time bound ([`Self::with_max_gap_wait`]) gave up.
     pub fn skipped_gaps(&self) -> u64 {
         self.skipped_gaps
+    }
+
+    /// How many times a complete key frame released what was missing before it
+    /// ([`Self::with_key_frame_release`]).
+    pub fn key_frame_releases(&self) -> u64 {
+        self.key_frame_releases
+    }
+
+    /// The oldest sequence number the builder can still use: the one after the newest packet
+    /// it built into a sample or gave up. `None` until then. A packet before it that arrives
+    /// late (a repair of what was given up, a duplicate) is ignored by [`Self::push`], so a
+    /// receiver should stop asking for those: give this to
+    /// `RTCRtpReceiver::set_nack_horizon` (RFC 4588 section 6.3) after popping.
+    pub fn nack_horizon(&self) -> Option<u16> {
+        self.next_wanted
+    }
+
+    /// Records that every packet before `to` is consumed.
+    fn consumed_to(&mut self, to: u16) {
+        if self.next_wanted.is_none_or(|next| older_than(next, to)) {
+            self.next_wanted = Some(to);
+        }
+    }
+
+    /// The first missing position among those buffered, and the first packet of the first
+    /// complete key frame behind it (with any packets of the same RTP timestamp directly
+    /// before that one: parameter sets sent in packets of their own).
+    fn key_frame_behind_gap(&self) -> Option<(u16, u16)> {
+        if !self.filled.has_data() {
+            return None;
+        }
+        let tail = self.filled.tail;
+        let mut i = self.filled.head;
+        while i != tail && self.buffer[i as usize].is_some() {
+            i = i.wrapping_add(1);
+        }
+        if i == tail {
+            return None;
+        }
+        let gap = i;
+        while i != tail {
+            let first = i;
+            i = i.wrapping_add(1);
+            let Some(packet) = &self.buffer[first as usize] else {
+                continue;
+            };
+            if !self.depacketizer.is_key_frame_start(&packet.payload) {
+                continue;
+            }
+            let timestamp = packet.header.timestamp;
+            let mut j = first;
+            let complete = loop {
+                match &self.buffer[j as usize] {
+                    Some(p) if p.header.timestamp == timestamp => {
+                        if self
+                            .depacketizer
+                            .is_partition_tail(p.header.marker, &p.payload)
+                        {
+                            break true;
+                        }
+                    }
+                    // The next frame began: this one ended without its mark.
+                    Some(_) => break true,
+                    None => break false,
+                }
+                j = j.wrapping_add(1);
+                if j == tail {
+                    break false;
+                }
+            };
+            if !complete {
+                continue;
+            }
+            let mut start = first;
+            while start.wrapping_sub(1) != gap {
+                match &self.buffer[start.wrapping_sub(1) as usize] {
+                    Some(p) if p.header.timestamp == timestamp => start = start.wrapping_sub(1),
+                    _ => break,
+                }
+            }
+            return Some((gap, start));
+        }
+        None
+    }
+
+    /// Releases what is missing before a complete key frame
+    /// ([`Self::with_key_frame_release`]).
+    fn release_at_key_frame(&mut self, now: Instant) {
+        if !self.key_frame_release {
+            return;
+        }
+        while let Some((gap, start)) = self.key_frame_behind_gap() {
+            // Positions consumed earlier and not yet cleared go first, so that the head of
+            // what is buffered is the next packet to build from.
+            if let Some(next) = self.next_wanted {
+                while self.filled.has_data() && older_than(self.filled.head, next) {
+                    self.release_packet(self.filled.head);
+                    self.filled.head = self.filled.head.wrapping_add(1);
+                }
+                if self.active.empty() {
+                    self.active = self.filled;
+                }
+            }
+            // What is complete before the gap is built, in order; the incomplete sample next
+            // to the gap is dropped.
+            let mut steps = 0u32;
+            while self.filled.has_data() && self.filled.head != gap && steps <= u32::from(u16::MAX)
+            {
+                self.drop_head(now);
+                steps += 1;
+            }
+            if self.filled.head != gap {
+                return;
+            }
+            let mut i = gap;
+            while i != start {
+                self.release_packet(i);
+                self.dropped_packets = self.dropped_packets.saturating_add(1);
+                i = i.wrapping_add(1);
+            }
+            self.filled.head = start;
+            self.active = SampleSequenceLocation {
+                head: start,
+                tail: self.filled.tail,
+            };
+            self.consumed_any = true;
+            self.consumed_to(start);
+            self.key_frame_releases += 1;
+        }
     }
 
     /// When the oldest missing packet will have been waited for as long as
@@ -322,6 +539,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
             // could not build the sample so drop it
             self.consumed_any = true;
             self.active.head = self.active.head.wrapping_add(1);
+            self.consumed_to(self.active.head);
         }
 
         self.release_packet(self.filled.head);
@@ -332,8 +550,19 @@ impl<T: Depacketizer> SampleBuilder<T> {
     ///
     /// Push does not copy the input. If you wish to reuse
     /// this memory make sure to copy before calling push
+    ///
+    /// A packet older than everything already consumed ([`Self::nack_horizon`]: a late
+    /// repair of a gap that was given up, a duplicate of a packet already built into a
+    /// sample) is ignored: it has no sample left to belong to, and buffered it would look
+    /// like the start of a new gap.
     pub fn push(&mut self, now: Instant, p: Packet) {
         let sequence_number = p.header.sequence_number;
+        if self
+            .next_wanted
+            .is_some_and(|next| older_than(sequence_number, next))
+        {
+            return;
+        }
         self.buffer[sequence_number as usize] = Some(p);
         if let Some(arrival) = self.arrivals.get_mut(sequence_number as usize) {
             *arrival = Some(now);
@@ -358,6 +587,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
             }
             _ => {}
         }
+        self.release_at_key_frame(now);
         self.purge_buffers(now);
         self.give_up_gaps(now);
     }
@@ -466,12 +696,14 @@ impl<T: Depacketizer> SampleBuilder<T> {
 
             self.consumed_any = true;
             self.active.head = consume.tail;
+            self.consumed_to(consume.tail);
             return Err(BuildError::InvalidPartition(consume));
         }
 
         // the head set of packets is now fully consumed
         self.consumed_any = true;
         self.active.head = consume.tail;
+        self.consumed_to(consume.tail);
 
         // Assemble the sample payload from the consumed packets. For the common
         // single-packet sample (all audio, and any frame that fits one RTP

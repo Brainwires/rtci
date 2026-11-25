@@ -249,6 +249,21 @@ impl Depacketizer for Av1Depacketizer {
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
         marker
     }
+
+    fn has_key_frames(&self) -> bool {
+        true
+    }
+
+    /// A packet with the aggregation header's `N` bit set that starts a temporal unit: "N:
+    /// MUST be set to 1 if the packet is the first packet of a coded video sequence, and MUST
+    /// be set to 0 otherwise" (AV1 RTP specification, section 4.4). A coded video sequence
+    /// begins with a key frame and is decoded without anything before it.
+    fn is_key_frame_start(&self, payload: &Bytes) -> bool {
+        payload
+            .first()
+            .is_some_and(|aggregation_header| aggregation_header & AV1_N_MASK != 0)
+            && self.is_partition_head(payload)
+    }
 }
 
 /// Write LEB128 encoded value to buffer
