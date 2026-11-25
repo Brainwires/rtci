@@ -23,8 +23,8 @@ use bytes::Bytes;
 use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtci::interceptor::{
     GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder, NackResponderBuilder,
-    PassThroughInterceptor, ReceivedRateBound, Registry, RetransmissionRateLimit, RtcpRandom,
-    RtcpSessionBuilder, Slot,
+    PacerBacklog, PassThroughInterceptor, ReceivedRateBound, Registry, RetransmissionRateLimit,
+    RtcpRandom, RtcpSessionBuilder, Slot,
 };
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
@@ -165,6 +165,10 @@ pub struct Setup {
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
+    /// What the default chains' pacer does with its backlog when capacity collapses
+    /// (`DefaultInterceptorOptions::pacer_backlog`, docs/capacity-collapse.md); the engine's
+    /// default when `None`.
+    pub pacer_backlog: Option<PacerBacklog>,
     /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
     /// permanent tests run [`Perturbation::None`].
     pub perturbation: Perturbation,
@@ -229,6 +233,7 @@ impl Setup {
             video: [true, true],
             report_from_every_ssrc: None,
             received_rate_bound: None,
+            pacer_backlog: None,
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
@@ -236,6 +241,12 @@ impl Setup {
     }
 
     /// The receivers give a gap up after `wait` and ask for a key frame.
+    /// The default chains' pacer keeps (`Keep`) or flushes (`Flush`) its backlog at a collapse.
+    pub fn pacer_backlog(mut self, backlog: PacerBacklog) -> Self {
+        self.pacer_backlog = Some(backlog);
+        self
+    }
+
     pub fn gap_wait(mut self, wait: Duration) -> Self {
         self.gap_wait = Some(wait);
         self
@@ -674,6 +685,9 @@ impl Peer {
             }
             if let Some(rate_limit) = rate_limit {
                 options.nack_retransmission_rate_limit = rate_limit;
+            }
+            if let Some(backlog) = setup.pacer_backlog {
+                options.pacer_backlog = backlog;
             }
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;

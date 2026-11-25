@@ -55,6 +55,32 @@ pub enum QueueOverflow {
     Drain,
 }
 
+/// What the pacer does with what it holds when the path's capacity collapses: the target has
+/// fallen to half or less of what the queued media was written for, and the queue would now
+/// take half the queue time bound or more to leave (see "A capacity collapse" on
+/// [`PacerInterceptor`]). It applies with [`QueueOverflow::Drop`]; [`QueueOverflow::Drain`]
+/// never discards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Backlog {
+    /// The queue is given up: the media and retransmissions waiting are discarded
+    /// ([`PacerDiscard`], [`RetransmissionsLeft`]), the NACK responder is told to forget what
+    /// was sent before ([`PacerFlush`]) and the application is asked for a key frame of every
+    /// video stream. The receiver's next picture is a current one, a key frame sized for the
+    /// new rate, in place of seconds of frames sized for the old one delivered in order.
+    /// RFC 8834 section 6.1: "It is not appropriate to blindly retransmit RTP packets in
+    /// response to a NACK. The importance of lost packets and the likelihood of them arriving
+    /// in time to be useful need to be considered"; RFC 4588 section 7: the sender "MAY
+    /// selectively retransmit only the packets that it deems important".
+    #[default]
+    Flush,
+    /// The source is paused and everything queued is delivered in order, with every
+    /// retransmission asked for ("Pausing the source" on [`PacerInterceptor`]): for a receiver
+    /// that plays strictly in order and cannot resume at a key frame. After a sharp drop the
+    /// picture such a receiver shows is seconds old.
+    Keep,
+}
+
 /// Builder for [`PacerInterceptor`].
 ///
 /// # Example
@@ -72,6 +98,7 @@ pub struct PacerBuilder {
     queue_limit: usize,
     queue_time_limit: Option<Duration>,
     queue_overflow: QueueOverflow,
+    backlog: Backlog,
     immediate_release: bool,
 }
 
@@ -83,6 +110,7 @@ impl Default for PacerBuilder {
             queue_limit: DEFAULT_QUEUE_LIMIT,
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
             queue_overflow: QueueOverflow::default(),
+            backlog: Backlog::default(),
             immediate_release: true,
         }
     }
@@ -135,6 +163,13 @@ impl PacerBuilder {
         self
     }
 
+    /// What happens to the queue when the path's capacity collapses ([`Backlog::Flush`] by
+    /// default).
+    pub fn with_backlog(mut self, backlog: Backlog) -> Self {
+        self.backlog = backlog;
+        self
+    }
+
     /// Whether a packet the budget already covers leaves when it is written, with nothing
     /// queued ahead of it. On by default.
     ///
@@ -162,6 +197,7 @@ impl PacerBuilder {
         pacer.immediate_release = self.immediate_release;
         pacer.queue_time_limit = self.queue_time_limit;
         pacer.queue_overflow = self.queue_overflow;
+        pacer.backlog = self.backlog;
         pacer
     }
 }
@@ -286,6 +322,40 @@ impl PacerBuilder {
 /// the bound, discarded as below, with a key-frame request: that, not the resume, is when a key
 /// frame is needed.
 ///
+/// # A capacity collapse
+///
+/// By default ([`Backlog::Flush`]) the pause above is for a queue that is long at a steady
+/// target: a key frame larger than a second of the target, a source that is slow to follow.
+/// When the queue is long because **the target collapsed** (a pause would begin or is in
+/// force, and the target is now half or less of the highest target in force since the oldest
+/// queued new media was written), the pacer does not pause, or ends the pause. It
+/// **flushes**: every queued packet is
+/// discarded (new media and FEC through [`PacerDiscard`], whole frames, as below; queued
+/// retransmissions through [`RetransmissionsLeft`]), a [`PacerFlush`] tells the NACK responder
+/// to forget everything sent before on the video streams, so that later NACKs for it are
+/// answered by nothing, and the application is asked for a key frame of every video stream
+/// (the Picture Loss Indication described below). The source is not paused: the next frame it
+/// writes, at the target it now reads, is the key frame. Audio is never queued and is not
+/// touched; padding stays.
+///
+/// What was queued was sized for a rate the path no longer carries: 0.4 s of 2.5 Mbit/s video
+/// and the retransmissions of what the path dropped take 8 s to leave at 100 to 250 kbit/s
+/// (`tests/capacity_instrument.rs`: the picture on the screen was 9 s old in the median),
+/// against a key frame of a few packets. RFC 8834 section 6.1 asks a sender to consider "the
+/// likelihood of [retransmissions] arriving in time to be useful"; RFC 8836 section 2 gives
+/// interactive media "no more delay than hundreds of milliseconds end-to-end"; RFC 8298
+/// section 3 lets a sender whose queues grow rapidly discard encoded frames "to ensure that
+/// the RTP queues are drained quickly". A decoder refresh point "completely resets the
+/// decoder" (RFC 5104 section 2.2): nothing sent before it is needed after it.
+///
+/// A flush is not repeated for what was written after it: the key frame the application
+/// writes in answer was written at the fallen target, so a queue it fills is a pause, not a
+/// collapse, and is delivered. The target has to halve again for another flush. The receiver
+/// sees a gap in the sequence numbers (the application numbered the discarded packets) and
+/// its NACKs for it go unanswered; one that waits for missing packets has to bound that wait
+/// in time or resume at the key frame (`docs/capacity-collapse.md`).
+/// [`Backlog::Keep`] restores the pause for every long queue.
+///
 /// # Discarding media
 ///
 /// With [`QueueOverflow::Drop`], new media the target has no room for is discarded **whole
@@ -340,6 +410,14 @@ pub struct PacerInterceptor {
     queue_limit: usize,
     queue_time_limit: Option<Duration>,
     queue_overflow: QueueOverflow,
+    backlog: Backlog,
+    /// The targets set and when, oldest first, back to the one in force when the oldest queued
+    /// new media was written: what that media was written for (see "A capacity collapse").
+    targets: VecDeque<(Instant, f64)>,
+    /// How many times the queue was flushed at a collapse.
+    flushes: u64,
+    /// The media SSRCs of the bound streams other than audio.
+    video: HashSet<u32>,
     /// The SSRCs of the audio streams: their packets are not queued behind others.
     audio: HashSet<u32>,
     /// The flows the circuit breaker has ceased ([`CircuitBreakerNotice`]): their packets do
@@ -397,6 +475,10 @@ impl PacerInterceptor {
             queue_limit: queue_limit.max(1),
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
             queue_overflow: QueueOverflow::default(),
+            backlog: Backlog::default(),
+            targets: VecDeque::new(),
+            flushes: 0,
+            video: HashSet::new(),
             audio: HashSet::new(),
             ceased: HashSet::new(),
             immediate_release: true,
@@ -460,6 +542,12 @@ impl PacerInterceptor {
         self.pauses
     }
 
+    /// How many times the queue was flushed at a collapse of the target (see "A capacity
+    /// collapse" on [`PacerInterceptor`]).
+    pub fn flushes(&self) -> u64 {
+        self.flushes
+    }
+
     /// Whether the application is told to pause now.
     pub fn paused(&self) -> bool {
         self.paused
@@ -490,6 +578,14 @@ impl PacerInterceptor {
         self.queue.front().map_or(Duration::ZERO, |head| {
             now.saturating_duration_since(head.now)
         })
+    }
+
+    /// When the oldest queued new media (not a retransmission) was written.
+    fn oldest_new_media(&self) -> Option<Instant> {
+        self.queue
+            .iter()
+            .find(|queued| !queued.message.has(&Attribute::Retransmission))
+            .map(|oldest| oldest.now)
     }
 
     /// The rate to pace at now: the target, or more when the queue would otherwise not drain
@@ -687,6 +783,14 @@ impl PacerInterceptor {
             Some(limit) => expected <= limit.mul_f64(RESUME_AT),
             None => self.paused,
         };
+        if (self.paused || change) && self.collapsed() {
+            // Not a queue to wait out: the rate it was written for is gone. Also when the
+            // target goes on falling during a pause that began before it had halved.
+            self.flush(now);
+            // A pause in force ends with its queue.
+            let was_paused = std::mem::replace(&mut self.paused, false);
+            return was_paused;
+        }
         if change {
             self.paused = !self.paused;
             if self.paused {
@@ -695,6 +799,103 @@ impl PacerInterceptor {
             }
         }
         change
+    }
+
+    /// Records the target set at `now`, and drops the targets older than the one in force
+    /// when the oldest queued new media was written.
+    fn note_target(&mut self, now: Instant, bits_per_second: f64) {
+        if self.targets.back().map(|(_, target)| *target) != Some(bits_per_second) {
+            self.targets.push_back((now, bits_per_second));
+        }
+        self.forget_targets();
+    }
+
+    /// Drops the targets that no queued new media was written under: all but the last with
+    /// none queued, otherwise those replaced before the oldest was written.
+    fn forget_targets(&mut self) {
+        let oldest = self.oldest_new_media();
+        while self.targets.len() > 1 && oldest.is_none_or(|written| self.targets[1].0 <= written) {
+            self.targets.pop_front();
+        }
+        // Far more changes than a queue's lifetime holds: the oldest are let go (the collapse
+        // is then judged against a later, lower target, which errs towards the pause).
+        while self.targets.len() > MAX_TARGETS_KEPT {
+            self.targets.pop_front();
+        }
+    }
+
+    /// Whether the queue is long because the target collapsed: new media waits, and the
+    /// target is at most [`COLLAPSE_AT`] of the highest in force since the oldest of it was
+    /// written (see "A capacity collapse").
+    fn collapsed(&self) -> bool {
+        if self.backlog != Backlog::Flush || self.queue_overflow != QueueOverflow::Drop {
+            return false;
+        }
+        let Some(oldest) = self.oldest_new_media() else {
+            return false;
+        };
+        let mut written_for: f64 = 0.0;
+        for (index, (_, target)) in self.targets.iter().enumerate() {
+            // In force when the oldest was written (the last set at or before it), or since.
+            let superseded = self
+                .targets
+                .get(index + 1)
+                .is_some_and(|(next, _)| *next <= oldest);
+            if !superseded {
+                written_for = written_for.max(*target);
+            }
+        }
+        written_for > 0.0 && self.target() <= COLLAPSE_AT * written_for
+    }
+
+    /// Gives the queue up at a collapse: retransmissions dropped, media discarded stream by
+    /// stream, the NACK responder told to forget what was sent before ([`PacerFlush`]), and
+    /// a key frame asked of every video stream.
+    fn flush(&mut self, now: Instant) {
+        let mut streams: Vec<(u32, Vec<TaggedPacket>)> = Vec::new();
+        for packet in std::mem::take(&mut self.queue) {
+            if packet.message.has(&Attribute::Retransmission) {
+                self.retransmission_dropped(&packet);
+                self.dropped += 1;
+            } else if let Packet::Rtp(rtp) = &packet.message.packet {
+                let ssrc = rtp.header.ssrc;
+                match streams.iter_mut().find(|(stream, _)| *stream == ssrc) {
+                    Some((_, packets)) => packets.push(packet),
+                    None => streams.push((ssrc, vec![packet])),
+                }
+            }
+        }
+        self.queued_bits = 0.0;
+        self.flushes += 1;
+        let mut asked: HashSet<u32> = HashSet::new();
+        for (ssrc, packets) in &streams {
+            // `PacerDiscard`, and for a media stream the key-frame request.
+            self.discard(now, *ssrc, packets);
+            asked.insert(*ssrc);
+        }
+        let mut ssrcs: Vec<u32> = self.video.iter().copied().collect();
+        ssrcs.sort_unstable();
+        // A video stream with nothing queued lost its repairs all the same.
+        for ssrc in ssrcs.iter().filter(|ssrc| !asked.contains(ssrc)) {
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+                    PictureLossIndication {
+                        sender_ssrc: 0,
+                        media_ssrc: *ssrc,
+                    },
+                )]))
+                .with(Attribute::DeliverToApplication),
+            });
+        }
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(PacerFlush { ssrcs }))),
+        });
+        self.forget_targets();
     }
 
     /// Whether new media written at `written` is what a source that follows the pause left
@@ -897,6 +1098,29 @@ pub struct PacerDiscard {
     pub target_bitrate: f64,
 }
 
+/// The pacer gave its queue up at a collapse of the target ([`Backlog::Flush`], see "A capacity
+/// collapse" on [`PacerInterceptor`]): sent application-ward on an empty RTCP carrier, after
+/// the [`PacerDiscard`] of each stream that had media queued. The NACK responder forgets
+/// everything sent before it on the streams named (their retransmission buffers, the requests
+/// waiting): a NACK for any of it is answered by nothing, and the stream goes on from the key
+/// frame the application is asked for. Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacerFlush {
+    /// The media SSRCs of the video streams flushed (every bound stream that is not audio).
+    pub ssrcs: Vec<u32>,
+}
+
+/// A collapse is a target at most this share of what the queued media was written for: half.
+/// One decrease of the delay-based controller is 0.85 and the loss-based controller cuts by
+/// at most half a report, so a target that halved within the life of the queue (two seconds
+/// at most) is a path that lost its capacity, not a controller adapting; and a queue a
+/// flush's own key frame fills was written at the fallen target and is never a collapse.
+const COLLAPSE_AT: f64 = 0.5;
+
+/// How many target changes are kept to say what queued media was written for.
+const MAX_TARGETS_KEPT: usize = 1024;
+
 /// The pause begins when the expected queue time reaches this share of the queue time bound:
 /// half, so a source that stops when told (within a frame or a read of its target) never lets
 /// its packets wait the bound, even when the target falls by half once more meanwhile.
@@ -980,6 +1204,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                 None => self.pacer.set_target_bitrate(*bits_per_second),
             }
             self.minimum = msg.message.custom::<crate::MinimumTarget>().copied();
+            let target = *bits_per_second;
+            self.note_target(msg.now, target);
             // A new rate changes how long the queue takes to leave: the pause may begin or
             // end, and the application reads it on this packet.
             self.update_pause(msg.now);
@@ -1281,12 +1507,14 @@ impl Interceptor for PacerInterceptor {
         if info.mime_type.to_ascii_lowercase().starts_with("audio/") {
             self.audio.extend(crate::twcc::flow_ssrcs(info));
         } else {
+            self.video.insert(info.ssrc);
             self.repair_flows
                 .extend(info.ssrc_rtx.into_iter().chain(info.ssrc_fec));
         }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.video.remove(&info.ssrc);
         for ssrc in crate::twcc::flow_ssrcs(info) {
             self.audio.remove(&ssrc);
             self.discarded_frame.remove(&ssrc);

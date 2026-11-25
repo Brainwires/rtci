@@ -17,7 +17,7 @@ mod capacity_common;
 
 use anyhow::{Result, bail};
 use capacity_common::*;
-use rtci::interceptor::{ReceivedRateBound, RetransmissionRateLimit};
+use rtci::interceptor::{PacerBacklog, ReceivedRateBound, RetransmissionRateLimit};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -94,6 +94,10 @@ struct Outcome {
 /// the caller's uplink capped at 300 kbit/s until `Setup::cap` (20 s) after its estimate went
 /// under 400 kbit/s, then open again for 25 s.
 fn run(setup: &Setup) -> Result<Outcome> {
+    // This file's receiver plays strictly in order and its bounds were set for a sender that
+    // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
+    // The instrument's cells run the engine's default.
+    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
     let seed = setup.seed;
     let mut world = World::connected(setup)?;
     match setup.cap_at_target {
@@ -924,6 +928,10 @@ struct PathChangeOutcome {
 /// application that hands them over with a placeholder pair: only the peer connection's word
 /// tells the congestion controllers that the path changed.
 fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
+    // This file's receiver plays strictly in order and its bounds were set for a sender that
+    // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
+    // The instrument's cells run the engine's default.
+    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
     let mut world = World::connected(setup)?;
     let t = world.now + Duration::from_secs(10);
     world.advance(t)?;
@@ -1136,6 +1144,10 @@ struct OpenLinkOutcome {
 /// link without loss, without a capacity and so without a queue, audio and video each way,
 /// the video following the estimate.
 fn open_link_run(setup: &Setup) -> Result<OpenLinkOutcome> {
+    // This file's receiver plays strictly in order and its bounds were set for a sender that
+    // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
+    // The instrument's cells run the engine's default.
+    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
     let mut world = World::connected(setup)?;
     world.sampling = true;
     let t = world.now + Duration::from_secs(35);
@@ -1276,6 +1288,10 @@ struct CameraOutcome {
 /// the callee's on five seconds later, the caller's off, then the caller's on again and the
 /// callee's off, each five seconds apart, and six seconds more.
 fn camera_run(setup: &Setup) -> Result<CameraOutcome> {
+    // This file's receiver plays strictly in order and its bounds were set for a sender that
+    // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
+    // The instrument's cells run the engine's default.
+    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
     let mut world = World::connected(&setup.audio_only())?;
     world.sampling = true;
     let five = Duration::from_secs(5);
