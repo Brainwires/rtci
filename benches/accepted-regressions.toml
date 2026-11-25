@@ -1,0 +1,19 @@
+# Micro-benchmark regressions that were measured and accepted.
+#
+# The pull-request job "Benchmarks compared with the base" of .github/workflows/bench.yml
+# (scripts/bench-compare.sh, scripts/bench-compare.py) fails when a benchmark is slower than its
+# base in every round by more than the measured noise allows. A branch that makes a benchmark
+# slower ON PURPOSE adds, in the same branch:
+#
+#   1. a row to the ledger in docs/performance.md (what moved, before -> after, why accepted);
+#   2. an entry here naming that row:
+#
+#        [[accepted]]
+#        bench = "DTLS/Setup/*"        # a benchmark name as the job prints it, or a glob
+#        max_ratio = 60.0              # head / base the entry accepts; beyond it the job fails
+#        ledger = "zeroize-1"          # the ledger row's id (the job refuses an unknown id)
+#        note = "scrub_stack() after building keyed objects"
+#
+# An entry expires when the branch is merged: from then on the base already has the cost, the
+# entry matches nothing, and the job lists it as stale. Remove it in the next branch that touches
+# this file (scripts/check-performance-ledger.py keeps every entry pointing at a ledger row).

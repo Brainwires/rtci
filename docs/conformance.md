@@ -22,6 +22,13 @@ The rest of the evidence that the claims hold:
   ones listed there with a reason and a covering test.
 - [Upstream test parity](upstream-test-parity.md): every test of upstream `webrtc-rs/rtc` and
   `webrtc-rs/webrtc` v0.17.1 has a fork test, a mapped equivalent, or the reason it cannot exist.
+- [Performance ledger](performance.md): every measured performance cost or gain that was
+  accepted (and every measured alternative that was refused), with its figures, its guard and
+  its evidence. A branch that moves a measured figure adds its ledger row in the same branch and
+  tags its CHANGELOG entry `Performance: <id>`; `scripts/check-performance-ledger.py` (the
+  `Test inventory` job) fails on a tag without a row or a row naming a file or test that does not
+  exist, and the pull-request job of `bench.yml` fails on a micro-benchmark regression that has
+  no allowlist entry naming a row.
 - Fuzzing: every parser a peer, a server or an untrusted file reaches has a fuzz target, run by
   `fuzz.yml` and built by OSS-Fuzz ([fuzzing and gates](conformance/w7.md)).
 
