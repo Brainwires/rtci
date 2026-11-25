@@ -979,6 +979,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **interceptor / pacer** (pacing-3): the deadline the pacer names is an instant at which the
+  packet leaves, at every rate. Where a packet's wait is not a whole number of nanoseconds
+  (12 000 bits at 840 kbit/s) the budget, refilled to the named instant, could be a fraction
+  of a nanosecond's worth short: the packet stayed, and `poll_timeout` named the same instant
+  again, so a driver that follows the deadlines exactly span (the test worlds hid it by
+  pushing their clock on). The budget now covers a packet to within what the rate adds in
+  two nanoseconds. `pacer::tests::a_packet_is_releasable_at_the_instant_named_for_it`,
+  `pacer_deadline.rs::every_deadline_the_pacer_names_releases_a_packet_and_the_next_is_later`.
+
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
   one run in fifty (28 of 1500 runs on master, alike under every crypto feature set; in CI it
