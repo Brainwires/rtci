@@ -167,7 +167,7 @@ or no RFC-permitted setting changes it:
   the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an
   audit row for the owner).
 
-## 2. Engine-only capabilities: the same in every profile (30)
+## 2. Engine-only capabilities: the same in every profile (31)
 
 A capability the engine has and Chrome lacks stays on under `Chrome`: it negotiates
 down with a Chrome peer, or a Chrome peer does not notice it. Further engine-only
