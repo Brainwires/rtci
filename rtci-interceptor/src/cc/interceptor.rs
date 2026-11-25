@@ -947,6 +947,11 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                 .reports
                 .first()
                 .is_some_and(|first| state.reports.iter().all(|r| r.departure == first.departure));
+            if !state.reports.is_empty()
+                && let Some(probing) = self.probing.as_mut()
+            {
+                probing.set_unpaced(burst);
+            }
             let estimate = if burst {
                 self.probing
                     .as_ref()
