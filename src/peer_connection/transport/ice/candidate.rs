@@ -311,9 +311,13 @@ impl fmt::Display for RTCIceCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} {} {}:{}{}",
-            self.protocol, self.typ, self.address, self.port, self.related_address,
-        )
+            "{} {} {}:{}",
+            self.protocol, self.typ, self.address, self.port
+        )?;
+        if !self.related_address.is_empty() {
+            write!(f, " related {}:{}", self.related_address, self.related_port)?;
+        }
+        Ok(())
     }
 }
 
@@ -462,5 +466,32 @@ mod to_json_section_tests {
         let line = candidate.to_json().unwrap().candidate;
         assert_eq!(line.split_whitespace().nth(2), Some("tcp"), "{line}");
         assert!(line.ends_with("typ host tcptype passive"), "{line}");
+    }
+
+    /// The string form names the related address apart from the port (it ran them together:
+    /// `udp prflx 10.1.0.135:55410172.17.0.1`).
+    #[test]
+    fn the_string_form_separates_the_related_address_from_the_port() {
+        let candidate = RTCIceCandidate {
+            protocol: RTCIceProtocol::Udp,
+            address: "10.1.0.135".to_owned(),
+            port: 55410,
+            typ: RTCIceCandidateType::Prflx,
+            related_address: "172.17.0.1".to_owned(),
+            related_port: 40000,
+            ..Default::default()
+        };
+        assert_eq!(
+            candidate.to_string(),
+            "udp prflx 10.1.0.135:55410 related 172.17.0.1:40000"
+        );
+        let host = RTCIceCandidate {
+            protocol: RTCIceProtocol::Udp,
+            address: "10.1.0.135".to_owned(),
+            port: 55410,
+            typ: RTCIceCandidateType::Host,
+            ..Default::default()
+        };
+        assert_eq!(host.to_string(), "udp host 10.1.0.135:55410");
     }
 }

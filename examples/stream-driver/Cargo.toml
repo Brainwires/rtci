@@ -76,6 +76,26 @@ name = "virtual_time"
 required-features = ["peer", "runtime-mock"]
 
 [[test]]
+name = "mdns_virtual_time"
+required-features = ["peer", "runtime-mock"]
+
+[[test]]
+name = "mdns_failures"
+required-features = ["peer", "runtime-mock"]
+
+[[test]]
+name = "mdns_shutdown"
+required-features = ["peer", "runtime-mock"]
+
+[[test]]
+name = "mdns_budget"
+required-features = ["peer", "runtime-mock"]
+
+[[test]]
+name = "mdns_unavailable"
+required-features = ["peer", "runtime-tokio"]
+
+[[test]]
 name = "loopback"
 required-features = ["runtime-tokio"]
 
