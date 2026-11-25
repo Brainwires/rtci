@@ -143,6 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
   and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
   section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
+  With breaker-1's rate-now rule (see "Fixed") section 3's form ceases that call in 5 of the
+  test's 6 runs (after 3.6 to 31.6 s; hosted run 45521916073), the default still in none.
   Audit: RFC8083-3-3 is `setting` (measured); it was `partial`. Returned in
   `conf/ccrows-8r-cb-last-frames-test` after train 24 took it out: with the RTP/RTCP family
   (rtp-1, -2, -3, -5, -6, -8) its test, then one seed's first 15 s, saw no trip. The breaker
@@ -1059,6 +1061,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every time (silent 3.7 s in the median, 7.3 s at the 90th percentile, 10.9 s at worst: a
   known limit, `docs/circuit-breaker.md`); with both directions capped a flow was left ceased
   in 94 of 100 runs, now one ceases in 7 and is restarted.
+  The capacity file's per-seed check that a sender following the target never freezes for
+  more than 2 s (`a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer`,
+  retired with the capacity instrument in favour of its ensemble requirement) had been met
+  in seed 6 only with the call's voice dead: there the breaker ceased the caller's audio
+  0.166 s after the cap and it never came back, which left the video the whole floor (freeze
+  0.98 s); with the voice alive that seed freezes 2.22 s (the link then carries 74 kbit/s of
+  audio, 22 of new video and 91 of retransmissions in the pause). Over seeds 1 to 200 of that
+  cell at the test's phase the voice was dead in 29; in the other 171 the freeze is the same
+  to the digit with and without this change, and over 2 s in 14 of them (8.2 %) either way
+  (hosted runs 45516852677, 45516841561). The bound is not changed and no seed is chosen: the
+  requirement is the instrument's, over the ensemble, where it is a known limit.
   Audit rows RFC8083-3-1, 3-6, 4.2-4, 4.2-5, 4.2-6, 4.3-4, 4.5-1, 4.5-2, 5-3.
 
 - **rtci, interceptor / RTP circuit breaker** (collapse-3): the application is told when the
