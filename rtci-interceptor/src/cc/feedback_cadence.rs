@@ -45,13 +45,26 @@ const SEND_ESTIMATE_REPORT_OCTETS: f64 = 68.0;
 /// its next report, while its interval is not fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CongestionFeedbackCadence {
-    /// The drafts' cadence (the default). draft-ietf-rmcat-gcc-02 section 3: "The RECOMMENDED
-    /// feedback interval is once per received video frame or at least once every 30 ms if
-    /// audio-only or multi-stream. If the feedback overhead needs to be limited this interval
-    /// can be increased to 100 ms"; draft-holmer-rmcat-transport-wide-cc-extensions-01
-    /// section 3: "It is recommended that a feedback message is sent for every frame
-    /// received, but in cases of low uplink bandwidth it is acceptable to send them less
-    /// frequently".
+    /// The default: the interval in which a share (5%) of the media RECEIVED holds one
+    /// feedback packet, between 50 ms and the generator's ceiling (250 ms).
+    ///
+    /// **No specification has this form: it is the engine's choice**, kept because every
+    /// form the texts give measured worse in the capacity instrument
+    /// (`tests/capacity_instrument.rs`, each against this one on the same seeds): the drafts'
+    /// 30 ms ([`Self::PerFrame`]), 100 ms always, 30 to 100 ms by the media received and 30
+    /// to 100 ms by the endpoint's own send estimate each broke the merge-point rule of
+    /// `docs/capacity-instrument.md` (every form that reports more often than 50 ms costs
+    /// the picture behind a short queue and after an outage; 100 ms always costs the audio
+    /// behind a long one). The `Performance` behaviour profile takes it with 2.5% and 500 ms.
+    #[default]
+    ReceivedMedia,
+    /// The drafts' cadence (the `StrictRfc` behaviour profile). draft-ietf-rmcat-gcc-02
+    /// section 3: "The RECOMMENDED feedback interval is once per received video frame or at
+    /// least once every 30 ms if audio-only or multi-stream. If the feedback overhead needs
+    /// to be limited this interval can be increased to 100 ms";
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: "It is recommended that
+    /// a feedback message is sent for every frame received, but in cases of low uplink
+    /// bandwidth it is acceptable to send them less frequently".
     ///
     /// A session whose only reported stream is one video stream is reported when a frame of
     /// it ends (the RTP marker), and after [`PER_FRAME_MAX_INTERVAL`] without one; any other
@@ -63,7 +76,6 @@ pub enum CongestionFeedbackCadence {
     /// members): the interval is then the time in which this endpoint's share of the RTCP
     /// bandwidth ([`RtcpBandwidthShare`], from the RTCP session) holds one feedback packet,
     /// up to [`PER_FRAME_MAX_INTERVAL`] and no longer.
-    #[default]
     PerFrame,
     /// libwebrtc's cadence (the `Chrome` behaviour profile): the interval in which 5% of the
     /// endpoint's own send estimate holds one 68-octet report, between 50 and 250 ms; 100 ms
@@ -74,10 +86,6 @@ pub enum CongestionFeedbackCadence {
     /// share and the ceiling are the generator's (`with_feedback_share`,
     /// `with_max_adaptive_interval`).
     SendEstimate,
-    /// The interval in which a share of the media RECEIVED holds one feedback packet, between
-    /// 50 ms and the generator's ceiling (the `Performance` behaviour profile, with 2.5% and
-    /// 500 ms). No specification has this form: it is tuning.
-    ReceivedMedia,
 }
 
 /// The interval between two feedback packets of a generator (TWCC or RFC 8888): fixed, or
@@ -327,9 +335,15 @@ mod tests {
     use shared::TransportContext;
     use std::sync::Arc;
 
-    /// The received-media form (the `Performance` profile's).
+    /// The received-media form (the default).
     fn received_media(floor: Duration, adaptive: bool) -> FeedbackCadence {
-        FeedbackCadence::new(floor, adaptive).with_form(CongestionFeedbackCadence::ReceivedMedia)
+        FeedbackCadence::new(floor, adaptive)
+    }
+
+    /// The drafts' form.
+    fn per_frame() -> FeedbackCadence {
+        FeedbackCadence::new(Duration::from_millis(100), true)
+            .with_form(CongestionFeedbackCadence::PerFrame)
     }
 
     fn media(now: Instant, octets: usize) -> TaggedPacket {
@@ -486,7 +500,7 @@ mod tests {
     /// video stream is reported when a frame ends (the marker), and after 100 ms without.
     #[test]
     fn one_video_stream_is_reported_when_a_frame_ends() {
-        let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
+        let mut cadence = per_frame();
         cadence.bind_remote(&stream(1, "video/VP8"));
         let now = Instant::now();
         assert!(!cadence.on_packet(&packet(now, 1, false)));
@@ -500,7 +514,7 @@ mod tests {
     #[test]
     fn audio_only_and_several_streams_are_reported_every_30_ms() {
         let now = Instant::now();
-        let mut audio = FeedbackCadence::new(Duration::from_millis(100), true);
+        let mut audio = per_frame();
         audio.bind_remote(&stream(1, "audio/opus"));
         assert_eq!(PER_FRAME_INTERVAL, audio.interval(now));
         assert!(
@@ -508,7 +522,7 @@ mod tests {
             "a talk spurt's marker"
         );
 
-        let mut both = FeedbackCadence::new(Duration::from_millis(100), true);
+        let mut both = per_frame();
         both.bind_remote(&stream(1, "audio/opus"));
         both.bind_remote(&stream(2, "video/VP8"));
         assert_eq!(PER_FRAME_INTERVAL, both.interval(now));
@@ -528,7 +542,7 @@ mod tests {
     #[test]
     fn the_interval_grows_to_100_ms_where_the_rtcp_bandwidth_does_not_hold_it() {
         let now = Instant::now();
-        let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
+        let mut cadence = per_frame();
         cadence.bind_remote(&stream(1, "audio/opus"));
         let share = |bits_per_second: f64| carrier(now, RtcpBandwidthShare { bits_per_second });
         // 96 octets every 30 ms are 25.6 kbit/s: a share of 100 kbit/s holds them.
@@ -545,7 +559,7 @@ mod tests {
 
         // One video stream: a frame that ends sooner after the last report than the share
         // holds is left to the next one.
-        let mut video = FeedbackCadence::new(Duration::from_millis(100), true);
+        let mut video = per_frame();
         video.bind_remote(&stream(1, "video/VP8"));
         video.on_packet(&share(15_360.0));
         video.reported(now);

@@ -75,20 +75,23 @@ impl TwccReceiverBuilder {
         self
     }
 
-    /// Whether the interval follows the cadence ([`Self::with_cadence`]: by default the
-    /// drafts' "every frame received", "at least once every 30 ms") or stays fixed at
-    /// [`Self::with_interval`] (`false`). On by default.
+    /// Whether the interval follows the cadence ([`Self::with_cadence`]: by default 50 to
+    /// 250 ms, sized to 5% of the media received) or stays fixed at [`Self::with_interval`]
+    /// (`false`). On by default.
     pub fn with_adaptive_interval(mut self, adaptive_interval: bool) -> Self {
         self.adaptive_interval = adaptive_interval;
         self
     }
 
     /// When feedback is built while the interval is not fixed: see
-    /// [`CongestionFeedbackCadence`]. Default [`CongestionFeedbackCadence::PerFrame`]:
-    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3, "It is recommended that
+    /// [`CongestionFeedbackCadence`]. Default [`CongestionFeedbackCadence::ReceivedMedia`],
+    /// the engine's own form, which no specification has. The drafts' form is
+    /// [`CongestionFeedbackCadence::PerFrame`]
+    /// (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3, "It is recommended that
     /// a feedback message is sent for every frame received, but in cases of low uplink
     /// bandwidth it is acceptable to send them less frequently", with
-    /// draft-ietf-rmcat-gcc-02 section 3's intervals (30 ms, up to 100 ms).
+    /// draft-ietf-rmcat-gcc-02 section 3's intervals: 30 ms, up to 100 ms): measured worse as
+    /// the default, it is the `StrictRfc` behaviour profile's.
     pub fn with_cadence(mut self, cadence: CongestionFeedbackCadence) -> Self {
         self.cadence = cadence;
         self

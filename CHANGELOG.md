@@ -201,6 +201,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
+- **rtci-dtls**: a resumption that carries no certificate where one should be is refused
+  when a `verify_peer_certificate` check is configured (fails closed): a client fails a
+  handshake that would resume such a ticket or session with `bad_certificate`, and a DTLS 1.3
+  or 1.2 server that asks its clients for a certificate (any `ClientAuthType` but
+  `NoClientCert`) resumes none (a full handshake runs, in which it asks again, with the
+  normal check). Before, the check was skipped for an empty list. Two handshakes have no
+  certificate by their nature and are not refused (`conf/dtls-resume-3`, after the second
+  review): an **external PSK** handshake (RFC 8446 sections 2.2 and 4.2.11: it authenticates
+  by possession of the key; the check is not called, as before), which the first form of
+  this change failed for every configuration that had both external PSKs and a check (the
+  server aborted with `bad_certificate`); and a resumption at a server with `NoClientCert`,
+  whose first handshake had no client certificate to check either, which the first form
+  silently turned into a full handshake every time. `ConfigBuilder::with_verify_peer_certificate`
+  and `with_external_psks` now say what the check covers. Not reachable from the peer
+  connection (its tickets always carry certificates, it configures no external PSK and its
+  servers require a client certificate); reachable by other users of `rtci-dtls`. Tests:
+  `dtls13/psk_test.rs::a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate`,
+  `a_server_that_asks_for_a_certificate_resumes_no_ticket_without_one_for_its_check`,
+  `a_server_that_asks_for_no_certificate_resumes_with_a_check_configured`,
+  `an_external_psk_handshake_completes_for_a_client_with_a_certificate_check`,
+  `an_external_psk_handshake_completes_for_a_server_with_a_certificate_check`,
+  `an_external_psk_handshake_completes_for_a_server_that_requires_client_certificates`,
+  `resumption_test.rs::a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate`,
+  `a_server_that_asks_for_a_certificate_resumes_no_session_without_one_for_its_check`,
+  `a_server_that_asks_for_no_certificate_resumes_with_a_check_configured`.
+
 - **`rtci-stream-driver` marks what it sends (RFC 8835 section 4.2 SHOULD, RFC 8837).**
   `PeerDriver` sets `IP_TOS` / `IPV6_TCLASS` on its UDP socket before each datagram whose byte
   differs from the last (the new `RTCPeerConnection::traffic_class`: the RFC 8837 DSCP with the
@@ -820,6 +846,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **congestion control feedback cadence as a setting** (rtcpbudget-2):
+  `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
+  `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
+  `DefaultInterceptorOptions::congestion_feedback_cadence` and the governed behaviour
+  `cc.feedback-cadence`. **The default does not change**: feedback every 50 to 250 ms, sized
+  to 5% of the media received (`ReceivedMedia`), which is the engine's own choice and no
+  specification's. `PerFrame` is the drafts' cadence (draft-ietf-rmcat-gcc-02 section 3,
+  draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: a lone video stream is
+  reported when each frame ends, anything else every 30 ms, up to 100 ms where this
+  endpoint's share of the RTCP bandwidth does not hold that), on in the `StrictRfc` profile;
+  as the default it measured worse in the capacity instrument (send target under a 300
+  kbit/s cap 210 -> 186 kbit/s, the picture requirement of the pacer-less chain missed in
+  36 instead of 4 of 200 calls, RTCP 122 -> 135 kbit/s on an open call), and so did 100 ms
+  always and two forms between (audit rows TWCC-3-4 and GCC-3-2: `setting`, measured).
+  `SendEstimate` is libwebrtc's cadence (50 to 250 ms from 5% of the endpoint's own send
+  estimate, 100 ms before one is known), **now the `Chrome` profile's** (a behaviour change
+  for that profile only: its feedback was sized to the media received). New attributes on
+  what the chain hands application-ward: `RtcpBandwidthShare` (this endpoint's share of the
+  RTCP bandwidth, from the RTCP session) and `SendEstimate` (the congestion controller's
+  estimate beside `TargetBitrateChanged`). The capacity instrument's chain token `perframe`
+  runs the drafts' form.
+
+- **interceptors** (rtcpbudget-5): an option, off by default and in every behaviour profile,
+  for an endpoint's own share of the RTCP bandwidth to follow the rate its congestion
+  controller allows it to send at: `RtcpSessionBuilder::with_share_following_send_rate`,
+  `DefaultInterceptorOptions::rtcp_share_follows_send_rate`,
+  `RtcpSessionControl::SendRate` and `CongestionControlBuilder::with_send_rate_told_to_rtcp`
+  (the congestion controller tells the RTCP session of its chain the estimate whenever it has
+  moved by a twentieth). **It is tuning with no specification behind it**: RFC 3550 section
+  6.2 sizes the RTCP bandwidth from the session bandwidth (here the media measured both
+  ways) and section 6.3.1 shares it equally among the members whatever each direction
+  carries, so an endpoint whose uplink has collapsed to 300 kbit/s while the other direction
+  still carries 2.5 Mbit/s keeps sending about 80 kbit/s of RTCP on it. With the option the
+  endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which
+  every endpoint sends at this endpoint's rate (5% x send rate x members / local SSRCs, no
+  less than 5% of the minimum session bandwidth); the intervals calculated for the other
+  members (`RtcpReportingInterval`, what the circuit breaker takes for the peer's reporting
+  interval), member timeouts, BYE and sender status keep RFC 3550's value, and congestion
+  control feedback is not slowed. Measured in the capacity instrument (default chain, one
+  direction capped at 300 kbit/s): RTCP on the capped link 80 -> 34 kbit/s, the open call
+  unchanged (122 kbit/s); figures for the picture and the recovery are in
+  `docs/capacity-instrument.md`. The `Performance` profile does not take it: its
+  `T_rr_interval` of one second already brings that RTCP to 22 kbit/s, and beside it the
+  option changed nothing that was measured. Tests
+  `the_rtcp_share_follows_the_send_rate_the_session_is_told`,
+  `the_interval_calculated_for_the_peer_does_not_follow_the_send_rate`.
+
+- **interceptor** (collapse-2): `ProbeFill`, an attribute the pacer adds to a `ProbeRequest`'s
+  carrier on its way application-ward: the padding the cluster needs beyond the media and
+  retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
+  that much; a chain without a pacer has no such attribute and the whole cluster is padding,
+  as before.
 - **interceptors** (breaker-1): `CircuitBreakerBuilder::with_automatic_restart` and
   `DefaultInterceptorOptions::circuit_breaker_automatic_restart` (on by default: RFC 8083
   section 4.5's restart on information that the congestion has dissipated; off leaves every
@@ -844,6 +922,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the round trip jumped; `Rfc`, `StrictRfc` and `Performance` keep `Rto`. Test:
   `agent_consent_delay_test.rs::test_a_response_after_its_wait_renews_nothing_unless_the_wait_is_fixed`,
   `test_no_consent_transaction_is_kept_past_the_consent_expiry`.
+- **DTLS session resumption between a connection's transports, opt-in** (RFC 5764 section 3
+  SHOULD, "as an optimization"; `conf/dtls-resume-3`, after two security reviews of
+  `conf/dtls-resume-1` and `-2`): `SettingEngineBuilder::with_dtls_session_resumption(true)`.
+  **Off by default, a standing departure from that SHOULD** (`docs/conformance.md`, "Standing
+  departures from a SHOULD"; audit row RFC5764-3-4), because it is not free and most peers
+  cannot take part. **What it costs**, measured with three unbundled transports on links with
+  latency, time until every DTLS transport is connected: at a 100 ms round trip 453 ms off,
+  753 ms on against a peer that issues no ticket (+300 ms, about 3 round trips: the others
+  start one whole handshake later and resume nothing), 703 ms on between two engines with
+  tickets (+250 ms, about 2.5 round trips); at 300 ms 1.353 s, 2.253 s (+900 ms) and 2.103 s
+  (+750 ms). One datagram lost on the first handshake delays every transport, not one. What
+  it saves is one signature and one verification per other transport. **No browser can take
+  part**: libwebrtc sets `SSL_OP_NO_TICKET` (and has an `SSL_CTX` per transport), Firefox's
+  `TransportLayerDtls::Setup()` turns session tickets and the session cache off; against a
+  browser the setting only adds the wait. **With BUNDLE (one transport) it does nothing.**
+  When the negotiation that sets up the transports sets up more than one in a DTLS
+  role, the first client transport runs a full handshake and the others resume with the
+  peer's **DTLS 1.3** tickets (`psk_dhe_ke` only, a fresh (EC)DHE exchange); server
+  transports share the connection's ticket keys for their first handshake only. **No DTLS 1.2
+  session id or ticket is asked for, issued or accepted by the peer connection in any
+  configuration** (a DTLS 1.2 ticket carries the master secret, and a resumed 1.2 association
+  runs no key exchange). The wait is bounded: a transport waits for the first handshake at
+  most three of its initial flight intervals (1.2 s at 400 ms; 4.5 round trips where ICE
+  measured one) and never more than 3 s (`LEADER_WAIT_MAX`: the ICE figure is one sample,
+  which a slow-answering peer could stretch), not at all once the first failed, was closed or
+  could not start, and not for a ticket that does not come: against a peer that issues none
+  the others start as soon as the first handshake is complete (which is the cost above). The
+  first reviewed form waited without bound for a stalled first handshake, and added 800 ms
+  (two flight intervals) of waiting for a ticket against a peer without tickets; both are
+  gone. A bundled connection asks for and issues no ticket (the same DTLS datagrams as
+  without the setting); a transport added later, re-keying and a server's later handshake on
+  the same transport are full handshakes; same remote fingerprints only, and each section's
+  fingerprint check runs on the certificates stored with the ticket; client tickets are kept at
+  most five minutes and dropped once every transport has started, and `close()` wipes the
+  tickets left and the server side's ticket keys (new `session::SessionTicketIssuer::retire`
+  / `is_retired` in `rtci-dtls`), not only the drop of the connection. RFC5764-3-4 is
+  `partial` (implemented, not the default). New in `rtci-dtls`: `ConfigBuilder::with_dtls12_resumption`
+  (DTLS 1.2 out of resumption, DTLS 1.3 kept), `ConfigBuilder::with_session_ticket_issuer`
+  and `session::SessionTicketIssuer` (ticket keys shared by several configurations),
+  `Tls13Session::peer_certificates` / `limit_lifetime`, `Dtls12Session::peer_certificates`,
+  `HandshakeConfig::supports_dtls13` (now public). Tests: `tests/multi_transport_rtc2rtc.rs`
+  (`unbundled_transports_wait_for_the_first_and_resume_its_dtls_session`,
+  `a_first_handshake_that_never_completes_holds_the_others_back_three_flight_intervals_at_most`,
+  `the_others_do_not_wait_for_a_ticket_that_does_not_come`,
+  `the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`,
+  `a_datagram_lost_on_the_first_handshake_delays_every_transport_with_the_session_on`,
+  `a_first_handshake_that_never_completes_costs_the_others_the_bounded_wait_on_links_with_latency`,
+  `a_final_answer_naming_another_certificate_is_checked_by_a_full_handshake_as_the_dtls_client`
+  and `_as_the_dtls_server`,
+  `by_default_a_final_answer_with_other_fingerprints_is_refused_with_the_session_made`,
+  `with_dtls12_the_transports_neither_wait_nor_ask_for_a_ticket`,
+  `a_bundled_connection_exchanges_no_ticket_with_the_session_on`,
+  `a_transport_added_by_a_later_negotiation_runs_a_full_handshake`, the wrong-fingerprint and
+  re-key tests); `transport/dtls/resumption.rs` (the re-check behind the admission gate in
+  both roles, a final answer with other fingerprints, the store's lifetime and emptying, its
+  filter on tickets without certificates, the wipe at close, the wait rules);
+  `handler/dtls.rs` (the bound and its cap,
+  `the_wait_for_the_leader_is_capped_whatever_round_trip_ice_measured`, a leader that cannot
+  start, no resumption of a later handshake in place); `transport_close_test.rs`
+  (`closing_the_connection_wipes_its_dtls_session`); `rtci-dtls` server-side re-check tests in DTLS 1.3 and 1.2
+  (`the_server_runs_its_peer_certificate_check_again_on_a_resumed_client`).
 
 - **mDNS may leave two kinds of host address unwrapped, each an opt-in setting, off by default
   (mdns-5; MDNSICE-3.1.2.2-4, -3.1.2.2-5, -3.1.2.3-1).** Only in `QueryAndGather`; in every
@@ -997,6 +1136,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updated since the triage day, and `webrtc-rs/webrtc` commits (`master`, `v0.17.x`). Both
   points are FORK.md's (new row "Open upstream work last triaged"). Read-only GitHub API
   calls; no workflow runs it.
+- **`SettingEngineBuilder::with_dtls_session_resumption(bool)`** (default `false`): with
+  `true` the transports of a connection's unbundled sections share one DTLS session (RFC 5764
+  section 3; see the entry "DTLS session resumption between a connection's transports,
+  opt-in" for what it costs); `false`, the default, gives every association a full handshake
+  at once, as before.
+- **rtci-dtls**: `session::SessionTicketIssuer` and `ConfigBuilder::with_session_ticket_issuer`:
+  ticket keys (and the record of used tickets) several configurations share, so that a ticket
+  one issued is accepted, once, by another; `SessionTicketIssuer::retire` wipes the keys
+  (zeroized) before the last holder is dropped, after which no ticket is issued or accepted.
+  `Tls13Session::peer_certificates` and `Dtls12Session::peer_certificates`.
+- **rtci-dtls** (documentation): what DTLS 1.2 session resumption costs is stated on
+  `ConfigBuilder`, `with_session_tickets`, `with_session_store`, `with_session_cache`,
+  `with_dtls12_resumption`, the `session` module and the crate: a resumed DTLS 1.2
+  association runs no key exchange and an RFC 5077 ticket is the master secret sealed under
+  the server's ticket key, so there is no forward secrecy against the ticket key, the session
+  cache or the client's store; DTLS 1.3 resumption (`psk_dhe_ke`) keeps it. The stand-alone
+  default is unchanged: once tickets, a cache or a store are configured both versions resume
+  unless `with_dtls12_resumption(false)`.
 - **turn** (`conf/transport3-mays`): `ClientConfig::software_in_indications` puts the
   client's SOFTWARE in its Send indications too (RFC 8489 section 6.1: "Indications MAY include
   a SOFTWARE attribute"). Off by default, so nothing changes on the wire: Send indications are
@@ -1085,6 +1242,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
+  while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
+  report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the
+  controller took the probe's measurement for what the path delivers whenever one was held
+  (six seconds after any probe result), and from the second report of an over-use on that
+  measurement was the estimate itself, so the estimate fell by 15% every 50 ms whatever
+  arrived: 268 kbit/s to the 100 kbit/s floor in 0.3 s while 213 to 252 kbit/s was received
+  (the path of `tests/capacity_cap_video_rtc2rtc.rs`, where the estimate under a 300 kbit/s
+  cap averaged 200 kbit/s and fell to the floor again and again). The measurement now stands
+  in for the received rate only while the sender is received below it (application limited,
+  as before); a sender received at the measurement or above it is cut to 0.85 times the
+  received rate, and over-use never raises an estimate that rests on a probe.
+  `rate_control::tests::lasting_over_use_with_a_probe_measurement_follows_the_received_rate`.
+- **interceptor / bandwidth probing** (collapse-2): a probe cluster's padding belongs to the
+  cluster. The NACK responder made a whole cluster of padding-only RTX packets for every
+  `ProbeRequest`, and the pacer kept what did not leave in the cluster "until budget was
+  spare". With a backlog in the pacer (after a capacity drop, during its pause) every cluster
+  was filled by the backlog and its 22 padding packets stayed queued, for seconds: 191 of them
+  after ten clusters in `tests/capacity_cap_video_rtc2rtc.rs`. They left inside later
+  clusters with the RTX sequence numbers they were given when made, far behind the stream's
+  newest, where the receiver's replay protection and feedback window no longer take them; no
+  report ever named them, so those clusters were never reported in full and gave no result
+  (every cluster after the cap; an estimate at its floor with an application-limited sender
+  then stayed there, 35 s on an open path in the cap matrix's seed 5 and 3 of 1000 seeds of
+  the capacity review). Now the pacer says how much padding a cluster needs beyond the media
+  it holds (`ProbeFill`, on the request's carrier), the responder makes that much (none while
+  a backlog waits), and padding that could not leave in its cluster is discarded when the
+  cluster ends (`PacerInterceptor::padding_discarded` counts it). The congestion controller
+  counts in a cluster only the packets per-packet feedback will report (audio without
+  feedback that left during a cluster was waited for and never came), and a cluster one of
+  whose reports is still missing 500 ms after it left is measured on the others instead of
+  being given up. `rtci-interceptor/tests/probe_cluster_padding.rs`.
 - **interceptors (RTP circuit breaker, RFC 8083): a call's voice no longer goes silent for
   good after a capacity drop** (breaker-1). In a call between two peers of this engine a
   sudden drop of the path's capacity ceased the voice 145 ms later (seven voice packets
@@ -1165,8 +1354,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again" of the capacity review (both directions capped; a 1000 ms queue). Now the breaker
   sends `CircuitBreakerNotice` application-ward when a flow ceases and when a restart takes
   effect, and the peer connection raises `RTCPeerConnectionEvent::OnCircuitBreaker` (sender,
-  RID, SSRC, the breaker that tripped, how long until a restart is accepted).
-  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`.
+  RID, SSRC, the breaker that tripped, how long until a restart is accepted). The pacer reads
+  the notice too and no longer charges a ceased flow's packets to its budget: a voice the
+  application kept writing took 76 of a 100 kbit/s target for packets that never left, and
+  the estimate, bound by one and a half times what arrives, could not climb.
+  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`,
+  `pacing.rs::a_flow_the_circuit_breaker_ceased_is_not_charged_to_the_budget`.
+
+- **interceptors (pacer): the target the pacer announces carries the congestion controller's
+  minimum** (`conf/breaker-2-pacer-ceased-flow`). When a pause of the source begins or ends
+  the pacer says the controller's target again application-ward
+  (`Attribute::TargetBitrateChanged`), and it did so without the controller's minimum
+  (`MinimumTarget`). The NACK responder takes the minimum from each target it reads and never
+  tells the original media less; from the end of a pause until the controller's next target
+  it read "no minimum" and lowered the target by its whole retransmission reserve, floor or
+  not, and the peer connection reported that as `availableOutgoingBitrate` (46 850 bit/s with
+  the estimator at its 100 000 bit/s floor: a 53 150 bit/s reserve announced before the
+  target reached the floor; hosted run 45501349668, the reason `conf/collapse-4` was not
+  green). The pacer now keeps the minimum that rode with the controller's last target and
+  attaches it to its own announcements.
+  `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
+
+- **rtci (statistics): `availableOutgoingBitrate` survives `set_parameters` during a pacer
+  pause** (`conf/breaker-2-pacer-ceased-flow`). `RTCRtpSender::set_parameters` divides the
+  transport's target among the encodings again; while the pacer had the source paused that
+  target is zero, and the division wrote it as the transport's estimate: the statistic was
+  gone until the congestion controller's next target. The division now sets the streams'
+  shares only.
+  `interceptor_circuit_breaker_test::dividing_the_target_again_while_the_source_is_paused_leaves_the_estimate_alone`.
 
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
@@ -1346,6 +1561,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **capacity instrument** (rtcpbudget-5): chain tokens for the default chain with other
+  settings, measurement only: `share` (the defaults with `rtcp_share_follows_send_rate`),
+  `perf` (the `Performance` profile's interceptor settings), `perfshare`, `perfnoshare`,
+  `chrome` (the `Chrome` profile's); `Setup::profile` and `Setup::share_follows_send_rate`
+  in the capacity world.
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40

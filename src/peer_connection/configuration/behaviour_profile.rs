@@ -906,13 +906,11 @@ governed_behaviours! {
     {
         id: "cc.feedback-cadence",
         setting: "DefaultInterceptorOptions::congestion_feedback_cadence",
-        clause: "draft-ietf-rmcat-gcc-02 3, draft-holmer-rmcat-transport-wide-cc-extensions-01 3",
-        rfc: CongestionFeedbackCadence::PerFrame => "PerFrame",
+        clause: "draft-ietf-rmcat-gcc-02 3, draft-holmer-rmcat-transport-wide-cc-extensions-01 3 (RECOMMENDED; the default has no text)",
+        rfc: CongestionFeedbackCadence::ReceivedMedia => "ReceivedMedia",
         chrome: CongestionFeedbackCadence::SendEstimate => "SendEstimate",
         strict_rfc: CongestionFeedbackCadence::PerFrame => "PerFrame",
-        performance: CongestionFeedbackCadence::ReceivedMedia => "ReceivedMedia",
-        performance_note: "No text has this form: feedback sized to a share of the media RECEIVED (cc.feedback-share, cc.feedback-max-interval), the engine's cadence before the drafts' became the default. Kept for the profile because its measured figures (cc.feedback-share) were taken with it",
-        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: send_interval = kTwccReportSize (68 octets) / (0.05 * estimate) held between kMinInterval 50 ms and kMaxInterval 250 ms, kDefaultInterval 100 ms before; the estimate is call/call.cc::Call::OnTargetTransferRate's msg.target_rate, the endpoint's own send estimate",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: send_interval = kTwccReportSize (68 octets) / (0.05 * estimate) held between kMinInterval 50 ms and kMaxInterval 250 ms, kDefaultInterval 100 ms before; the estimate is call/call.cc::Call::OnTargetTransferRate's msg.target_rate, the endpoint's own send estimate. The default (50 to 250 ms from 5% of the media RECEIVED) is the engine's choice and no specification's: the drafts' per frame / 30 ms up to 100 ms (StrictRfc) and three forms between measured worse in the capacity instrument (audit rows TWCC-3-4, GCC-3-2)",
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_cadence = v,
         read: |o: &DefaultInterceptorOptions| o.congestion_feedback_cadence,
@@ -1639,6 +1637,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228)",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_session_resumption",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 5764 3 (SHOULD, \"as an optimization\"): the transports of unbundled sections share one DTLS session, the others waiting for the first (at most three flight intervals and never more than 3 s) and resuming it with DTLS 1.3 tickets (psk_dhe_ke only; no DTLS 1.2 session id or ticket in any configuration). Off in every profile, an opt-in (`true`), a standing departure from the SHOULD because it costs connection time and no browser can take part. Measured (tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency, three unbundled transports, time until all are connected): round trip 100 ms: off 453 ms, on against a peer that issues no ticket 753 ms (+300 ms, about 3 round trips, nothing resumed), on between two engines with tickets 703 ms (+250 ms, about 2.5 round trips); round trip 300 ms: 1.353 s, 2.253 s (+900 ms), 2.103 s (+750 ms); one datagram lost on the first handshake delays every transport. It saves one signature and one verification per other transport. No browser issues or offers a ticket: libwebrtc rtc_base/openssl_stream_adapter.cc @ a222406d sets SSL_OP_NO_TICKET (line 1223) with an SSL_CTX per adapter (line 1149); Firefox dom/media/webrtc/transport/transportlayerdtls.cpp TransportLayerDtls::Setup() sets SSL_ENABLE_SESSION_TICKETS to PR_FALSE and SSL_NO_CACHE to PR_TRUE (read by the second review, 2026-11-24). With BUNDLE (one transport, Chrome's connection in every bundle policy) it does nothing: no wait, no ticket",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_connection_id",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further",
@@ -1662,6 +1665,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
         class: NotGovernedClass::Same,
         note: "the same in every profile: the engine default (UpToTarget on master, the measured choice in tests/capacity_cap_video_rtc2rtc.rs; WithinTarget, RFC 4588 7, once conf/gcc-2-rfc-retransmission lands). libwebrtc has no retransmission rate limit on video at a222406d: call/rtp_video_sender.cc (lines 292-354) configures no retransmission_rate_limiter, which modules/rtp_rtcp/source/rtp_rtcp_interface.h line 92 defaults to nullptr, so RTPSender::ReSendPacket's TryUseRate check (rtp_sender.cc lines 331-333) never applies; instead modules/video_coding/fec_controller_default.cc (lines 146-167) lowers the encoder target by the share NACK and FEC took, capped at kProtectionOverheadRateThreshold 0.5 (line 31). That is the RFC's form (retransmissions inside the target, the originals lowered to make room) closer than UpToTarget, which is not libwebrtc's rule at this revision; Performance keeps the default (UpToTarget measured worse than WithinTarget on the paced default chain by gcc-2's owner)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::rtcp_share_follows_send_rate",
+        class: NotGovernedClass::EngineOnly,
+        note: "tuning with NO specification behind it, off in every profile (opt-in): this endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which every endpoint sends at this endpoint's congestion-controlled rate (5% x send rate x members / local SSRCs), so the endpoint behind a link that collapsed one way stops spending the other direction's share on it; the intervals calculated for the peer are untouched. RFC 3550 6.2 sizes the RTCP bandwidth from the session bandwidth and 6.3.1 shares it equally among the members, whatever each direction carries; RFC 4585 4.3 leaves an asymmetric link to the application's b=RS / b=RR. Not a Performance value: that profile's T_rr_interval of 1 s already takes regular RTCP to about 22 kbit/s on such a link, and measured beside it the option adds nothing (CHANGELOG, docs/capacity-instrument.md). libwebrtc computes no RTCP bandwidth (modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: a fixed report interval, 1 s video, 5 s audio), so there is no share to follow",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::circuit_breaker_automatic_restart",

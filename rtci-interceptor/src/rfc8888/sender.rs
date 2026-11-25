@@ -112,12 +112,16 @@ impl Rfc8888Builder {
     }
 
     /// When a report is built while the interval is not fixed: see
-    /// [`CongestionFeedbackCadence`]. Default [`CongestionFeedbackCadence::PerFrame`]: RFC
-    /// 8888 section 4, "sending feedback once per frame is an upper bound before the
-    /// reporting overhead becomes excessive", and "Specifications for RTP congestion control
-    /// algorithms can also provide guidance": draft-ietf-rmcat-gcc-02 section 3, "once per
-    /// received video frame or at least once every 30 ms if audio-only or multi-stream",
-    /// up to 100 ms where the overhead needs to be limited.
+    /// [`CongestionFeedbackCadence`]. Default [`CongestionFeedbackCadence::ReceivedMedia`],
+    /// the engine's own form, which no specification has (RFC 8888 section 4 leaves the
+    /// interval to the application: "Applications need to negotiate an appropriate congestion
+    /// control feedback interval"). [`CongestionFeedbackCadence::PerFrame`] is the form of
+    /// the texts (RFC 8888 section 4, "sending feedback once per frame is an upper bound
+    /// before the reporting overhead becomes excessive", and "Specifications for RTP
+    /// congestion control algorithms can also provide guidance": draft-ietf-rmcat-gcc-02
+    /// section 3, "once per received video frame or at least once every 30 ms if audio-only
+    /// or multi-stream", up to 100 ms where the overhead needs to be limited): measured
+    /// worse as the default, it is the `StrictRfc` behaviour profile's.
     pub fn with_cadence(mut self, cadence: CongestionFeedbackCadence) -> Self {
         self.cadence = cadence;
         self

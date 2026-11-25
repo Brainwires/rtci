@@ -552,3 +552,98 @@ fn the_minimum_session_bandwidth_lets_rtcp_follow_low_media() {
         "{follows} / {floor} = {ratio:.2}"
     );
 }
+
+/// What a sender of about 270 kbit/s (three hundred 112-octet packets a second), no `b=`
+/// line, does over seconds 4 to 20: its regular packets, and the reporting interval the
+/// session calculates for a member that sends, as it rides on the last RTCP handed
+/// application-ward.
+fn reports_of_a_sender_told_its_send_rate(follows: bool, told: Option<u64>) -> (usize, Duration) {
+    let mut chain = chain(
+        builder()
+            .with_t_rr_interval(Duration::ZERO)
+            .with_share_following_send_rate(follows),
+    );
+    let base = Instant::now();
+    chain.bind_local_stream(&video(10));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    if let Some(bits_per_second) = told {
+        control(
+            &mut chain,
+            base,
+            RtcpSessionControl::SendRate(bits_per_second),
+        );
+    }
+    let mut sent = vec![];
+    let mut calculated = Duration::ZERO;
+    for step in 0..6000u32 {
+        let now = base + secs(1.0 / 300.0) * step;
+        chain
+            .handle_write(rtp(now, 10, step as u16, step * 300))
+            .unwrap();
+        sent.extend(run(&mut chain, now));
+        if step % 300 == 299 {
+            chain
+                .handle_read(rtcp(now, remote_receiver_report(77)))
+                .unwrap();
+            // The chain's end keeps the attributes and hands on an empty carrier in place
+            // of the report (the application did not ask for RTCP): every item is looked at.
+            while let Some(packet) = chain.poll_read() {
+                if let Some(interval) = packet
+                    .message
+                    .custom::<rtci_interceptor::RtcpReportingInterval>()
+                {
+                    calculated = interval.sender;
+                }
+            }
+        }
+    }
+    (regular_after(&sent, base + secs(4.0)), calculated)
+}
+
+/// `with_share_following_send_rate` (tuning, no specification asks for it; off in every
+/// profile): an endpoint whose congestion controller allows it 100 kbit/s while the session
+/// measures about 270 kbit/s schedules its own regular reports with 5% of 100 kbit/s for each
+/// of its SSRCs' places among the members, here with one remote member twice that: fewer
+/// reports. Without the option the rate it is told changes nothing, and with the option but
+/// no rate told nothing changes either.
+#[test]
+fn the_rtcp_share_follows_the_send_rate_the_session_is_told() {
+    let (plain, _) = reports_of_a_sender_told_its_send_rate(false, None);
+    let (ignored, _) = reports_of_a_sender_told_its_send_rate(false, Some(100_000));
+    let (untold, _) = reports_of_a_sender_told_its_send_rate(true, None);
+    let (follows, _) = reports_of_a_sender_told_its_send_rate(true, Some(100_000));
+    assert!(plain >= 40, "{plain}");
+    assert_eq!(
+        plain, ignored,
+        "the option is off: the rate told is not used"
+    );
+    assert_eq!(plain, untold, "no rate was told: nothing to follow");
+    let ratio = follows as f64 / plain as f64;
+    assert!(
+        (0.4..=0.9).contains(&ratio),
+        "{follows} / {plain} = {ratio:.2}: two members, so the bound is 5% of 200 kbit/s \
+         against 5% of the 270 to 340 kbit/s measured"
+    );
+    // A rate above what the session measures bounds nothing.
+    let (high, _) = reports_of_a_sender_told_its_send_rate(true, Some(5_000_000));
+    assert_eq!(plain, high);
+}
+
+/// The interval the session calculates for the OTHER members (what the circuit breaker
+/// takes for the peer's reporting interval) is RFC 3550's for the whole RTCP bandwidth
+/// whether or not this endpoint's own share follows its send rate: the peer does not slow
+/// its reports because this endpoint's uplink collapsed.
+#[test]
+fn the_interval_calculated_for_the_peer_does_not_follow_the_send_rate() {
+    let (_, plain) = reports_of_a_sender_told_its_send_rate(false, None);
+    let (_, follows) = reports_of_a_sender_told_its_send_rate(true, Some(100_000));
+    assert!(plain > Duration::ZERO, "an interval rode on the RTCP read");
+    // (The average packet size the interval is computed from differs a little between the
+    // two runs, which send different numbers of reports; the bound would lengthen it by a
+    // third or more.)
+    let ratio = follows.as_secs_f64() / plain.as_secs_f64();
+    assert!(
+        (0.87..=1.15).contains(&ratio),
+        "{follows:?} / {plain:?} = {ratio:.2}"
+    );
+}

@@ -12,8 +12,8 @@
 //! Run with `--nocapture` to read the table.
 
 use rtci_interceptor::{
-    AttributedPacket, CongestionFeedbackCadence, CongestionFeedbackFormat, Interceptor, Packet,
-    RTCPFeedback, RTPHeaderExtension, Registry, Rfc8888Builder, RtcpRandom, RtcpSessionBuilder,
+    AttributedPacket, CongestionFeedbackFormat, Interceptor, Packet, RTCPFeedback,
+    RTPHeaderExtension, Registry, Rfc8888Builder, RtcpRandom, RtcpSessionBuilder,
     RtcpSessionControl, Slot, StreamInfo, TaggedPacket, TwccReceiverBuilder, TwccSenderBuilder,
     convert_ccfb, convert_twcc,
 };
@@ -80,7 +80,7 @@ enum Generators {
     Fixed,
     /// The defaults.
     Default,
-    /// The `Performance` behaviour profile's: feedback sized to 2.5% of the media received, at most
+    /// The `Performance` behaviour profile's: feedback sized to 2.5% of the media, at most
     /// 500 ms apart, counted against the RTCP bandwidth; `T_rr_interval` one second; a 16
     /// kbit/s floor under the session bandwidth.
     Performance,
@@ -104,11 +104,9 @@ fn endpoint(seed: u64, generators: Generators, reduced_size: bool) -> Box<dyn In
         }
         Generators::Performance => (
             TwccReceiverBuilder::new()
-                .with_cadence(CongestionFeedbackCadence::ReceivedMedia)
                 .with_feedback_share(0.025)
                 .with_max_adaptive_interval(Duration::from_millis(500)),
             Rfc8888Builder::new()
-                .with_cadence(CongestionFeedbackCadence::ReceivedMedia)
                 .with_feedback_share(0.025)
                 .with_max_adaptive_interval(Duration::from_millis(500)),
         ),

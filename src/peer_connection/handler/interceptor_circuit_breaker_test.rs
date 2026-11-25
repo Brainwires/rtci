@@ -391,3 +391,32 @@ fn a_flow_ceasing_while_the_source_is_paused_leaves_the_estimate_alone() {
         "a flow restarted in the pause"
     );
 }
+
+/// The same when the application changes an encoding's parameters during a pause
+/// (`RTCRtpSender::set_parameters` divides the target again): the paused target of zero is
+/// not written as the estimate, and `availableOutgoingBitrate` does not lose it.
+#[test]
+fn dividing_the_target_again_while_the_source_is_paused_leaves_the_estimate_alone() {
+    let (mut pc, _video, _voice) = connection();
+    hand(
+        &mut pc,
+        AttributedPacket::new(Packet::Rtcp(vec![]))
+            .with(Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            })
+            .with(Attribute::Custom(std::sync::Arc::new(
+                interceptor::PacerPause {
+                    target_bits_per_second: 250_000.0,
+                },
+            ))),
+    );
+    pc.reallocate_target_bitrate();
+    assert_eq!(
+        Some(250_000.0),
+        pc.pipeline_context
+            .stats
+            .outgoing_estimates
+            .get(&0)
+            .copied()
+    );
+}

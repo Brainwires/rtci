@@ -1,5 +1,7 @@
 //! When the congestion control feedback generators (transport-wide feedback, RFC 8888) build
-//! a report: the drafts' cadence by default, libwebrtc's with the setting.
+//! a report with the cadence set: the drafts' (`PerFrame`, the `StrictRfc` profile's) and
+//! libwebrtc's (`SendEstimate`, the `Chrome` profile's). The default, sized to the media
+//! received, is in `congestion_feedback_rate.rs` and the generators' own tests.
 //!
 //! draft-ietf-rmcat-gcc-02 section 3: "The RECOMMENDED feedback interval is once per received
 //! video frame or at least once every 30 ms if audio-only or multi-stream. If the feedback
@@ -189,6 +191,16 @@ fn feedback_times(chain: &mut impl Interceptor, epoch: Instant, media: &Media) -
     times
 }
 
+/// The transport-wide feedback generator with the drafts' cadence.
+fn per_frame_twcc() -> TwccReceiverBuilder {
+    TwccReceiverBuilder::new().with_cadence(CongestionFeedbackCadence::PerFrame)
+}
+
+/// The RFC 8888 generator with the drafts' cadence.
+fn per_frame_rfc8888() -> Rfc8888Builder {
+    Rfc8888Builder::new().with_cadence(CongestionFeedbackCadence::PerFrame)
+}
+
 fn twcc(builder: TwccReceiverBuilder) -> impl Interceptor {
     Registry::new()
         .with(Slot::TwccReceiver, builder.build())
@@ -229,7 +241,7 @@ const AUDIO_ALONE: Media = Media {
 /// frame's last packet arrived (11 ms + 2 ms into every 40).
 #[test]
 fn transport_wide_feedback_of_one_video_stream_is_sent_for_every_frame_received() {
-    let mut chain = twcc(TwccReceiverBuilder::new());
+    let mut chain = twcc(per_frame_twcc());
     chain.bind_remote_stream(&stream(VIDEO, "video/VP8", TWCC));
     let times = feedback_times(&mut chain, Instant::now(), &VIDEO_ALONE);
     assert_eq!(50, times.len(), "{times:?}");
@@ -246,7 +258,7 @@ fn transport_wide_feedback_of_one_video_stream_is_sent_for_every_frame_received(
 /// frame is an upper bound before the reporting overhead becomes excessive").
 #[test]
 fn rfc_8888_feedback_of_one_video_stream_is_sent_for_every_frame_received() {
-    let mut chain = rfc8888(Rfc8888Builder::new());
+    let mut chain = rfc8888(per_frame_rfc8888());
     chain.bind_remote_stream(&stream(VIDEO, "video/VP8", CCFB));
     let times = feedback_times(&mut chain, Instant::now(), &VIDEO_ALONE);
     assert_eq!(50, times.len(), "{times:?}");
@@ -266,7 +278,7 @@ fn audio_only_and_multi_stream_sessions_are_reported_every_30_ms() {
         (&AUDIO_AND_VIDEO, "audio and video"),
         (&AUDIO_ALONE, "audio"),
     ] {
-        let mut chain = twcc(TwccReceiverBuilder::new());
+        let mut chain = twcc(per_frame_twcc());
         chain.bind_remote_stream(&stream(AUDIO, "audio/opus", TWCC));
         if media.video {
             chain.bind_remote_stream(&stream(VIDEO, "video/VP8", TWCC));
@@ -280,7 +292,7 @@ fn audio_only_and_multi_stream_sessions_are_reported_every_30_ms() {
             "{name}: {times:?}"
         );
 
-        let mut chain = rfc8888(Rfc8888Builder::new());
+        let mut chain = rfc8888(per_frame_rfc8888());
         chain.bind_remote_stream(&stream(AUDIO, "audio/opus", CCFB));
         if media.video {
             chain.bind_remote_stream(&stream(VIDEO, "video/VP8", CCFB));
@@ -303,7 +315,7 @@ fn the_interval_is_increased_to_100_ms_where_the_rtcp_bandwidth_does_not_hold_mo
     let epoch = Instant::now();
     // 3.8 kbit/s, an audio call's share: a feedback packet of about 100 octets fits every
     // 200 ms. The draft's ceiling holds: ten a second.
-    let mut chain = twcc(TwccReceiverBuilder::new());
+    let mut chain = twcc(per_frame_twcc());
     chain.bind_remote_stream(&stream(AUDIO, "audio/opus", TWCC));
     chain
         .handle_read(carrier(
@@ -325,7 +337,7 @@ fn the_interval_is_increased_to_100_ms_where_the_rtcp_bandwidth_does_not_hold_mo
 
     // One video stream at 25 frames a second with the same share: every third frame at
     // most (a frame ends every 40 ms, the interval is 100 ms).
-    let mut chain = twcc(TwccReceiverBuilder::new());
+    let mut chain = twcc(per_frame_twcc());
     chain.bind_remote_stream(&stream(VIDEO, "video/VP8", TWCC));
     chain
         .handle_read(carrier(
