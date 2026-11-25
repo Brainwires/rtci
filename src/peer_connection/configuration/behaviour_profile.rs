@@ -387,7 +387,9 @@ macro_rules! governed_behaviours {
 }
 
 use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance};
-use interceptor::{EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase};
+use interceptor::{
+    CongestionFeedbackCadence, EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase,
+};
 
 governed_behaviours! {
     // ---- ICE ----
@@ -900,6 +902,18 @@ governed_behaviours! {
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_minimum_session_bandwidth = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_minimum_session_bandwidth,
+    },
+    {
+        id: "cc.feedback-cadence",
+        setting: "DefaultInterceptorOptions::congestion_feedback_cadence",
+        clause: "draft-ietf-rmcat-gcc-02 3, draft-holmer-rmcat-transport-wide-cc-extensions-01 3 (RECOMMENDED; the default has no text)",
+        rfc: CongestionFeedbackCadence::ReceivedMedia => "ReceivedMedia",
+        chrome: CongestionFeedbackCadence::SendEstimate => "SendEstimate",
+        strict_rfc: CongestionFeedbackCadence::PerFrame => "PerFrame",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: send_interval = kTwccReportSize (68 octets) / (0.05 * estimate) held between kMinInterval 50 ms and kMaxInterval 250 ms, kDefaultInterval 100 ms before; the estimate is call/call.cc::Call::OnTargetTransferRate's msg.target_rate, the endpoint's own send estimate. The default (50 to 250 ms from 5% of the media RECEIVED) is the engine's choice and no specification's: the drafts' per frame / 30 ms up to 100 ms (StrictRfc) and three forms between measured worse in the capacity instrument (audit rows TWCC-3-4, GCC-3-2)",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_cadence = v,
+        read: |o: &DefaultInterceptorOptions| o.congestion_feedback_cadence,
     },
     {
         id: "cc.feedback-share",
@@ -1680,6 +1694,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
         class: NotGovernedClass::Same,
         note: "the same in every profile: the engine default (UpToTarget on master, the measured choice in tests/capacity_cap_video_rtc2rtc.rs; WithinTarget, RFC 4588 7, once conf/gcc-2-rfc-retransmission lands). libwebrtc has no retransmission rate limit on video at a222406d: call/rtp_video_sender.cc (lines 292-354) configures no retransmission_rate_limiter, which modules/rtp_rtcp/source/rtp_rtcp_interface.h line 92 defaults to nullptr, so RTPSender::ReSendPacket's TryUseRate check (rtp_sender.cc lines 331-333) never applies; instead modules/video_coding/fec_controller_default.cc (lines 146-167) lowers the encoder target by the share NACK and FEC took, capped at kProtectionOverheadRateThreshold 0.5 (line 31). That is the RFC's form (retransmissions inside the target, the originals lowered to make room) closer than UpToTarget, which is not libwebrtc's rule at this revision; Performance keeps the default (UpToTarget measured worse than WithinTarget on the paced default chain by gcc-2's owner)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::rtcp_share_follows_send_rate",
+        class: NotGovernedClass::EngineOnly,
+        note: "tuning with NO specification behind it, off in every profile (opt-in): this endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which every endpoint sends at this endpoint's congestion-controlled rate (5% x send rate x members / local SSRCs), so the endpoint behind a link that collapsed one way stops spending the other direction's share on it; the intervals calculated for the peer are untouched. RFC 3550 6.2 sizes the RTCP bandwidth from the session bandwidth and 6.3.1 shares it equally among the members, whatever each direction carries; RFC 4585 4.3 leaves an asymmetric link to the application's b=RS / b=RR. Not a Performance value: that profile's T_rr_interval of 1 s already takes regular RTCP to about 22 kbit/s on such a link, and measured beside it the option adds nothing (CHANGELOG, docs/capacity-instrument.md). libwebrtc computes no RTCP bandwidth (modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: a fixed report interval, 1 s video, 5 s audio), so there is no share to follow",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::circuit_breaker_automatic_restart",

@@ -1687,6 +1687,55 @@ fn the_received_rate_bound_as_a_clamp_pulls_an_audio_only_estimate_down() -> Res
     Ok(())
 }
 
+/// RFC 4585 section 3.2 ("FB messages are part of the RTCP control streams and thus subject
+/// to the RTCP bandwidth constraints") and 3.5.2 read onto congestion control feedback
+/// (`rtcp_immediate_congestion_feedback: false`, the `StrictRfc` profile's form,
+/// RFC4585-3.5.2-5) on the camera call of
+/// `an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain`: while only audio is
+/// sent the session bandwidth is its 64 kbit/s floor, 5 % of it holds a feedback packet
+/// every one to four seconds, the sender's estimator hears nothing for half a second
+/// (RFC 8888 section 5, RFC 8836 requirement 10: missing feedback is taken for over-use)
+/// and halves, again and again, on a link that loses and queues nothing. The default (the
+/// feedback leaves as it is built) keeps the start rate. The second measurement behind the
+/// default; the first is `rfc_4585_timing_of_congestion_feedback_measured_against_immediate`.
+#[test]
+fn feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent() -> Result<()> {
+    let seed = 1;
+    let setup = Setup::new(seed, None)
+        .chain(Chain::Default)
+        .anchor(ANCHORS[0]);
+    let default = camera_run(&setup)?;
+    let in_budget = camera_run(&setup.immediate_congestion_feedback(false))?;
+    println!(
+        "default lowest {:?}, step down {:?}, at off {:?}; inside the RTCP bandwidth lowest {:?}, step down {:?}, at off {:?}",
+        default.lowest,
+        default.step_down,
+        default.at_off,
+        in_budget.lowest,
+        in_budget.step_down,
+        in_budget.at_off
+    );
+    for i in 0..2 {
+        assert!(
+            default.lowest[i].is_some_and(|lowest| lowest >= 300_000),
+            "{default:?}"
+        );
+        assert_eq!(None, default.step_down[i], "{default:?}");
+    }
+    assert!(
+        in_budget
+            .lowest
+            .iter()
+            .any(|lowest| lowest.is_some_and(|lowest| lowest <= 150_000)),
+        "{in_budget:?}"
+    );
+    assert!(
+        in_budget.step_down.iter().any(Option::is_some),
+        "{in_budget:?}"
+    );
+    Ok(())
+}
+
 /// After a path change with a four-second outage the estimate starts over at the start rate
 /// and, on a new path that loses and queues nothing, does not go under it: nothing on the
 /// new path is evidence of congestion. (ParolNet's

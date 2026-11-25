@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5047 | 26 | 7 | 1 | 3 | 3 | 0 | 665 | 5752 |
-| SHOULD | 908 | 0 | 3 | 4 | 48 | 23 | 0 | 325 | 1311 |
-| MAY | 499 | 0 | 0 | 12 | 22 | 70 | 0 | 177 | 780 |
+| MUST | 5048 | 26 | 7 | 2 | 3 | 3 | 0 | 663 | 5752 |
+| SHOULD | 907 | 2 | 3 | 4 | 46 | 24 | 0 | 325 | 1311 |
+| MAY | 500 | 0 | 0 | 12 | 21 | 70 | 0 | 177 | 780 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6526 | 26 | 10 | 18 | 76 | 97 | 0 | 1168 | 7921 |
+| all | 6527 | 28 | 10 | 19 | 73 | 98 | 0 | 1166 | 7921 |
 
 ## RFC behaviour tested
 
@@ -26,9 +26,9 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5087 | 5080 | 99.9 | 5047 | 99.2 |
-| SHOULD | 986 | 911 | 92.4 | 908 | 92.1 |
-| MAY | 603 | 499 | 82.8 | 499 | 82.8 |
+| MUST | 5089 | 5081 | 99.8 | 5048 | 99.2 |
+| SHOULD | 986 | 912 | 92.5 | 907 | 92.0 |
+| MAY | 603 | 500 | 82.9 | 500 | 82.9 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
 
 ## Per file
@@ -39,7 +39,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `av1-rtp.md` | SHOULD | 13 | 0 | 0 | 0 | 1 | 0 | 0 | 1 | 15 |
 | `av1-rtp.md` | MAY | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 10 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MUST | 36 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 36 |
-| `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 3 |
+| `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 1 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 3 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `draft-ietf-avtcore-rtp-sframe.md` | MUST | 30 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 30 |
 | `draft-ietf-avtcore-rtp-sframe.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
@@ -52,7 +52,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 6 | 0 | 0 | 0 | 0 | 1 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 1 | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 7 |
 | `draft-ietf-rmcat-gcc.md` | MUST | 34 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 35 |
-| `draft-ietf-rmcat-gcc.md` | SHOULD | 15 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 17 |
+| `draft-ietf-rmcat-gcc.md` | SHOULD | 15 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 17 |
 | `draft-ietf-rmcat-gcc.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc2198.md` | MUST | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 13 |
 | `rfc2198.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
@@ -83,7 +83,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc4571.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `rfc4585.md` | MUST | 54 | 1 | 0 | 1 | 0 | 0 | 0 | 11 | 67 |
 | `rfc4585.md` | SHOULD | 6 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 12 |
-| `rfc4585.md` | MAY | 12 | 0 | 0 | 1 | 1 | 1 | 0 | 0 | 15 |
+| `rfc4585.md` | MAY | 13 | 0 | 0 | 1 | 0 | 1 | 0 | 0 | 15 |
 | `rfc4588.md` | MUST | 26 | 0 | 0 | 0 | 0 | 0 | 0 | 12 | 38 |
 | `rfc4588.md` | SHOULD | 9 | 0 | 0 | 0 | 3 | 0 | 0 | 1 | 13 |
 | `rfc4588.md` | MAY | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 6 |
@@ -210,8 +210,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8083.md` | MUST | 21 | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 23 |
 | `rfc8083.md` | SHOULD | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 17 |
 | `rfc8083.md` | MAY | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 |
-| `rfc8108.md` | MUST | 15 | 2 | 0 | 0 | 0 | 0 | 0 | 5 | 22 |
-| `rfc8108.md` | SHOULD | 7 | 0 | 0 | 0 | 1 | 0 | 0 | 2 | 10 |
+| `rfc8108.md` | MUST | 16 | 2 | 0 | 1 | 0 | 0 | 0 | 3 | 22 |
+| `rfc8108.md` | SHOULD | 6 | 0 | 0 | 0 | 1 | 1 | 0 | 2 | 10 |
 | `rfc8108.md` | MAY | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | `rfc8122.md` | MUST | 18 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 21 |
 | `rfc8122.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 5 |

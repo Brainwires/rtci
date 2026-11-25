@@ -963,6 +963,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **congestion control feedback cadence as a setting** (rtcpbudget-2):
+  `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
+  `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
+  `DefaultInterceptorOptions::congestion_feedback_cadence` and the governed behaviour
+  `cc.feedback-cadence`. **The default does not change**: feedback every 50 to 250 ms, sized
+  to 5% of the media received (`ReceivedMedia`), which is the engine's own choice and no
+  specification's. `PerFrame` is the drafts' cadence (draft-ietf-rmcat-gcc-02 section 3,
+  draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: a lone video stream is
+  reported when each frame ends, anything else every 30 ms, up to 100 ms where this
+  endpoint's share of the RTCP bandwidth does not hold that), on in the `StrictRfc` profile;
+  as the default it measured worse in the capacity instrument (send target under a 300
+  kbit/s cap 210 -> 186 kbit/s, the picture requirement of the pacer-less chain missed in
+  36 instead of 4 of 200 calls, RTCP 122 -> 135 kbit/s on an open call), and so did 100 ms
+  always and two forms between (audit rows TWCC-3-4 and GCC-3-2: `setting`, measured).
+  `SendEstimate` is libwebrtc's cadence (50 to 250 ms from 5% of the endpoint's own send
+  estimate, 100 ms before one is known), **now the `Chrome` profile's** (a behaviour change
+  for that profile only: its feedback was sized to the media received). New attributes on
+  what the chain hands application-ward: `RtcpBandwidthShare` (this endpoint's share of the
+  RTCP bandwidth, from the RTCP session) and `SendEstimate` (the congestion controller's
+  estimate beside `TargetBitrateChanged`). The capacity instrument's chain token `perframe`
+  runs the drafts' form.
+
+- **interceptors** (rtcpbudget-5): an option, off by default and in every behaviour profile,
+  for an endpoint's own share of the RTCP bandwidth to follow the rate its congestion
+  controller allows it to send at: `RtcpSessionBuilder::with_share_following_send_rate`,
+  `DefaultInterceptorOptions::rtcp_share_follows_send_rate`,
+  `RtcpSessionControl::SendRate` and `CongestionControlBuilder::with_send_rate_told_to_rtcp`
+  (the congestion controller tells the RTCP session of its chain the estimate whenever it has
+  moved by a twentieth). **It is tuning with no specification behind it**: RFC 3550 section
+  6.2 sizes the RTCP bandwidth from the session bandwidth (here the media measured both
+  ways) and section 6.3.1 shares it equally among the members whatever each direction
+  carries, so an endpoint whose uplink has collapsed to 300 kbit/s while the other direction
+  still carries 2.5 Mbit/s keeps sending about 80 kbit/s of RTCP on it. With the option the
+  endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which
+  every endpoint sends at this endpoint's rate (5% x send rate x members / local SSRCs, no
+  less than 5% of the minimum session bandwidth); the intervals calculated for the other
+  members (`RtcpReportingInterval`, what the circuit breaker takes for the peer's reporting
+  interval), member timeouts, BYE and sender status keep RFC 3550's value, and congestion
+  control feedback is not slowed. Measured in the capacity instrument (default chain, one
+  direction capped at 300 kbit/s): RTCP on the capped link 80 -> 34 kbit/s, the open call
+  unchanged (122 kbit/s); figures for the picture and the recovery are in
+  `docs/capacity-instrument.md`. The `Performance` profile does not take it: its
+  `T_rr_interval` of one second already brings that RTCP to 22 kbit/s, and beside it the
+  option changed nothing that was measured. Tests
+  `the_rtcp_share_follows_the_send_rate_the_session_is_told`,
+  `the_interval_calculated_for_the_peer_does_not_follow_the_send_rate`.
+
 - **interceptor** (collapse-2): `ProbeFill`, an attribute the pacer adds to a `ProbeRequest`'s
   carrier on its way application-ward: the padding the cluster needs beyond the media and
   retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
@@ -1350,6 +1397,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measurement: a path that delivers a burst as one aggregate shows no spread and is credited
   with the rate asked for; the delay-based controller corrects it once the media follows
   (`burst_estimate`). Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
+- **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
+  (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
+  it receives, so a peer that follows it (this engine with
+  `rtcp_report_from_every_ssrc`, the `StrictRfc` profile) sends several report blocks about
+  each flow in one compound packet, the same reception each time. The RFC 8083 breaker took
+  each copy for a report of its own: the media timeout's count of reports without progress
+  was reached in a fraction of the reporting intervals, a loss interval's packets were taken
+  by the first copy and the others showed none, and the spacing between copies read as a
+  reporting interval of zero. A flow now follows one reporting SSRC and takes another only
+  once the one it follows has been silent for the RTCP timeout (the reporter left or changed
+  its SSRC). With a peer that reports once (the default, libwebrtc) nothing changes. Tests
+  `every_ssrc_of_the_receiver_reporting_counts_as_one_report`,
+  `another_reporting_ssrc_is_followed_once_the_first_has_been_silent_for_the_rtcp_timeout`.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
@@ -1670,6 +1730,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - both directions capped: every run of the default chain misses the picture requirement
     (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
     ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
+  - both directions capped, why: each sender's congestion feedback crosses the other sender's
+    overloaded uplink and is dropped there for about the first second (the queue drops RTCP
+    like media), and what arrives is 0.33 s late, so the estimate is under 400 kbit/s 0.8 to
+    1.9 s after the drop where one way it is 0.5 s. A missing-feedback timeout of three
+    observed feedback intervals (RFC 8888 section 5 permits it) brings that to 0.8 s in the
+    median and was measured and NOT taken: with one direction capped it cuts the healthy
+    direction's target to 915 from 2373 kbit/s (audit row RFC8888-5-2).
+  - a peer reports `disconnected` for 0.2 to 1.4 s in 13 to 17 % of calls through the drop
+    (one ICE consent datagram lost at the full queue; none stays so, none fails): the
+    documented meaning of the state (docs/conformance/audit/rfc7675.md).
   - without the pacer: the picture requirement is violated in 7.0 % of runs (interval 4.2 to
     11.4 %) and the freeze one in 5.5 %: at the bound, neither met nor missed can be claimed
     (their 300-run tests pass on one draw and fail on the next; run on demand).
@@ -1683,6 +1753,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
+  (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
+  capacity's return until the target is at 1000 kbit/s; `recover` waits for 0.4 of the target
+  before the drop, which is a different rate in a chain that met the drop lower, so it does not
+  compare chains) and `startup` (seconds from the start of the call until the target is within
+  5 % of the 2.5 Mbit/s maximum; 99 when not before the drop); new scenario `cap60` (the cap
+  held 60 s instead of 20; measurement only). The baseline gains two tripwires per cell (the
+  90th percentile of each new figure) when it is next recorded. Test only.
+
+- **capacity instrument: how long a peer is disconnected, the direction that was not capped,
+  a feedback outage** (`conf/instrument-3-disconnect-and-reverse-columns`): new figures
+  `disc_time`, `disc_max`, `disc_open` (episodes outside Connected: total, longest, still open
+  at the end), `stun_lost` (ICE consent datagrams that did not arrive), `low` / `mean10` (the
+  caller's lowest and mean target after the drop) and `back_low` / `back_mean` (the callee's:
+  the direction whose capacity did not change); new scenario `fbgap` (no capacity change, the
+  callee's RTCP lost for 300 ms). The baseline gains three tripwires per cell (`disc_open` > 0,
+  `disc_max` > 2 s, the 10th percentile of `back_mean`) when it is next recorded. Test only.
+- **Congestion control feedback inside the RTCP bandwidth, measured on a call** (row
+  RFC4585-3.5.2-5, a measured setting; the default, feedback sent as it is built, is
+  unchanged). `feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent`
+  (`tests/capacity_cap_video_rtc2rtc.rs`): with RFC 4585 section 3.5.2's timing for the
+  feedback, an audio-only call's estimate halves to its floor on a clean link (5 % of a
+  64 kbit/s session holds a feedback packet every one to four seconds; half a second without
+  feedback is taken for over-use). The capacity instrument on the same seeds: one direction
+  capped, nothing worse (oldest picture -0.33 s); both directions capped, recovery slower than
+  20 s in 64 % of runs against 18.5 %. The capacity world's `Setup` takes
+  `immediate_congestion_feedback`.
+- **audit and capacity instrument** (rtcpbudget-4): RFC 8108 section 5.1's report blocks
+  from every SSRC stay a setting (`rtcp.report-from-every-ssrc`: `StrictRfc` on, the default
+  and `Chrome` once), now on the capacity instrument's evidence in place of a two-seed
+  print: as the default it made the picture through a capacity collapse 0.53 s older
+  (8.00 -> 8.53 s, 1000 seeds), the send target under the cap 24 kbit/s lower and three
+  times as many calls slow to recover (81 -> 244 of 1000), because its compound packets are
+  twice the size (RTCP of an endpoint 122 -> 149 kbit/s on an open 2.5 Mbit/s call). The
+  instrument's chain token `every` runs it; the ParolNet chain of the capacity world takes
+  `Setup::report_from_every_ssrc` too. Audit rows corrected: RFC8108-5.3-2 (an aggregated
+  compound packet begins with SR or RR: tested, was "no aggregation"), RFC8108-5.3.1-1 (the
+  conditional limit of two aggregated reports for non-updated peers: missing, was "met by
+  not aggregating"), RFC8108-5.3.2-5 (untested, was "no step b"), RFC4585-4.3-1 (`b=RS` /
+  `b=RR` of the remote description reach the session: tested, was "the SDP layer does not
+  feed it").
+
+- **capacity instrument: the behaviour profiles through a collapse** (rtcpbudget-4):
+  `docs/capacity-instrument.md` has the table of the default, `Performance`, the default with
+  `rtcp_share_follows_send_rate` and `Chrome` on the same 1000 seeds, paired: RTCP on the
+  capped link 80 / 22 / 33 / 20 kbit/s, oldest picture 7.9 / 6.1 / 6.2 / 5.8 s, calls over
+  20 s to recover 128 / 0 / 0 / 18 of 1000; `Performance` pays when both directions collapse
+  (picture +1.6 s). The `Chrome` column was measured before the repair of retransmitted RED
+  packets and is marked so.
+
+- **capacity instrument** (rtcpbudget-5): chain tokens for the default chain with other
+  settings, measurement only: `share` (the defaults with `rtcp_share_follows_send_rate`),
+  `perf` (the `Performance` profile's interceptor settings), `perfshare`, `perfnoshare`,
+  `chrome` (the `Chrome` profile's); `Setup::profile` and `Setup::share_follows_send_rate`
+  in the capacity world.
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
