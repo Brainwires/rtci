@@ -1051,6 +1051,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the source paused (a target of zero) leaves `availableOutgoingBitrate` at the congestion
   controller's estimate
   (`interceptor_circuit_breaker_test::a_flow_ceasing_while_the_source_is_paused_leaves_the_estimate_alone`).
+  Measured (the capacity instrument's cells, 300 kbit/s cap for 20 s; hosted runs
+  45516841561 / 45516852677, 45516861432 / 45516870845; before = the same tree without this
+  change): with a 300 ms bottleneck queue the caller's voice was silent to the end of the call
+  in 63 of 534 runs, now no flow is ceased in any; with a 1000 ms queue it was ceased for good
+  in 96 of 300, now the congestion breaker ceases it in 84 of 300 and the engine restarts it
+  every time (silent 3.7 s in the median, 7.3 s at the 90th percentile, 10.9 s at worst: a
+  known limit, `docs/circuit-breaker.md`); with both directions capped a flow was left ceased
+  in 94 of 100 runs, now one ceases in 7 and is restarted.
   Audit rows RFC8083-3-1, 3-6, 4.2-4, 4.2-5, 4.2-6, 4.3-4, 4.5-1, 4.5-2, 5-3.
 
 - **rtci, interceptor / RTP circuit breaker** (collapse-3): the application is told when the
