@@ -175,6 +175,12 @@ pub enum RtcpSessionControl {
     TrrIntCleared,
     /// The endpoint leaves the session: every local SSRC says BYE.
     Leave,
+    /// The rate the congestion controller of the same chain allows this endpoint to send at,
+    /// bits per second. Used only with
+    /// [`RtcpSessionBuilder::with_share_following_send_rate`]; the congestion control
+    /// interceptor writes it wire-ward when told to
+    /// ([`CongestionControlBuilder::with_send_rate_told_to_rtcp`](crate::CongestionControlBuilder::with_send_rate_told_to_rtcp)).
+    SendRate(u64),
     /// What identifies the local stream `ssrc` beyond the CNAME: the identification-tag of
     /// its m= section (RFC 9143 section 15.1, SDES `MID`), its RtpStreamId (RFC 8852 section
     /// 3.1) and, for a redundancy stream (RTX, FEC), the RepairedRtpStreamId of the stream it
@@ -322,6 +328,25 @@ pub struct RtcpReportingInterval {
     pub receiver: Duration,
 }
 
+/// This endpoint's share of the RTCP bandwidth as the session calculates it now: the RTCP
+/// bandwidth (RFC 3550 section 6.2: 5% of the session bandwidth, or what `b=RS` / `b=RR`
+/// give) divided equally among the members (section 6.3.1), times the number of this
+/// endpoint's SSRCs that take part (RFC 8108 section 5: each is a member).
+///
+/// The session attaches it to every RTCP packet it hands application-ward, beside
+/// [`RtcpReportingInterval`]. The congestion control feedback generators read it: with
+/// [`CongestionFeedbackCadence::PerFrame`](crate::CongestionFeedbackCadence) their interval
+/// grows towards 100 ms where this share does not hold a feedback packet per interval (RFC
+/// 4585 section 3.2: feedback is "subject to the RTCP bandwidth constraints";
+/// draft-ietf-rmcat-gcc-02 section 3: "If the feedback overhead needs to be limited this
+/// interval can be increased to 100 ms"). Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RtcpBandwidthShare {
+    /// The share, bits per second.
+    pub bits_per_second: f64,
+}
+
 /// Builder for [`RtcpSessionInterceptor`].
 ///
 /// ```
@@ -346,6 +371,7 @@ pub struct RtcpSessionBuilder {
     immediate_congestion_feedback: bool,
     congestion_feedback_in_budget: bool,
     minimum_session_bandwidth: u64,
+    share_follows_send_rate: bool,
     joins_on_start: bool,
     first_report_at_join: bool,
     random: Box<dyn RtcpRandom>,
@@ -368,6 +394,7 @@ impl Default for RtcpSessionBuilder {
             immediate_congestion_feedback: true,
             congestion_feedback_in_budget: false,
             minimum_session_bandwidth: RTCP_SESSION_MIN_BANDWIDTH,
+            share_follows_send_rate: false,
             joins_on_start: false,
             first_report_at_join: false,
             random: Box::new(ThreadRandom),
@@ -456,9 +483,16 @@ impl RtcpSessionBuilder {
     /// remote SSRC and for each of the endpoint's other SSRCs that has sent (`true`, the
     /// `StrictRfc` behaviour profile). Default `false`: the blocks are carried once, by the
     /// first local media SSRC, and none about the co-located SSRCs, as libwebrtc does and as
-    /// RFC 8861 reporting groups allow where they are signalled; the larger compound packets
-    /// of the RFC form were measured to cost the video through a capacity cap
-    /// (`measure_report_blocks_from_every_ssrc_against_once` in the root crate's tests).
+    /// RFC 8861 reporting groups allow where they are signalled.
+    ///
+    /// The default is a measured choice. The RFC form's compound packets are about twice the
+    /// size, and RFC 3550 section 6.3's interval does not make up for all of it (the average
+    /// packet size it is computed from counts the small congestion control feedback packets
+    /// too): an endpoint of a 2.5 Mbit/s audio and video call sent 149 instead of 122 kbit/s
+    /// of RTCP, and 93 instead of 80 kbit/s on a link that had collapsed to 300 kbit/s. In
+    /// the capacity instrument (`tests/capacity_instrument.rs`, chain `every` against `paced`,
+    /// the same seeds) the picture through the collapse was 0.5 s older, the send target
+    /// under the cap 24 kbit/s lower and three times as many calls took over 20 s to recover.
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self
@@ -508,6 +542,31 @@ impl RtcpSessionBuilder {
     /// least 8 kbit/s, so a session with no media still reports.
     pub fn with_minimum_session_bandwidth(mut self, bits_per_second: u64) -> Self {
         self.minimum_session_bandwidth = bits_per_second.max(8_000);
+        self
+    }
+
+    /// Tuning with no specification behind it, off by default: whether this endpoint's own
+    /// share of the RTCP bandwidth follows the rate its congestion controller allows it to
+    /// send at.
+    ///
+    /// RFC 3550 section 6.2 sizes the RTCP bandwidth from the session bandwidth, here the
+    /// media measured in both directions, and section 6.3.1 shares it equally among the
+    /// members; nothing in it, in RFC 4585 or in RFC 8108 ties one endpoint's share to the
+    /// rate of its own direction. So when one direction of a call collapses and the other
+    /// does not, the endpoint behind the collapsed link keeps reporting at the rate the
+    /// whole session gives it: a fifth of a 300 kbit/s link, measured. With `true`, the RTCP
+    /// bandwidth this endpoint's own SSRCs schedule their regular reports with is at most the
+    /// session's RTCP fraction (5%) of the session there would be if every endpoint sent at
+    /// this endpoint's rate: `fraction x send rate x members / local SSRCs`, no less than the
+    /// fraction of the minimum session bandwidth. The send rate is the congestion
+    /// controller's ([`RtcpSessionControl::SendRate`]); until one is told, and when the
+    /// session's own figure is lower, nothing changes. The intervals calculated for the
+    /// other members ([`RtcpReportingInterval`]) are not touched: the peer shares the
+    /// bandwidth as RFC 3550 says. Congestion control feedback is not slowed by it (it is
+    /// sent at once unless [`Self::with_immediate_congestion_feedback`] is off); early
+    /// feedback (NACK, PLI) keeps its rules, on the longer regular interval.
+    pub fn with_share_following_send_rate(mut self, follows: bool) -> Self {
+        self.share_follows_send_rate = follows;
         self
     }
 
@@ -586,6 +645,7 @@ impl RtcpSessionBuilder {
             immediate_congestion_feedback: template.immediate_congestion_feedback,
             congestion_feedback_in_budget: template.congestion_feedback_in_budget,
             minimum_session_bandwidth: template.minimum_session_bandwidth,
+            share_follows_send_rate: template.share_follows_send_rate,
             joins_on_start: template.joins_on_start,
             first_report_at_join: template.first_report_at_join,
             random: Box::new(random.clone()),
@@ -635,6 +695,8 @@ impl RtcpSessionBuilder {
             immediate_congestion_feedback: self.immediate_congestion_feedback,
             congestion_feedback_in_budget: self.congestion_feedback_in_budget,
             minimum_session_bandwidth: self.minimum_session_bandwidth,
+            share_follows_send_rate: self.share_follows_send_rate,
+            send_rate: None,
             congestion_feedback_rate: RateWindow::default(),
             regular_size: 0.0,
             sending_regular: false,
@@ -874,6 +936,11 @@ pub struct RtcpSessionInterceptor {
     report_from_every_ssrc: bool,
     random: Box<dyn RtcpRandom>,
 
+    /// [`RtcpSessionBuilder::with_share_following_send_rate`].
+    share_follows_send_rate: bool,
+    /// The rate the congestion controller allows this endpoint to send at
+    /// ([`RtcpSessionControl::SendRate`]), bits per second.
+    send_rate: Option<f64>,
     /// [`RtcpSessionBuilder::with_joins_on_start`].
     joins_on_start: bool,
     /// [`RtcpSessionBuilder::with_first_report_at_join`].
@@ -1287,6 +1354,29 @@ impl RtcpSessionInterceptor {
         }
     }
 
+    /// The RTCP bandwidth this endpoint's own SSRCs schedule with, octets per second, and the
+    /// senders' share of it: [`Self::rtcp_bandwidth`], held with
+    /// [`RtcpSessionBuilder::with_share_following_send_rate`] to the RTCP fraction of a
+    /// session in which every endpoint sends at this endpoint's congestion-controlled rate.
+    fn own_rtcp_bandwidth(&self, now: Instant) -> (f64, f64) {
+        let (rtcp_bw, sender_fraction) = self.rtcp_bandwidth(now);
+        let (true, Some(send_rate)) = (self.share_follows_send_rate, self.send_rate) else {
+            return (rtcp_bw, sender_fraction);
+        };
+        let locals = self
+            .locals
+            .iter()
+            .filter(|local| local.participates())
+            .count()
+            .max(1) as f64;
+        let members = self.member_count().max(1) as f64;
+        let session = (send_rate * members / locals).max(self.minimum_session_bandwidth as f64);
+        (
+            rtcp_bw.min(session * self.rtcp_fraction / 8.0),
+            sender_fraction,
+        )
+    }
+
     /// The minimum interval in force for a local SSRC.
     fn t_min(&self, now: Instant, initial: bool) -> f64 {
         match self.profile {
@@ -1359,8 +1449,13 @@ impl RtcpSessionInterceptor {
         we_sent: bool,
         initial: bool,
         senders: usize,
+        own: bool,
     ) -> IntervalInput {
-        let (rtcp_bw, sender_fraction) = self.rtcp_bandwidth(now);
+        let (rtcp_bw, sender_fraction) = if own {
+            self.own_rtcp_bandwidth(now)
+        } else {
+            self.rtcp_bandwidth(now)
+        };
         IntervalInput {
             members: self.member_count().max(1),
             senders,
@@ -1380,7 +1475,7 @@ impl RtcpSessionInterceptor {
             .timing
             .is_none_or(|timing| timing.initial);
         let senders = self.sender_count(now);
-        let td = deterministic_interval(&self.interval_input(now, we_sent, initial, senders));
+        let td = deterministic_interval(&self.interval_input(now, we_sent, initial, senders, true));
         let random = self.unit();
         randomized_interval(td, random).max(MIN_INTERVAL)
     }
@@ -1392,7 +1487,8 @@ impl RtcpSessionInterceptor {
         let td = |we_sent: bool| {
             // A member that sends is one of the senders, whether or not it has been heard to.
             let senders = if we_sent { senders.max(1) } else { senders };
-            let td = deterministic_interval(&self.interval_input(now, we_sent, false, senders));
+            let td =
+                deterministic_interval(&self.interval_input(now, we_sent, false, senders, false));
             // A member with no share of the RTCP bandwidth sends no regular report: an hour
             // stands for never.
             let td = if td.is_finite() {
@@ -1408,6 +1504,15 @@ impl RtcpSessionInterceptor {
         }
     }
 
+    /// This endpoint's share of the RTCP bandwidth ([`RtcpBandwidthShare`]).
+    fn bandwidth_share(&self, now: Instant) -> RtcpBandwidthShare {
+        let (rtcp_bw, _) = self.rtcp_bandwidth(now);
+        let local = self.locals.iter().filter(|l| l.participates()).count();
+        RtcpBandwidthShare {
+            bits_per_second: rtcp_bw * 8.0 * local as f64 / self.member_count().max(1) as f64,
+        }
+    }
+
     /// The `T_rr_interval` regular reports keep (RFC 4585 3.5.3), seconds: the configured or
     /// negotiated one, or with [`RtcpSessionBuilder::with_congestion_feedback_in_budget`] the
     /// regular interval in what the RTCP bandwidth leaves after the congestion control
@@ -1416,7 +1521,7 @@ impl RtcpSessionInterceptor {
         if !self.congestion_feedback_in_budget {
             return self.t_rr_interval;
         }
-        let (rtcp_bw, sender_fraction) = self.rtcp_bandwidth(now);
+        let (rtcp_bw, sender_fraction) = self.own_rtcp_bandwidth(now);
         let feedback = self.congestion_feedback_rate.bits_per_second(now) / 8.0;
         let left = rtcp_bw - feedback;
         let size = if self.regular_size > 0.0 {
@@ -1575,7 +1680,7 @@ impl RtcpSessionInterceptor {
     /// RFC 3550 6.3.5 with RFC 8108 7.1.4: a member not heard for five deterministic
     /// intervals (computed for a receiver, with a minimum of five seconds) is timed out.
     fn time_out_members(&mut self, now: Instant) {
-        let mut input = self.interval_input(now, false, false, self.sender_count(now));
+        let mut input = self.interval_input(now, false, false, self.sender_count(now), false);
         input.t_min = RTCP_MIN_TIME;
         let timeout = TIMEOUT_MULTIPLIER * deterministic_interval(&input);
         if !timeout.is_finite() {
@@ -2713,7 +2818,7 @@ impl RtcpSessionInterceptor {
         if self.member_count() >= BYE_BACKOFF_MEMBERS && !self.left {
             // RFC 3550 6.3.7: in a large session the BYE takes its turn.
             let size = (wire_size(&packets) + self.srtcp_overhead) as f64;
-            let mut input = self.interval_input(now, false, true, 0);
+            let mut input = self.interval_input(now, false, true, 0, false);
             input.members = 1;
             input.avg_rtcp_size = size;
             let t = randomized_interval(deterministic_interval(&input), self.unit());
@@ -2877,7 +2982,7 @@ impl RtcpSessionInterceptor {
         if bye.tn > now {
             return;
         }
-        let mut input = self.interval_input(now, false, true, 0);
+        let mut input = self.interval_input(now, false, true, 0, false);
         input.members = bye.members;
         input.avg_rtcp_size = bye.size;
         let t = randomized_interval(deterministic_interval(&input), self.unit());
@@ -2928,6 +3033,9 @@ impl RtcpSessionInterceptor {
             }
             RtcpSessionControl::Cname(cname) => self.cname = cname.clone(),
             RtcpSessionControl::Bandwidth(bandwidth) => self.bandwidth = *bandwidth,
+            RtcpSessionControl::SendRate(bits_per_second) => {
+                self.send_rate = Some(*bits_per_second as f64);
+            }
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
             RtcpSessionControl::SrtcpOverhead(overhead) => {
                 // Given after the session started (any control starts it), the average moves
@@ -3035,6 +3143,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
             // application-ward (RFC 8083 section 3, Tdr).
             let interval = self.reporting_interval(now);
             msg.message.add(Attribute::Custom(Arc::new(interval)));
+            // And what the RTCP bandwidth gives this endpoint, for the congestion control
+            // feedback generators' cadence.
+            let share = self.bandwidth_share(now);
+            msg.message.add(Attribute::Custom(Arc::new(share)));
         }
         if pass {
             self.read_queue.push_back(msg);
@@ -3351,7 +3463,7 @@ mod tests {
                 .custom::<RtcpReportingInterval>()
                 .expect("the calculated interval rides on it");
             // The remote reporter is a member now; nobody has sent RTP.
-            let input = session.interval_input(now, false, false, 0);
+            let input = session.interval_input(now, false, false, 0, false);
             (interval, input)
         };
 
