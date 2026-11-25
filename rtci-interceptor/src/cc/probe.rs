@@ -27,6 +27,14 @@
 //!   the RTX stream when the application's own media is not enough: they carry no media, so a
 //!   receiver never has a packet twice.
 //! - [`probe_estimate`] turns the receiver's reports on a cluster into a bit rate.
+//!
+//! In a chain without a pacer nothing releases a cluster at its rate. The NACK responder's
+//! padding is then the cluster: it leaves as one burst with the cluster's mark, and
+//! [`burst_estimate`] reads the rate of the narrowest link from how far apart the burst
+//! arrived, never more than the rate asked for. Where nothing sends a cluster at all (no
+//! pacer and no RTX stream to pad on), the congestion controller stops asking after the first
+//! cluster that no packet left for, until another stream starts to send: a request that can
+//! have no result is not made again.
 
 use crate::rtpfb::acknowledgement::PacketReport;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
@@ -196,6 +204,48 @@ pub fn probe_estimate(reports: &[PacketReport]) -> Option<f64> {
     }
 }
 
+/// The bit rate a path showed it carries, from the reports on a cluster that left as one burst
+/// (a chain without a pacer: the NACK responder's padding, written in the same instant).
+///
+/// Such a cluster has no send rate. What the path did with it is the measurement: packets
+/// that left together arrive as far apart as the narrowest link takes to send each, so the
+/// octets after the first over the span of the arrivals is that link's rate (95% of it is
+/// taken, as [`probe_estimate`] takes of a cluster the bottleneck held apart). The cluster was
+/// asked for at `asked` bits per second and nothing was sent to show more than that: the
+/// result is never above it, and it is `asked` itself when the arrivals span no time the
+/// receiver's clock resolves.
+///
+/// A known limit of this measurement: a path that delivers the burst as one aggregate (a
+/// Wi-Fi or cellular link that hands several packets over at once behind the narrow link)
+/// shows no spread, or less than the narrow link made, and is credited with up to the rate
+/// asked for although it carries less. Nothing was sent at that rate, so the cluster cannot
+/// contradict it; the estimate is then above the path until the delay-based controller's
+/// over-use detection brings it down, a few feedback reports after the media follows it. A
+/// paced cluster does not have the limit (its packets leave at the rate asked for, and the
+/// path either carries them so or delays them). The credit is not held to a multiple of
+/// what the path carried in the last second: at the start, which is where the clusters
+/// matter, the path has carried next to nothing yet.
+///
+/// `None` when fewer than four packets of the cluster arrived with a time.
+pub fn burst_estimate(reports: &[PacketReport], asked: f64) -> Option<f64> {
+    let arrived: Vec<(Duration, usize)> = reports
+        .iter()
+        .filter(|report| report.arrived)
+        .filter_map(|report| Some((report.arrival?, report.size)))
+        .collect();
+    if arrived.len() < 4 {
+        return None;
+    }
+    let total: usize = arrived.iter().map(|(_, size)| size).sum();
+    let first = arrived.iter().min_by_key(|(at, _)| *at)?;
+    let last = arrived.iter().max_by_key(|(at, _)| *at)?;
+    let span = last.0.saturating_sub(first.0).as_secs_f64();
+    if span <= 0.0 {
+        return Some(asked);
+    }
+    Some(((total - first.1) as f64 * 8.0 / span * 0.95).min(asked))
+}
+
 /// Decides when a probe cluster is sent and at what rate.
 #[derive(Debug)]
 pub struct ProbeController {
@@ -220,6 +270,8 @@ pub struct ProbeController {
     drop_probe: bool,
     /// When [`poll`](Self::poll) was last called.
     polled_at: Option<Instant>,
+    /// Whether clusters leave as bursts of padding ([`set_unpaced`](Self::set_unpaced)).
+    unpaced: bool,
 }
 
 impl ProbeController {
@@ -243,6 +295,7 @@ impl ProbeController {
             drop: None,
             drop_probe: false,
             polled_at: None,
+            unpaced: false,
         }
     }
 
@@ -262,6 +315,23 @@ impl ProbeController {
     pub fn with_probe_after_drop(mut self, enabled: bool) -> Self {
         self.after_drop = enabled;
         self
+    }
+
+    /// Whether this chain's clusters leave as one burst of padding (no pacer: the congestion
+    /// controller says so when it measures a cluster whose packets left in one instant).
+    ///
+    /// Then the rate before a large drop is not probed for. A paced cluster is the media
+    /// already waiting, released faster for a few milliseconds, with padding only for what
+    /// is missing; a burst is five packets of padding on top of the media, at once. After a
+    /// drop that is 160 ms of a 300 kbit/s link put into the queue that caused the drop, once
+    /// a second. Measured on the capacity instrument (200 calls a cell, a 2.5 Mbit/s path
+    /// that drops to 300 kbit/s): with such bursts 7 of 200 calls of ParolNet's chain were
+    /// over 2 s without a new picture against 3 without them, 172 retransmissions a call
+    /// against 142, and behind a 1000 ms queue the audio paused for over a second in 72 of
+    /// 200 calls against 21. The start-up clusters and those of an application-limited
+    /// sender are still asked for.
+    pub fn set_unpaced(&mut self, unpaced: bool) {
+        self.unpaced = unpaced;
     }
 
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
@@ -312,6 +382,7 @@ impl ProbeController {
         } else if let Some(rate) = self.further.take() {
             Some(rate)
         } else if let Some((before, at)) = self.drop
+            && !self.unpaced
             && now.saturating_duration_since(at) >= PROBE_AFTER_DROP_DELAY
             && target < PROBE_AFTER_DROP_SHARE * before
             && self
@@ -377,6 +448,13 @@ impl ProbeController {
         self.outstanding.map(|(cluster, _, _)| cluster)
     }
 
+    /// The rate `cluster` was asked for at, while its result is awaited.
+    pub fn asked_rate(&self, cluster: u32) -> Option<f64> {
+        self.outstanding
+            .filter(|(outstanding, _, _)| *outstanding == cluster)
+            .map(|(_, rate, _)| rate)
+    }
+
     /// The result of `cluster`: `estimate` bits per second. Returns the estimate when it is
     /// the outstanding cluster's, for the estimator to take.
     pub fn on_result(&mut self, cluster: u32, estimate: f64) -> Option<f64> {
@@ -430,6 +508,7 @@ impl ProbeController {
         };
         let after_drop = self
             .drop
+            .filter(|_| !self.unpaced)
             .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
         [Some(next), after_drop]
     }
@@ -719,6 +798,35 @@ mod tests {
             }
         }
         assert!((3..=5).contains(&probes), "{probes} probes");
+    }
+
+    /// A chain whose clusters leave as bursts ([`ProbeController::set_unpaced`]) is not probed
+    /// after a large drop, and names no deadline for it; the same drop is probed once the
+    /// clusters are paced.
+    #[test]
+    fn a_drop_is_not_probed_while_clusters_leave_as_bursts() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        controller.set_unpaced(true);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        for ms in (1_100..4_000).step_by(100) {
+            assert_eq!(None, controller.poll(at(ms), 900_000.0, 900_000.0, true));
+            assert!(
+                controller
+                    .poll_timeout()
+                    .is_none_or(|next| next > at(ms) + Duration::from_secs(1)),
+                "a deadline for a probe that will not be asked for, at {ms} ms"
+            );
+        }
+        controller.set_unpaced(false);
+        let request = controller
+            .poll(at(4_000), 900_000.0, 900_000.0, true)
+            .expect("paced clusters: the rate before the drop");
+        assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
     }
 
     /// `with_probe_after_drop(false)`: a drop is left to the delay-based controller's climb.
