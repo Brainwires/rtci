@@ -39,14 +39,19 @@ impl CryptoGcm {
         remote_key: &[u8],
         remote_write_iv: &[u8],
     ) -> Result<Self> {
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let local_gcm = provider
             .crypto()
             .new_aead(AeadAlgorithm::Aes128Gcm, local_key)
             .map_err(crypto_error)?;
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let remote_gcm = provider
             .crypto()
             .new_aead(AeadAlgorithm::Aes128Gcm, remote_key)
             .map_err(crypto_error)?;
+        crypto::scrub_stack();
         Ok(CryptoGcm {
             provider,
             local_gcm,

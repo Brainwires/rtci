@@ -35,7 +35,7 @@ pub use hkdf::{hkdf_expand, hkdf_expand_label, hkdf_extract};
 pub use openssl_ctr::openssl_aes_ctr;
 pub use provider::default_provider;
 pub use rsa_pkcs1::{rsa_pkcs1_hash, verify_rsa_pkcs1_without_digest_parameters};
-pub use secret::SecretVec;
+pub use secret::{SecretVec, scrub_stack};
 pub use traits::*;
 
 /// Compares equal-length byte strings without data-dependent early exit.

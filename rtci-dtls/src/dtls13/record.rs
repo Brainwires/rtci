@@ -182,12 +182,16 @@ pub(crate) struct RecordKeys {
 impl RecordKeys {
     pub(crate) fn new(crypto: &dyn RTCCrypto, suite: Suite13, keys: &TrafficKeys) -> Result<Self> {
         let crypto_error = |error: crypto::CryptoError| Error::Crypto(error.to_string());
+        crypto::scrub_stack();
         let aead = crypto
             .new_aead(suite.aead(), keys.key.as_ref())
             .map_err(crypto_error)?;
         let mask = crypto
             .new_header_mask(suite.header_mask(), keys.sequence_number_key.as_ref())
             .map_err(crypto_error)?;
+        // The key schedules were built on the stack before they were boxed: see
+        // `scrub_stack`.
+        crypto::scrub_stack();
         if keys.iv.len() != 12 {
             return Err(Error::ErrInvalidPacketLength);
         }

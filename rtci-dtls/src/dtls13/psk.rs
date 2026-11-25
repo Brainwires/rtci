@@ -513,6 +513,7 @@ impl TicketIssuer {
             .crypto()
             .new_aead(AeadAlgorithm::Aes256Gcm, key.as_ref())
             .map_err(crypto_error)?;
+        crypto::scrub_stack();
         // The plaintext is encrypted in place: sized up front, so that no allocation it
         // moved from keeps it.
         let mut ticket = Vec::with_capacity(TICKET_NONCE_LEN + plaintext.len() + TICKET_TAG_LEN);
@@ -545,6 +546,7 @@ impl TicketIssuer {
             else {
                 continue;
             };
+            crypto::scrub_stack();
             let mut plaintext = SecretVec::new(ciphertext.to_vec());
             if aead
                 .open_in_place(nonce, aad, plaintext.as_mut(), tag)

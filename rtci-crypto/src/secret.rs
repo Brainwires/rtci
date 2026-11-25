@@ -76,3 +76,23 @@ impl From<Vec<u8>> for SecretVec {
         Self::new(value)
     }
 }
+
+/// How much stack [`scrub_stack`] overwrites.
+const SCRUB_STACK_BYTES: usize = 32 * 1024;
+
+/// Overwrites the stack below the caller's frame (32 KiB of it).
+///
+/// Building a keyed object leaves copies of the key and its schedule in the stack frames of
+/// the functions that built it: a value moved out of a frame is not dropped there, so its
+/// zeroize-on-drop never runs on the copy left behind, and a provider's own temporaries are
+/// not erased at all. Those dead frames are reused by later calls, and a value later built
+/// there and moved into the heap (into a `Box`, a `Vec`) carries whatever was in its padding
+/// or in the unused part of an enum or union along: the key ends up in memory the heap frees
+/// without erasure. Calling this right after a key schedule is built and moved to where it
+/// lives, from the frame that called the provider, overwrites what the deeper frames left.
+#[inline(never)]
+pub fn scrub_stack() {
+    let mut area = [0u8; SCRUB_STACK_BYTES];
+    area.zeroize();
+    std::hint::black_box(&mut area);
+}

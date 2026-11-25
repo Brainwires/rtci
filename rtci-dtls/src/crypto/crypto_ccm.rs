@@ -57,14 +57,19 @@ impl CryptoCcm {
             CryptoCcmTagLen::CryptoCcmTagLength => AeadAlgorithm::Aes128Ccm,
             CryptoCcmTagLen::CryptoCcm8TagLength => AeadAlgorithm::Aes128Ccm8,
         };
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let local_ccm = provider
             .crypto()
             .new_aead(algorithm, local_key)
             .map_err(crypto_error)?;
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let remote_ccm = provider
             .crypto()
             .new_aead(algorithm, remote_key)
             .map_err(crypto_error)?;
+        crypto::scrub_stack();
         Ok(CryptoCcm {
             provider,
             local_ccm,

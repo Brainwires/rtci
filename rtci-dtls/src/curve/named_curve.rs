@@ -45,9 +45,12 @@ impl NamedCurveKeypair {
             .active
             .take()
             .ok_or(Error::ErrNamedCurveAndPrivateKeyMismatch)?;
-        active
+        let secret = active
             .complete(peer_public_key)
-            .map_err(|error| Error::Crypto(error.to_string()))
+            .map_err(|error| Error::Crypto(error.to_string()));
+        // The provider computed the shared secret in its own stack frames: see `scrub_stack`.
+        crypto::scrub_stack();
+        secret
     }
 }
 
@@ -75,9 +78,11 @@ impl NamedCurve {
         crypto: &dyn RTCCrypto,
         peer_share: &[u8],
     ) -> Result<(Vec<u8>, crypto::SecretVec)> {
-        crypto
+        let response = crypto
             .key_exchange_respond(self.crypto_algorithm()?, peer_share)
-            .map_err(|error| Error::Crypto(error.to_string()))
+            .map_err(|error| Error::Crypto(error.to_string()));
+        crypto::scrub_stack();
+        response
     }
 
     pub(crate) fn generate_keypair_with_crypto(

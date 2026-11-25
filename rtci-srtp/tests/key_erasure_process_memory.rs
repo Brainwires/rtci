@@ -33,7 +33,12 @@ mod process_memory_tests {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::mpsc;
+
+    /// One search at a time: a search sees every thread's memory, so another test's live
+    /// contexts would be found after this one's drop.
+    static SERIAL: Mutex<()> = Mutex::new(());
 
     use super::key_material::{MAX_NEEDLE, Needle, context_needles, rtcp, rtp};
     use crypto::RTCCryptoProvider;
@@ -297,6 +302,7 @@ mod process_memory_tests {
     #[cfg(feature = "crypto-aws-lc-rs")]
     #[test]
     fn with_aws_lc_no_key_outlives_its_contexts_in_process_memory() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let sessions: Vec<Session> = every_session()
             .into_iter()
             .filter(|s| s.provider == "aws-lc-rs")
@@ -314,6 +320,7 @@ mod process_memory_tests {
     #[cfg(feature = "crypto-ring")]
     #[test]
     fn with_ring_only_its_aes_gcm_keys_outlive_the_contexts_in_process_memory() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let sessions: Vec<Session> = every_session()
             .into_iter()
             .filter(|s| s.provider == "ring")
@@ -334,6 +341,7 @@ mod process_memory_tests {
     #[test]
     #[ignore = "KNOWN LIMIT: with ring, AES-GCM round keys outlive the contexts in freed memory; fails when run (-- --ignored known_limit_)"]
     fn known_limit_with_ring_no_key_outlives_its_contexts_in_process_memory() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let sessions: Vec<Session> = every_session()
             .into_iter()
             .filter(|s| s.provider == "ring")
