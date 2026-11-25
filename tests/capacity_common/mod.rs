@@ -165,6 +165,10 @@ pub struct Setup {
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
+    /// `DefaultInterceptorOptions::rtcp_immediate_congestion_feedback` for the default chains
+    /// (`false`: RFC 4585 3.2 and 3.5.2, congestion control feedback takes its turn inside
+    /// the RTCP bandwidth), the options' default when `None`.
+    pub immediate_congestion_feedback: Option<bool>,
     /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
     /// permanent tests run [`Perturbation::None`].
     pub perturbation: Perturbation,
@@ -228,6 +232,7 @@ impl Setup {
             video: [true, true],
             report_from_every_ssrc: None,
             received_rate_bound: None,
+            immediate_congestion_feedback: None,
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
@@ -249,6 +254,13 @@ impl Setup {
     /// Every local SSRC reports on every other (RFC 8108 section 5.1) or the blocks go once.
     pub fn report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = Some(every);
+        self
+    }
+
+    /// Congestion control feedback sent at once (`true`) or under RFC 4585 3.5.2's timing,
+    /// inside the RTCP bandwidth (`false`), in the default chain.
+    pub fn immediate_congestion_feedback(mut self, immediate: bool) -> Self {
+        self.immediate_congestion_feedback = Some(immediate);
         self
     }
 
@@ -676,6 +688,9 @@ impl Peer {
             }
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;
+            }
+            if let Some(immediate) = setup.immediate_congestion_feedback {
+                options.rtcp_immediate_congestion_feedback = immediate;
             }
             let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),

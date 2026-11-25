@@ -18,7 +18,7 @@ GCC-5.5-11	A	S	media (running)	`setting` (measured): `Gcc::with_received_rate_bo
 RFC2198-5-4	E	S	media (running)	RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream
 RFC3550-6.1-13	A	S	media (running)	`setting`: strict RTCP validity
 RFC3550-A.2-1	A	S	media (running)	`setting`: strict RTCP validity
-RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`
+RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`; an audio-only estimate halves to the floor on a clean link (`feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent`); both directions capped: recovery over 20 s in 64% of runs against 18.5% (instrument)
 RFC4585-4.2-7	E	S	media (running)	Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
 RFC5109-7.2-2	D	L	media (running)	A separate FEC RTP session (own m= line and transport) so the FEC stream can use the media SSRC; RFC5109-14.1-5
 RFC5109-14.1-2	D	L	media (running)	As RFC5109-7.2-2
