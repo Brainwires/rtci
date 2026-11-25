@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Key material left in freed memory by rtci-dtls, rtci-srtp and rtci-crypto is now erased**
+  (`conf/zeroize-1-dtls-srtp-key-erasure`; RFC 5246 section 8.1, RFC 8446 section 7.1, RFC 3711
+  section 9.3, RFC 7714 section 13.1; docs/key-erasure.md). In 0.1.0 (and on master until this
+  change) these stayed in heap memory after it was freed, until the allocator reused it:
+  DTLS 1.2: the PRF (`prf_p_hash`) built its output and intermediate values in plain vectors, so
+  the master secret, the key block (every record key and IV) and the DTLS-SRTP exporter output
+  (the SRTP master keys and salts) were left behind; `State` held the master and premaster
+  secrets in plain vectors (replaced or dropped without erasure; the ECDHE shared secret was
+  unwrapped from its `SecretVec`); a PSK returned by the application's callback was not erased;
+  `EncryptionKeys` printed every key through `Display` and `Debug`; the record ciphers' write
+  IVs were plain; the serialized `State` and ticket plaintexts left copies while being built;
+  the cookie secrets of an endpoint were not overwritten (the bytes stayed where `take()` left
+  them, the previous secret was never erased) and, like ticket keys and the DTLS 1.3
+  HelloRetryRequest cookie secret, they stayed in the buffered generator's output buffer.
+  DTLS 1.3: record IVs held inline in epochs that live in vectors were copied into memory the
+  vectors freed. SRTP and DTLS with the ring provider: the RustCrypto HMAC-SHA1 states (the
+  AES-CM and NULL profiles' authentication keys, the AES-CBC suite's MAC keys) were not erased;
+  RustCrypto `aes` was built without `zeroize`, so AES-CBC and AES-CCM key schedules and the
+  per-packet AES-CM ones were not erased. Key schedules and shared secrets also left copies in
+  dead stack frames that later moves carried into heap padding. All of these are now erased:
+  `SecretVec` everywhere (it implements `Zeroize` and `ZeroizeOnDrop`), structs that hold keys
+  derive both, buffers are sized up front, `aes`/`ctr` are built with `zeroize`, the HMAC-SHA1
+  state is overwritten on drop, `crypto::scrub_stack` runs after keyed objects and shared
+  secrets are built, and secrets are drawn with the new `RTCRandom::fill_secret` (the built-in
+  providers read the operating system for it). Tests: `tests/dtls_secret_erasure.rs` (every
+  freed heap block and every block still allocated, all platforms; the whole process on Linux),
+  the DTLS 1.2 exporter test of `tests/dtls_srtp_keying_material_erasure.rs` (was a known
+  limit), `with_ring_only_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
+  `key_erasure_process_memory.rs`. No wire or handshake behaviour changes. Additions to the API:
+  `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
+  for `SecretVec` and `SessionKeys`. DTLS record setup costs one 32 KiB stack overwrite per
+  key schedule built; per-packet costs did not move beyond noise (`rtci-srtp` and `rtci-dtls`
+  benchmarks against master in one run).
+
 ### Breaking changes
 
 - **interceptor, peer connection** (`conf/flush-1r-backlog-flush-at-collapse`): **the default
@@ -1579,15 +1615,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
-- **SRTP key erasure (RFC 7714 section 13.1) with the ring provider, and the DTLS 1.2 exporter**
-  (`conf/must-2-feedback-reliance-and-key-erasure`): with the ring provider, the AES-GCM
-  profiles' session keys and all their AES round keys (`ring::aead::LessSafeKey`) and, for the
-  AES-CM and NULL profiles, the two HMAC-SHA1 hash states of each authentication key (RustCrypto
-  `hmac`) are freed without being overwritten, so they persist in freed heap memory until the
-  allocator reuses it; with DTLS 1.2, `prf_p_hash` leaves the exported SRTP keying material in
-  freed heap memory the same way. Tests: `known_limit_*` in `rtci-srtp/tests/key_schedule_erasure.rs`,
-  `rtci-srtp/tests/key_erasure_process_memory.rs` and `tests/dtls_srtp_keying_material_erasure.rs`
-  (fail when run). The AWS-LC provider and DTLS 1.3 leave nothing.
+- **SRTP and DTLS key erasure (RFC 7714 section 13.1) with the ring provider**
+  (`conf/must-2-feedback-reliance-and-key-erasure`, narrowed by `conf/zeroize-1-dtls-srtp-key-erasure`):
+  ring does not erase its own key objects, so with the ring provider the AES-GCM profiles' SRTP
+  session keys and all their AES round keys (`ring::aead::LessSafeKey`), and the DTLS record
+  keys of the AES-GCM and ChaCha20-Poly1305 suites and DTLS 1.3 record-number keys, persist in
+  freed heap memory until the allocator reuses it. Everything the crates hold is erased with
+  either provider; the AWS-LC provider erases its keys too. ring's maintainer declined
+  destructor-based zeroization (ring issue #15) in favour of a zeroizing global allocator,
+  which an application can install. Tests: `known_limit_*` in
+  `rtci-srtp/tests/key_schedule_erasure.rs` and `key_erasure_process_memory.rs` (fail when run).
 
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
@@ -1673,8 +1710,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (freed Rust heap, every platform), `rtci-srtp/tests/key_erasure_process_memory.rs` (the whole
   process, Linux) and `tests/dtls_srtp_keying_material_erasure.rs`: every key an SRTP context
   derives, its AES round keys, GHASH key and HMAC-SHA1 states, computed by the tests themselves,
-  are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`, class C
-  instead of E: see Known limits).
+  are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`; class E
+  after `conf/zeroize-1-dtls-srtp-key-erasure`: see Security and Known limits).
 
 - **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
   (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the

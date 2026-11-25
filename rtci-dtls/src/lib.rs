@@ -23,6 +23,16 @@
 //! * [`extension`] — the ClientHello/ServerHello extensions, including `use_srtp` and SNI.
 //! * [`alert`], [`content`], [`record_layer`] — the record layer and its content types.
 //!
+//! # Key material
+//!
+//! Every struct holding secret key material derives `Zeroize` and `ZeroizeOnDrop`, or holds
+//! each secret in a type that does (`rtci_crypto::SecretVec`, `zeroize::Zeroizing`), and
+//! key material is never built in a buffer that grows (a growing `Vec` frees its old allocation
+//! as it is). What a provider's own objects keep is the provider's to erase: the ring provider
+//! does not erase its AES-GCM, ChaCha20-Poly1305 and header-protection keys, the AWS-LC
+//! provider does. `docs/key-erasure.md` lists every secret, where it lives and which test
+//! checks it.
+//!
 //! # Example
 //!
 //! A WebRTC handshake is configured with a self-signed certificate and the SRTP profiles to

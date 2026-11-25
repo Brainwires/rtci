@@ -396,6 +396,14 @@ that response, so a sender that passes the server-address filter and knows the r
 transaction id can make the client believe in an allocation; requests for such an allocation
 carry no credential until the server asks for one with a 401.
 
+Key erasure (`conf/zeroize-1-dtls-srtp-key-erasure`, docs/key-erasure.md): every secret
+`rtci-dtls`, `rtci-srtp` and `rtci-crypto` hold is overwritten before its memory is freed (the
+DTLS 1.2 PRF and its outputs, master and premaster secrets, PSKs, key blocks, IVs, cookie and
+ticket secrets, serialized state; the RustCrypto HMAC-SHA1 states and AES key schedules), the
+stack is scrubbed after keyed objects are built, and secret keys come from the operating
+system (`RTCRandom::fill_secret`). Checked by scanning every freed heap block and, on Linux, the
+whole process. ring's own key objects are its limit.
+
 ### Dependency audit (fork only)
 
 `.github/workflows/audit.yml` resolves dependencies afresh and runs `cargo deny check advisories`
