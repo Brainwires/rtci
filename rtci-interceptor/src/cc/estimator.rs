@@ -84,6 +84,12 @@ pub trait BandwidthEstimator: Send + Sync {
         None
     }
 
+    /// The ceiling of the estimate, when the estimator has one: probing asks for nothing
+    /// above it (a cluster above what the estimate can ever be measures nothing of use).
+    fn max_bitrate(&self) -> Option<f64> {
+        None
+    }
+
     /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over
     /// only while the receiver sends no per-packet feedback (no TWCC, no RFC 8888): the
     /// loss-based half of an estimator can still run on it

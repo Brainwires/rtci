@@ -454,6 +454,10 @@ impl BandwidthEstimator for Gcc {
         Some(self.min)
     }
 
+    fn max_bitrate(&self) -> Option<f64> {
+        Some(self.max)
+    }
+
     fn set_external_bounds(&mut self, min: Option<f64>, max: Option<f64>) {
         let (configured_min, configured_max) = self.configured;
         self.max = max.map_or(configured_max, |max| max.min(configured_max));
