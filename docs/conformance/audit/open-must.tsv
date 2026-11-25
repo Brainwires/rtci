@@ -19,7 +19,6 @@ RFC2198-5-4	E	S	media (running)	RED depacketizing for audio is the application's
 RFC3550-6.1-13	A	S	media (running)	`setting`: strict RTCP validity
 RFC3550-A.2-1	A	S	media (running)	`setting`: strict RTCP validity
 RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`; an audio-only estimate halves to the floor on a clean link (`feedback_inside_the_rtcp_bandwidth_halves_an_estimate_while_only_audio_is_sent`); both directions capped: recovery over 20 s in 64% of runs against 18.5% (instrument)
-RFC4585-4.2-7	E	S	media (running)	Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
 RFC5109-7.2-2	D	L	media (running)	A separate FEC RTP session (own m= line and transport) so the FEC stream can use the media SSRC; RFC5109-14.1-5
 RFC5109-14.1-2	D	L	media (running)	As RFC5109-7.2-2
 RFC5109-14.1-5	D	L	media (running)	Separate FEC m= line with `a=group:FEC`, on a transport of its own
@@ -41,7 +40,7 @@ RFC6679-7.1-3	C	S	sdp	Offer `a=rtcp-xr:ecn-sum` with ECN
 RFC6679-7.1-4	C	S	sdp	Offer `nack ecn` where ECN is offered
 RFC7164-5-1	E	S	media (running)	The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds
 RFC7496-3-1	F	S	sctp	RFC 3758's MUST rows are all tested (rfc3758.md: 39 tested, 4 n/a); cite them
-RFC7714-13.1-3	E	S	dtls-srtp	Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested)
+RFC7714-13.1-3	C	M	dtls-srtp / crypto	Tested (must2): crate-held keys and AWS-LC erase everything; open: ring's AES-GCM round keys and HMAC-SHA1 states in freed memory (provider limit: E12 pure-Rust provider or upstream ring) and the DTLS 1.2 exporter's prf_p_hash buffers (zeroize them, S); tests known_limit_* in rtci-srtp/tests and tests/dtls_srtp_keying_material_erasure.rs
 RFC7742-5-2	F	S	payload	`tests/jsep_sweep_rfc9429.rs::an_offer_has_the_mandatory_audio_and_video_formats` (VP8, H.264 42e0xx); mutation-check and cite
 RFC7742-6.2-6	C	S	payload	Give an application-registered H.264 format without fmtp a `profile-level-id`
 RFC7742-6.2-7	C	S	sdp	Compare the level; take the RFC 6184 defaults (`42000A`, mode 0) when absent (codec matching is JSEP's)
