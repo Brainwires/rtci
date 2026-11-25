@@ -8,9 +8,9 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5752; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5089.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5082 of 5089 (99.9 %).
-- Tested as the default (`tested`): 5049 of 5089 (99.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 7: 1 untested, 3 partial, 3 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5083 of 5089 (99.9 %).
+- Tested as the default (`tested`): 5050 of 5089 (99.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 6: 1 untested, 2 partial, 3 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
@@ -18,14 +18,14 @@ Verdicts and classes are defined in `RULES.md`.
 | B | implemented, lacking a test that fails without it | 1 | 0 |
 | C | partly implemented | 3 | 0 |
 | D | not implemented | 2 | 0 |
-| E | cannot be met or observed inside this engine | 8 | 7 |
+| E | cannot be met or observed inside this engine | 7 | 7 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 40 | 26 |
+| all | | 39 | 26 |
 
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 6 rows, 4 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 0 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
 Class C rows that say "Owner decision" are implemented as a setting whose default differs
@@ -36,7 +36,6 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -80,7 +79,6 @@ Sorted by class, then owner, size and ID.
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
-| RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Everything the crates own is erased and tested (zeroize: prf_p_hash, HMAC-SHA1 states, aes/ctr zeroize); met with AWS-LC entirely; open with ring only: its AES-GCM key object (ring::aead::LessSafeKey) is freed without erasure, ring's memory (provider limit). Closes by an erasing provider (E12) or upstream ring; tests known_limit_* in rtci-srtp/tests | M | dtls-srtp / crypto |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
