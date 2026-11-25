@@ -40,7 +40,6 @@ use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine as WebrtcSettingEngine;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::ice::mdns::MulticastDnsMode as WebrtcMulticastDnsMode;
-use webrtc::ice_transport::ice_server::RTCIceServer as WebrtcIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection as WebrtcPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfiguration;
@@ -132,13 +131,9 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
         .with_setting_engine(setting_engine)
         .build();
 
-    let config = WebrtcRTCConfiguration {
-        ice_servers: vec![WebrtcIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    // No STUN server: both peers are on this machine and connect over host candidates; a
+    // public server would only make the test depend on the internet.
+    let config = WebrtcRTCConfiguration::default();
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
     Ok(peer_connection)

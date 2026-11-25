@@ -35,7 +35,6 @@ use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
-use webrtc::ice_transport::ice_server::RTCIceServer as WebrtcIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection as WebrtcPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfiguration;
@@ -411,13 +410,9 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
         .with_interceptor_registry(registry)
         .build();
 
-    let config = WebrtcRTCConfiguration {
-        ice_servers: vec![WebrtcIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    // No STUN server: both peers are on this machine and connect over host candidates; a
+    // public server would only make the test depend on the internet.
+    let config = WebrtcRTCConfiguration::default();
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
     Ok(peer_connection)

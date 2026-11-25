@@ -1,0 +1,42 @@
+# Allowlist of scripts/check-no-public-network-in-tests.py: test-source lines that name a public
+# server or a non-local address but do no I/O with it.
+#
+#   <path> | <count> | <text the line contains> | <reason>
+#
+# The row allows exactly <count> flagged lines of <path> containing the text: one more fails (a
+# new line under an old row), one fewer fails (a stale row). A line that does reach off the
+# machine never belongs here: fix the test (a server on loopback in the same process).
+rtci-ice/src/agent/agent_rfc6544_mdns_test.rs | 2 | "192.168.0.3: | A test helper named connect that feeds a sans-I/O ICE-TCP agent; no socket
+rtci-ice/src/lib.rs | 1 | stun:stun.l.google.com:19302 | Doc-test parsing a URL; no I/O
+rtci-mdns/src/message/message_test.rs | 10 | google.com | DNS name parsing and canonicalisation test vectors; no I/O
+rtci-shared/src/stream/stream_test.rs | 2 | addr("10.0.0.1:0") | The sans-I/O stream table's connect (a queued command); no socket
+src/lib.rs | 4 | stun:stun.l.google.com:19302 | Crate documentation examples marked no_run: compiled, never run
+src/peer_connection/configuration/mod.rs | 12 | stun:stun.l.google.com:19302 | Configuration parsing, serialisation and documentation examples of the rtci peer: no driver, nothing resolved or sent
+src/peer_connection/configuration/mod.rs | 2 | global.stun.twilio.com | Configuration parsing, serialisation and documentation examples of the rtci peer: no driver, nothing resolved or sent
+src/peer_connection/mod.rs | 2 | stun:stun.l.google.com:19302 | Documentation examples on the rtci peer's configuration: no driver, so the name is never resolved and nothing is sent
+src/peer_connection/upstream_peer_connection_test.rs | 1 | stun:stun.l.google.com:19302 | Set/get configuration round trip on the sans-I/O peer connection: no driver, nothing resolved or sent
+tests/data_channels_close_by_rtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/data_channels_close_by_webrtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/data_channels_create_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/data_channels_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/data_channels_negotiated_rtc2rtc.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/ice_restart_by_webrtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/interceptor_rtcp_reports_interop.rs | 3 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/mdns_query_and_gather_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/negotiated_data_channel_rtc2rtc.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/offer_answer_rtc2rtc.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/one_media_section_rtc_to_rtc_simulcast.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/one_media_section_rtc_to_rtc_unicast.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/play_from_disk_rtc_set_remote_before_add_track_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/play_from_disk_vpx_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/reflect_rtc_to_webrtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/reflect_webrtc_to_rtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/renegotiation_set_direction.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/rtcp_processing_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/save_to_disk_vpx_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/simulcast_rtc_to_rtc_interop.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/simulcast_rtc_to_webrtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/simulcast_rtx_rrid.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/simulcast_webrtc_to_rtc_interop.rs | 1 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/statistics_rtc_to_rtc.rs | 2 | "stun:stun.l.google.com:19302" | The rtci peer's ICE server, configuration only: the engine asks its driver to resolve the name (StreamCommand::Resolve) and this test's driver never answers, so nothing is looked up or sent
+tests/testenv/mod.rs | 1 | s.connect("224.0.0.251:5353") | UDP connect to the mDNS group only picks the egress interface (a UDP connect sends nothing); real-network environment only (#[ignore] outside it)

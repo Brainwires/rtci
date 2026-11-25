@@ -1652,6 +1652,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **No test needs the public internet** (`conf/test-1-no-public-network`): on train 34
+  `rtci-turn`'s `test_client_with_stun_send_binding_request` sent a STUN Binding request to a
+  public Google server and blocked in `recv_from` with no timeout until CI cancelled the macOS
+  job after 90 minutes. It and `test_client_with_stun_send_binding_request_to_parallel` now ask a
+  STUN server on a loopback socket of the same process, which answers with the address it saw;
+  the tests still check that the client sends a Binding request and reads the server-reflexive
+  address from the response, now that it is the client's own address, and every read waits at
+  most 5 s, then fails naming what did not arrive. The upstream `webrtc` peer of fifteen
+  `tests/*_interop.rs` files no longer has a public STUN server (it resolved the name and sent
+  Binding requests to it, and its gathering waited for the answer); both peers connect over host
+  candidates on this machine as before. Two loopback TCP reads in `tests/ice_tcp_active_passive.rs`
+  are bounded. New gate `scripts/check-no-public-network-in-tests.py` (with its unit tests,
+  `cargo.yml` Test inventory job) fails on a test source that names a public STUN/TURN server or
+  connects, sends or resolves to an address off the machine; lines that only parse or configure
+  such a name are rows of `scripts/check-no-public-network-in-tests.allow`, each with its reason
+  and an exact count. Test and CI only; no engine change.
+
 - **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
   (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
   capacity's return until the target is at 1000 kbit/s; `recover` waits for 0.4 of the target

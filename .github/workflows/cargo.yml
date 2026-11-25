@@ -212,6 +212,8 @@ jobs:
         run: python3 scripts/check-changelog-released.py
       - name: The committed nested Cargo.lock files resolve their manifests (--locked)
         run: python3 scripts/check-nested-locks.py
+      - name: No test talks to the public internet (public STUN/TURN servers, off-machine addresses)
+        run: python3 scripts/test_check_no_public_network_in_tests.py && python3 scripts/check-no-public-network-in-tests.py
 
   # The `chrome-defaults` feature makes `BehaviourProfile::default()` Chrome, and with it every
   # default of the setting engine, media engine and interceptor options. One job, not a test
