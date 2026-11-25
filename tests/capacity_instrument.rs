@@ -66,7 +66,9 @@
 //!   behaviour profile's interceptor settings), `perfshare` (the same with the share
 //!   following the send rate), `perfnoshare` (the same with it off: `perf`, since the
 //!   profile leaves it off), `chrome` (the `Chrome` behaviour profile's interceptor settings;
-//!   the media engine and the session description stay this world's);
+//!   the media engine and the session description stay this world's), `perframe` (the
+//!   defaults with the drafts' feedback cadence, `CongestionFeedbackCadence::PerFrame`: the
+//!   measurement behind that default);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
 //!   .with_max_gap_wait(300 ms)` and a PLI when the builder gives a gap up
 //!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time
@@ -515,6 +517,8 @@ enum Tuning {
     PerformanceWithoutShare,
     /// `chrome`: the `Chrome` behaviour profile's interceptor settings.
     Chrome,
+    /// `perframe`: the defaults with the drafts' congestion control feedback cadence.
+    PerFrame,
 }
 
 /// Everything of a run but its seed (the module's "Cells").
@@ -551,9 +555,8 @@ impl Cell {
                 other => bail!("unknown scenario {other} in {name}"),
             },
             chain: match chain {
-                "paced" | "share" | "perf" | "perfshare" | "perfnoshare" | "chrome" => {
-                    Chain::Default
-                }
+                "paced" | "share" | "perf" | "perfshare" | "perfnoshare" | "chrome"
+                | "perframe" => Chain::Default,
                 "nopacer" => Chain::DefaultWithoutPacer,
                 "parolnet" => Chain::ParolNet,
                 other => bail!("unknown chain {other} in {name}"),
@@ -564,6 +567,7 @@ impl Cell {
                 "perfshare" => Tuning::PerformanceWithShare,
                 "perfnoshare" => Tuning::PerformanceWithoutShare,
                 "chrome" => Tuning::Chrome,
+                "perframe" => Tuning::PerFrame,
                 _ => Tuning::Default,
             },
             gap_ms: number(gap, "gap")?,
@@ -593,6 +597,7 @@ impl Cell {
                 (_, Tuning::PerformanceWithShare) => "perfshare",
                 (_, Tuning::PerformanceWithoutShare) => "perfnoshare",
                 (_, Tuning::Chrome) => "chrome",
+                (_, Tuning::PerFrame) => "perframe",
                 (Chain::DefaultWithoutPacer, Tuning::Default) => "nopacer",
                 (Chain::ParolNet, Tuning::Default) => "parolnet",
             },
@@ -619,6 +624,9 @@ impl Cell {
                 .profile(BehaviourProfile::Performance)
                 .share_follows_send_rate(false),
             Tuning::Chrome => setup.profile(BehaviourProfile::Chrome),
+            Tuning::PerFrame => {
+                setup.feedback_cadence(rtci::interceptor::CongestionFeedbackCadence::PerFrame)
+            }
         };
         match self.gap_ms {
             0 => setup,

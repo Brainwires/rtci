@@ -880,6 +880,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **congestion control feedback cadence as a setting** (rtcpbudget-2):
+  `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
+  `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
+  `DefaultInterceptorOptions::congestion_feedback_cadence` and the governed behaviour
+  `cc.feedback-cadence`. **The default does not change**: feedback every 50 to 250 ms, sized
+  to 5% of the media received (`ReceivedMedia`), which is the engine's own choice and no
+  specification's. `PerFrame` is the drafts' cadence (draft-ietf-rmcat-gcc-02 section 3,
+  draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: a lone video stream is
+  reported when each frame ends, anything else every 30 ms, up to 100 ms where this
+  endpoint's share of the RTCP bandwidth does not hold that), on in the `StrictRfc` profile;
+  as the default it measured worse in the capacity instrument (send target under a 300
+  kbit/s cap 210 -> 186 kbit/s, the picture requirement of the pacer-less chain missed in
+  36 instead of 4 of 200 calls, RTCP 122 -> 135 kbit/s on an open call), and so did 100 ms
+  always and two forms between (audit rows TWCC-3-4 and GCC-3-2: `setting`, measured).
+  `SendEstimate` is libwebrtc's cadence (50 to 250 ms from 5% of the endpoint's own send
+  estimate, 100 ms before one is known), **now the `Chrome` profile's** (a behaviour change
+  for that profile only: its feedback was sized to the media received). New attributes on
+  what the chain hands application-ward: `RtcpBandwidthShare` (this endpoint's share of the
+  RTCP bandwidth, from the RTCP session) and `SendEstimate` (the congestion controller's
+  estimate beside `TargetBitrateChanged`). The capacity instrument's chain token `perframe`
+  runs the drafts' form.
+
 - **interceptors** (rtcpbudget-5): an option, off by default and in every behaviour profile,
   for an endpoint's own share of the RTCP bandwidth to follow the rate its congestion
   controller allows it to send at: `RtcpSessionBuilder::with_share_following_send_rate`,

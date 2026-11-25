@@ -387,7 +387,9 @@ macro_rules! governed_behaviours {
 }
 
 use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance};
-use interceptor::{EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase};
+use interceptor::{
+    CongestionFeedbackCadence, EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase,
+};
 
 governed_behaviours! {
     // ---- ICE ----
@@ -900,6 +902,18 @@ governed_behaviours! {
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_minimum_session_bandwidth = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_minimum_session_bandwidth,
+    },
+    {
+        id: "cc.feedback-cadence",
+        setting: "DefaultInterceptorOptions::congestion_feedback_cadence",
+        clause: "draft-ietf-rmcat-gcc-02 3, draft-holmer-rmcat-transport-wide-cc-extensions-01 3 (RECOMMENDED; the default has no text)",
+        rfc: CongestionFeedbackCadence::ReceivedMedia => "ReceivedMedia",
+        chrome: CongestionFeedbackCadence::SendEstimate => "SendEstimate",
+        strict_rfc: CongestionFeedbackCadence::PerFrame => "PerFrame",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: send_interval = kTwccReportSize (68 octets) / (0.05 * estimate) held between kMinInterval 50 ms and kMaxInterval 250 ms, kDefaultInterval 100 ms before; the estimate is call/call.cc::Call::OnTargetTransferRate's msg.target_rate, the endpoint's own send estimate. The default (50 to 250 ms from 5% of the media RECEIVED) is the engine's choice and no specification's: the drafts' per frame / 30 ms up to 100 ms (StrictRfc) and three forms between measured worse in the capacity instrument (audit rows TWCC-3-4, GCC-3-2)",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_cadence = v,
+        read: |o: &DefaultInterceptorOptions| o.congestion_feedback_cadence,
     },
     {
         id: "cc.feedback-share",

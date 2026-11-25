@@ -39,6 +39,18 @@ pub const DEFAULT_PRUNE_HORIZON: Duration = Duration::from_secs(2);
 /// taken to be gone, as a receiver that stopped estimating has no other way to lift it.
 pub const REMB_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Rides with [`Attribute::TargetBitrateChanged`] application-ward: the congestion
+/// controller's estimate of what this endpoint may send, as the estimator has it. The target
+/// beside it is lowered on its way up (the NACK responder takes its retransmission reserve
+/// off, the pacer writes zero for a pause); this is not. The congestion control feedback
+/// generators size [`CongestionFeedbackCadence::SendEstimate`](crate::CongestionFeedbackCadence)
+/// by it. Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SendEstimate {
+    /// The estimate, bits per second.
+    pub bits_per_second: f64,
+}
+
 /// The addresses and protocol a packet arrived between.
 type PathKey = (
     std::net::SocketAddr,
@@ -1003,6 +1015,15 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         );
     }
 
+    /// The estimate as it is, for what application-ward needs the congestion controller's
+    /// own value: the target that rides beside it is lowered on its way (the retransmission
+    /// reserve, a pause).
+    fn estimate_attribute(&self) -> Attribute {
+        Attribute::Custom(std::sync::Arc::new(SendEstimate {
+            bits_per_second: self.estimator.target_bitrate(),
+        }))
+    }
+
     /// Publish the estimate, and return the attribute to announce when it moved.
     fn publish(&mut self) -> Option<Attribute> {
         let target = self.estimator.target_bitrate();
@@ -1084,6 +1105,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         self.tell_rtcp(msg.now);
         if let Some(attribute) = self.publish() {
             msg.message.add(attribute);
+            msg.message.add(self.estimate_attribute());
             if let Some(minimum) = self.minimum_attribute() {
                 msg.message.add(minimum);
             }
@@ -1204,6 +1226,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         self.tell_rtcp(now);
         if let Some(attribute) = self.publish() {
             let mut message = AttributedPacket::new(Packet::Rtcp(Vec::new())).with(attribute);
+            message.add(self.estimate_attribute());
             if let Some(minimum) = self.minimum_attribute() {
                 message.add(minimum);
             }
