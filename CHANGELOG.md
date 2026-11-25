@@ -1659,11 +1659,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   STUN server on a loopback socket of the same process, which answers with the address it saw;
   the tests still check that the client sends a Binding request and reads the server-reflexive
   address from the response, now that it is the client's own address, and every read waits at
-  most 5 s, then fails naming what did not arrive. The upstream `webrtc` peer of fifteen
-  `tests/*_interop.rs` files no longer has a public STUN server (it resolved the name and sent
-  Binding requests to it, and its gathering waited for the answer); both peers connect over host
-  candidates on this machine as before. Two loopback TCP reads in `tests/ice_tcp_active_passive.rs`
-  are bounded. New gate `scripts/check-no-public-network-in-tests.py` (with its unit tests,
+  most 5 s, then fails naming what did not arrive. In all, 17 default tests sent packets to a
+  public STUN server: those two and fifteen `tests/*_interop.rs` files, whose upstream `webrtc`
+  peer resolved `stun.l.google.com`, sent Binding requests to it and waited for them in its
+  gathering. That peer has no STUN server now; both peers connect over host candidates on this
+  machine. The two QueryOnly tests of `tests/mdns_query_and_gather_interop.rs` had connected on
+  Windows only through that public server (the upstream server-reflexive socket, bound to the
+  unspecified address, was the one path to the rtc peer's loopback candidate): on Windows and
+  macOS their rtc peer now binds the mDNS egress address, as the QueryAndGather tests' already did
+  on Windows. The engine-side ICE server of the rtc2rtc and interop tests (configured, never
+  resolved: no test driver answers the engine's resolve command) is now `stun:stun.invalid:3478`
+  (RFC 6761), so nothing could be looked up even by a driver that answered. Two loopback TCP
+  reads in `tests/ice_tcp_active_passive.rs` are bounded. New gate `scripts/check-no-public-network-in-tests.py` (with its unit tests,
   `cargo.yml` Test inventory job) fails on a test source that names a public STUN/TURN server or
   connects, sends or resolves to an address off the machine; lines that only parse or configure
   such a name are rows of `scripts/check-no-public-network-in-tests.allow`, each with its reason

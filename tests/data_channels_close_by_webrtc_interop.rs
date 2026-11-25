@@ -73,7 +73,7 @@ async fn test_data_channel_close_by_webrtc_interop() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();

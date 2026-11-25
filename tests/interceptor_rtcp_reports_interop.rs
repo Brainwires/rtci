@@ -105,7 +105,7 @@ async fn test_custom_interceptor_registry_with_rtcp_reports() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -432,7 +432,7 @@ async fn test_sender_report_generation_on_rtp_send() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -712,7 +712,7 @@ async fn test_register_default_interceptors_helper() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();

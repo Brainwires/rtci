@@ -61,7 +61,7 @@ async fn test_negotiated_data_channel_rtc_to_rtc() -> Result<()> {
 
     let offerer_config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -121,7 +121,7 @@ async fn test_negotiated_data_channel_rtc_to_rtc() -> Result<()> {
 
     let answerer_config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
