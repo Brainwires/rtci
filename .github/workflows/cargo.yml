@@ -533,6 +533,42 @@ jobs:
       - name: Check the workspace
         run: cargo check --workspace --all-features --verbose
 
+  # What a call's user sees when the path's capacity collapses (tests/capacity_instrument.rs):
+  # the pull-request ensemble in a release build, on GitHub's runners only: 606 runs, about
+  # twelve minutes with the build (up to twice that on a slow runner). Its tripwires hold
+  # every cell against the recorded baseline and its requirement tests are sized for a stated
+  # power (the test file's doc). The fine comparison of a congestion-control, pacing,
+  # retransmission or RTCP-timing change is capacity-compare.yml (docs/capacity-instrument.md).
+  capacity_instrument:
+    name: Capacity instrument (release ensemble)
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: capacity-instrument
+      - name: The analysis script's unit tests
+        run: python3 scripts/test_capacity_instrument.py
+      - name: Build the instrument (release)
+        run: cargo test --release --package rtci --test capacity_instrument --no-run
+      - name: Tripwires and requirements over the pull-request ensemble
+        run: cargo test --release --package rtci --test capacity_instrument -- --ignored ensemble_
+      # Within a process the ensemble test repeats runs on other threads; this repeats a
+      # measurement in a second process, so that a figure that follows from an address, a hash
+      # seed or a clock is noticed.
+      - name: The same seeds give the same rows in a second process
+        run: |
+          for pass in 1 2; do
+            RTC_INSTR_CELLS=pr RTC_INSTR_SEEDS=1-2 \
+              cargo test --release --package rtci --test capacity_instrument -- --ignored --nocapture --exact measure > rows.$pass.log
+            grep -o 'IROW .*' rows.$pass.log | sort > rows.$pass.txt
+          done
+          test -s rows.1.txt
+          diff rows.1.txt rows.2.txt
+
   rustfmt_and_clippy:
     timeout-minutes: 30
     name: Check rustfmt style && run clippy

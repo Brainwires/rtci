@@ -1,0 +1,131 @@
+name: capacity-compare
+
+# The fine comparison of the capacity instrument (tests/capacity_instrument.rs), started by hand
+# before any change to congestion control, pacing, retransmission or RTCP timing is merged:
+# the same seeds on a head and on a base (master), measured by this ref's instrument, and the
+# merge-point rule of docs/capacity-instrument.md applied to the two (scripts/capacity-instrument.py
+# compare). The run is red when the rule is broken; its summary is the table with every test.
+#
+#   head: conf/some-branch   base: master
+#
+# GitHub-hosted runners only. Two gate cells at `seeds` runs each and twelve star cells at
+# `star_seeds` each: about 40 minutes a side with the defaults, the two sides side by side.
+on:
+  workflow_dispatch:
+    inputs:
+      head:
+        description: Branch, tag or full commit SHA to judge
+        required: true
+        type: string
+      base:
+        description: Branch, tag or full commit SHA it is compared with
+        required: false
+        default: master
+        type: string
+      seeds:
+        description: Seeds 1..N of each gate cell (the reference receiver and the one without a bound, paced chain)
+        required: false
+        default: '1000'
+        type: string
+      star_seeds:
+        description: Seeds 1..N of each star cell (pacer-less chain, both directions, queue depths, reverse loss, outage)
+        required: false
+        default: '100'
+        type: string
+
+run-name: "capacity-compare ${{ inputs.head }} against ${{ inputs.base }}"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  GATE_CELLS: cap/paced/gap300/up/q300/rl0,cap/paced/gap0/up/q300/rl0
+  STAR_CELLS: cap/nopacer/gap300/up/q300/rl0,cap/nopacer/gap0/up/q300/rl0,cap/paced/gap300/both/q300/rl0,cap/nopacer/gap300/both/q300/rl0,cap/paced/gap300/up/q100/rl0,cap/paced/gap300/up/q1000/rl0,cap/paced/gap300/up/q300/rl5,cap/nopacer/gap300/up/q100/rl0,cap/nopacer/gap300/up/q1000/rl0,cap/nopacer/gap300/up/q300/rl5,outage/paced/gap300/up/q300/rl0,outage/nopacer/gap300/up/q300/rl0
+
+jobs:
+  measure:
+    name: Measure (${{ matrix.side }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [head, base]
+    steps:
+      - name: The tree to measure
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ matrix.side == 'head' && inputs.head || inputs.base }}
+      - name: This ref's instrument
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: instrument
+      # Both sides are measured by one instrument: the one of the ref this workflow was started
+      # on. A tree from before the instrument (v0.1.0, say) is measured the same way.
+      - name: Put the instrument over the tree
+        run: |
+          git rev-parse HEAD
+          rm -rf tests/capacity_common
+          cp -R instrument/tests/capacity_common tests/capacity_common
+          cp instrument/tests/capacity_instrument.rs tests/capacity_instrument.rs
+          mkdir -p tests/fixtures
+          cp instrument/tests/fixtures/capacity-instrument-baseline.tsv tests/fixtures/
+          rm -rf instrument
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: capacity-instrument
+      - name: Build the instrument (release)
+        run: cargo test --release --package rtci --test capacity_instrument --no-run
+      - name: Gate cells
+        env:
+          SEEDS: ${{ inputs.seeds }}
+        run: |
+          case "$SEEDS" in ''|*[!0-9]*) echo "::error::seeds is a number"; exit 2;; esac
+          RTC_INSTR_CELLS="$GATE_CELLS" RTC_INSTR_SEEDS="1-$SEEDS" \
+            cargo test --release --package rtci --test capacity_instrument -- --ignored --nocapture --exact measure > gate.log
+          grep -c 'IROW ' gate.log
+      - name: Star cells
+        env:
+          SEEDS: ${{ inputs.star_seeds }}
+        run: |
+          case "$SEEDS" in ''|*[!0-9]*) echo "::error::star_seeds is a number"; exit 2;; esac
+          RTC_INSTR_CELLS="$STAR_CELLS" RTC_INSTR_SEEDS="1-$SEEDS" \
+            cargo test --release --package rtci --test capacity_instrument -- --ignored --nocapture --exact measure > star.log
+          grep -c 'IROW ' star.log
+      - name: Keep the rows
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rows-${{ matrix.side }}
+          path: |
+            gate.log
+            star.log
+
+  compare:
+    name: The merge-point rule
+    needs: measure
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rows-head
+          path: rows-head
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rows-base
+          path: rows-base
+      - name: Compare
+        env:
+          HEAD_REF: ${{ inputs.head }}
+          BASE_REF: ${{ inputs.base }}
+        run: |
+          status=0
+          python3 scripts/capacity-instrument.py compare \
+            --base rows-base/gate.log rows-base/star.log --base-label "$BASE_REF" \
+            --head rows-head/gate.log rows-head/star.log --head-label "$HEAD_REF" > comparison.md || status=$?
+          cat comparison.md
+          cat comparison.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
