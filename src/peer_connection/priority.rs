@@ -292,9 +292,12 @@ impl crate::peer_connection::RTCPeerConnection {
                 |mid| stats.section_transport_key(mid) == key,
                 &ceased,
             );
+            // The shares only: `total` is the target the streams were last given (zero while
+            // the pacer has the source paused), not a new estimate from the congestion
+            // controller, and `availableOutgoingBitrate` is left as it said.
             self.pipeline_context
                 .stats
-                .on_target_bitrate(key, total, &shares);
+                .on_target_shares(key, total, &shares);
         }
     }
 
