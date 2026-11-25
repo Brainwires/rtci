@@ -28,6 +28,7 @@ use rtci::interceptor::{
 };
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorHandles, DefaultInterceptorOptions, configure_key_frame_requests,
@@ -162,6 +163,13 @@ pub struct Setup {
     /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains, the
     /// options' default when `None`.
     pub report_from_every_ssrc: Option<bool>,
+    /// The behaviour profile whose interceptor settings the default chains take
+    /// (`DefaultInterceptorOptions::for_profile`); the build's default when `None`. The media
+    /// engine and the session description stay this world's own.
+    pub profile: Option<BehaviourProfile>,
+    /// `DefaultInterceptorOptions::rtcp_share_follows_send_rate` for the default chains, the
+    /// profile's value when `None`.
+    pub share_follows_send_rate: Option<bool>,
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
@@ -236,6 +244,8 @@ impl Setup {
             cap_at_target: None,
             video: [true, true],
             report_from_every_ssrc: None,
+            profile: None,
+            share_follows_send_rate: None,
             received_rate_bound: None,
             pacer_backlog: None,
             immediate_congestion_feedback: None,
@@ -273,6 +283,19 @@ impl Setup {
     /// inside the RTCP bandwidth (`false`), in the default chain.
     pub fn immediate_congestion_feedback(mut self, immediate: bool) -> Self {
         self.immediate_congestion_feedback = Some(immediate);
+        self
+    }
+
+    /// The default chains take the interceptor settings of `profile`.
+    pub fn profile(mut self, profile: BehaviourProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
+    /// The default chains' RTCP share follows the send rate (or not), whatever the profile
+    /// says.
+    pub fn share_follows_send_rate(mut self, follows: bool) -> Self {
+        self.share_follows_send_rate = Some(follows);
         self
     }
 
@@ -697,7 +720,13 @@ impl Peer {
             RtpCodecKind::Audio,
         )?;
         if setup.chain != Chain::ParolNet {
-            let mut options = DefaultInterceptorOptions::default();
+            let mut options = match setup.profile {
+                Some(profile) => DefaultInterceptorOptions::for_profile(profile),
+                None => DefaultInterceptorOptions::default(),
+            };
+            if let Some(follows) = setup.share_follows_send_rate {
+                options.rtcp_share_follows_send_rate = follows;
+            }
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
             if let Some(every) = setup.report_from_every_ssrc {

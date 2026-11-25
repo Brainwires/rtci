@@ -880,6 +880,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptors** (rtcpbudget-5): an option, off by default and in every behaviour profile,
+  for an endpoint's own share of the RTCP bandwidth to follow the rate its congestion
+  controller allows it to send at: `RtcpSessionBuilder::with_share_following_send_rate`,
+  `DefaultInterceptorOptions::rtcp_share_follows_send_rate`,
+  `RtcpSessionControl::SendRate` and `CongestionControlBuilder::with_send_rate_told_to_rtcp`
+  (the congestion controller tells the RTCP session of its chain the estimate whenever it has
+  moved by a twentieth). **It is tuning with no specification behind it**: RFC 3550 section
+  6.2 sizes the RTCP bandwidth from the session bandwidth (here the media measured both
+  ways) and section 6.3.1 shares it equally among the members whatever each direction
+  carries, so an endpoint whose uplink has collapsed to 300 kbit/s while the other direction
+  still carries 2.5 Mbit/s keeps sending about 80 kbit/s of RTCP on it. With the option the
+  endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which
+  every endpoint sends at this endpoint's rate (5% x send rate x members / local SSRCs, no
+  less than 5% of the minimum session bandwidth); the intervals calculated for the other
+  members (`RtcpReportingInterval`, what the circuit breaker takes for the peer's reporting
+  interval), member timeouts, BYE and sender status keep RFC 3550's value, and congestion
+  control feedback is not slowed. Measured in the capacity instrument (default chain, one
+  direction capped at 300 kbit/s): RTCP on the capped link 80 -> 34 kbit/s, the open call
+  unchanged (122 kbit/s); figures for the picture and the recovery are in
+  `docs/capacity-instrument.md`. The `Performance` profile does not take it: its
+  `T_rr_interval` of one second already brings that RTCP to 22 kbit/s, and beside it the
+  option changed nothing that was measured. Tests
+  `the_rtcp_share_follows_the_send_rate_the_session_is_told`,
+  `the_interval_calculated_for_the_peer_does_not_follow_the_send_rate`.
+
 - **interceptor** (collapse-2): `ProbeFill`, an attribute the pacer adds to a `ProbeRequest`'s
   carrier on its way application-ward: the padding the cluster needs beyond the media and
   retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
@@ -1618,6 +1643,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped, nothing worse (oldest picture -0.33 s); both directions capped, recovery slower than
   20 s in 64 % of runs against 18.5 %. The capacity world's `Setup` takes
   `immediate_congestion_feedback`.
+- **capacity instrument** (rtcpbudget-5): chain tokens for the default chain with other
+  settings, measurement only: `share` (the defaults with `rtcp_share_follows_send_rate`),
+  `perf` (the `Performance` profile's interceptor settings), `perfshare`, `perfnoshare`,
+  `chrome` (the `Chrome` profile's); `Setup::profile` and `Setup::share_follows_send_rate`
+  in the capacity world.
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
