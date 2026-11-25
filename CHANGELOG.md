@@ -1096,6 +1096,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attaches it to its own announcements.
   `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
 
+- **rtci (statistics): `availableOutgoingBitrate` survives `set_parameters` during a pacer
+  pause** (`conf/breaker-2-pacer-ceased-flow`). `RTCRtpSender::set_parameters` divides the
+  transport's target among the encodings again; while the pacer had the source paused that
+  target is zero, and the division wrote it as the transport's estimate: the statistic was
+  gone until the congestion controller's next target. The division now sets the streams'
+  shares only.
+  `interceptor_circuit_breaker_test::dividing_the_target_again_while_the_source_is_paused_leaves_the_estimate_alone`.
+
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
   one run in fifty (28 of 1500 runs on master, alike under every crypto feature set; in CI it
