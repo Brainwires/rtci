@@ -1169,9 +1169,12 @@ impl NackResponderInterceptor {
             }
             stream.sent_at.iter_mut().for_each(|sent| *sent = None);
             stream.last_retransmit.clear();
-            // What was remembered of the repairs of those packets goes with them: none of
-            // them can be asked for again, and a report on one that is still in flight finds
-            // nothing to update.
+            // What was remembered of the repairs of those packets goes with them. Not needed
+            // for what is sent: with the buffer emptied no flushed packet can be retransmitted
+            // again whatever this memory says (`retransmittable` finds none), and the entries
+            // would age out (`expire_repairs`). Cleared so that a report still in flight on
+            // one of those repairs finds nothing to hold a later request against, and the
+            // stream's memory starts empty with the key frame, as its buffer does.
             stream.repairs.clear();
             stream.repairs_by_rtx.clear();
             stream.repairs_order.clear();

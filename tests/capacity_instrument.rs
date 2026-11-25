@@ -1126,6 +1126,43 @@ fn ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end() -
     Ok(())
 }
 
+/// THE PICTURE GUARD: in the default chain's two reference cells of the pull-request ensemble
+/// (100 runs) at most ONE run shows a picture older than 2 s for more than 0.5 s. With the
+/// backlog flushed at a collapse (docs/capacity-collapse.md) none does (0 of 2000 runs of
+/// these two cells; 2000 of 2000 with the pause). The requirement itself, at most 5 % of
+/// calls on 300 runs, is `on_demand_requirement_picture_in_the_default_chain`, which does not
+/// fit the job; this is its tripwire: a tree in which 5 % of calls miss passes it with
+/// probability 0.037 (0.95^100 + 100 x 0.05 x 0.95^99), one in which none does never fails.
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_tripwire_picture_in_the_default_chain() -> Result<()> {
+    const ALLOWED: usize = 1;
+    let mut missed = Vec::new();
+    for cell in [DEFAULT_CHAIN, DEFAULT_CHAIN_NO_BOUND] {
+        for row in pr_rows(cell)? {
+            if row
+                .value(PICTURE.figure)
+                .is_none_or(|stale| stale > PICTURE.limit)
+            {
+                missed.push(format!(
+                    "{cell} seed {}: a picture older than 2 s for {} s",
+                    row.seed,
+                    row.value(PICTURE.figure).unwrap_or(f64::NAN),
+                ));
+            }
+        }
+    }
+    assert!(
+        missed.len() <= ALLOWED,
+        "TRIPWIRE: {} of the default chain's runs miss the picture requirement ({}), at most \
+         {ALLOWED} allowed:\n{}",
+        missed.len(),
+        PICTURE.claim,
+        missed.join("\n")
+    );
+    Ok(())
+}
+
 /// The 1 s audio requirement in the default chain: met since breaker-1 (0 of 1000 runs with
 /// more than 1 s without audio, hosted run 45525698919; 89 of 1000 before). On 300 runs, on
 /// demand: the reference cell has 60 runs in the pull-request ensemble, where
