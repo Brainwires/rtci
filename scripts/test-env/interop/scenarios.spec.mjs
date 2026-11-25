@@ -140,6 +140,11 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   // Rust's NACK responder repaired them (RFC 4588; an ordinary loss, a round trip old, is
   // never declined as useless), and the browser kept decoding. Each figure is asserted only
   // where the browser fills it (webrtc-stats inbound-rtp); the line below says which it filled.
+  // This shows that the engine repairs for the browser the gaps it relays: netem drops only
+  // the browser-to-Rust leg (`impair` filters on Rust's port), so loss on the path TO the
+  // browser is not impaired in this cell. retransmittedPacketsReceived also counts the
+  // padding-only RTX packets of a bandwidth probe (it is above zero before any NACK), so the
+  // repairs are asserted on retransmittedBytesReceived where the browser fills it.
   const [first, mid, last] = r.inbound;
   console.log(
     `[${test.info().project.name}] loss recovery, the browser's receive side: ${JSON.stringify({ first, mid, last })}`,
@@ -148,10 +153,11 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   if (last.nackCount !== undefined) {
     expect(last.nackCount - (first?.nackCount ?? 0), JSON.stringify(r.inbound)).toBeGreaterThan(0);
   }
-  if (last.retransmittedPacketsReceived !== undefined) {
+  const repaired = last.retransmittedBytesReceived !== undefined ? "retransmittedBytesReceived" : "retransmittedPacketsReceived";
+  if (last[repaired] !== undefined) {
     expect(
-      last.retransmittedPacketsReceived - (first?.retransmittedPacketsReceived ?? 0),
-      `the browser received no retransmission from Rust: ${JSON.stringify(r.inbound)}`,
+      last[repaired] - (first?.[repaired] ?? 0),
+      `the browser received no retransmission from Rust (${repaired}): ${JSON.stringify(r.inbound)}`,
     ).toBeGreaterThan(0);
   }
   if (last.framesDecoded !== undefined) {

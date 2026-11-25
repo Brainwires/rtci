@@ -53,7 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the bound where a packet is repaired longer (an `rtx-time` over 2 s, the age rule off).
   Known small effect: a give-up does not tell the pacer, so a retransmission of a forgotten
   packet already queued there still leaves (counted in 700 paced calls with 247 give-ups: 3 in
-  all, at one give-up). Fixed with it: a probe cluster asked for while
+  all, at one give-up). A small cost, accepted: in a chain without a pacer behind a 100 ms
+  queue the climb back after the cap is slightly slower (seconds to 1000 kbit/s median
+  17.85 -> 18.30, 90th percentile 19.10 -> 20.40, per seed +0.26 +-0.24 s; target 15-25 s after
+  the cap 1215 -> 1195 kbit/s; 200 calls), and calls over 20 s go from 3 to 31 of 200 since the
+  climb clusters at 17-21 s; with both directions capped the 15-25 s target is 44-66 kbit/s
+  lower (not significant) against 89-90 kbit/s more target while the cap holds. Fixed with it: a probe cluster asked for while
   the responder's buffer is empty (after a give-up or the pacer's flush, before the next
   packet is written) is still padded, under the header of the newest packet the buffer held;
   before, no padding left, and a chain without a pacer stopped probing.
