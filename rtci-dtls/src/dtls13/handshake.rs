@@ -1507,7 +1507,7 @@ impl Conn13 {
                 let mut secret = vec![0u8; 32];
                 self.provider
                     .random()
-                    .fill(&mut secret)
+                    .fill_secret(&mut secret)
                     .map_err(|err| internal(Error::Crypto(err.to_string())))?;
                 let secret = SecretVec::new(secret);
                 let (hello_retry_request, _) = hello_retry_request(

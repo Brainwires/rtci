@@ -193,7 +193,7 @@ impl CookieSecrets {
             let mut secret = [0u8; COOKIE_SECRET_LENGTH];
             provider
                 .random()
-                .fill(&mut secret)
+                .fill_secret(&mut secret)
                 .map_err(|err| Error::Crypto(err.to_string()))?;
             // The secret before stays good for one more lifetime; one that has been idle for
             // two is too old to vouch for anything.

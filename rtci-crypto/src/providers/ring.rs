@@ -63,6 +63,13 @@ impl RTCRandom for RingRandom {
     fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError> {
         common::fill_random(output)
     }
+
+    fn fill_secret(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        use ring::rand::SecureRandom;
+        SystemRandom::new()
+            .fill(output)
+            .map_err(|_| CryptoError::RandomnessFailed)
+    }
 }
 
 impl RTCCrypto for RingCrypto {

@@ -43,7 +43,10 @@ const DTLS12_TICKET_PEER_VERIFIED: u8 = 2;
 
 fn new_ticket_key(provider: &dyn RTCCryptoProvider) -> Result<SecretVec> {
     let mut key = vec![0u8; TICKET_KEY_LEN];
-    provider.random().fill(&mut key).map_err(crypto_error)?;
+    provider
+        .random()
+        .fill_secret(&mut key)
+        .map_err(crypto_error)?;
     Ok(SecretVec::new(key))
 }
 
