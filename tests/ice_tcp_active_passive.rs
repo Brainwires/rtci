@@ -447,7 +447,10 @@ async fn test_ice_tcp_passive_accepts_connection() -> Result<()> {
     // Passive receives and decodes
     let mut accepted_stream = accepted_stream;
     let mut buf = vec![0u8; 1024];
-    let n = accepted_stream.read(&mut buf).await?;
+    // Bounded: a frame that never arrives fails the test instead of hanging it.
+    let n = tokio::time::timeout(Duration::from_secs(5), accepted_stream.read(&mut buf))
+        .await
+        .map_err(|_| anyhow::anyhow!("no framed packet on the accepted stream within 5 s"))??;
 
     let mut decoder = TcpFrameDecoder::new();
     decoder.extend_from_slice(&buf[..n]);
@@ -503,7 +506,13 @@ async fn test_tcp_framing_partial_reads() -> Result<()> {
 
     let start = Instant::now();
     while packets.len() < 3 && start.elapsed() < Duration::from_secs(5) {
-        let n = stream.read(&mut buf).await?;
+        // Bounded by the loop's own deadline: a sender that stalls fails the test.
+        let left = Duration::from_secs(5).saturating_sub(start.elapsed());
+        let n = tokio::time::timeout(left, stream.read(&mut buf))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("only {} of 3 framed packets within 5 s", packets.len())
+            })??;
         if n == 0 {
             break;
         }

@@ -42,7 +42,6 @@ use webrtc::api::APIBuilder;
 // webrtc links its own `rtcp`, so the type it is handed is not the one this crate parses with.
 use webrtc::api::interceptor_registry::register_default_interceptors as webrtc_register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine as WebrtcMediaEngine;
-use webrtc::ice_transport::ice_server::RTCIceServer as WebrtcIceServer;
 use webrtc::interceptor::registry::Registry as WebrtcRegistry;
 use webrtc::peer_connection::RTCPeerConnection as WebrtcPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfiguration;
@@ -235,13 +234,9 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
         .with_interceptor_registry(registry)
         .build();
 
-    let config = WebrtcRTCConfiguration {
-        ice_servers: vec![WebrtcIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    // No STUN server: both peers are on this machine and connect over host candidates; a
+    // public server would only make the test depend on the internet.
+    let config = WebrtcRTCConfiguration::default();
 
     Ok(Arc::new(api.new_peer_connection(config).await?))
 }
@@ -288,7 +283,7 @@ fn create_rtc_peer_config_with_rtcp_forwarder(
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
