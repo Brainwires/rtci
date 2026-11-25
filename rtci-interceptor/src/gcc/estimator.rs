@@ -626,6 +626,57 @@ mod tests {
         assert_eq!(long, 300_000.0, "down to the starting estimate, not below");
     }
 
+    /// `usage` is the reading of the last feedback: normal at the start, over-use while
+    /// packets sent 10 ms apart arrive 40 ms apart (a growing queue, which lowers the target),
+    /// and not over-use once they arrive as they left.
+    #[test]
+    fn usage_follows_the_last_feedback() {
+        let epoch = Instant::now();
+        let mut gcc = Gcc::new(1_000_000.0, 100_000.0, 10_000_000.0);
+        assert_eq!(Usage::Normal, gcc.usage());
+        let mut id = 0u64;
+        let mut arrival_ms = 50u64;
+        let mut seen = false;
+        // Two seconds of a growing queue, a batch of ten packets every 100 ms.
+        for batch in 0..20u64 {
+            let reports: Vec<PacketReport> = (0..10u64)
+                .map(|n| {
+                    id += 1;
+                    arrival_ms += 40;
+                    report(
+                        id,
+                        epoch + Duration::from_millis(100 * batch + 10 * n),
+                        Some(arrival_ms),
+                    )
+                })
+                .collect();
+            gcc.on_reports(epoch + Duration::from_millis(100 * (batch + 1)), &reports);
+            seen |= gcc.usage() == Usage::Over;
+        }
+        assert!(seen, "a growing queue reads as over-use");
+        assert!(gcc.target_bitrate() < 1_000_000.0, "and lowers the target");
+        // Five seconds in which packets arrive as far apart as they left.
+        for batch in 20..70u64 {
+            let reports: Vec<PacketReport> = (0..10u64)
+                .map(|n| {
+                    id += 1;
+                    arrival_ms += 10;
+                    report(
+                        id,
+                        epoch + Duration::from_millis(100 * batch + 10 * n),
+                        Some(arrival_ms),
+                    )
+                })
+                .collect();
+            gcc.on_reports(epoch + Duration::from_millis(100 * (batch + 1)), &reports);
+        }
+        assert_ne!(
+            Usage::Over,
+            gcc.usage(),
+            "a queue that no longer grows does not"
+        );
+    }
+
     /// Empty feedback says nothing and must not move anything.
     #[test]
     fn empty_feedback_changes_nothing() {
