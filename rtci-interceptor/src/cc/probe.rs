@@ -97,6 +97,24 @@ impl ProbeRequest {
     }
 }
 
+/// How much padding a probe cluster needs, from the pacer that sends it.
+///
+/// The pacer reads a [`ProbeRequest`] first on its way application-ward and adds this to the
+/// same carrier: the cluster's size less the media and retransmissions already waiting in its
+/// queue, which leave first, at the cluster's rate and with its mark, and so fill the cluster
+/// in place of padding. The NACK responder makes that much padding and no more (none at all
+/// while a backlog waits, as during the pacer's pause): padding made for a cluster that media
+/// fills never leaves in it, and each such packet uses up a sequence number of the RTX stream.
+/// Without a pacer in the chain there is no such attribute and the responder fills the whole
+/// cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeFill {
+    /// The cluster this is about ([`ProbeRequest::cluster`]).
+    pub cluster: u32,
+    /// The padding wanted, octets on the wire.
+    pub octets: usize,
+}
+
 /// The mark of an RTP packet the pacer released as part of a probe cluster, as an
 /// [`Attribute::Custom`] on its way to the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

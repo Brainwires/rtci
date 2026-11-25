@@ -112,6 +112,8 @@ struct SelectedPsk {
     index: u16,
     secret: SecretVec,
     without_key_exchange: bool,
+    /// An external PSK (RFC 8446 section 2.2), not one of this server's tickets.
+    external: bool,
     peer_certificates: Vec<Vec<u8>>,
     /// The 0-RTT data the server takes with it, if it takes any.
     early_data_limit: Option<u32>,
@@ -319,14 +321,36 @@ impl Conn13 {
         Ok(())
     }
 
-    /// Runs the configured peer-certificate check again on the certificates a PSK carries
-    /// from the handshake that made it: a resumed association is the same peer only if the
-    /// application still accepts that one.
-    fn verify_resumed_peer(&self) -> std::result::Result<(), Refusal> {
-        if self.peer_certificates.is_empty() {
-            return Ok(());
-        }
+    /// Runs the configured peer-certificate check again on the certificates a resumption
+    /// PSK (a ticket, RFC 8446 section 4.6.1) carries from the handshake that made it: a
+    /// resumed association is the same peer only if the application still accepts that one.
+    /// With a check configured, a ticket that carries no certificate where the first
+    /// handshake had one to check is refused: there is nothing to run the check on, and the
+    /// check is not skipped (it fails closed).
+    ///
+    /// Two handshakes have no certificate by their nature, and the check has nothing to say
+    /// about them, as in a handshake that carries none:
+    ///
+    /// - one made with an `external` PSK (RFC 8446 sections 2.2 and 4.2.11): no certificate
+    ///   is ever sent with it, and it authenticates both sides by possession of the key;
+    /// - a resumption at a server that asks its clients for no certificate
+    ///   (`ClientAuthType::NoClientCert`): the first handshake had none either, and the
+    ///   check never ran on that client.
+    fn verify_resumed_peer(&self, external: bool) -> std::result::Result<(), Refusal> {
         if let Some(verify_peer_certificate) = &self.cfg.verify_peer_certificate {
+            if self.peer_certificates.is_empty() {
+                if external
+                    || (!self.is_client && self.cfg.client_auth == ClientAuthType::NoClientCert)
+                {
+                    return Ok(());
+                }
+                return Err(refuse(
+                    alert::BAD_CERTIFICATE,
+                    Error::Other(
+                        "a resumption carries no certificate for the configured check".to_owned(),
+                    ),
+                ));
+            }
             verify_peer_certificate(&self.peer_certificates, &[])
                 .map_err(|error| refuse(alert::BAD_CERTIFICATE, error))?;
         }
@@ -512,6 +536,7 @@ impl Conn13 {
             // certificates are those of the handshake the ticket came from.
             self.psk = Some(psk.secret);
             self.resumed = true;
+            self.external_psk = psk.external;
             self.peer_certificates = psk.peer_certificates;
         }
 
@@ -824,7 +849,7 @@ impl Conn13 {
             return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
         }
         if self.resumed {
-            self.verify_resumed_peer()?;
+            self.verify_resumed_peer(self.external_psk)?;
         }
         self.transcript.add(FINISHED, body);
         let (local, remote) = self.enter_application_secrets()?;
@@ -1027,6 +1052,7 @@ impl Conn13 {
             self.psk = Some(selected.secret);
             self.psk_without_key_exchange = selected.without_key_exchange;
             self.resumed = true;
+            self.external_psk = selected.external;
             self.peer_certificates = selected.peer_certificates;
         }
 
@@ -1234,6 +1260,14 @@ impl Conn13 {
             cfg.client_auth,
             ClientAuthType::RequireAnyClientCert | ClientAuthType::RequireAndVerifyClientCert
         );
+        // A configured peer-certificate check is run again on a ticket's certificates
+        // (`verify_resumed_peer`). A server that asks its clients for a certificate resumes
+        // no ticket without one: the handshake is a full one, in which it asks again and
+        // the check runs on what comes. A server that asks for none (`NoClientCert`) had no
+        // client certificate in the first handshake either: there is nothing to check
+        // again, and the ticket resumes.
+        let rechecks_certificate = cfg.verify_peer_certificate.is_some()
+            && cfg.client_auth != ClientAuthType::NoClientCert;
         let offers_early_data = hello.extension(EXT_EARLY_DATA).is_some();
         // No HelloRetryRequest came before this ClientHello (its transcript starts with it).
         let first_client_hello = self.transcript.is_empty();
@@ -1260,7 +1294,8 @@ impl Conn13 {
                         && ticket.issued_ms <= now_ms
                         && now_ms < expires
                         && ticket.server_name == negotiated.server_name
-                        && (!requires_certificate || !ticket.peer_certificates.is_empty());
+                        && (!requires_certificate || !ticket.peer_certificates.is_empty())
+                        && (!rechecks_certificate || !ticket.peer_certificates.is_empty());
                     claim = Some((ticket.id, now_ms, expires));
                     // RFC 8446 sections 4.2.10 and 8.3: 0-RTT with the first PSK, a ticket
                     // that allows it, of the same suite, in a first ClientHello, whose age as
@@ -1312,16 +1347,18 @@ impl Conn13 {
                 index: index as u16,
                 secret,
                 without_key_exchange,
+                external,
                 peer_certificates,
                 early_data_limit,
             };
             // The client is the peer of the handshake the ticket came from: the
-            // application's check of it runs again.
+            // application's check of it runs again. An external PSK has no such handshake
+            // and no certificate (RFC 8446 section 2.2).
             let earlier = std::mem::replace(
                 &mut self.peer_certificates,
                 selected.peer_certificates.clone(),
             );
-            let checked = self.verify_resumed_peer();
+            let checked = self.verify_resumed_peer(external);
             self.peer_certificates = earlier;
             checked?;
             return Ok(Some(selected));
@@ -1363,7 +1400,8 @@ impl Conn13 {
                 .fill(&mut age_add)
                 .map_err(|err| internal(Error::Crypto(err.to_string())))?;
             let age_add = u32::from_be_bytes(age_add);
-            let ticket = issuer
+            // An issuer whose keys were wiped (`SessionTicketIssuer::retire`) issues none.
+            let Some(ticket) = issuer
                 .seal(
                     provider.as_ref(),
                     suite.id,
@@ -1374,7 +1412,10 @@ impl Conn13 {
                     &self.peer_certificates,
                     cfg.max_early_data,
                 )
-                .map_err(internal)?;
+                .map_err(internal)?
+            else {
+                return Ok(());
+            };
             let body = new_session_ticket(
                 issuer.lifetime.as_secs() as u32,
                 age_add,
