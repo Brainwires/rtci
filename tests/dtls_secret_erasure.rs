@@ -134,6 +134,14 @@ fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
             .map(|(_, _, what)| *what);
         for needle in prefixes.found_in(needles, block) {
             let line = format!("{} in a freed block of {size} bytes", needle.describe());
+            if owner.is_none() && std::env::var_os("RTCI_ERASURE_DUMP").is_some() {
+                let at = (0..size).find(|i| needle.at(block, *i)).unwrap_or_default();
+                let hex: String = block[..size.min(192)]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                println!("DUMP {line} at {at}: {hex}");
+            }
             match owner {
                 Some(what) => providers.push(format!("{line} ({what})")),
                 None => ours.push(line),
@@ -555,12 +563,19 @@ struct Derived {
 }
 
 impl Derived {
+    /// Adds a needle; one already there with the same bytes takes `what` as another name.
     fn push(&mut self, what: impl Into<String>, inverted: &[u8]) {
-        if inverted.len() >= SHORTEST
-            && !inverted.iter().all(|b| *b == 0xff)
-            && !self.needles.iter().any(|n| n.inverted == inverted)
-        {
-            self.needles.push(Needle::new(what, inverted));
+        if inverted.len() < SHORTEST || inverted.iter().all(|b| *b == 0xff) {
+            return;
+        }
+        let what = what.into();
+        match self.needles.iter_mut().find(|n| n.inverted == inverted) {
+            Some(needle) => {
+                if !needle.what.split(" = ").any(|name| name == what) {
+                    needle.what = format!("{} = {what}", needle.what);
+                }
+            }
+            None => self.needles.push(Needle::new(what, inverted)),
         }
     }
 }
@@ -1113,7 +1128,7 @@ fn dtls12_ticket_keys_and_resumed_master_secrets_are_erased() {
                 .derived
                 .needles
                 .iter()
-                .any(|n| n.what == "an AEAD key"),
+                .any(|n| n.what.contains("an AEAD key")),
             "the ticket key and the record keys were recorded"
         );
         left.extend(
@@ -1411,15 +1426,12 @@ fn the_quarantine_sees_secrets_left_behind() {
         outcome
             .left
             .iter()
-            .any(|line| line.starts_with("the exported SRTP keying material")),
+            .any(|line| line.contains("the exported SRTP keying material")),
         "the careless copy of the material is found: {:#?}",
         outcome.left
     );
     assert!(
-        outcome
-            .left
-            .iter()
-            .any(|line| line.starts_with("an AEAD key")),
+        outcome.left.iter().any(|line| line.contains("an AEAD key")),
         "the careless copy of a record key is found: {:#?}",
         outcome.left
     );
@@ -1631,12 +1643,12 @@ mod process_memory_tests {
                 assert!(
                     before
                         .iter()
-                        .any(|line| line.starts_with("the exported keying material")),
+                        .any(|line| line.contains("the exported keying material")),
                     "{} {suite:?}: the live exported material is found",
                     provider.name()
                 );
                 assert!(
-                    before.iter().any(|line| line.starts_with("an HMAC key")),
+                    before.iter().any(|line| line.contains("an HMAC key")),
                     "{} {suite:?}: a live secret of the association is found",
                     provider.name()
                 );

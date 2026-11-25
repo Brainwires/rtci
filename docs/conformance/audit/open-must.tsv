@@ -40,7 +40,7 @@ RFC6679-7.1-3	C	S	sdp	Offer `a=rtcp-xr:ecn-sum` with ECN
 RFC6679-7.1-4	C	S	sdp	Offer `nack ecn` where ECN is offered
 RFC7164-5-1	E	S	media (running)	The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds
 RFC7496-3-1	F	S	sctp	RFC 3758's MUST rows are all tested (rfc3758.md: 39 tested, 4 n/a); cite them
-RFC7714-13.1-3	C	M	dtls-srtp / crypto	Tested (must2): crate-held keys and AWS-LC erase everything; open: ring's AES-GCM round keys and HMAC-SHA1 states in freed memory (provider limit: E12 pure-Rust provider or upstream ring) and the DTLS 1.2 exporter's prf_p_hash buffers (zeroize them, S); tests known_limit_* in rtci-srtp/tests and tests/dtls_srtp_keying_material_erasure.rs
+RFC7714-13.1-3	E	M	dtls-srtp / crypto	Everything the crates own is erased and tested (zeroize: prf_p_hash, HMAC-SHA1 states, aes/ctr zeroize); met with AWS-LC entirely; open with ring only: its AES-GCM key object (ring::aead::LessSafeKey) is freed without erasure, ring's memory (provider limit). Closes by an erasing provider (E12) or upstream ring; tests known_limit_* in rtci-srtp/tests
 RFC7742-5-2	F	S	payload	`tests/jsep_sweep_rfc9429.rs::an_offer_has_the_mandatory_audio_and_video_formats` (VP8, H.264 42e0xx); mutation-check and cite
 RFC7742-6.2-6	C	S	payload	Give an application-registered H.264 format without fmtp a `profile-level-id`
 RFC7742-6.2-7	C	S	sdp	Compare the level; take the RFC 6184 defaults (`42000A`, mode 0) when absent (codec matching is JSEP's)
