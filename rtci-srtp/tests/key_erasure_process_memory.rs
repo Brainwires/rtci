@@ -15,8 +15,9 @@
 //!
 //! Stack frames are searched too (the worker's whole stack): the AES counter-mode schedules
 //! the AES-CM profiles build per packet on the stack (RustCrypto `aes`, both providers) were not
-//! found there, before or after the drop, in the runs recorded in the audit; nothing erases
-//! them, so that is an observation, not a guarantee.
+//! found there, before or after the drop, in the runs recorded in the audit. Since 0.2 they are
+//! also erased as each is dropped (`aes` with its `zeroize` feature, `ctr` through `cipher`);
+//! no test can show it, since the frames were never seen to hold them.
 //!
 //! macOS and Windows would need `mach_vm_read`/`mach_vm_region` or
 //! `VirtualQuery`/`ReadProcessMemory` on the process itself; the providers' code is the same
@@ -305,14 +306,33 @@ mod process_memory_tests {
         assert!(left.is_empty(), "found after the drop: {left:#?}");
     }
 
-    /// KNOWN LIMIT (RFC 7714 section 13.1) with the ring provider: its AES-GCM key
-    /// (`ring::aead::LessSafeKey`: the session key and every AES round key) and the HMAC-SHA1
-    /// state of the AES-CM and NULL profiles' authentication keys (RustCrypto `hmac`) are still in
-    /// the process once the contexts are dropped, in freed heap memory, until the allocator reuses
-    /// it. Fails when run.
+    /// With the ring provider, only ring's AES-GCM keys (the AEAD profiles' session encryption
+    /// keys, kept by `ring::aead::LessSafeKey`) are still in the process once the contexts are
+    /// dropped: the HMAC-SHA1 states of the AES-CM and NULL profiles (RustCrypto `hmac`, built
+    /// by `rtci-crypto`) and every key the crate holds are gone. In 0.1.0 the HMAC outer state
+    /// was found after the drop.
     #[cfg(feature = "crypto-ring")]
     #[test]
-    #[ignore = "KNOWN LIMIT: with ring, AES-GCM round keys and HMAC-SHA1 states outlive the contexts in freed memory; fails when run (-- --ignored known_limit_)"]
+    fn with_ring_only_its_aes_gcm_keys_outlive_the_contexts_in_process_memory() {
+        let sessions: Vec<Session> = every_session()
+            .into_iter()
+            .filter(|s| s.provider == "ring")
+            .collect();
+        check_the_search_sees_live_keys(&sessions);
+        let left = left_behind(&sessions, |s, needle| {
+            !(s.profile.is_aead() && !needle.crate_held && needle.key.ends_with("encryption key"))
+        });
+        assert!(left.is_empty(), "found after the drop: {left:#?}");
+    }
+
+    /// KNOWN LIMIT (RFC 7714 section 13.1) with the ring provider: its AES-GCM key
+    /// (`ring::aead::LessSafeKey`: the session key and every AES round key) is still in the
+    /// process once the contexts are dropped, in freed heap memory, until the allocator reuses
+    /// it. ring's memory, not the crate's; with AWS-LC nothing outlives the contexts. Fails when
+    /// run.
+    #[cfg(feature = "crypto-ring")]
+    #[test]
+    #[ignore = "KNOWN LIMIT: with ring, AES-GCM round keys outlive the contexts in freed memory; fails when run (-- --ignored known_limit_)"]
     fn known_limit_with_ring_no_key_outlives_its_contexts_in_process_memory() {
         let sessions: Vec<Session> = every_session()
             .into_iter()
