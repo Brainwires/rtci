@@ -239,6 +239,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call with the builder as it comes stands beside it as the ignored
   `known_limit_a_capacity_drop_from_the_paths_rate_leaves_no_long_freeze`
   (`docs/test-exclusions.md`), which fails until the limit is gone.
+  (`conf/nack-11-decline-useless-repairs` removes the repair tail and the unbounded
+  receiver's old picture named above, see "Breaking changes"; that one seeded call still
+  renders nothing for 1.15 s with 2 retransmissions: the collapse itself, not the repairs.)
   THE WAY BACK: `GccInterceptorBuilder::with_bandwidth_probing(false)` gives the old start
   (8% a second) and the old figures.
   A chain without a pacer probes at the start and while the application sends less than the
