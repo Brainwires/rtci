@@ -472,12 +472,22 @@ pub struct DefaultInterceptorOptions {
     /// `false` by default and in every behaviour profile: an option to turn on. See
     /// [`RtcpSessionBuilder::with_share_following_send_rate`](interceptor::RtcpSessionBuilder::with_share_following_send_rate).
     pub rtcp_share_follows_send_rate: bool,
-    /// The share of the media received that congestion control feedback (transport-wide and
-    /// RFC 8888) is sized to. 0.05 by default. See
+    /// When congestion control feedback (transport-wide and RFC 8888) is built. By default
+    /// [`CongestionFeedbackCadence::ReceivedMedia`](interceptor::CongestionFeedbackCadence::ReceivedMedia):
+    /// every 50 to 250 ms, sized to 5% of the media received, an engine choice no
+    /// specification has (measured: see the type). The `StrictRfc` behaviour profile takes the
+    /// drafts' cadence (`PerFrame`: "once per received video frame or at least once every 30 ms
+    /// if audio-only or multi-stream", up to 100 ms, draft-ietf-rmcat-gcc-02 section 3), the
+    /// `Chrome` profile libwebrtc's (`SendEstimate`: 50 to 250 ms from 5% of the endpoint's
+    /// own send estimate). See
+    /// [`TwccReceiverBuilder::with_cadence`](interceptor::TwccReceiverBuilder::with_cadence).
+    pub congestion_feedback_cadence: interceptor::CongestionFeedbackCadence,
+    /// The share of the rate it is sized to that congestion control feedback takes with the
+    /// `ReceivedMedia` and `SendEstimate` cadences. 0.05 by default. See
     /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share).
     pub congestion_feedback_share: f64,
-    /// The longest interval between two congestion control feedback packets while media
-    /// arrives. 250 ms by default. See
+    /// The longest interval between two congestion control feedback packets with the
+    /// `ReceivedMedia` and `SendEstimate` cadences. 250 ms by default. See
     /// [`TwccReceiverBuilder::with_max_adaptive_interval`](interceptor::TwccReceiverBuilder::with_max_adaptive_interval).
     pub congestion_feedback_max_interval: Duration,
     /// Where the RTCP sessions draw their random numbers from (the report interval's
@@ -565,6 +575,10 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "rtcp_share_follows_send_rate",
                 &self.rtcp_share_follows_send_rate,
             )
+            .field(
+                "congestion_feedback_cadence",
+                &self.congestion_feedback_cadence,
+            )
             .field("congestion_feedback_share", &self.congestion_feedback_share)
             .field(
                 "congestion_feedback_max_interval",
@@ -612,6 +626,7 @@ impl DefaultInterceptorOptions {
             rtcp_congestion_feedback_in_budget: false,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
             rtcp_share_follows_send_rate: false,
+            congestion_feedback_cadence: interceptor::CongestionFeedbackCadence::ReceivedMedia,
             congestion_feedback_share: 0.05,
             congestion_feedback_max_interval: Duration::from_millis(250),
             rtcp_random: None,
@@ -1136,6 +1151,7 @@ fn with_congestion_feedback_recorders(
     options: &DefaultInterceptorOptions,
 ) -> Registry {
     let rereport_received = options.twcc_rereport_received;
+    let cadence = options.congestion_feedback_cadence;
     let share = options.congestion_feedback_share;
     let max_interval = options.congestion_feedback_max_interval;
     let wall_clock = options.wall_clock;
@@ -1147,6 +1163,7 @@ fn with_congestion_feedback_recorders(
             PerRtpSession::new(move || {
                 TwccReceiverBuilder::new()
                     .with_rereport_received(rereport_received)
+                    .with_cadence(cadence)
                     .with_feedback_share(share)
                     .with_max_adaptive_interval(max_interval)
                     .build()
@@ -1160,6 +1177,7 @@ fn with_congestion_feedback_recorders(
             Slot::Rfc8888,
             PerRtpSession::new(move || {
                 let builder = Rfc8888Builder::new()
+                    .with_cadence(cadence)
                     .with_feedback_share(share)
                     .with_max_adaptive_interval(max_interval);
                 match wall_clock {

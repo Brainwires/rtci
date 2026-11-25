@@ -14,10 +14,10 @@ API is the default and tested too (`RULES.md`).
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
 | MUST | 5048 | 26 | 7 | 2 | 3 | 3 | 0 | 663 | 5752 |
-| SHOULD | 906 | 0 | 3 | 4 | 48 | 24 | 0 | 326 | 1311 |
+| SHOULD | 906 | 2 | 3 | 4 | 46 | 24 | 0 | 326 | 1311 |
 | MAY | 500 | 0 | 0 | 12 | 21 | 70 | 0 | 177 | 780 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6526 | 26 | 10 | 19 | 75 | 98 | 0 | 1167 | 7921 |
+| all | 6526 | 28 | 10 | 19 | 73 | 98 | 0 | 1167 | 7921 |
 
 ## RFC behaviour tested
 
@@ -27,7 +27,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
 | MUST | 5089 | 5081 | 99.8 | 5048 | 99.2 |
-| SHOULD | 985 | 909 | 92.3 | 906 | 92.0 |
+| SHOULD | 985 | 911 | 92.5 | 906 | 92.0 |
 | MAY | 603 | 500 | 82.9 | 500 | 82.9 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
 
@@ -39,7 +39,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `av1-rtp.md` | SHOULD | 13 | 0 | 0 | 0 | 1 | 0 | 0 | 1 | 15 |
 | `av1-rtp.md` | MAY | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 10 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MUST | 36 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 36 |
-| `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 3 |
+| `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 1 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 3 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `draft-ietf-avtcore-rtp-sframe.md` | MUST | 30 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 30 |
 | `draft-ietf-avtcore-rtp-sframe.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
@@ -52,7 +52,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 6 | 0 | 0 | 0 | 0 | 1 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 1 | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 7 |
 | `draft-ietf-rmcat-gcc.md` | MUST | 34 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 35 |
-| `draft-ietf-rmcat-gcc.md` | SHOULD | 15 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 17 |
+| `draft-ietf-rmcat-gcc.md` | SHOULD | 15 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 17 |
 | `draft-ietf-rmcat-gcc.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc2198.md` | MUST | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 13 |
 | `rfc2198.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |

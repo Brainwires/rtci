@@ -171,6 +171,9 @@ pub struct Setup {
     /// `DefaultInterceptorOptions::rtcp_share_follows_send_rate` for the default chains, the
     /// profile's value when `None`.
     pub share_follows_send_rate: Option<bool>,
+    /// `DefaultInterceptorOptions::congestion_feedback_cadence` for the default chains, the
+    /// profile's value when `None`.
+    pub feedback_cadence: Option<rtci::interceptor::CongestionFeedbackCadence>,
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
@@ -238,6 +241,7 @@ impl Setup {
             report_from_every_ssrc: None,
             profile: None,
             share_follows_send_rate: None,
+            feedback_cadence: None,
             received_rate_bound: None,
             perturbation: Perturbation::None,
             gap_wait: None,
@@ -273,6 +277,15 @@ impl Setup {
     /// says.
     pub fn share_follows_send_rate(mut self, follows: bool) -> Self {
         self.share_follows_send_rate = Some(follows);
+        self
+    }
+
+    /// The default chains' congestion control feedback is built with `cadence`.
+    pub fn feedback_cadence(
+        mut self,
+        cadence: rtci::interceptor::CongestionFeedbackCadence,
+    ) -> Self {
+        self.feedback_cadence = Some(cadence);
         self
     }
 
@@ -695,6 +708,9 @@ impl Peer {
             };
             if let Some(follows) = setup.share_follows_send_rate {
                 options.rtcp_share_follows_send_rate = follows;
+            }
+            if let Some(cadence) = setup.feedback_cadence {
+                options.congestion_feedback_cadence = cadence;
             }
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
