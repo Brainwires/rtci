@@ -1,7 +1,7 @@
 //! The responder half of [`Mdns`]: the unique address records it owns, from probing to goodbye
 //! (RFC 6762 sections 6 to 10).
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use super::wire::{
@@ -107,14 +107,14 @@ pub(super) struct Goodbye {
     not_before: Option<Instant>,
 }
 
-/// Where a record's messages leave from: its own address when that is IPv4, so that the
-/// application can send them on that address's interface (RFC 6762 section 14). Everything
-/// goes to the IPv4 group, so an IPv6 record leaves from the unspecified IPv4 address.
+/// Where a record's messages leave from: its own address, IPv4 or IPv6, so that the
+/// application can send them on that address's interface (RFC 6762 section 14: "addresses
+/// ... MUST be valid for use on the interface on which the response is being sent"). The
+/// destination is the IPv4 group; an application whose host has IPv6 mDNS sends an IPv6
+/// record's message on the IPv6 group of the address's interface (the stream driver does,
+/// and on the IPv4 group of the same interface too).
 fn from_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => ip,
-        IpAddr::V6(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-    }
+    ip
 }
 
 /// `items` (indexes) grouped by `key`, in first-seen order. Records are aggregated into one

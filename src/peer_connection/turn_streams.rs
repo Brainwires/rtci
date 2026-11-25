@@ -713,6 +713,13 @@ impl RTCPeerConnection {
                 .as_mut()
                 .and_then(|r| r.next_attempt(now))
             {
+                if !self.address_allowed(addr, ice::AddressPurpose::StunTurnServer) {
+                    debug!("TURN server {addr}: the address policy refuses it, not used");
+                    if let Some(r) = self.streams.turn.links[index].race.as_mut() {
+                        r.failed();
+                    }
+                    continue;
+                }
                 if self.streams.turn.is_held_back(addr, now) {
                     debug!("TURN server {addr} is held back: not used");
                     if let Some(r) = self.streams.turn.links[index].race.as_mut() {

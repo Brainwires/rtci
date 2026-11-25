@@ -15,7 +15,7 @@ use crate::runtime::MulticastConfig;
 use rtci::mdns::{MDNS_MULTICAST_IPV4, MdnsRateLimit};
 use rtci::shared::TaggedBytesMut;
 use std::collections::VecDeque;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -37,8 +37,19 @@ pub(crate) const MAX_HELD_MDNS: usize = 256;
 /// process is draft-ietf-mmusic-mdns-ice-candidates section 7.1's "implementation-wide rate
 /// limit". The returned value is a handle: every clone takes from the same budget.
 pub fn process_mdns_rate_limit() -> MdnsRateLimit {
-    static LIMIT: OnceLock<MdnsRateLimit> = OnceLock::new();
-    LIMIT.get_or_init(MdnsRateLimit::default).clone()
+    PROCESS_LIMIT.get_or_init(MdnsRateLimit::default).clone()
+}
+
+static PROCESS_LIMIT: OnceLock<MdnsRateLimit> = OnceLock::new();
+
+/// Sets the process's mDNS budget ([`process_mdns_rate_limit`]) instead of the default, once,
+/// before its first use (the first driver that sends mDNS uses it).
+///
+/// # Errors
+///
+/// The budget was set or used already: `limit` is handed back, and the budget in use stays.
+pub fn set_process_mdns_rate_limit(limit: MdnsRateLimit) -> Result<(), MdnsRateLimit> {
+    PROCESS_LIMIT.set(limit)
 }
 
 /// What a driver's connection wants to send by mDNS, held to the budget.
@@ -85,16 +96,17 @@ impl MdnsEgress {
     }
 }
 
-/// The IPv4 mDNS socket: port 5353, joined to 224.0.0.251 (as rtci-mdns' `MulticastSocket`).
-pub(crate) fn mdns_v4() -> MulticastConfig {
-    MulticastConfig::mdns(MDNS_MULTICAST_IPV4.into())
+/// The IPv4 mDNS socket: port 5353, joined to 224.0.0.251 (as rtci-mdns' `MulticastSocket`) on
+/// the interface of each of `interfaces`.
+pub(crate) fn mdns_v4(interfaces: Vec<IpAddr>) -> MulticastConfig {
+    MulticastConfig::mdns(MDNS_MULTICAST_IPV4.into(), interfaces)
 }
 
-/// The IPv6 mDNS socket: `[::]:5353`, IPv6 only, joined to ff02::fb on the default interface,
-/// sending with hop limit 255 (RFC 6762 section 11). Binding fails where the host has no IPv6
-/// or cannot join the group.
-pub(crate) fn mdns_v6() -> MulticastConfig {
-    MulticastConfig::mdns(MDNS_MULTICAST_IPV6.into())
+/// The IPv6 mDNS socket: `[::]:5353`, IPv6 only, joined to ff02::fb on the interface of each of
+/// `interfaces` (the default one without an IPv6 address there), sending with hop limit 255
+/// (RFC 6762 section 11). Binding fails where the host has no IPv6 or cannot join the group.
+pub(crate) fn mdns_v6(interfaces: Vec<IpAddr>) -> MulticastConfig {
+    MulticastConfig::mdns(MDNS_MULTICAST_IPV6.into(), interfaces)
 }
 
 #[cfg(test)]
