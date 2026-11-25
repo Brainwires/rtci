@@ -270,6 +270,8 @@ pub struct ProbeController {
     drop_probe: bool,
     /// When [`poll`](Self::poll) was last called.
     polled_at: Option<Instant>,
+    /// Whether clusters leave as bursts of padding ([`set_unpaced`](Self::set_unpaced)).
+    unpaced: bool,
 }
 
 impl ProbeController {
@@ -293,6 +295,7 @@ impl ProbeController {
             drop: None,
             drop_probe: false,
             polled_at: None,
+            unpaced: false,
         }
     }
 
@@ -312,6 +315,21 @@ impl ProbeController {
     pub fn with_probe_after_drop(mut self, enabled: bool) -> Self {
         self.after_drop = enabled;
         self
+    }
+
+    /// Whether this chain's clusters leave as one burst of padding (no pacer: the congestion
+    /// controller says so when it measures a cluster whose packets left in one instant).
+    ///
+    /// Then the rate before a large drop is not probed for. A paced cluster is the media
+    /// already waiting, released faster for a few milliseconds, with padding only for what
+    /// is missing; a burst is five packets of padding on top of the media, at once. After a
+    /// drop that is 160 ms of a 300 kbit/s link put into the queue that caused the drop, once
+    /// a second: measured on the capacity instrument, it cost the capped link's target and
+    /// the audio (the figures are with [`with_probe_after_drop`](Self::with_probe_after_drop)
+    /// in the changelog). The start-up clusters and those of an application-limited sender
+    /// are still asked for.
+    pub fn set_unpaced(&mut self, unpaced: bool) {
+        self.unpaced = unpaced;
     }
 
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
@@ -362,6 +380,7 @@ impl ProbeController {
         } else if let Some(rate) = self.further.take() {
             Some(rate)
         } else if let Some((before, at)) = self.drop
+            && !self.unpaced
             && now.saturating_duration_since(at) >= PROBE_AFTER_DROP_DELAY
             && target < PROBE_AFTER_DROP_SHARE * before
             && self
@@ -487,6 +506,7 @@ impl ProbeController {
         };
         let after_drop = self
             .drop
+            .filter(|_| !self.unpaced)
             .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
         [Some(next), after_drop]
     }
