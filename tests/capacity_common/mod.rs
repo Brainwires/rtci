@@ -240,13 +240,13 @@ impl Setup {
         }
     }
 
-    /// The receivers give a gap up after `wait` and ask for a key frame.
     /// The default chains' pacer keeps (`Keep`) or flushes (`Flush`) its backlog at a collapse.
     pub fn pacer_backlog(mut self, backlog: PacerBacklog) -> Self {
         self.pacer_backlog = Some(backlog);
         self
     }
 
+    /// The receivers give a gap up after `wait` and ask for a key frame.
     pub fn gap_wait(mut self, wait: Duration) -> Self {
         self.gap_wait = Some(wait);
         self
@@ -542,6 +542,12 @@ pub struct Peer {
     /// requests (PLI / FIR) it was handed.
     pub pacer_discards: Vec<(Duration, u32, usize)>,
     pub key_requests_received: u32,
+    /// The key-frame requests the engine itself made of this peer's application (a Picture
+    /// Loss Indication with sender SSRC 0: the pacer's, at a discard or a flush of its
+    /// backlog): when, and the media SSRC named.
+    pub local_key_requests: Vec<(Duration, u32)>,
+    /// Every `OnKeyFrameRequest`: when, and the sender named.
+    pub key_frame_request_events: Vec<(Duration, RTCRtpSenderId)>,
     /// When the application was told of a selected candidate pair, with the estimate then.
     pub pair_changes: Vec<(Duration, Option<u32>)>,
     /// The lowest `availableOutgoingBitrate` of the nominated pair (webrtc-stats) and the
@@ -835,6 +841,8 @@ impl Peer {
             keyframe_requests: Vec::new(),
             pacer_discards: Vec::new(),
             key_requests_received: 0,
+            local_key_requests: Vec::new(),
+            key_frame_request_events: Vec::new(),
             pair_changes: Vec::new(),
             lowest_outgoing: None,
             lowest_estimate: None,
@@ -1248,6 +1256,9 @@ impl World {
                 RTCPeerConnectionEvent::OnPacerDiscard {
                     frames, packets, ..
                 } => peer.pacer_discards.push((at, frames, packets)),
+                RTCPeerConnectionEvent::OnKeyFrameRequest { sender, .. } => {
+                    peer.key_frame_request_events.push((at, sender));
+                }
                 _ => {}
             }
         }
@@ -1283,6 +1294,13 @@ impl World {
                 {
                     peer.force_key = true;
                     peer.key_requests_received += 1;
+                    for packet in &packets {
+                        if let Some(pli) = packet.as_any().downcast_ref::<PictureLossIndication>()
+                            && pli.sender_ssrc == 0
+                        {
+                            peer.local_key_requests.push((at, pli.media_ssrc));
+                        }
+                    }
                 }
                 _ => {}
             }

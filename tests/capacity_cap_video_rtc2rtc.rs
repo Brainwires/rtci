@@ -893,6 +893,125 @@ fn a_sender_ignoring_the_target_has_whole_frames_discarded_and_is_asked_for_key_
     Ok(())
 }
 
+/// What the application sees of a flush (docs/capacity-collapse.md), end to end through the
+/// peer connection: twenty seconds of a call at 2.5 Mbit/s each way, then the caller's
+/// uplink capped at 300 kbit/s for three seconds. Returns the world and when the cap began.
+fn collapse_run(backlog: Option<PacerBacklog>) -> Result<(World, Duration)> {
+    let mut setup = Setup::new(1, None).chain(Chain::Default);
+    if let Some(backlog) = backlog {
+        setup = setup.pacer_backlog(backlog);
+    }
+    let mut world = World::connected(&setup)?;
+    let t = world.now + Duration::from_secs(20);
+    world.advance(t)?;
+    let capped_at = world.elapsed();
+    world.uplinks[0].set_profile(LinkProfile::capped_300k());
+    let t = world.now + Duration::from_secs(3);
+    world.advance(t)?;
+    Ok((world, capped_at))
+}
+
+/// The default chain, as an application gets it. When the path's capacity collapses the pacer
+/// gives its backlog up, and the application is asked for a key frame of its video stream the
+/// way a receiver asks: a Picture Loss Indication for the stream's SSRC with sender SSRC 0 on
+/// `RTCPeerConnection::poll_read` (`RTCMessage::RtcpPacket`), and
+/// `RTCPeerConnectionEvent::OnKeyFrameRequest` naming the video sender, both at the instant
+/// of the flush, with `OnPacerDiscard` for what was queued. One request per flush for the one
+/// video stream, none for the audio; a source that answers a PLI with a key frame writes one
+/// as its next frame. Nothing of the kind happens at either peer while the path holds.
+#[test]
+fn a_capacity_collapse_asks_the_application_for_a_key_frame_of_its_video_stream() -> Result<()> {
+    let (world, capped_at) = collapse_run(None)?;
+    let caller = &world.peers[0];
+    let callee = &world.peers[1];
+    let video_ssrc = 0x1000_0001;
+    let video_sender = caller.video.expect("the caller sends video");
+    for peer in [caller, callee] {
+        assert!(
+            peer.local_key_requests
+                .iter()
+                .all(|(at, _)| *at >= capped_at)
+                && peer.pacer_discards.iter().all(|(at, ..)| *at >= capped_at),
+            "nothing is flushed while the path holds: {:?} {:?}",
+            peer.local_key_requests,
+            peer.pacer_discards
+        );
+    }
+    let requests = &caller.local_key_requests;
+    assert!(
+        !requests.is_empty(),
+        "the collapse asked the application for no key frame"
+    );
+    assert!(
+        requests.len() <= 4,
+        "a collapse from 2.5 Mbit/s halves at most four times to the floor: {requests:?}"
+    );
+    for (index, (at, ssrc)) in requests.iter().enumerate() {
+        assert_eq!(
+            video_ssrc, *ssrc,
+            "only the video stream is asked: {requests:?}"
+        );
+        assert!(
+            index == 0 || requests[index - 1].0 < *at,
+            "one request for the stream at a flush: {requests:?}"
+        );
+        assert!(
+            caller
+                .key_frame_request_events
+                .iter()
+                .any(|(when, sender)| when == at && *sender == video_sender),
+            "no OnKeyFrameRequest for the video sender at {at:?}: {:?}",
+            caller.key_frame_request_events
+        );
+        // The application's answer: the next frame it writes is a key frame (30 frames a
+        // second, at the target it reads every 100 ms).
+        assert!(
+            caller
+                .keyframes_sent
+                .iter()
+                .any(|sent| *sent >= *at && *sent <= *at + Duration::from_millis(150)),
+            "no key frame written after the request at {at:?}: {:?}",
+            caller.keyframes_sent
+        );
+    }
+    // What was queued at the first flush was announced with it.
+    let first = requests[0].0;
+    assert!(
+        caller
+            .pacer_discards
+            .iter()
+            .any(|(at, frames, packets)| *at == first && *frames > 0 && *packets > 0),
+        "no OnPacerDiscard at the flush at {first:?}: {:?}",
+        caller.pacer_discards
+    );
+    assert!(
+        first <= capped_at + Duration::from_secs(1),
+        "the flush came {:?} after the capacity fell",
+        first - capped_at
+    );
+    Ok(())
+}
+
+/// The same call with `PacerBacklog::Keep`: the source is paused and what it wrote is
+/// delivered; the engine asks the application for no key frame and announces no discard.
+#[test]
+fn with_the_backlog_kept_a_capacity_collapse_asks_the_application_for_nothing() -> Result<()> {
+    let (world, _) = collapse_run(Some(PacerBacklog::Keep))?;
+    let caller = &world.peers[0];
+    assert!(
+        caller.local_key_requests.is_empty() && caller.pacer_discards.is_empty(),
+        "{:?} {:?}",
+        caller.local_key_requests,
+        caller.pacer_discards
+    );
+    assert!(
+        caller.targets.iter().any(|(_, bps)| *bps == 0),
+        "the source was not paused: {:?}",
+        caller.targets
+    );
+    Ok(())
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // Read through `Debug`.
 struct PathChangeOutcome {
