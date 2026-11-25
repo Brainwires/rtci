@@ -230,3 +230,65 @@ fn abs_send_time_is_stamped_as_the_packet_passes() {
     }
     assert_eq!(vec![0, 1 << 16, 3 << 17], values);
 }
+
+/// A packet sent again as it was (the answer to a NACK when no RTX is negotiated: the media
+/// SSRC and the sequence number of the first transmission) keeps the stamp its first
+/// transmission left with. Under SRTP it is the same packet index, which protects one packet
+/// only (RFC 3711 section 3.3.1): with a new stamp it is a different packet, the SRTP sender
+/// refuses it and the retransmission never leaves. An RTX retransmission, a new packet of
+/// the retransmission stream, is stamped as it passes, and so is a packet that reuses a
+/// sequence number without being a retransmission.
+#[test]
+fn a_packet_sent_again_as_it_was_keeps_its_abs_send_time() {
+    const RTX_SSRC: u32 = 0x5151_0002;
+    let mut stamp = AbsSendTimeInterceptor::new();
+    let mut info = remote(true, false, true);
+    info.ssrc_rtx = Some(RTX_SSRC);
+    stamp.bind_local_stream(&info);
+    let epoch = Instant::now();
+    let mut pass = |ms: u64, ssrc: u32, sequence_number: u16, retransmission: bool| -> u64 {
+        let mut message = AttributedPacket::new(Packet::Rtp(rtp::Packet {
+            header: rtp::header::Header {
+                version: 2,
+                ssrc,
+                sequence_number,
+                ..Default::default()
+            },
+            payload: vec![0u8; 10].into(),
+        }));
+        if retransmission {
+            message = message.with(crate::Attribute::Retransmission);
+        }
+        stamp
+            .handle_write(TaggedPacket {
+                now: epoch + Duration::from_millis(ms),
+                transport: TransportContext::default(),
+                message,
+            })
+            .unwrap();
+        let Packet::Rtp(packet) = stamp.poll_write().unwrap().message.packet else {
+            panic!("rtp");
+        };
+        let mut data = packet.header.get_extension(AST_ID).expect("stamped");
+        rtp::extension::abs_send_time_extension::AbsSendTimeExtension::unmarshal(&mut data)
+            .unwrap()
+            .timestamp
+    };
+
+    assert_eq!(0, pass(0, SSRC, 100, false));
+    assert_eq!(1 << 16, pass(250, SSRC, 101, false));
+    // The packets again, half a second and more later: the stamps they first left with.
+    assert_eq!(0, pass(500, SSRC, 100, true));
+    assert_eq!(1 << 16, pass(750, SSRC, 101, true));
+    assert_eq!(
+        0,
+        pass(1_000, SSRC, 100, true),
+        "however often it is sent again"
+    );
+    // An RTX packet is a new packet: stamped as it passes (1.5 s is 3 << 17).
+    assert_eq!(3 << 17, pass(1_500, RTX_SSRC, 7, true));
+    // A retransmission of a packet never seen here is stamped as it passes.
+    assert_eq!(3 << 17, pass(1_500, SSRC, 5000, true));
+    // The same sequence number on a packet that is not a retransmission: a new stamp.
+    assert_eq!(3 << 17, pass(1_500, SSRC, 100, false));
+}
