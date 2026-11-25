@@ -514,7 +514,8 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         self.round_trip_time = Some(smoothed);
         self.estimator.on_round_trip_time(now, smoothed);
         if let Some(breaker) = &self.circuit_breaker {
-            breaker.report_round_trip_time(smoothed);
+            // Each measurement as it is: the breaker smooths Tr itself (RFC 8083 section 3).
+            breaker.report_round_trip_time(sample);
         }
     }
 

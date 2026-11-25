@@ -282,8 +282,8 @@ pub use cc::probe::{
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
 pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};
 pub use circuit_breaker::{
-    CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
-    CircuitBreakerState,
+    CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerNotice,
+    CircuitBreakerReason, CircuitBreakerState,
     DEFAULT_NON_REPORTING_THRESHOLD as CIRCUIT_BREAKER_NON_REPORTING_THRESHOLD,
     DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
     PacketSize as CircuitBreakerPacketSize,
@@ -387,9 +387,11 @@ pub use pacing::pacer::{
     BURST_TIME as PACER_BURST_TIME, MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer,
 };
 pub use pacing::sender::{
-    DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
+    Backlog as PacerBacklog, DEFAULT_BITRATE as PACER_DEFAULT_BITRATE,
+    DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
     DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerDiscard,
-    PacerInterceptor, PacerPause, QueueOverflow as PacerQueueOverflow, RetransmissionsLeft,
+    PacerFlush, PacerInterceptor, PacerPause, QueueOverflow as PacerQueueOverflow,
+    RetransmissionsLeft,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;
@@ -415,8 +417,8 @@ pub use rtcp_session::identity::{RtcpRandom, generate_rtcp_cname};
 pub use rtcp_session::{
     RTCP_SESSION_DEFAULT_MTU, RTCP_SESSION_DEFAULT_T_RR_INTERVAL, RTCP_SESSION_MIN_BANDWIDTH,
     RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH,
-    RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpSessionBuilder, RtcpSessionControl,
-    RtcpSessionEvent, RtcpSessionInterceptor,
+    RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpReportingInterval, RtcpSessionBuilder,
+    RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
 };
 pub use rtp_session::{PathChanged, PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};

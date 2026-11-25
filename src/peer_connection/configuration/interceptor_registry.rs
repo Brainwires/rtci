@@ -354,6 +354,16 @@ pub struct DefaultInterceptorOptions {
     /// the target as libwebrtc's pacer does. See
     /// [`PacerBuilder::with_queue_overflow`](interceptor::PacerBuilder::with_queue_overflow).
     pub pacer_queue_overflow: interceptor::PacerQueueOverflow,
+    /// What the pacer does with its queue when the path's capacity collapses (the target
+    /// falls to half or less of what the queued media was written for and the queue would
+    /// take a second or more to leave): flushed by default, with a key-frame request
+    /// (`RTCPeerConnectionEvent::OnKeyFrameRequest`), so the receiver's next picture is a
+    /// current one; [`PacerBacklog::Keep`](interceptor::PacerBacklog::Keep) pauses the source
+    /// and delivers the queue and every retransmission in order, for a receiver that cannot
+    /// resume at a key frame. See
+    /// [`PacerBuilder::with_backlog`](interceptor::PacerBuilder::with_backlog) and
+    /// `docs/capacity-collapse.md`.
+    pub pacer_backlog: interceptor::PacerBacklog,
     /// Whether the path is probed for capacity above the target with short clusters of
     /// packets, as libwebrtc does. `true` by default: RFC 8836 section 2 asks that a
     /// congestion controller "adapt as quickly as possible to initial network conditions"
@@ -442,6 +452,19 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Whether the chain carries the RTP circuit breaker (RFC 8083). `true` by default: RFC
+    /// 8834 section 7.1, "WebRTC Endpoints MUST implement the RTP circuit breaker algorithm".
+    /// `false` in the `Chrome` behaviour profile: libwebrtc has none. Without it
+    /// [`DefaultInterceptorHandles::circuit_breaker`] watches nothing and no
+    /// `OnCircuitBreaker` event is raised.
+    pub circuit_breaker: bool,
+    /// Whether the circuit breaker restarts a ceased flow itself when the receiver's reports
+    /// on the transport's other flows show what stopped it has gone (RFC 8083 section 4.5:
+    /// "unless the sender has received information that the congestion has dissipated").
+    /// `true` by default; with `false` every restart is the application's
+    /// (`CircuitBreakerHandle::restart` after `OnCircuitBreaker`). See
+    /// [`CircuitBreakerBuilder::with_automatic_restart`](interceptor::CircuitBreakerBuilder::with_automatic_restart).
+    pub circuit_breaker_automatic_restart: bool,
     /// Whether congestion control feedback that leaves at once counts against the RTCP
     /// bandwidth of the regular reports, which then space out to keep both inside it. `false`
     /// by default. See
@@ -494,6 +517,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("unnegotiated_tmmbr", &self.unnegotiated_tmmbr)
             .field("pacer_immediate_release", &self.pacer_immediate_release)
             .field("pacer_queue_overflow", &self.pacer_queue_overflow)
+            .field("pacer_backlog", &self.pacer_backlog)
             .field("bandwidth_probing", &self.bandwidth_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
@@ -526,6 +550,11 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field(
                 "circuit_breaker_packet_size",
                 &self.circuit_breaker_packet_size,
+            )
+            .field("circuit_breaker", &self.circuit_breaker)
+            .field(
+                "circuit_breaker_automatic_restart",
+                &self.circuit_breaker_automatic_restart,
             )
             .field(
                 "rtcp_congestion_feedback_in_budget",
@@ -562,6 +591,7 @@ impl DefaultInterceptorOptions {
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
             pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
+            pacer_backlog: interceptor::PacerBacklog::default(),
             bandwidth_probing: true,
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
@@ -577,6 +607,8 @@ impl DefaultInterceptorOptions {
             ulpfec_zero_mutable_extensions: false,
             video_flexfec: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            circuit_breaker: true,
+            circuit_breaker_automatic_restart: true,
             rtcp_congestion_feedback_in_budget: false,
             rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
             congestion_feedback_share: 0.05,
@@ -697,22 +729,24 @@ pub fn register_default_interceptors_with_options(
     // RTCP), given to that transport's congestion controller.
     let transports = TransportHandles::default();
     let circuit_breaker = transports.breaker_for(0);
-    let registry = {
+    let registry = if options.circuit_breaker {
         let transports = transports.clone();
         let packet_size = options.circuit_breaker_packet_size;
+        let automatic_restart = options.circuit_breaker_automatic_restart;
+        let breaker = move || {
+            CircuitBreakerBuilder::new()
+                .with_packet_size(packet_size)
+                .with_automatic_restart(automatic_restart)
+        };
         registry.with_per_rtp_session(
             Slot::CircuitBreaker,
             PerRtpSession::with_first_for_sessions(
-                CircuitBreakerBuilder::new()
-                    .with_packet_size(packet_size)
-                    .build_with_handle(&circuit_breaker),
-                move |session| {
-                    CircuitBreakerBuilder::new()
-                        .with_packet_size(packet_size)
-                        .build_with_handle(&transports.breaker_for(session))
-                },
+                breaker().build_with_handle(&circuit_breaker),
+                move |session| breaker().build_with_handle(&transports.breaker_for(session)),
             ),
         )
+    } else {
+        registry
     };
 
     // The estimator runs on whichever per-packet feedback each stream negotiated: RFC 8888
@@ -744,6 +778,7 @@ pub fn register_default_interceptors_with_options(
     transports.insert_congestion_control(0, handle.clone());
     let pacer_immediate_release = options.pacer_immediate_release;
     let pacer_queue_overflow = options.pacer_queue_overflow;
+    let pacer_backlog = options.pacer_backlog;
     let registry = registry
         .with_per_rtp_session(
             Slot::CongestionControl,
@@ -771,6 +806,7 @@ pub fn register_default_interceptors_with_options(
                     .with_target_bitrate(initial_target)
                     .with_immediate_release(pacer_immediate_release)
                     .with_queue_overflow(pacer_queue_overflow)
+                    .with_backlog(pacer_backlog)
                     .build()
             }),
         );

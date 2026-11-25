@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod key_frame_start_test;
+
 /// AV1 payload format ([RFC 9628]).
 pub mod av1;
 /// Comfort noise payload format ([RFC 3389]).

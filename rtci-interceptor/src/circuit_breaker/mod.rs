@@ -16,9 +16,33 @@
 //! | Media usability (4.4) | reported loss or delay stayed past the application's bound for the application's period |
 //!
 //! A tripped flow ceases transmission (4.5): its RTP is dropped here, above the TWCC sender and the
-//! send history, so a packet that does not leave is neither numbered nor counted. It is not
-//! restarted automatically; the application restarts it through [`CircuitBreakerHandle`], and not
-//! before the interval that tripped it has passed again.
+//! send history, so a packet that does not leave is neither numbered nor counted. The
+//! application is told ([`CircuitBreakerNotice`]) and can restart it through
+//! [`CircuitBreakerHandle`], not before the interval that tripped it has passed again. The
+//! breaker restarts it itself only on what section 4.5 allows an automatic restart on,
+//! "information that the congestion has dissipated": the receiver's own reports on another
+//! flow of the same transport (see [`CircuitBreakerBuilder::with_automatic_restart`]).
+//!
+//! # The intervals
+//!
+//! Every count above is in reporting intervals of the receiver, Tdr: "the sender's estimate of
+//! the deterministic RTCP reporting interval, Td, calculated by a receiver of the data it is
+//! sending", which "can be estimated by executing the algorithm in Section 6.2 of \[RFC3550\]"
+//! (section 3). The RTCP session of the chain runs that algorithm and says what it gives
+//! ([`RtcpReportingInterval`](crate::RtcpReportingInterval), on every RTCP packet it hands
+//! application-ward); the breaker takes it as the least Tdr can be, and a receiver whose
+//! reports come further apart than that (a minimum interval of its own: RTP/AVP's five
+//! seconds, a `T_rr_interval`, a browser's fixed second) has the interval its reports show
+//! (section 4.3: "If the incoming RTCP SR or RR packets are using a reduced minimum RTCP
+//! reporting interval ... then that reduced RTCP reporting interval is used"). Reports that
+//! come closer together than the calculated interval (early feedback packets that carry a
+//! report) are each counted and do not shorten Tdr (section 5: they are "counted towards the
+//! circuit breaker conditions", which "will potentially make the RTP circuit breaker trigger
+//! earlier"). Without an RTCP session in the chain Tdr is the spacing of the reports.
+//!
+//! With RTP/AVPF and no `T_rr_interval` the calculated interval of a call that carries video
+//! is some tens of milliseconds, so k = 5 reports without progress are a quarter of a second
+//! or less: the breaker's timescale is the receiver's reporting timescale, as the RFC has it.
 
 use crate::Interceptor;
 use crate::never_sent::NeverSent;
@@ -49,6 +73,16 @@ const FRAME_INTERVAL_WINDOW: Duration = Duration::from_secs(10);
 /// How many sender reports are remembered to turn a report block's LSR into a send instant.
 const REMEMBERED_SENDER_REPORTS: usize = 16;
 
+/// How many departures of a flow are remembered until a report covers them.
+const REMEMBERED_DEPARTURES: usize = 4096;
+
+/// How many times the hold of a flow that trips again soon after a restart is doubled.
+const MAX_HOLD_DOUBLINGS: u32 = 6;
+
+/// A restarted flow that has run this many times its last hold without tripping starts over
+/// with the triggering interval alone as its hold.
+const CLEAN_RUN_HOLDS: u32 = 10;
+
 /// Which breaker stopped a flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -61,6 +95,33 @@ pub enum CircuitBreakerReason {
     Congestion,
     /// Loss or delay stayed past the application's usability bound (section 4.4).
     MediaUnusable,
+}
+
+/// The circuit breaker ceased or restarted a flow (RFC 8083 section 4.5).
+///
+/// The breaker sends it application-ward, on an empty RTCP carrier on its read leg, at the
+/// instant a flow ceases and when a restart takes effect: one the application asked for
+/// ([`CircuitBreakerHandle::restart`]) or one the breaker made on the receiver's reports
+/// ([`CircuitBreakerBuilder::with_automatic_restart`]). A ceased flow's RTP is dropped at the
+/// breaker until it is restarted. Section 4.5: "RTP flows halted by the circuit breaker
+/// SHOULD NOT be restarted automatically unless the sender has received information that the
+/// congestion has dissipated or can reasonably be expected to have dissipated"; where no such
+/// information can reach the breaker (every flow of the transport has ceased) only the
+/// application can restart the flow, so it has to hear of it: the peer connection hands this
+/// to the application as `RTCPeerConnectionEvent::OnCircuitBreaker`. The pacer reads it on
+/// its way past and stops charging the flow's packets to its budget (they do not leave).
+/// Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CircuitBreakerNotice {
+    /// The flow (a media, RTX or FEC SSRC this endpoint sends).
+    pub ssrc: u32,
+    /// The breaker that tripped, `None` for a flow that was restarted.
+    pub ceased: Option<CircuitBreakerReason>,
+    /// For a ceased flow: how long from now until a restart is accepted (section 4.5: "the
+    /// reaction to a triggered circuit breaker lasts for at least the triggering interval").
+    /// The triggering interval, doubled for each time the flow tripped again soon after a
+    /// restart.
+    pub restart_after: Duration,
 }
 
 /// What the circuit breaker is doing with one flow.
@@ -127,6 +188,7 @@ struct Config {
     reduce_before_ceasing: bool,
     group: bool,
     usability: Option<MediaUsability>,
+    automatic_restart: bool,
 }
 
 /// Builder for [`CircuitBreakerInterceptor`].
@@ -158,6 +220,7 @@ impl Default for CircuitBreakerBuilder {
                 reduce_before_ceasing: false,
                 group: false,
                 usability: None,
+                automatic_restart: true,
             },
         }
     }
@@ -235,6 +298,38 @@ impl CircuitBreakerBuilder {
         self
     }
 
+    /// Whether the breaker restarts a ceased flow itself when the receiver's reports show what
+    /// stopped it has gone (`true`, the default), or leaves every restart to the application
+    /// (`false`).
+    ///
+    /// Section 4.5: "RTP flows halted by the circuit breaker SHOULD NOT be restarted
+    /// automatically unless the sender has received information that the congestion has
+    /// dissipated or can reasonably be expected to have dissipated." The information the
+    /// breaker takes is the receiver's reports on another flow this endpoint sends on the same
+    /// transport, received after the flow ceased:
+    ///
+    /// - a flow stopped by the media timeout (4.2, "most likely due to a path failure")
+    ///   restarts when such a report shows the other flow's packets arriving: the path
+    ///   delivers;
+    /// - a flow stopped by the congestion breaker (4.3) restarts when those reports, over a
+    ///   whole hold, show a loss at which the rate that tripped it is within ten times the
+    ///   TCP throughput again (or no loss at all);
+    /// - a flow stopped for unusable media (4.4) restarts when they show loss and round trip
+    ///   time back inside the application's bound over a whole hold;
+    /// - a flow stopped by the RTCP timeout (4.1) restarts when a report on an SSRC this
+    ///   endpoint sends arrives again: "the receiver and return path are working".
+    ///
+    /// Never before the hold has passed ("the reaction to a triggered circuit breaker lasts
+    /// for at least the triggering interval"), and a flow that trips again soon after a
+    /// restart is held twice as long each time (up to 64 times the triggering interval), so a
+    /// path that keeps failing is tried ever more rarely. When every flow of the transport has
+    /// ceased nothing is sent that a report could speak of: the application restarts
+    /// ([`CircuitBreakerHandle::restart`]) or nobody does.
+    pub fn with_automatic_restart(mut self, automatic: bool) -> Self {
+        self.config.automatic_restart = automatic;
+        self
+    }
+
     /// Build the interceptor and the handle the application watches it through.
     pub fn build(self) -> (CircuitBreakerInterceptor, CircuitBreakerHandle) {
         let handle = CircuitBreakerHandle::new();
@@ -248,6 +343,7 @@ impl CircuitBreakerBuilder {
             config: self.config,
             flows: HashMap::new(),
             awaiting_rtcp_since: None,
+            calculated_interval: None,
             shared: handle.shared.clone(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -260,7 +356,7 @@ struct Shared {
     states: HashMap<u32, CircuitBreakerState>,
     restarts: Vec<u32>,
     dropped: u64,
-    /// A round trip time measured elsewhere in the chain.
+    /// The round trip time measured elsewhere in the chain, smoothed as section 3 says.
     round_trip_time: Option<Duration>,
 }
 
@@ -270,7 +366,7 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The application's view of the circuit breaker, and the only way a ceased flow restarts.
+/// The application's view of the circuit breaker, and its way to restart a ceased flow.
 #[derive(Clone)]
 pub struct CircuitBreakerHandle {
     shared: Arc<Mutex<Shared>>,
@@ -325,8 +421,8 @@ impl CircuitBreakerHandle {
             .reduce(f64::min)
     }
 
-    /// A round trip time measured from congestion-control feedback, for the breaker to use
-    /// when it cannot measure one itself.
+    /// One round trip time measurement from congestion-control feedback, for the breaker to
+    /// use when it cannot measure one itself.
     ///
     /// Tr is the RFC 3550 round trip time: a report block's LSR and DLSR against the instant
     /// the named sender report left. The breaker only knows that instant for sender reports
@@ -334,8 +430,16 @@ impl CircuitBreakerHandle {
     /// set places it) none does, and without Tr the congestion breaker could never compare the
     /// flow with TCP. The congestion controller's feedback gives the same quantity many times
     /// a second.
+    ///
+    /// Give each measurement as it is made: this smooths them as section 3 says ("Tr = (0.8 *
+    /// Tr) + (0.2 * Tr_new) where Tr_new is the latest RTT estimate"), once. A value that is
+    /// already an average makes Tr trail the path by that average's memory on top of its own.
     pub fn report_round_trip_time(&self, round_trip_time: Duration) {
-        lock(&self.shared).round_trip_time = Some(round_trip_time);
+        let mut shared = lock(&self.shared);
+        shared.round_trip_time = Some(match shared.round_trip_time {
+            Some(previous) => previous.mul_f64(0.8) + round_trip_time.mul_f64(0.2),
+            None => round_trip_time,
+        });
     }
 
     /// How many RTP packets of ceased flows were dropped.
@@ -345,10 +449,12 @@ impl CircuitBreakerHandle {
 
     /// Restart a ceased flow. Returns whether it restarted.
     ///
-    /// A flow is not restarted automatically (section 4.5): this is the application saying the
-    /// congestion can be expected to have gone. It is refused until the interval that tripped
-    /// the breaker has passed again, so the reaction to a tripped breaker lasts at least that
-    /// long however often a restart is attempted.
+    /// This is the application saying the congestion can be expected to have gone (section
+    /// 4.5), for a flow the breaker has no information to restart on by itself
+    /// ([`CircuitBreakerBuilder::with_automatic_restart`]). It is refused until the hold has
+    /// passed (the interval that tripped the breaker, doubled for each trip that followed a
+    /// restart closely), so the reaction to a tripped breaker lasts at least the triggering
+    /// interval however often a restart is attempted.
     pub fn restart(&self, ssrc: u32, now: Instant) -> bool {
         let mut shared = lock(&self.shared);
         match shared.states.get(&ssrc) {
@@ -420,6 +526,71 @@ struct Flow {
     /// Sender reports sent for this flow: the middle 32 bits of the NTP timestamp, and when.
     sender_reports: VecDeque<(u32, Instant)>,
     unusable_since: Option<Instant>,
+    /// The packets no report has covered yet: sequence number and when each left, oldest
+    /// first. What a report that shows no progress is held against (section 4.2).
+    unreported: VecDeque<(u16, Instant)>,
+    /// The newest sequence number that left.
+    newest_sent: Option<u16>,
+    /// What stopped the flow and what a restart waits for, while it is ceased.
+    halt: Option<Halt>,
+    /// How many times in a row the flow tripped soon after a restart (1 for a first trip).
+    trips: u32,
+    /// The hold of the last trip.
+    last_hold: Duration,
+    /// When the flow was last restarted.
+    restarted_at: Option<Instant>,
+}
+
+/// A ceased flow: what stopped it, and what the receiver's reports on the transport's other
+/// flows have shown since (the information section 4.5 lets a restart rest on).
+#[derive(Debug, Clone, Copy)]
+struct Halt {
+    reason: CircuitBreakerReason,
+    /// How long the reaction lasts at least.
+    hold: Duration,
+    restart_after: Instant,
+    /// The rate, in bytes per second, and the packet size the congestion breaker tripped at.
+    rate: f64,
+    packet_size: f64,
+    /// The start of the stretch of reports being weighed.
+    since: Instant,
+    /// Over that stretch, from reports that showed another flow's packets arriving: the time
+    /// they cover, in seconds, and the fraction lost weighted by it.
+    covered: f64,
+    lost: f64,
+}
+
+/// A breaker that tripped: which, the interval that triggered it, and for the congestion
+/// breaker the rate (bytes per second) and packet size it was judged at.
+#[derive(Debug, Clone, Copy)]
+struct Trip {
+    reason: CircuitBreakerReason,
+    interval: Duration,
+    rate: f64,
+    packet_size: f64,
+}
+
+impl Trip {
+    fn new(reason: CircuitBreakerReason, interval: Duration) -> Self {
+        Self {
+            reason,
+            interval,
+            rate: 0.0,
+            packet_size: 0.0,
+        }
+    }
+}
+
+/// What a report block said about a running flow, for the ceased flows of the same transport.
+#[derive(Debug, Clone, Copy)]
+struct Witness {
+    ssrc: u32,
+    /// Whether the report showed packets of the flow arriving since the one before.
+    progressed: bool,
+    fraction_lost: f64,
+    /// The time since the flow's previous report.
+    duration: Duration,
+    round_trip_time: Option<Duration>,
 }
 
 impl Flow {
@@ -445,6 +616,12 @@ impl Flow {
             round_trip_time: None,
             sender_reports: VecDeque::new(),
             unusable_since: None,
+            unreported: VecDeque::new(),
+            newest_sent: None,
+            halt: None,
+            trips: 0,
+            last_hold: Duration::ZERO,
+            restarted_at: None,
         }
     }
 
@@ -484,6 +661,18 @@ impl Flow {
         self.never_sent.on_sent(sequence_number);
         self.packets_since_report += 1;
         self.bytes_since_report += size as u64;
+        // A sequence number behind the newest is a retransmission: the report that covers the
+        // newest covers it.
+        if self
+            .newest_sent
+            .is_none_or(|newest| is_newer(sequence_number, newest))
+        {
+            self.newest_sent = Some(sequence_number);
+            self.unreported.push_back((sequence_number, now));
+            while self.unreported.len() > REMEMBERED_DEPARTURES {
+                self.unreported.pop_front();
+            }
+        }
 
         match self.current_frame {
             Some((current, _)) if current == timestamp => {}
@@ -510,6 +699,28 @@ impl Flow {
             frame.packets += 1;
         }
     }
+
+    /// The receiver reported `highest` as the extended highest sequence number received: the
+    /// departures up to it are covered.
+    fn on_reported(&mut self, highest: u32) {
+        let highest = highest as u16;
+        while let Some((sequence_number, _)) = self.unreported.front() {
+            if is_newer(*sequence_number, highest) {
+                break;
+            }
+            self.unreported.pop_front();
+        }
+    }
+
+    /// When the oldest packet no report has covered left.
+    fn oldest_unreported(&self) -> Option<Instant> {
+        self.unreported.front().map(|(_, sent)| *sent)
+    }
+}
+
+/// Whether sequence number `a` is ahead of `b` (RFC 3550 A.1: within half the number space).
+fn is_newer(a: u16, b: u16) -> bool {
+    a != b && a.wrapping_sub(b) < 0x8000
 }
 
 /// The RTP circuit breaker of RFC 8083: stops a flow whose receiver has gone, whose media is
@@ -526,6 +737,9 @@ pub struct CircuitBreakerInterceptor {
     /// When media was first sent since RTCP last reported on it: what the RTCP timeout runs
     /// from. `None` while nothing sent is waiting to be reported on.
     awaiting_rtcp_since: Option<Instant>,
+    /// What the chain's RTCP session last calculated as the deterministic reporting interval
+    /// (RFC 3550 section 6.3.1), `None` when no RTCP session says.
+    calculated_interval: Option<crate::RtcpReportingInterval>,
     shared: Arc<Mutex<Shared>>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
@@ -551,6 +765,29 @@ fn cb_interval(g: u32, tf: Duration, tr: Duration, tdr: Duration, td: Duration) 
     ((3.0 * reaction.min(cap)) / (3.0 * tdr) - 1e-9)
         .ceil()
         .max(1.0) as u32
+}
+
+/// The sending rate, in bytes per second, over the newest of `samples` that together cover at
+/// least `span` (one reporting interval at least); 0 without samples.
+///
+/// RFC 8083 section 4.3 compares X "with the actual sending rate of the RTP stream", and the
+/// RFC 3551 text it quotes gives the timescale: "The timescale on which TCP throughput is
+/// measured is the round-trip time of the connection."
+fn recent_rate(samples: &VecDeque<LossSample>, span: Duration) -> f64 {
+    let mut covered = Duration::ZERO;
+    let mut bytes = 0u64;
+    for sample in samples.iter().rev() {
+        covered += sample.duration;
+        bytes += sample.bytes_sent;
+        if covered >= span {
+            break;
+        }
+    }
+    if covered.is_zero() {
+        0.0
+    } else {
+        bytes as f64 / covered.as_secs_f64()
+    }
 }
 
 /// s over the reporting intervals the sending rate is measured over: the bytes sent in them
@@ -620,19 +857,54 @@ impl CircuitBreakerInterceptor {
     }
 
     /// Apply the restarts the application asked for through the handle.
-    fn apply_restarts(&mut self) {
+    fn apply_restarts(&mut self, now: Instant) {
         let restarts = std::mem::take(&mut lock(&self.shared).restarts);
         for ssrc in restarts {
-            if self.flows.contains_key(&ssrc) {
-                // A restarted flow starts from nothing: what was measured before describes
-                // the path that tripped the breaker.
-                self.flows.insert(ssrc, Flow::new());
-            }
+            self.restart(now, ssrc);
         }
     }
 
+    /// The flow sends again, and the chain application-ward is told.
+    fn restart(&mut self, now: Instant, ssrc: u32) {
+        let Some(flow) = self.flows.get_mut(&ssrc) else {
+            return;
+        };
+        // A restarted flow starts from nothing: what was measured before describes the path
+        // that tripped the breaker. What it keeps is how often it tripped, which the next
+        // hold is measured by.
+        let (trips, last_hold) = (flow.trips, flow.last_hold);
+        *flow = Flow::new();
+        flow.trips = trips;
+        flow.last_hold = last_hold;
+        flow.restarted_at = Some(now);
+        self.publish(ssrc);
+        self.notify(now, ssrc, None, Duration::ZERO);
+    }
+
+    /// Tells the chain application-ward, and through it the application, that a flow ceased
+    /// or was restarted ([`CircuitBreakerNotice`]).
+    fn notify(
+        &mut self,
+        now: Instant,
+        ssrc: u32,
+        ceased: Option<CircuitBreakerReason>,
+        restart_after: Duration,
+    ) {
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport: shared::TransportContext::default(),
+            message: crate::AttributedPacket::new(Packet::Rtcp(vec![])).with(
+                crate::Attribute::Custom(Arc::new(CircuitBreakerNotice {
+                    ssrc,
+                    ceased,
+                    restart_after,
+                })),
+            ),
+        });
+    }
+
     /// Cease transmission of `ssrc`, or of every flow when flows are grouped.
-    fn cease(&mut self, ssrc: u32, reason: CircuitBreakerReason, now: Instant, hold: Duration) {
+    fn cease(&mut self, ssrc: u32, trip: Trip, now: Instant) {
         let ssrcs: Vec<u32> = if self.config.group {
             self.flows.keys().copied().collect()
         } else {
@@ -642,15 +914,45 @@ impl CircuitBreakerInterceptor {
             if let Some(flow) = self.flows.get_mut(&ssrc)
                 && !flow.is_ceased()
             {
-                flow.state = CircuitBreakerState::Ceased {
-                    reason,
-                    at: now,
-                    restart_after: now + hold,
+                // Section 4.5: "the reaction to a triggered circuit breaker lasts for at least
+                // the triggering interval". A flow that trips again soon after a restart is
+                // held twice as long each time: a restart that keeps failing is the "automatic
+                // redial" the section warns of, and has to become rare.
+                let soon = flow.restarted_at.is_some_and(|at| {
+                    now.saturating_duration_since(at)
+                        < flow.last_hold.saturating_mul(CLEAN_RUN_HOLDS)
+                });
+                flow.trips = if soon {
+                    (flow.trips + 1).min(MAX_HOLD_DOUBLINGS + 1)
+                } else {
+                    1
                 };
+                let hold = trip.interval.saturating_mul(1 << (flow.trips - 1));
+                flow.last_hold = hold;
+                let restart_after = now + hold;
+                flow.state = CircuitBreakerState::Ceased {
+                    reason: trip.reason,
+                    at: now,
+                    restart_after,
+                };
+                flow.halt = Some(Halt {
+                    reason: trip.reason,
+                    hold,
+                    restart_after,
+                    rate: trip.rate,
+                    packet_size: trip.packet_size,
+                    since: now,
+                    covered: 0.0,
+                    lost: 0.0,
+                });
                 // Stopping a stream cancels its media timeout breaker (section 4.2).
                 flow.stalled_reports = 0;
-                log::warn!("RTP circuit breaker: SSRC {ssrc:#x} ceased transmission ({reason:?})");
+                log::warn!(
+                    "RTP circuit breaker: SSRC {ssrc:#x} ceased transmission ({:?}), held {hold:?}",
+                    trip.reason
+                );
                 self.publish(ssrc);
+                self.notify(now, ssrc, Some(trip.reason), hold);
             }
         }
     }
@@ -659,9 +961,106 @@ impl CircuitBreakerInterceptor {
         self.config.rtcp_interval * RTCP_TIMEOUT_INTERVALS
     }
 
-    /// One report block about a flow this endpoint sends.
-    fn on_report_block(&mut self, now: Instant, report: &rtcp::reception_report::ReceptionReport) {
+    /// A report on a running flow, held against the ceased flows of the same transport:
+    /// section 4.5's "information that the congestion has dissipated".
+    fn on_witness(&mut self, now: Instant, witness: Witness) {
+        if !self.config.automatic_restart {
+            return;
+        }
         let config = self.config;
+        let mut restarts = Vec::new();
+        for (ssrc, flow) in self.flows.iter_mut() {
+            if *ssrc == witness.ssrc {
+                continue;
+            }
+            let Some(halt) = flow.halt.as_mut() else {
+                continue;
+            };
+            match halt.reason {
+                // "Most likely due to a path failure" (section 4): packets of another flow
+                // arriving over the same 5-tuple show the path delivers.
+                CircuitBreakerReason::MediaTimeout => {
+                    if witness.progressed && now >= halt.restart_after {
+                        restarts.push(*ssrc);
+                    }
+                }
+                // A report on an SSRC this endpoint sends, see `on_rtcp`.
+                CircuitBreakerReason::RtcpTimeout => {}
+                CircuitBreakerReason::Congestion | CircuitBreakerReason::MediaUnusable => {
+                    if witness.progressed {
+                        let duration = witness.duration.as_secs_f64();
+                        halt.covered += duration;
+                        halt.lost += witness.fraction_lost * duration;
+                    }
+                    if now.saturating_duration_since(halt.since) < halt.hold {
+                        continue;
+                    }
+                    // A whole hold of reports: what do they say of the path now?
+                    let informed = halt.covered >= halt.hold.as_secs_f64() / 2.0;
+                    let loss = if halt.covered > 0.0 {
+                        halt.lost / halt.covered
+                    } else {
+                        0.0
+                    };
+                    let dissipated = informed
+                        && match halt.reason {
+                            CircuitBreakerReason::Congestion => {
+                                loss <= 0.0
+                                    || witness.round_trip_time.is_some_and(|tr| {
+                                        halt.rate
+                                            <= 10.0
+                                                * tcp_throughput(
+                                                    halt.packet_size,
+                                                    tr,
+                                                    loss,
+                                                    config.full_tcp_equation,
+                                                )
+                                    })
+                            }
+                            _ => config.usability.is_none_or(|usability| {
+                                loss <= usability.max_loss
+                                    && witness
+                                        .round_trip_time
+                                        .is_none_or(|tr| tr <= usability.max_round_trip_time)
+                            }),
+                        };
+                    if dissipated {
+                        restarts.push(*ssrc);
+                    } else {
+                        // Not yet: the next verdict is on another whole hold of reports.
+                        halt.since = now;
+                        halt.covered = 0.0;
+                        halt.lost = 0.0;
+                    }
+                }
+            }
+        }
+        for ssrc in restarts {
+            log::info!("RTP circuit breaker: SSRC {ssrc:#x} restarted on the receiver's reports");
+            self.restart(now, ssrc);
+        }
+    }
+
+    /// One report block about a flow this endpoint sends, from a sender report or a receiver
+    /// report.
+    fn on_report_block(
+        &mut self,
+        now: Instant,
+        report: &rtcp::reception_report::ReceptionReport,
+        in_sender_report: bool,
+    ) {
+        let config = self.config;
+        // What the RTCP session calculates for a member in the receiver's place (RFC 8083
+        // section 3: "whether the receiver is sending SR or RR packets"). Tdr above five
+        // seconds is not to be configured (section 4.3), so the calculation claims no more.
+        let calculated = self.calculated_interval.map(|interval| {
+            if in_sender_report {
+                interval.sender
+            } else {
+                interval.receiver
+            }
+            .min(DEFAULT_RTCP_INTERVAL)
+        });
         let Some(flow) = self.flows.get_mut(&report.ssrc) else {
             return;
         };
@@ -686,17 +1085,15 @@ impl CircuitBreakerInterceptor {
         }
 
         // No sender report of this flow was seen leaving (the report generator is wire-ward of
-        // here): Tr is the round trip time the congestion controller measured.
+        // here): Tr is the round trip time the congestion controller measured, smoothed where
+        // its measurements are handed in (`CircuitBreakerHandle::report_round_trip_time`).
         if flow.sender_reports.is_empty()
             && let Some(reported) = lock(&self.shared).round_trip_time
         {
-            flow.round_trip_time = Some(match flow.round_trip_time {
-                Some(previous) => previous.mul_f64(0.8) + reported.mul_f64(0.2),
-                None => reported,
-            });
+            flow.round_trip_time = Some(reported);
         }
 
-        // Tdr, from how often this receiver actually reports.
+        // How often this receiver actually reports.
         let since_last = flow
             .last_report_at
             .map(|last| now.saturating_duration_since(last));
@@ -709,15 +1106,24 @@ impl CircuitBreakerInterceptor {
         flow.last_report_at = Some(now);
         flow.reports_received += 1;
 
+        // Tdr: the calculated deterministic interval, or the spacing of the reports where that
+        // is longer (the receiver uses a minimum interval the calculation cannot know of).
+        // Without an RTCP session to calculate it, the spacing; Td until there is one.
+        let tdr = match (calculated, flow.receiver_interval) {
+            (Some(calculated), Some(observed)) => calculated.max(observed),
+            (Some(calculated), None) => calculated,
+            (None, Some(observed)) => observed,
+            (None, None) => config.rtcp_interval,
+        };
         let tf = flow.frame_interval();
         let tr = flow.round_trip_time.unwrap_or_default();
-        let tdr = flow.receiver_interval.unwrap_or(config.rtcp_interval);
         let sent_packets = std::mem::take(&mut flow.packets_since_report);
         let sent_bytes = std::mem::take(&mut flow.bytes_since_report);
         log::debug!(
             "circuit breaker: report on {:#x}: fraction lost {}/256, cumulative lost {}, \
-             extended highest {}, jitter {}, LSR {:#x}, DLSR {}; Tr {:?} (shared {:?}), Tdr {:?}, \
-             Tf {:?}, sent since last {} packets / {} bytes, report {}",
+             extended highest {}, jitter {}, LSR {:#x}, DLSR {}; Tr {:?} (shared {:?}), Tdr {:?} \
+             (calculated {:?}, observed {:?}), Tf {:?}, sent since last {} packets / {} bytes, \
+             report {}",
             report.ssrc,
             report.fraction_lost,
             report.total_lost,
@@ -728,6 +1134,8 @@ impl CircuitBreakerInterceptor {
             flow.round_trip_time,
             lock(&self.shared).round_trip_time,
             tdr,
+            calculated,
+            flow.receiver_interval,
             tf,
             sent_packets,
             sent_bytes,
@@ -740,18 +1148,36 @@ impl CircuitBreakerInterceptor {
             Some(previous) => report.last_sequence_number > previous,
             None => true,
         };
-        flow.highest_sequence = Some(
-            flow.highest_sequence
-                .map_or(report.last_sequence_number, |previous| {
-                    previous.max(report.last_sequence_number)
-                }),
-        );
-        let mut trip: Option<(CircuitBreakerReason, Duration)> = None;
+        let highest = flow
+            .highest_sequence
+            .map_or(report.last_sequence_number, |previous| {
+                previous.max(report.last_sequence_number)
+            });
+        flow.highest_sequence = Some(highest);
+        flow.on_reported(highest);
+        // "If RTP data packets are being sent": a flow that has sent nothing for twice the
+        // longest of its intervals has stopped (a paused pacer, a muted source), and
+        // "When stopping sending an RTP stream, a sender MUST cancel the corresponding media
+        // timeout circuit breaker."
+        let slowest = tf.max(tr).max(tdr);
+        let sending = flow
+            .last_departure
+            .is_some_and(|sent| now.saturating_duration_since(sent) <= slowest * 2);
+        // "An RTCP packet indicating that its media was not received": a packet the report
+        // does not cover left long enough ago to have arrived and been reported, a round trip
+        // at least. A report that comes sooner than that after the packet says nothing of it.
+        let missed = flow
+            .oldest_unreported()
+            .is_some_and(|sent| now.saturating_duration_since(sent) >= tr);
+        let mut trip: Option<Trip> = None;
         if progressed {
             // The media is arriving: the breaker is cancelled and set anew.
             flow.stalled_reports = 0;
             flow.media_timeout = timeout;
-        } else if sent_packets > 0 || flow.stalled_reports > 0 {
+        } else if !sending {
+            flow.stalled_reports = 0;
+            flow.media_timeout = timeout;
+        } else if missed {
             // Media was sent and the receiver did not see it. Reconsider: the timeout only
             // ever extends.
             flow.media_timeout = flow.media_timeout.max(timeout);
@@ -763,7 +1189,10 @@ impl CircuitBreakerInterceptor {
                 flow.media_timeout
             );
             if flow.stalled_reports >= flow.media_timeout {
-                trip = Some((CircuitBreakerReason::MediaTimeout, tdr * flow.media_timeout));
+                trip = Some(Trip::new(
+                    CircuitBreakerReason::MediaTimeout,
+                    tdr * flow.media_timeout,
+                ));
             }
         }
 
@@ -856,16 +1285,21 @@ impl CircuitBreakerInterceptor {
             let loss = average.min(net_loss(&flow.losses).unwrap_or(average));
             let bytes: u64 = flow.losses.iter().map(|sample| sample.bytes_sent).sum();
             let sending_rate = bytes as f64 / window.as_secs_f64();
+            // "The actual sending rate of the RTP stream": what it sends now, over a round
+            // trip (and a group of frames at least). CB_INTERVAL is there "to give the
+            // congestion control algorithm time to react", so a flow whose rate came down
+            // inside it is judged at the rate it came down to. The breaker trips on a flow
+            // that was above ten times X over the intervals the loss is averaged over and
+            // still is.
+            let actual_rate = recent_rate(&flow.losses, tr.max(tf * config.frame_group_size));
+            let bound = 10.0 * tcp_throughput(packet_size, tr, loss, config.full_tcp_equation);
             log::debug!(
                 "circuit breaker: {:#x}: CB_INTERVAL {interval}, loss {loss:.4} over {window:?}, \
-                 sending {sending_rate:.0} B/s, s {packet_size:.0} B, Tr {tr:?}, TCP {:.0} B/s",
+                 sending {sending_rate:.0} B/s (now {actual_rate:.0} B/s), s {packet_size:.0} B, \
+                 Tr {tr:?}, 10 x TCP {bound:.0} B/s",
                 report.ssrc,
-                tcp_throughput(packet_size, tr, loss, config.full_tcp_equation),
             );
-            if loss > 0.0
-                && sending_rate
-                    > 10.0 * tcp_throughput(packet_size, tr, loss, config.full_tcp_equation)
-            {
+            if loss > 0.0 && sending_rate > bound && actual_rate > bound {
                 match flow.state {
                     CircuitBreakerState::Running if config.reduce_before_ceasing => {
                         flow.state = CircuitBreakerState::Reduced {
@@ -876,7 +1310,14 @@ impl CircuitBreakerInterceptor {
                         flow.losses.clear();
                         flow.reports_received = 0;
                     }
-                    _ => trip = Some((CircuitBreakerReason::Congestion, window)),
+                    _ => {
+                        trip = Some(Trip {
+                            reason: CircuitBreakerReason::Congestion,
+                            interval: window,
+                            rate: sending_rate,
+                            packet_size,
+                        })
+                    }
                 }
             } else if matches!(flow.state, CircuitBreakerState::Reduced { .. })
                 && flow.reports_since_reduction >= u64::from(interval)
@@ -895,17 +1336,29 @@ impl CircuitBreakerInterceptor {
             if unusable {
                 let since = *flow.unusable_since.get_or_insert(now);
                 if trip.is_none() && now.saturating_duration_since(since) >= usability.period {
-                    trip = Some((CircuitBreakerReason::MediaUnusable, usability.period));
+                    trip = Some(Trip::new(
+                        CircuitBreakerReason::MediaUnusable,
+                        usability.period,
+                    ));
                 }
             } else {
                 flow.unusable_since = None;
             }
         }
 
-        let ssrc = report.ssrc;
+        let witness = Witness {
+            ssrc: report.ssrc,
+            progressed,
+            fraction_lost,
+            duration: since_last.unwrap_or_default(),
+            round_trip_time: flow.round_trip_time,
+        };
         match trip {
-            Some((reason, hold)) => self.cease(ssrc, reason, now, hold),
-            None => self.publish(ssrc),
+            Some(trip) => self.cease(witness.ssrc, trip, now),
+            None => {
+                self.publish(witness.ssrc);
+                self.on_witness(now, witness);
+            }
         }
     }
 
@@ -918,10 +1371,10 @@ impl CircuitBreakerInterceptor {
             let any = packet.as_any();
             if let Some(sr) = any.downcast_ref::<rtcp::sender_report::SenderReport>() {
                 has_report_packet = true;
-                reports.extend(sr.reports.iter().cloned());
+                reports.extend(sr.reports.iter().cloned().map(|report| (report, true)));
             } else if let Some(rr) = any.downcast_ref::<rtcp::receiver_report::ReceiverReport>() {
                 has_report_packet = true;
-                reports.extend(rr.reports.iter().cloned());
+                reports.extend(rr.reports.iter().cloned().map(|report| (report, false)));
             }
         }
 
@@ -930,13 +1383,34 @@ impl CircuitBreakerInterceptor {
         // received for this breaker too (section 5), and for this breaker only.
         let reports_on_us = reports
             .iter()
-            .any(|report| self.flows.contains_key(&report.ssrc));
+            .any(|(report, _)| self.flows.contains_key(&report.ssrc));
         if !packets.is_empty() && (!has_report_packet || reports_on_us) {
             self.awaiting_rtcp_since = None;
         }
 
-        for report in &reports {
-            self.on_report_block(now, report);
+        // A flow the RTCP timeout stopped had "no way of knowing if it is causing congestion"
+        // (section 4.1). A report on an SSRC this endpoint sends is that way back: once the
+        // hold has passed the flow sends again.
+        if self.config.automatic_restart && reports_on_us {
+            let due: Vec<u32> = self
+                .flows
+                .iter()
+                .filter(|(_, flow)| {
+                    flow.halt.is_some_and(|halt| {
+                        halt.reason == CircuitBreakerReason::RtcpTimeout
+                            && now >= halt.restart_after
+                    })
+                })
+                .map(|(ssrc, _)| *ssrc)
+                .collect();
+            for ssrc in due {
+                log::info!("RTP circuit breaker: SSRC {ssrc:#x} restarted: RTCP reports again");
+                self.restart(now, ssrc);
+            }
+        }
+
+        for (report, in_sender_report) in &reports {
+            self.on_report_block(now, report, *in_sender_report);
         }
     }
 }
@@ -949,7 +1423,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        self.apply_restarts();
+        self.apply_restarts(msg.now);
+        if let Some(interval) = msg.message.custom::<crate::RtcpReportingInterval>() {
+            self.calculated_interval = Some(*interval);
+        }
         if let Packet::Rtcp(packets) = &msg.message.packet {
             let packets: Vec<_> = packets.to_vec();
             self.on_rtcp(msg.now, &packets);
@@ -963,7 +1440,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        self.apply_restarts();
+        self.apply_restarts(msg.now);
         match &msg.message.packet {
             Packet::Rtp(rtp_packet) => {
                 let frames_kept = 4 * self.config.frame_group_size as usize;
@@ -1009,7 +1486,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
-        self.apply_restarts();
+        self.apply_restarts(now);
         if let Some(since) = self.awaiting_rtcp_since
             && now.saturating_duration_since(since) >= self.rtcp_timeout()
         {
@@ -1024,7 +1501,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
                 .map(|(ssrc, _)| *ssrc)
                 .collect();
             for ssrc in ssrcs {
-                self.cease(ssrc, CircuitBreakerReason::RtcpTimeout, now, hold);
+                self.cease(
+                    ssrc,
+                    Trip::new(CircuitBreakerReason::RtcpTimeout, hold),
+                    now,
+                );
             }
         }
         Ok(())
@@ -1105,6 +1586,90 @@ mod tests {
             3,
             cb_interval(1, secs(0.033), secs(0.1), secs(5.0), secs(5.0))
         );
+    }
+
+    /// The boundary values of MEDIA_TIMEOUT = ceil(k * max(Tf, Tr, Tdr) / Tdr): a ratio that is
+    /// a whole number is that number, the least bit more is one more report; each of the
+    /// three intervals takes over at the instant it becomes the longest.
+    #[test]
+    fn media_timeout_at_its_boundaries() {
+        // Tr exactly Tdr: k. A millisecond longer: ceil(5 * 0.026 / 0.025) = 6.
+        assert_eq!(5, media_timeout(5, secs(0.02), secs(0.025), secs(0.025)));
+        assert_eq!(6, media_timeout(5, secs(0.02), secs(0.026), secs(0.025)));
+        // Tf exactly twice Tdr: 10. Tf just past it: 11.
+        assert_eq!(10, media_timeout(5, secs(0.05), secs(0.0), secs(0.025)));
+        assert_eq!(11, media_timeout(5, secs(0.0501), secs(0.0), secs(0.025)));
+        // A queue that makes the round trip 300 ms against reports every 25 ms: 60 reports.
+        assert_eq!(60, media_timeout(5, secs(0.02), secs(0.3), secs(0.025)));
+        // k = 1 with everything shorter than Tdr: one report.
+        assert_eq!(1, media_timeout(1, secs(0.0), secs(0.0), secs(5.0)));
+    }
+
+    /// The boundary values of CB_INTERVAL: where each term of the inner max takes over, and
+    /// the cap max(15, 3 * Td).
+    #[test]
+    fn cb_interval_at_its_boundaries() {
+        // 10 * Tr exactly 3 * Tdr (0.3 s, 1 s): 3 reports. Tr a little longer: 4.
+        assert_eq!(
+            3,
+            cb_interval(1, secs(0.02), secs(0.3), secs(1.0), secs(5.0))
+        );
+        assert_eq!(
+            4,
+            cb_interval(1, secs(0.02), secs(0.31), secs(1.0), secs(5.0))
+        );
+        // 10 * G * Tf takes over from 10 * Tr: G = 30 frames of 33 ms is 10 s, 10 reports.
+        assert_eq!(
+            10,
+            cb_interval(30, secs(1.0 / 30.0), secs(0.1), secs(1.0), secs(5.0))
+        );
+        // The cap: 10 * Tr = 20 s is held to max(15, 3 * 5) = 15 s; with Td = 6 s to 18 s.
+        assert_eq!(
+            15,
+            cb_interval(1, secs(0.02), secs(2.0), secs(1.0), secs(5.0))
+        );
+        assert_eq!(
+            18,
+            cb_interval(1, secs(0.02), secs(2.0), secs(1.0), secs(6.0))
+        );
+        // Reports every 25 ms and a 142 ms round trip: ceil(1.42 / 0.025) = 57 reports.
+        assert_eq!(
+            57,
+            cb_interval(1, secs(0.02), secs(0.142), secs(0.025), secs(5.0))
+        );
+    }
+
+    /// The sending rate "now": over the newest samples that cover the span, one at least.
+    #[test]
+    fn the_recent_rate_is_that_of_the_newest_samples_covering_the_span() {
+        let sample = |milliseconds: u64, bytes: u64| LossSample {
+            fraction_lost: 0.0,
+            duration: Duration::from_millis(milliseconds),
+            bytes_sent: bytes,
+            packets_sent: 1,
+            net_lost: 0,
+            net_expected: 1,
+        };
+        let samples: VecDeque<LossSample> =
+            [sample(100, 50_000), sample(100, 10_000), sample(100, 2_000)].into();
+        // A span shorter than the newest sample: that sample, 2000 bytes in 0.1 s.
+        assert!((recent_rate(&samples, secs(0.05)) - 20_000.0).abs() < 1e-6);
+        // Exactly one sample long: still that one. A little more: two (12000 in 0.2 s).
+        assert!((recent_rate(&samples, secs(0.1)) - 20_000.0).abs() < 1e-6);
+        assert!((recent_rate(&samples, secs(0.101)) - 60_000.0).abs() < 1e-6);
+        // Longer than everything held: all of it.
+        assert!((recent_rate(&samples, secs(5.0)) - 62_000.0 / 0.3).abs() < 1e-6);
+        assert_eq!(0.0, recent_rate(&VecDeque::new(), secs(1.0)));
+    }
+
+    /// RFC 3550 A.1 sequence number order, across the wrap.
+    #[test]
+    fn sequence_numbers_are_ordered_across_the_wrap() {
+        assert!(is_newer(2, 1));
+        assert!(!is_newer(1, 2));
+        assert!(!is_newer(7, 7));
+        assert!(is_newer(3, 65_530));
+        assert!(!is_newer(65_530, 3));
     }
 
     /// RFC 8083 section 4.3: X = s / (Tr * sqrt(2*b*p/3)), b = 1.
