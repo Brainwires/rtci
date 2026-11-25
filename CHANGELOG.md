@@ -1029,7 +1029,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a new packet of a flow that is being sent are a media timeout, in a quarter of a
   second or less. The flow now comes back when the flow beside it is seen arriving.
   A ceased encoding takes no share of the congestion controller's target
-  (`RTCRtpSender::target_bitrates`) until it is restarted.
+  (`RTCRtpSender::target_bitrates`) until it is restarted; dividing the target again for
+  that sets the streams' shares only, so a flow that ceases or restarts while the pacer has
+  the source paused (a target of zero) leaves `availableOutgoingBitrate` at the congestion
+  controller's estimate
+  (`interceptor_circuit_breaker_test::a_flow_ceasing_while_the_source_is_paused_leaves_the_estimate_alone`).
   Audit rows RFC8083-3-1, 3-6, 4.2-4, 4.2-5, 4.2-6, 4.3-4, 4.5-1, 4.5-2, 5-3.
 
 - **rtci, interceptor / RTP circuit breaker** (collapse-3): the application is told when the
