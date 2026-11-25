@@ -51,7 +51,14 @@
 //! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
-//! only counts (simulcast: packets per RID). `"negotiated":[{"label":..,"id":..,"ordered":..}]`
+//! only counts (simulcast: packets per RID); `{"media":"pipeline","video":"VP8|AV1"}` takes the
+//! browser's video through `rtci-video`'s receive pipeline and its pure-Rust decoder (frame
+//! assembly, jitter buffer, PLI, decode) and reports what it decoded under `pipeline` in the
+//! `report` reply (frames decoded and dropped, freezes, size, decoder errors); that scenario needs
+//! the peer built from the `rtci-video-interop` package with its `pipeline` feature (the `rtci`
+//! crate itself does not depend on `rtci-video`): `cargo build -p rtci-video-interop --features
+//! pipeline`, binary `interop-peer-video`; built as `rtci`'s example it answers with an error.
+//! `"negotiated":[{"label":..,"id":..,"ordered":..}]`
 //! creates pre-negotiated data channels. `"ice_tcp":true` adds a passive TCP candidate (RFC
 //! 6544) and `"udp":false` leaves out the UDP one. `"engine_tcp":true` has the engine gather
 //! its own TCP candidates and drive their connections through the stream interface and the
@@ -116,6 +123,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+#[cfg(feature = "pipeline")]
+use rtci_video::decoder::VideoDecoder;
+#[cfg(feature = "pipeline")]
+use rtci_video::engine::VideoReceiver;
+#[cfg(feature = "pipeline")]
+use rtci_video::{DecodeOutcome, ReceiveConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
@@ -457,6 +471,9 @@ struct Session {
     trickle_local: bool,
     out: Vec<Value>,
     media: String,
+    /// Scenario `pipeline`: the browser's video through the video receive pipeline.
+    #[cfg(feature = "pipeline")]
+    video_pipeline: Option<VideoPipeline>,
     scenario: Value,
     media_dir: String,
     outgoing: Vec<Outgoing>,
@@ -608,6 +625,8 @@ impl Session {
             trickle_local: false,
             out: vec![],
             media: String::new(),
+            #[cfg(feature = "pipeline")]
+            video_pipeline: None,
             scenario: Value::Null,
             media_dir,
             outgoing: vec![],
@@ -638,6 +657,7 @@ impl Session {
         let mut mbuf = vec![0u8; 2048];
         let mut tbuf = vec![0u8; 2048];
         loop {
+            s.pump_video_pipeline(Instant::now());
             s.drive()?;
             for v in s.out.drain(..) {
                 ws_tx.send(Message::Text(v.to_string().into())).await?;
@@ -650,6 +670,9 @@ impl Session {
                 if o.source.is_some() {
                     wake = wake.min(o.next);
                 }
+            }
+            if let Some(t) = s.video_pipeline_timeout(now) {
+                wake = wake.min(t);
             }
             let delay = wake
                 .saturating_duration_since(now)
@@ -1112,6 +1135,7 @@ impl Session {
                         "maxChannels": t.max_channels(),
                     })
                 });
+                let pipeline = self.video_pipeline_report();
                 self.out.push(json!({
                     "type": "report",
                     "rtp": self.rtp_by_key,
@@ -1137,6 +1161,7 @@ impl Session {
                     "sctp": sctp,
                     "fec": self.fec_stats(),
                     "videoDropped": self.video_dropped.load(Ordering::Relaxed),
+                    "pipeline": pipeline,
                     "errors": self.errors,
                 }));
             }
@@ -1502,6 +1527,9 @@ impl Session {
                     if let Some(rid) = &init.rid {
                         self.rid_by_ssrc.insert(init.ssrc, rid.to_string());
                     }
+                    if self.media == "pipeline" && kind == RtpCodecKind::Video {
+                        self.start_video_pipeline(init.receiver_id);
+                    }
                     self.tracks.insert(
                         init.track_id,
                         (kind, init.rid.map(|r| r.to_string()), init.receiver_id),
@@ -1593,6 +1621,9 @@ impl Session {
         let cov = self.coverage.entry(pkt.header.ssrc).or_default();
         cov.key = key;
         cov.add(pkt.header.sequence_number);
+        if kind == RtpCodecKind::Video && self.video_pipeline_rtp(&pkt) {
+            return;
+        }
         if self.media != "reflect" {
             return;
         }
@@ -2029,4 +2060,167 @@ impl rtci::interceptor::Interceptor for DropEveryNthRedMedia {
     fn bind_remote_stream(&mut self, _info: &rtci::interceptor::StreamInfo) {}
 
     fn unbind_remote_stream(&mut self, _info: &rtci::interceptor::StreamInfo) {}
+}
+
+/// Scenario `pipeline`: the browser's video through `rtci-video` (package `rtci-video-interop`,
+/// feature `pipeline`).
+#[cfg(feature = "pipeline")]
+struct VideoPipeline {
+    rx: VideoReceiver,
+    /// The decoder of each SSRC; `None` when no pure-Rust decoder decodes its codec.
+    decoders: HashMap<u32, Option<Box<dyn VideoDecoder>>>,
+    decoder_errors: u32,
+    unsupported: u32,
+    size: Option<(u32, u32)>,
+    decoder_name: String,
+}
+
+#[cfg(feature = "pipeline")]
+impl Session {
+    /// Scenario `pipeline`: the receive pipeline for the first video track.
+    fn start_video_pipeline(&mut self, receiver_id: rtci::rtp_transceiver::RTCRtpReceiverId) {
+        if self.video_pipeline.is_some() {
+            return;
+        }
+        match VideoReceiver::new(&mut self.pc, receiver_id, ReceiveConfig::default()) {
+            Ok(rx) => {
+                self.video_pipeline = Some(VideoPipeline {
+                    rx,
+                    decoders: HashMap::new(),
+                    decoder_errors: 0,
+                    unsupported: 0,
+                    size: None,
+                    decoder_name: String::new(),
+                })
+            }
+            Err(e) => self.errors.push(format!("video pipeline: {e}")),
+        }
+    }
+
+    /// Scenario `pipeline`: the pipeline's next deadline.
+    fn video_pipeline_timeout(&self, now: Instant) -> Option<Instant> {
+        self.video_pipeline
+            .as_ref()
+            .and_then(|v| v.rx.poll_timeout(now))
+    }
+
+    /// Scenario `pipeline`: a video packet into the pipeline; `false` when there is none.
+    fn video_pipeline_rtp(&mut self, pkt: &rtci::rtp::Packet) -> bool {
+        let Some(vp) = &mut self.video_pipeline else {
+            return false;
+        };
+        vp.rx.handle_rtp(Instant::now(), pkt);
+        self.pump_video_pipeline(Instant::now());
+        true
+    }
+
+    /// Scenario `pipeline`: runs the video receive pipeline's timers, decodes what it releases
+    /// with the pure-Rust decoder of its codec and renders each picture at once.
+    fn pump_video_pipeline(&mut self, now: Instant) {
+        let Some(vp) = &mut self.video_pipeline else {
+            return;
+        };
+        if let Err(e) = vp.rx.poll(&mut self.pc, now) {
+            self.errors.push(format!("video pipeline: {e}"));
+        }
+        while let Some((ssrc, request)) = vp.rx.poll_frame(now) {
+            let codec = request.frame.frame.codec;
+            let decoder = vp
+                .decoders
+                .entry(ssrc)
+                .or_insert_with(|| rtci_video::codec::decoder_for(codec));
+            let outcome = match decoder.as_mut().map(|d| d.decode(&request.frame)) {
+                Some(Ok(Some(p))) => {
+                    vp.size = Some((p.width, p.height));
+                    if let Some(d) = decoder.as_ref() {
+                        vp.decoder_name = d.implementation_name().to_owned();
+                    }
+                    DecodeOutcome::Decoded {
+                        width: p.width,
+                        height: p.height,
+                        qp: p.qp,
+                        decode_time: Duration::ZERO,
+                        request_key_frame: false,
+                    }
+                }
+                Some(Ok(None)) => continue,
+                Some(Err(_)) => {
+                    vp.decoder_errors += 1;
+                    DecodeOutcome::Failed
+                }
+                None => {
+                    vp.unsupported += 1;
+                    DecodeOutcome::Failed
+                }
+            };
+            vp.rx
+                .on_decoded(&mut self.pc, now, ssrc, request.token, outcome);
+            if matches!(outcome, DecodeOutcome::Decoded { .. }) {
+                vp.rx.on_rendered(ssrc, now);
+            }
+        }
+        vp.rx.update_stats(&mut self.pc, now);
+    }
+
+    /// What the video pipeline decoded (scenario `pipeline`), for the `report` reply.
+    fn video_pipeline_report(&mut self) -> Value {
+        let Some(vp) = &mut self.video_pipeline else {
+            return Value::Null;
+        };
+        let now = Instant::now();
+        let streams: Vec<Value> = vp
+            .rx
+            .ssrcs()
+            .into_iter()
+            .filter_map(|ssrc| {
+                let st = vp.rx.stats(ssrc, now)?;
+                Some(json!({
+                    "ssrc": ssrc,
+                    "framesReceived": st.frames_received,
+                    "framesDecoded": st.frames_decoded,
+                    "keyFramesDecoded": st.key_frames_decoded,
+                    "framesDropped": st.frames_dropped,
+                    "freezeCount": st.freeze_count,
+                    "totalFreezesDuration": st.total_freezes_duration,
+                    "longestIntervalMs": st.longest_render_interval * 1000.0,
+                    "keyFrameRequests": st.key_frame_requests_total(),
+                }))
+            })
+            .collect();
+        json!({
+            "streams": streams,
+            "decoder": vp.decoder_name,
+            "decoderErrors": vp.decoder_errors,
+            "unsupported": vp.unsupported,
+            "plisSent": vp.rx.plis_sent(),
+            "width": vp.size.map(|s| s.0),
+            "height": vp.size.map(|s| s.1),
+        })
+    }
+}
+
+/// Built without the `pipeline` feature (as `rtci`'s example): the scenario is refused.
+#[cfg(not(feature = "pipeline"))]
+impl Session {
+    fn start_video_pipeline(&mut self, _receiver_id: rtci::rtp_transceiver::RTCRtpReceiverId) {
+        self.errors.push(
+            "video pipeline: this interop peer was built without it (build the rtci-video-interop \
+             package with its pipeline feature)"
+                .into(),
+        );
+    }
+
+    fn video_pipeline_timeout(&self, _now: Instant) -> Option<Instant> {
+        None
+    }
+
+    fn video_pipeline_rtp(&mut self, _pkt: &rtci::rtp::Packet) -> bool {
+        false
+    }
+
+    fn pump_video_pipeline(&mut self, _now: Instant) {}
+
+    fn video_pipeline_report(&mut self) -> Value {
+        Value::Null
+    }
 }

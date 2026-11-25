@@ -150,6 +150,11 @@ jobs:
           netstat -rn -f inet | grep -E '^224' || true
       - name: Test workspace
         run: cargo test --workspace --no-fail-fast --verbose
+      # The driver's mDNS on virtual time (`runtime-mock` is not a default feature): two
+      # publishing drivers must connect, which catches a return of 0.1.0's socket matching on
+      # every platform, not only where real multicast runs.
+      - name: Stream driver mDNS on virtual time
+        run: cargo test --package rtci-stream-driver --features runtime-mock --test mdns_virtual_time --verbose
       - name: Doctests
         run: cargo test --workspace --doc --verbose
       - name: Disk left after the build (Windows)

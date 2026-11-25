@@ -18,6 +18,7 @@
 
 use crate::agent::agent_config::*;
 use crate::agent::{Agent, BindingRequest, Event, TaggedEvent};
+use crate::mdns::MulticastDnsMode;
 use bytes::BytesMut;
 use crc::{CRC_32_ISCSI, Crc};
 use log::{debug, error, trace, warn};
@@ -1338,6 +1339,17 @@ impl Agent {
         {
             Ok(mut prflx) => {
                 prflx.tcp_type = tcp_type;
+                // draft-ietf-mmusic-mdns-ice-candidates section 3.3.1: "Statistics related to
+                // ICE candidates that are accessible to the web application MUST NOT contain
+                // the IP address of a local or remote mDNS candidate". With host addresses
+                // hidden, the base is not given in the related address, and a mapped address
+                // that is a hidden host address of this agent shows as its name.
+                if self.mdns_mode == MulticastDnsMode::QueryAndGather {
+                    prflx.hide_related_address = true;
+                    if let Some(name) = self.mdns_name_of_hidden(mapped.ip()) {
+                        prflx.address = name;
+                    }
+                }
                 debug!(
                     "[{}]: new local peer-reflexive candidate {} (base {})",
                     self.get_name(),

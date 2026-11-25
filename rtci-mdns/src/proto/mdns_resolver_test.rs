@@ -395,13 +395,26 @@ fn test_nsec_saying_the_name_has_no_address_ends_the_query() {
     assert!(events(&mut conn).is_empty());
     assert!(conn.is_query_pending(id));
 
-    // Not from off the link.
+    // Not from off the link (the destination unknown, so the source's scope decides; one that
+    // arrived at the group is on the link whatever its source, RFC 6762 section 11).
     let (mut conn, id) = asking(base, config());
-    deliver(&mut conn, base, "203.0.113.9:5353", &nsec(&[0, 0, 0x80]));
+    deliver_to(
+        &mut conn,
+        base,
+        "203.0.113.9:5353",
+        UNKNOWN,
+        &nsec(&[0, 0, 0x80]),
+    );
     assert!(conn.is_query_pending(id));
 }
 
-// RFC 6762 section 11: with the link's subnets configured, they decide who is on the link.
+/// A datagram's destination the driver does not know (a socket bound to the unspecified
+/// address): the on-link test is then the source's (RFC 6762 section 11's second test).
+const UNKNOWN: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MDNS_PORT);
+
+// RFC 6762 section 11: with the link's subnets configured, they decide who is on the link
+// (for a response whose destination is not the group: one that arrived there is on the link
+// whatever its source).
 #[test]
 fn test_configured_subnets_decide_who_is_on_the_link() {
     let base = Instant::now();
@@ -414,22 +427,23 @@ fn test_configured_subnets_decide_who_is_on_the_link() {
 
     // A private address that is not in a configured subnet is not on this link.
     let (mut conn, id) = asking(base, config().with_on_link_subnets(subnets.clone()));
-    deliver(
+    deliver_to(
         &mut conn,
         base,
         OWNER_SRC,
+        UNKNOWN,
         &response(&[addr(UUID_1, OWNER)]),
     );
     assert!(answered(&mut conn).is_empty());
     let aaaa = response(&[addr(UUID_1, "2001:db8::7")]);
-    deliver(&mut conn, base, OWNER_SRC, &aaaa);
+    deliver_to(&mut conn, base, OWNER_SRC, UNKNOWN, &aaaa);
     assert!(answered(&mut conn).is_empty());
-    deliver(&mut conn, base, "[fe80::7]:5353", &aaaa);
+    deliver_to(&mut conn, base, "[fe80::7]:5353", UNKNOWN, &aaaa);
     assert_eq!(answered(&mut conn), vec![(id, ip("2001:db8::7"))]);
 
     // Without subnets, the address scope decides: a public IPv4 sender is refused.
     let (mut conn, id) = asking(base, config());
-    deliver(&mut conn, base, "203.0.113.9:5353", &public);
+    deliver_to(&mut conn, base, "203.0.113.9:5353", UNKNOWN, &public);
     assert!(conn.is_query_pending(id));
 }
 
