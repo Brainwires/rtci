@@ -1,6 +1,8 @@
 //! FEC statistics between two `rtci` peer connections in virtual time: VP8 in RED with ULPFEC
 //! in RED packets of its own (RFC 2198, RFC 5109 section 14.2, the form libwebrtc sends), a
-//! fixed amount of FEC, no NACK, and a network that loses packets. What the receiver's
+//! fixed amount of FEC, and a network that loses packets (NACK is on, the default interceptors
+//! negotiate it for video; the first test's stream has no RTX, so its repairs are the packets
+//! again, which the network loses as it lost the first). What the receiver's
 //! webrtc-stats say (`fecPacketsReceived`, `fecBytesReceived`, `fecPacketsDiscarded`, 8.5)
 //! and what the engine's own FEC counts say (`RTCPeerConnection::fec_stats`) are checked
 //! against what crossed the wire.
@@ -57,7 +59,8 @@ struct Peer {
 }
 
 impl Peer {
-    /// VP8 without NACK, RED and ULPFEC; the default interceptors with a ULPFEC encoder that
+    /// VP8, RED and ULPFEC, no RTX format; the default interceptors (NACK among them: a repair
+    /// is the packet again, RFC 4585 section 6.2.1) with a ULPFEC encoder that
     /// sends one FEC packet for every two media packets whatever the loss, reading the packets
     /// as they leave (its wire tap), and the decoder.
     fn new(addr: &str) -> Result<Self> {
