@@ -14,7 +14,7 @@
 use rtci_interceptor::{
     AttributedPacket, BandwidthEstimator, CongestionControlBuilder, Interceptor,
     NackResponderBuilder, PacerBuilder, Packet, PacketReport, ProbeRequest, RTCPFeedback,
-    RTPHeaderExtension, Registry, Slot, StreamInfo, TaggedPacket, TwccSenderBuilder,
+    RTPHeaderExtension, Registry, Slot, StreamInfo, TaggedPacket, TwccSenderBuilder, Usage,
 };
 use sansio::Protocol;
 use shared::TransportContext;
@@ -44,8 +44,12 @@ impl BandwidthEstimator for Scripted {
         *self.target.lock().unwrap()
     }
 
-    fn overusing(&self) -> bool {
-        self.overusing.load(Ordering::Relaxed)
+    fn usage(&self) -> Usage {
+        if self.overusing.load(Ordering::Relaxed) {
+            Usage::Over
+        } else {
+            Usage::Normal
+        }
     }
 }
 
@@ -213,7 +217,7 @@ fn with_the_setting_twice_the_target_is_asked_about_every_five_seconds() {
     }
 }
 
-/// While the estimator reads over-use ([`BandwidthEstimator::overusing`]) no recovery cluster
+/// While the estimator reads over-use ([`BandwidthEstimator::usage`]) no recovery cluster
 /// is asked for; the one that fell due meanwhile goes out when the reading ends.
 #[test]
 fn no_recovery_cluster_is_asked_while_the_estimator_reads_overuse() {

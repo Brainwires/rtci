@@ -3,7 +3,8 @@
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::probe::{
-    PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate, probe_estimate,
+    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate,
+    probe_estimate,
 };
 use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
@@ -126,6 +127,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
+    after_drop_probe: AfterDropProbe,
     recovery_probing: bool,
 }
 
@@ -138,6 +140,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
+            after_drop_probe: AfterDropProbe::default(),
             recovery_probing: false,
         }
     }
@@ -200,16 +203,25 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// With bandwidth probing on, what is probed for after a large drop of the target:
+    /// [`AfterDropProbe`] (the engine's repeated probe by default, libwebrtc's single one, or
+    /// none).
+    pub fn with_after_drop_probe(mut self, after_drop_probe: AfterDropProbe) -> Self {
+        self.after_drop_probe = after_drop_probe;
+        self
+    }
+
     /// Whether, with bandwidth probing on, the path is probed back towards the rate it
     /// carried before a large drop of the target for as long as that rate is remembered (a
     /// minute): a cluster at twice the target every five seconds while the target is below
     /// 85% of it and the estimator does not read the path as over-used
-    /// ([`BandwidthEstimator::overusing`]), with further clusters while the path carries what
-    /// is asked. Off by default; the peer connection's `Performance` profile turns it on
-    /// (`DefaultInterceptorOptions::recovery_probing`).
+    /// ([`BandwidthEstimator::usage`]), with further clusters while the path carries what is
+    /// asked. Off by default, in every behaviour profile
+    /// (`DefaultInterceptorOptions::recovery_probing`): it is tuning, with no specification
+    /// behind it, and Chrome does not do it.
     ///
     /// Without it a sender that keeps up with its target climbs back from a limit that has
-    /// gone at the delay-based controller's 8% a second (about 18 s from 250 kbit/s to
+    /// gone at the delay-based controller's 8% a second (about 17 s from 250 kbit/s to
     /// 1 Mbit/s); with it the next cluster finds the path, within five seconds. What it
     /// costs, why no specification asks for it and what libwebrtc does instead:
     /// [`ProbeController::with_recovery_probing`](crate::ProbeController::with_recovery_probing).
@@ -235,6 +247,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         }));
         let probing = self.bandwidth_probing.then(|| {
             ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY)
+                .with_after_drop_probe(self.after_drop_probe)
                 .with_recovery_probing(self.recovery_probing)
         });
         (
@@ -1022,7 +1035,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         let target = self.estimator.target_bitrate();
         let sending = self.sending_rate(now);
         let media_flowing = !self.sent.is_empty();
-        let overusing = self.estimator.overusing();
+        let usage = self.estimator.usage();
         let max = [self.applied_max.flatten(), self.estimator.max_bitrate()]
             .into_iter()
             .flatten()
@@ -1032,7 +1045,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             return;
         };
         probing.set_max_bitrate(max);
-        probing.set_overusing(overusing);
+        probing.set_usage(usage);
         if let Some(request) = probing.poll(now, target, sending, media_flowing) {
             self.probe_asked = Some((request.cluster, now));
             self.read_queue.push_back(request.into_packet(now));

@@ -1,5 +1,6 @@
 //! The seam a congestion control algorithm plugs into.
 
+use crate::Usage;
 use crate::rtpfb::acknowledgement::PacketReport;
 use std::time::Instant;
 
@@ -90,12 +91,13 @@ pub trait BandwidthEstimator: Send + Sync {
         None
     }
 
-    /// Whether the estimator reads the path as over-used now (more is sent than it carries:
-    /// a growing queue, or loss out of a full one). Recovery probing
-    /// ([`CongestionControlBuilder::with_recovery_probing`](crate::CongestionControlBuilder::with_recovery_probing))
-    /// asks for no cluster meanwhile. `false` for an estimator that has no such state.
-    fn overusing(&self) -> bool {
-        false
+    /// The estimator's reading of the path at the last feedback: over-used (more is sent than
+    /// it carries: a growing queue, or loss out of a full one), under-used (the queue is
+    /// draining) or normal. The probe controller reads it
+    /// ([`ProbeController::set_usage`](crate::ProbeController::set_usage)). `Normal` for an
+    /// estimator that has no such state.
+    fn usage(&self) -> Usage {
+        Usage::Normal
     }
 
     /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over

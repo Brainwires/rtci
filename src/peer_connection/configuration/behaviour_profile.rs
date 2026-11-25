@@ -1062,6 +1062,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.pacer_queue_overflow,
     },
     {
+        id: "cc.probe-after-drop",
+        setting: "DefaultInterceptorOptions::probe_after_drop",
+        clause: "RFC 8836 2 (1f)",
+        rfc: interceptor::AfterDropProbe::Repeated => "Repeated",
+        chrome: interceptor::AfterDropProbe::Libwebrtc => "Libwebrtc",
+        strict_rfc: interceptor::AfterDropProbe::Repeated => "Repeated",
+        chrome_source: "libwebrtc modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: SetEstimatedBitrate (lines 332-335) records a drop when one estimate is below kBitrateDropThreshold 0.66 of the one before it; RequestProbe (lines 385-419) asks one cluster at kProbeFractionAfterDrop 0.85 of the estimate before the drop, only in ALR or within kAlrEndedTimeout 3 s of it, in state kProbingComplete, when 0.95 of it is above the estimate, within kBitrateDropTimeout 5 s of the drop and over kMinTimeBetweenAlrProbes 5 s after the last such probe; called from goog_cc_network_control.cc (lines 529-531) when delay_based_bwe.cc (lines 121-128) saw the detector go from under-use to normal. The engine's form asks from 1 s after a drop below 0.66 of the 2 s high, once a second for 5 s, whether or not the sender is application limited",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.probe_after_drop = v,
+        read: |o: &DefaultInterceptorOptions| o.probe_after_drop,
+    },
+    {
         id: "cb.packet-size",
         setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
         clause: "RFC 8083 3, 4.3",
@@ -1606,6 +1618,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::bandwidth_probing",
         class: NotGovernedClass::Same,
         note: "probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::recovery_probing",
+        class: NotGovernedClass::EngineOnly,
+        note: "off in every profile: an opt-in that probes back towards the rate before a large drop for a minute (twice the target every 5 s while the estimator does not read over-use). Tuning with no specification behind it (RFC 8836 2 names probing at the start only; draft-ietf-rmcat-gcc-02 has none); libwebrtc does not do it: its periodic probes are for an application-limited sender (probe_controller.cc lines 441-449 @ a222406d) and its probe after a drop is one cluster within 5 s (RequestProbe, lines 385-419)",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::rapid_synchronisation",
