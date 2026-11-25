@@ -2,7 +2,7 @@
 # many of the baseline's runs were beyond it (over for hi, under for lo, or did not complete).
 # A percentile's threshold is the baseline's value and 10% of slack. Written by
 # scripts/capacity-instrument.py baseline; do not edit by hand.
-# Source: train 34 round 3 tree dcd2c41f, runs 45641527223 45641540896
+# Source: train 34 round 4 tree 8e95ad65, runs 45653020697 45653031592
 cell	figure	direction	threshold	beyond	runs	level
 cap/paced/gap300/up/q300/rl0	max_age	hi	1.461	195	1000	p50
 cap/paced/gap300/up/q300/rl0	max_age	hi	1.672	24	1000	p90
@@ -341,32 +341,32 @@ cap/nopacer/gap300/up/q300/rl5	audio_tail	hi	1.000	0	200	limit
 cap/nopacer/gap300/up/q300/rl5	under	lo	183.600	1	200	p10
 cap/nopacer/gap300/up/q300/rl5	window	lo	907.830	4	200	p10
 outage/paced/gap300/up/q300/rl0	max_age	hi	4.712	66	200	p50
-outage/paced/gap300/up/q300/rl0	max_age	hi	5.702	0	200	p90
-outage/paced/gap300/up/q300/rl0	stale1	hi	3.889	66	200	p50
-outage/paced/gap300/up/q300/rl0	stale1	hi	6.557	0	200	p90
-outage/paced/gap300/up/q300/rl0	fresh_gap	hi	4.770	66	200	p50
-outage/paced/gap300/up/q300/rl0	fresh_gap	hi	5.647	0	200	p90
+outage/paced/gap300/up/q300/rl0	max_age	hi	6.301	0	200	p90
+outage/paced/gap300/up/q300/rl0	stale1	hi	3.780	66	200	p50
+outage/paced/gap300/up/q300/rl0	stale1	hi	5.204	0	200	p90
+outage/paced/gap300/up/q300/rl0	fresh_gap	hi	4.762	66	200	p50
+outage/paced/gap300/up/q300/rl0	fresh_gap	hi	6.249	0	200	p90
 outage/paced/gap300/up/q300/rl0	stale2	hi	0.500	200	200	limit
-outage/paced/gap300/up/q300/rl0	freeze	hi	5.647	0	200	p90
+outage/paced/gap300/up/q300/rl0	freeze	hi	6.246	0	200	p90
 outage/paced/gap300/up/q300/rl0	freeze	hi	2.000	200	200	limit
 outage/paced/gap300/up/q300/rl0	tail_gap	hi	5.000	0	200	limit
 outage/paced/gap300/up/q300/rl0	resume	hi	2.000	0	200	limit
 outage/paced/gap300/up/q300/rl0	audio_gap	hi	4.509	0	200	p90
 outage/paced/gap300/up/q300/rl0	audio_gap	hi	1.000	200	200	limit
 outage/paced/gap300/up/q300/rl0	audio_lost	hi	224.400	0	200	p90
-outage/paced/gap300/up/q300/rl0	recover	hi	16.631	0	200	p90
-outage/paced/gap300/up/q300/rl0	to1000	hi	16.631	0	200	p90
+outage/paced/gap300/up/q300/rl0	recover	hi	1.133	0	200	p90
+outage/paced/gap300/up/q300/rl0	to1000	hi	1.133	0	200	p90
 outage/paced/gap300/up/q300/rl0	startup	hi	0.550	0	200	p90
-outage/paced/gap300/up/q300/rl0	rtx	hi	323.400	0	200	p90
+outage/paced/gap300/up/q300/rl0	rtx	hi	324.500	0	200	p90
 outage/paced/gap300/up/q300/rl0	discards	hi	0.000	134	200	limit
 outage/paced/gap300/up/q300/rl0	cb	hi	0.000	0	200	limit
 outage/paced/gap300/up/q300/rl0	disc	hi	0.000	0	200	limit
 outage/paced/gap300/up/q300/rl0	disc_open	hi	0.000	0	200	limit
 outage/paced/gap300/up/q300/rl0	disc_max	hi	2.000	0	200	limit
-outage/paced/gap300/up/q300/rl0	back_mean	lo	345.600	0	200	p10
+outage/paced/gap300/up/q300/rl0	back_mean	lo	1260.000	0	200	p10
 outage/paced/gap300/up/q300/rl0	audio_share	lo	0.900	200	200	limit
 outage/paced/gap300/up/q300/rl0	audio_tail	hi	1.000	0	200	limit
-outage/paced/gap300/up/q300/rl0	window	lo	1346.400	0	200	p10
+outage/paced/gap300/up/q300/rl0	window	lo	2250.000	0	200	p10
 outage/nopacer/gap300/up/q300/rl0	max_age	hi	4.925	0	200	p50
 outage/nopacer/gap300/up/q300/rl0	stale1	hi	3.869	0	200	p50
 outage/nopacer/gap300/up/q300/rl0	fresh_gap	hi	4.913	0	200	p50
@@ -379,8 +379,8 @@ outage/nopacer/gap300/up/q300/rl0	resume	hi	2.000	0	200	limit
 outage/nopacer/gap300/up/q300/rl0	audio_gap	hi	4.509	0	200	p90
 outage/nopacer/gap300/up/q300/rl0	audio_gap	hi	1.000	200	200	limit
 outage/nopacer/gap300/up/q300/rl0	audio_lost	hi	224.400	0	200	p90
-outage/nopacer/gap300/up/q300/rl0	recover	hi	0.583	0	200	p90
-outage/nopacer/gap300/up/q300/rl0	to1000	hi	0.583	0	200	p90
+outage/nopacer/gap300/up/q300/rl0	recover	hi	0.571	0	200	p90
+outage/nopacer/gap300/up/q300/rl0	to1000	hi	0.571	0	200	p90
 outage/nopacer/gap300/up/q300/rl0	startup	hi	0.550	0	200	p90
 outage/nopacer/gap300/up/q300/rl0	rtx	hi	338.800	0	200	p90
 outage/nopacer/gap300/up/q300/rl0	discards	hi	0.000	0	200	limit
@@ -388,7 +388,7 @@ outage/nopacer/gap300/up/q300/rl0	cb	hi	0.000	0	200	limit
 outage/nopacer/gap300/up/q300/rl0	disc	hi	0.000	0	200	limit
 outage/nopacer/gap300/up/q300/rl0	disc_open	hi	0.000	0	200	limit
 outage/nopacer/gap300/up/q300/rl0	disc_max	hi	2.000	0	200	limit
-outage/nopacer/gap300/up/q300/rl0	back_mean	lo	334.800	0	200	p10
+outage/nopacer/gap300/up/q300/rl0	back_mean	lo	1169.100	0	200	p10
 outage/nopacer/gap300/up/q300/rl0	audio_share	lo	0.900	200	200	limit
 outage/nopacer/gap300/up/q300/rl0	audio_tail	hi	1.000	0	200	limit
 outage/nopacer/gap300/up/q300/rl0	window	lo	2250.000	0	200	p10
