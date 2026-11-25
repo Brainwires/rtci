@@ -189,6 +189,10 @@ fn a_default_peer_connection_carries_its_profiles_values() -> shared::error::Res
             "{profile}"
         );
         assert_eq!(
+            agent.consent_response_wait, ice.consent_response_wait,
+            "{profile}"
+        );
+        assert_eq!(
             agent.send_data_before_nomination, ice.send_data_before_nomination,
             "{profile}"
         );
