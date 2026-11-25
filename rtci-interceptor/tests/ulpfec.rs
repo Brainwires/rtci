@@ -1472,7 +1472,10 @@ fn the_carriage_is_the_one_the_description_negotiated() {
     );
 
     let mut chain = negotiated_sender(
-        UlpfecSendBuilder::stream().with_red_placement(RedPlacement::OwnPacket),
+        UlpfecSendBuilder::stream()
+            .with_red_placement(RedPlacement::OwnPacket)
+            // The packets carry no marker bit: the FEC follows its block.
+            .with_fec_after_frame(false),
         false,
         &[
             (MEDIA_PT, "video/VP8"),
