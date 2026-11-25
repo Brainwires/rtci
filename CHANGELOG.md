@@ -1248,6 +1248,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
+  profile) two engines never raised their send rate** (rtcpbudget-6). A receiver learns a
+  stream's format from the payload type of its first packet; when that is the `red` format
+  (RFC 2198), which is described without `a=rtcp-fb` lines, the stream was bound to the
+  interceptors with no feedback at all, while the sender, which knows the stream by its
+  media codec, expected the feedback negotiated for that codec. With RFC 8888 congestion
+  control feedback (`ack ccfb`, what two engines negotiate) the receiver therefore reported
+  the audio stream only: the sender's congestion controller saw a path that carried 50
+  kbit/s, its estimate stopped at the first step above the start value (315 kbit/s) and
+  after a capacity collapse stayed at the floor; NACK and key frame requests about the video
+  were not bound either. A stream bound under `red` now has the feedback of the format it
+  carries (the one its fmtp names, else the section's first media format) beside any of its
+  own, as libwebrtc configures a stream from its first media codec whatever payload type
+  arrives. Found with the capacity instrument's `chrome` chain (send target 90 kbit/s for
+  the whole call); the row at fault was `fec.video-red-ulpfec`, alone. Not affected: the
+  default profile (no video RED), and a peer whose feedback is transport-wide (bound by
+  the header extension: Chromium). Test `a_red_stream_has_the_feedback_of_the_format_it_carries`.
+
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
   report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the

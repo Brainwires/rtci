@@ -2027,7 +2027,36 @@ pub(crate) fn create_stream_info(
         })
         .collect();
 
-    let feedbacks: Vec<_> = codec
+    // A redundancy stream (RFC 2198 `red`) is the media of another format of its section in
+    // RED blocks, and the `red` format itself is described without `a=rtcp-fb` lines (the
+    // engine's own registrations, Chromium's offers): what was negotiated for the format it
+    // carries is what applies to the stream. libwebrtc configures a stream's NACK and
+    // transport feedback from its first media codec whatever payload type a packet arrives
+    // under (media/engine/webrtc_video_engine.cc, `HasNack(recv_codecs.front().codec)`).
+    // Without this a receiver that learns a stream from a RED packet binds it with no
+    // feedback at all: no RFC 8888 reports about it (`ack ccfb` is read from here), so the
+    // sender's congestion controller hears of its audio only and never raises its estimate.
+    let carried = (crate::rtp_transceiver::rtp_sender::rtp_codec::repair_family(codec) == "red")
+        .then(|| {
+            let named = codec
+                .sdp_fmtp_line
+                .split('/')
+                .next()
+                .and_then(|primary| primary.trim().parse::<PayloadType>().ok());
+            let media = |c: &&RTCRtpCodecParameters| {
+                !crate::rtp_transceiver::rtp_sender::rtp_codec::is_repair_codec(&c.rtp_codec)
+                    && !crate::peer_connection::handler::endpoint::is_auxiliary_mime_type(
+                        &c.rtp_codec.mime_type,
+                    )
+            };
+            section_codecs
+                .iter()
+                .filter(media)
+                .find(|c| named == Some(c.payload_type))
+                .or_else(|| section_codecs.iter().find(media))
+        })
+        .flatten();
+    let mut feedbacks: Vec<_> = codec
         .rtcp_feedback
         .iter()
         .map(|f| interceptor::RTCPFeedback {
@@ -2035,6 +2064,15 @@ pub(crate) fn create_stream_info(
             parameter: f.parameter.clone(),
         })
         .collect();
+    for f in carried.iter().flat_map(|c| &c.rtp_codec.rtcp_feedback) {
+        let feedback = interceptor::RTCPFeedback {
+            typ: f.typ.clone(),
+            parameter: f.parameter.clone(),
+        };
+        if !feedbacks.contains(&feedback) {
+            feedbacks.push(feedback);
+        }
+    }
 
     interceptor::StreamInfo {
         ssrc,
@@ -2444,6 +2482,122 @@ mod ulpfec_tests {
                 (117, "onelevelonly=1".to_owned())
             ],
             info.section_fmtp_lines
+        );
+    }
+
+    /// A stream bound under the `red` format (a receiver learns it from a RED packet) has the
+    /// RTCP feedback negotiated for the format it carries: the `red` format has no
+    /// `a=rtcp-fb` lines of its own, and a stream bound without them gets no RFC 8888
+    /// reports, no NACK and no key frame requests. The primary format is the one the `red`
+    /// fmtp names (RFC 2198 section 5: `a=fmtp:63 111/111`), else the section's first media
+    /// format; a media format's own stream is as it was.
+    #[test]
+    fn a_red_stream_has_the_feedback_of_the_format_it_carries() {
+        let feedback = |typ: &str, parameter: &str| {
+            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCPFeedback {
+                typ: typ.to_owned(),
+                parameter: parameter.to_owned(),
+            }
+        };
+        let format = |payload_type: PayloadType,
+                      mime_type: &str,
+                      fmtp: &str,
+                      rtcp_feedback: Vec<
+            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCPFeedback,
+        >| {
+            crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: mime_type.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: fmtp.to_owned(),
+                    rtcp_feedback,
+                },
+                payload_type,
+            }
+        };
+        let negotiated = |info: &interceptor::StreamInfo| -> Vec<(String, String)> {
+            info.rtcp_feedback
+                .iter()
+                .map(|f| (f.typ.clone(), f.parameter.clone()))
+                .collect()
+        };
+        let pair = |typ: &str, parameter: &str| (typ.to_owned(), parameter.to_owned());
+
+        let video = [
+            format(
+                96,
+                "video/VP8",
+                "",
+                vec![feedback("nack", ""), feedback("ack", "ccfb")],
+            ),
+            format(97, "video/rtx", "apt=96", vec![]),
+            format(98, "video/VP9", "", vec![feedback("nack", "pli")]),
+            format(116, "video/red", "", vec![]),
+            format(117, "video/ulpfec", "", vec![]),
+        ];
+        let red = create_stream_info(
+            1,
+            None,
+            None,
+            116,
+            None,
+            None,
+            &video[3].rtp_codec,
+            &[],
+            &video,
+        );
+        assert_eq!(
+            vec![pair("nack", ""), pair("ack", "ccfb")],
+            negotiated(&red)
+        );
+        assert_eq!("video/red", red.mime_type);
+        // The media format's own stream is unchanged, and a repair format gains nothing.
+        let vp9 = create_stream_info(
+            1,
+            None,
+            None,
+            98,
+            None,
+            None,
+            &video[2].rtp_codec,
+            &[],
+            &video,
+        );
+        assert_eq!(vec![pair("nack", "pli")], negotiated(&vp9));
+        let fec = create_stream_info(
+            1,
+            None,
+            None,
+            117,
+            None,
+            None,
+            &video[4].rtp_codec,
+            &[],
+            &video,
+        );
+        assert!(fec.rtcp_feedback.is_empty());
+
+        // The fmtp names the primary encoding; a line of the red format's own is kept.
+        let audio = [
+            format(9, "audio/G722", "", vec![feedback("nack", "")]),
+            format(111, "audio/opus", "", vec![feedback("transport-cc", "")]),
+            format(63, "audio/red", "111/111", vec![feedback("ack", "ccfb")]),
+        ];
+        let red = create_stream_info(
+            2,
+            None,
+            None,
+            63,
+            None,
+            None,
+            &audio[2].rtp_codec,
+            &[],
+            &audio,
+        );
+        assert_eq!(
+            vec![pair("ack", "ccfb"), pair("transport-cc", "")],
+            negotiated(&red)
         );
     }
 }
