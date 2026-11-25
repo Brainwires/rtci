@@ -1304,10 +1304,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     primary of an RTX format, so the RTX of a RED format was left out of the negotiated list,
     and the offerer could neither send nor read a retransmitted RED packet (between two
     engines only the answerer's direction had the format).
-  - A FEC packet in RED (ULPFEC in a RED packet of its own, in the media's sequence space)
-    is not retransmitted when it is asked for: the media's own retransmission answers the
-    loss. libwebrtc keeps no FEC packet for retransmission (`ulpfec_generator.cc`,
-    `set_allow_retransmission(false)`).
+  - The FEC data of a FEC packet in RED (ULPFEC in a RED packet of its own, in the media's
+    sequence space) is not retransmitted when the packet is asked for: the media's own
+    retransmission answers the loss. Its sequence number is answered, with three octets
+    under the RTX of `red`: the original sequence number and the RED block header. A
+    receiver that puts frames together in sequence-number order cannot tell a lost FEC
+    packet from a lost one-packet frame, and would wait for it and ask for a key frame;
+    restored, the answer is a FEC packet with nothing in it, which reaches the application
+    as any FEC packet does, without a payload. libwebrtc keeps no FEC packet for
+    retransmission (`ulpfec_generator.cc:233`, `set_allow_retransmission(false)`) and
+    ignores a NACK for one (`rtp_sender.cc:348-351`); its receiver finds frames without the
+    number. Without an RTX stream a FEC packet is not sent again.
 
   Tests `rtci-interceptor/tests/nack_rtx_red.rs`,
   `in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red`,

@@ -282,18 +282,26 @@ fn the_streams_own_rtx_format_holds_beside_the_sections() {
     );
 }
 
-/// FEC is not retransmitted: a NACK that names a FEC packet (ULPFEC in a RED packet of its
-/// own, in the media's sequence space) is answered by nothing, the media packets beside it
-/// under the RTX of `red`. libwebrtc keeps no FEC packet for retransmission
-/// (`ulpfec_generator.cc`: `set_allow_retransmission(false)`).
+/// FEC data is not retransmitted, and a lost FEC packet's sequence number is still answered:
+/// a NACK that names a FEC packet (ULPFEC in a RED packet of its own, in the media's sequence
+/// space) gets, under the RTX of `red`, the packet's sequence number with its RED block
+/// header and nothing else: three octets. Restored and read by the FEC receiver it is what
+/// any FEC packet becomes on its way to the application: present, without a payload. So a
+/// receiver that puts frames together does not wait for a media packet that never was.
+/// Without an RTX stream nothing answers (the packet as it was is all that could leave under
+/// its number). libwebrtc keeps no FEC packet for retransmission
+/// (`ulpfec_generator.cc:233`: `set_allow_retransmission(false)`) and ignores such a NACK
+/// (`rtp_sender.cc:348-351`); its receiver does not need the number to find the next frame.
 #[test]
-fn a_fec_packet_in_red_is_not_retransmitted() {
+fn a_nack_for_a_fec_packet_in_red_is_answered_with_its_sequence_number_alone() {
     for rtx in [true, false] {
         let fec = UlpfecSendBuilder::red(RED, ULPFEC)
             .with_red_placement(RedPlacement::OwnPacket)
             .with_num_media_packets(2)
             .with_num_fec_packets(1)
             .with_adaptive_rate(false)
+            // The packets carry no marker bit: the FEC follows its block.
+            .with_fec_after_frame(false)
             .build();
         let mut chain = Registry::new()
             .with(Slot::FecEncoder, fec)
@@ -335,11 +343,54 @@ fn a_fec_packet_in_red_is_not_retransmitted() {
         for sequence_number in &fec_packets {
             chain.handle_read(nack(now, *sequence_number)).unwrap();
             while chain.poll_read().is_some() {}
+            let answer = written(&mut chain);
+            if !rtx {
+                assert_eq!(
+                    0,
+                    answer.len(),
+                    "no repair of the FEC packet {sequence_number} without an RTX stream"
+                );
+                continue;
+            }
+            assert_eq!(1, answer.len(), "FEC packet {sequence_number}");
             assert_eq!(
-                0,
-                written(&mut chain).len(),
-                "no repair of the FEC packet {sequence_number} (rtx: {rtx})"
+                (RTX_SSRC, RED_RTX),
+                (answer[0].header.ssrc, answer[0].header.payload_type)
             );
+            let [high, low] = sequence_number.to_be_bytes();
+            assert_eq!(
+                &[high, low, ULPFEC][..],
+                &answer[0].payload[..],
+                "the original sequence number and the RED block header, no FEC data"
+            );
+            // What the receiver makes of it: the RED packet, and from that the packet without
+            // a payload that stands for a FEC packet's sequence number.
+            let red = restored(&answer[0], &info);
+            assert_eq!(
+                (SSRC, RED, *sequence_number),
+                (
+                    red.header.ssrc,
+                    red.header.payload_type,
+                    red.header.sequence_number
+                )
+            );
+            let mut receiver = Registry::new()
+                .with(
+                    Slot::FecDecoder,
+                    rtci_interceptor::UlpfecReceiveBuilder::red(RED, ULPFEC).build(),
+                )
+                .build();
+            receiver.bind_remote_stream(&info);
+            receiver.handle_read(tagged(now, Packet::Rtp(red))).unwrap();
+            let delivered: Vec<rtp::Packet> = std::iter::from_fn(|| receiver.poll_read())
+                .filter_map(|tagged| match tagged.message.packet {
+                    Packet::Rtp(packet) => Some(packet),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(1, delivered.len());
+            assert_eq!(*sequence_number, delivered[0].header.sequence_number);
+            assert!(delivered[0].payload.is_empty(), "present, and no media");
         }
         chain.handle_read(nack(now, media_packets[0])).unwrap();
         while chain.poll_read().is_some() {}
