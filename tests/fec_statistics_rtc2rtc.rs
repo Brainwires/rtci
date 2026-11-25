@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use rtci::interceptor::{RedPlacement, Registry, Slot, UlpfecReceiveBuilder, UlpfecSendBuilder};
+use rtci::media_stream::MediaStreamTrack;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
@@ -23,7 +24,8 @@ use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtci::rtp::header::Header;
 use rtci::rtp_transceiver::RTCRtpSenderId;
 use rtci::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RTCRtpRtxParameters, RtpCodecKind,
 };
 use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtci::sansio::Protocol;
@@ -265,6 +267,15 @@ impl World {
     }
 
     fn connected_with(make: fn(&str) -> Result<Peer>) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_sending(make, None)
+    }
+
+    /// [`connected_with`](Self::connected_with); with `rtx`, the first peer's video has that
+    /// retransmission SSRC (RFC 4588), so a repair leaves as an RTX packet.
+    fn connected_sending(
+        make: fn(&str) -> Result<Peer>,
+        rtx: Option<u32>,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [make("10.0.0.1:5000")?, make("10.0.0.2:5000")?],
             now: Instant::now(),
@@ -272,22 +283,40 @@ impl World {
             sent_rtp: 0,
             not_red: Vec::new(),
         };
-        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
-            RtpCodecKind::Video,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Sendonly,
-                streams: vec![],
-                send_encodings: vec![RTCRtpEncodingParameters {
-                    active: true,
+        let sender = if let Some(rtx) = rtx {
+            world.peers[0].pc.add_track(MediaStreamTrack::new(
+                "call".to_owned(),
+                "video".to_owned(),
+                "video".to_owned(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(rtx.wrapping_sub(1)),
+                        rtx: Some(RTCRtpRtxParameters { ssrc: rtx }),
+                        ..Default::default()
+                    },
+                    codec: codec(MIME_TYPE_VP8),
                     ..Default::default()
                 }],
-            }),
-        )?;
-        let sender = world.peers[0]
-            .pc
-            .rtp_transceiver(transceiver)
-            .and_then(|t| t.sender())
-            .expect("a sendonly transceiver has a sender");
+            ))?
+        } else {
+            let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Sendonly,
+                    streams: vec![],
+                    send_encodings: vec![RTCRtpEncodingParameters {
+                        active: true,
+                        ..Default::default()
+                    }],
+                }),
+            )?;
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .expect("a sendonly transceiver has a sender")
+        };
         let now = world.now;
         let offer = world.peers[0].pc.create_offer(None)?;
         world.peers[0]
@@ -471,7 +500,7 @@ fn in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red
     use rtci::peer_connection::configuration::interceptor_registry::VIDEO_RED_RTX_PAYLOAD_TYPE;
     use std::collections::BTreeSet;
 
-    let (mut world, sender) = World::connected_with(Peer::chrome)?;
+    let (mut world, sender) = World::connected_sending(Peer::chrome, Some(0x5252_0002))?;
     for seq in 1000..1150 {
         world.send(sender, seq)?;
     }
