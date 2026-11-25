@@ -40,23 +40,32 @@ impl CryptoCbc {
         remote_key: &[u8],
         remote_mac: &[u8],
     ) -> Result<Self> {
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let local_cipher = provider
             .crypto()
             .new_cbc(CbcAlgorithm::Aes256Cbc, local_key)
             .map_err(crypto_error)?;
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let remote_cipher = provider
             .crypto()
             .new_cbc(CbcAlgorithm::Aes256Cbc, remote_key)
             .map_err(crypto_error)?;
         // Key the record MACs once per epoch, alongside the ciphers.
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let write_mac = provider
             .crypto()
             .new_hmac(HmacAlgorithm::Sha1, local_mac)
             .map_err(crypto_error)?;
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let read_mac = provider
             .crypto()
             .new_hmac(HmacAlgorithm::Sha1, remote_mac)
             .map_err(crypto_error)?;
+        crypto::scrub_stack();
         Ok(CryptoCbc {
             provider,
             local_cipher,

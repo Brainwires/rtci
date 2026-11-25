@@ -15,7 +15,9 @@ use ring::hmac;
 use ring::rand::SystemRandom;
 use ring::signature::{self, KeyPair};
 use sha1::Sha1;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::Arc;
+use std::sync::atomic::{Ordering, compiler_fence};
 
 /// The built-in Ring provider bundle.
 #[derive(Default)]
@@ -61,6 +63,13 @@ pub struct RingRandom;
 impl RTCRandom for RingRandom {
     fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError> {
         common::fill_random(output)
+    }
+
+    fn fill_secret(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        use ring::rand::SecureRandom;
+        SystemRandom::new()
+            .fill(output)
+            .map_err(|_| CryptoError::RandomnessFailed)
     }
 }
 
@@ -150,7 +159,7 @@ impl RTCCrypto for RingCrypto {
             HmacAlgorithm::Sha1 => Ok(Box::new(RustCryptoHmacSha1::new(key))),
             HmacAlgorithm::Sha256 | HmacAlgorithm::Sha384 | HmacAlgorithm::Sha512 => {
                 Ok(Box::new(RingHmac {
-                    key: hmac::Key::new(hmac_algorithm(algorithm), key),
+                    key: ErasedOnDrop::new(hmac::Key::new(hmac_algorithm(algorithm), key)),
                     output_len: algorithm.output_len(),
                 }))
             }
@@ -200,7 +209,9 @@ impl RTCCrypto for RingCrypto {
         };
         let key = aead::quic::HeaderProtectionKey::new(backend_algorithm, key)
             .map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Box::new(RingHeaderMask { key }))
+        Ok(Box::new(RingHeaderMask {
+            key: ErasedOnDrop::new(key),
+        }))
     }
 
     fn new_cbc(
@@ -247,12 +258,92 @@ impl RTCCrypto for RingCrypto {
     }
 }
 
+/// A ring key object kept in an allocation of this crate's own, overwritten with zeros when
+/// it is dropped (RFC 7714 section 13.1, RFC 3711 section 9.3, RFC 8446 section 7.1).
+///
+/// ring keeps a key schedule inline in each key object (`aead::LessSafeKey`: the AES round
+/// keys and the GHASH table, or the ChaCha20 key; `aead::quic::HeaderProtectionKey`: the AES
+/// round keys or the ChaCha20 key; `hmac::Key`: the two SHA-2 states after `key XOR ipad` and
+/// `key XOR opad`) and does not overwrite it when the object is dropped (ring issue #15
+/// settled against destructor-based erasure). So the object is moved, once, into a
+/// `Box<MaybeUninit<T>>` that this type owns, is only ever lent out as `&T`, and when this is
+/// dropped the value is dropped in place and THEN the `size_of::<T>()` bytes of the slot are
+/// overwritten with volatile writes, before the box frees the allocation.
+///
+/// Soundness. After `assume_init_drop` the slot holds no live value: its bytes are the memory
+/// of a `MaybeUninit<T>` that this type owns, which may hold any bytes at all. Writing zeros
+/// there is a write to our own allocation through a raw byte pointer, so it is defined
+/// behaviour whatever ring's layout is (it does not depend on ring's fields, and an all-zero
+/// `T` is never read: `MaybeUninit` has no drop glue and the box is freed next). The volatile
+/// writes and the fence keep the compiler from removing them as stores to memory about to be
+/// freed.
+///
+/// What this type cannot reach, and so does not erase: a copy moved out of it (which is why
+/// it never hands the value out by move, only `&T`), and the copies that building the value
+/// left in the stack frames of the functions that built it. The engine's callers build a key
+/// object from a frame of their own and call [`crate::scrub_stack`] right after it. Bytes a
+/// provider type keeps outside the object (a heap allocation of its own, a global cache) are
+/// out of reach too; ring 0.17's AEAD, header-protection and HMAC keys keep none.
+struct ErasedOnDrop<T> {
+    slot: Box<MaybeUninit<T>>,
+}
+
+impl<T> ErasedOnDrop<T> {
+    fn new(value: T) -> Self {
+        let mut slot = Box::<T>::new_uninit();
+        MaybeUninit::write(&mut *slot, value);
+        Self { slot }
+    }
+
+    fn get(&self) -> &T {
+        // SAFETY: `new` initialized the slot, and the value is dropped only in `drop`.
+        unsafe { self.slot.assume_init_ref() }
+    }
+
+    /// Hands the value to an API that consumes it by value (ring's `agree_ephemeral` takes the
+    /// ECDHE private key so), overwriting the slot it leaves. The value returned is a copy in
+    /// the caller's frame, which this type cannot reach: the caller scrubs the stack after
+    /// the consuming call. Only for such APIs; everything else borrows with [`Self::get`].
+    fn into_inner(mut self) -> T {
+        // SAFETY: `new` initialized the slot; the value is read out once, the slot is then
+        // overwritten and freed without being dropped (`forget` below skips `Drop`).
+        let value = unsafe { self.slot.assume_init_read() };
+        self.overwrite();
+        // SAFETY: `self.slot` is read out once and `self` is forgotten, so the box is freed
+        // exactly once (as a `Box<MaybeUninit<T>>`, which drops no value).
+        let slot = unsafe { std::ptr::read(&self.slot) };
+        std::mem::forget(self);
+        drop(slot);
+        value
+    }
+
+    /// Overwrites the slot with zeros. Only once it holds no value.
+    fn overwrite(&mut self) {
+        let bytes = self.slot.as_mut_ptr().cast::<u8>();
+        for offset in 0..size_of::<T>() {
+            // SAFETY: `offset` is inside the slot, which this type owns and which holds no
+            // value any more; a `u8` has no validity requirement.
+            unsafe { std::ptr::write_volatile(bytes.add(offset), 0) };
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+impl<T> Drop for ErasedOnDrop<T> {
+    fn drop(&mut self) {
+        // SAFETY: `new` initialized the slot; the value is dropped here, once, and never used
+        // again.
+        unsafe { self.slot.assume_init_drop() };
+        self.overwrite();
+    }
+}
+
 /// A keyed HMAC holding a `ring::hmac::Key`.
 ///
 /// `Key::new` performs the ipad/opad derivation; `Context::with_key` only clones the resulting
 /// state. Keeping the key here is what moves that derivation off the per-packet path.
 struct RingHmac {
-    key: hmac::Key,
+    key: ErasedOnDrop<hmac::Key>,
     output_len: usize,
 }
 
@@ -263,7 +354,7 @@ impl Mac for RingHmac {
 
     fn sign(&mut self, input: &[&[u8]], output: &mut [u8]) -> Result<(), CryptoError> {
         common::check_tag_len(self.output_len, output.len())?;
-        let mut context = hmac::Context::with_key(&self.key);
+        let mut context = hmac::Context::with_key(self.key.get());
         for part in input {
             context.update(part);
         }
@@ -296,7 +387,7 @@ fn hmac_algorithm(algorithm: HmacAlgorithm) -> hmac::Algorithm {
 /// computation RFC 9147 section 4.2.3 defines (AES-ECB of the sample, or the ChaCha20 block
 /// function keyed by it).
 struct RingHeaderMask {
-    key: aead::quic::HeaderProtectionKey,
+    key: ErasedOnDrop<aead::quic::HeaderProtectionKey>,
 }
 
 impl HeaderMask for RingHeaderMask {
@@ -305,13 +396,14 @@ impl HeaderMask for RingHeaderMask {
         sample: &[u8; HEADER_MASK_SAMPLE_LEN],
     ) -> Result<[u8; HEADER_MASK_LEN], CryptoError> {
         self.key
+            .get()
             .new_mask(sample)
             .map_err(|_| CryptoError::Provider("header mask generation failed".into()))
     }
 }
 
 struct RingAead {
-    key: aead::LessSafeKey,
+    key: ErasedOnDrop<aead::LessSafeKey>,
 }
 
 impl RingAead {
@@ -323,7 +415,9 @@ impl RingAead {
         let key = aead::UnboundKey::new(algorithm, key)
             .map(aead::LessSafeKey::new)
             .map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Box::new(Self { key }))
+        Ok(Box::new(Self {
+            key: ErasedOnDrop::new(key),
+        }))
     }
 }
 
@@ -349,6 +443,7 @@ impl AeadCipher for RingAead {
         })?;
         let tag = self
             .key
+            .get()
             .seal_in_place_separate_tag(nonce, aead::Aad::from(aad), plaintext_and_ciphertext)
             .map_err(|_| CryptoError::AuthenticationFailed)?;
         tag_out.copy_from_slice(tag.as_ref());
@@ -375,6 +470,7 @@ impl AeadCipher for RingAead {
             actual: tag.len(),
         })?;
         self.key
+            .get()
             .open_in_place_separate_tag(
                 nonce,
                 aead::Aad::from(aad),
@@ -390,16 +486,24 @@ impl AeadCipher for RingAead {
 struct RingKeyExchange {
     algorithm: KeyExchangeAlgorithm,
     backend_algorithm: &'static agreement::Algorithm,
-    private_key: agreement::EphemeralPrivateKey,
+    /// ring's ephemeral private key keeps the scalar inline and does not erase it; it is
+    /// consumed by value by `agree_ephemeral`, so it leaves its slot through `into_inner`.
+    private_key: ErasedOnDrop<agreement::EphemeralPrivateKey>,
     public_key: Vec<u8>,
 }
 
 impl RingKeyExchange {
     fn start(algorithm: KeyExchangeAlgorithm) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+        Self::start_with(algorithm, &SystemRandom::new())
+    }
+
+    fn start_with(
+        algorithm: KeyExchangeAlgorithm,
+        rng: &dyn ring::rand::SecureRandom,
+    ) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
         let backend_algorithm = agreement_algorithm(algorithm)?;
-        let private_key =
-            agreement::EphemeralPrivateKey::generate(backend_algorithm, &SystemRandom::new())
-                .map_err(|_| CryptoError::RandomnessFailed)?;
+        let private_key = agreement::EphemeralPrivateKey::generate(backend_algorithm, rng)
+            .map_err(|_| CryptoError::RandomnessFailed)?;
         let public_key = private_key
             .compute_public_key()
             .map_err(|_| CryptoError::Provider("key exchange public-key generation failed".into()))?
@@ -408,7 +512,7 @@ impl RingKeyExchange {
         Ok(Box::new(Self {
             algorithm,
             backend_algorithm,
-            private_key,
+            private_key: ErasedOnDrop::new(private_key),
             public_key,
         }))
     }
@@ -424,8 +528,9 @@ impl ActiveKeyExchange for RingKeyExchange {
     }
 
     fn complete(self: Box<Self>, peer_public_key: &[u8]) -> Result<SecretVec, CryptoError> {
-        let peer = agreement::UnparsedPublicKey::new(self.backend_algorithm, peer_public_key);
-        agreement::agree_ephemeral(self.private_key, &peer, |secret| {
+        let this = *self;
+        let peer = agreement::UnparsedPublicKey::new(this.backend_algorithm, peer_public_key);
+        agreement::agree_ephemeral(this.private_key.into_inner(), &peer, |secret| {
             SecretVec::new(secret.to_vec())
         })
         .map_err(|_| CryptoError::InvalidPublicKey)
@@ -440,7 +545,9 @@ enum RingSigningKeyKind {
 
 struct RingSigningKey {
     scheme: SignatureScheme,
-    kind: RingSigningKeyKind,
+    /// ring's key pairs keep the private key inline (an RSA key also in limb buffers of its
+    /// own) and do not erase it.
+    kind: ErasedOnDrop<RingSigningKeyKind>,
     public_key: Vec<u8>,
     public_key_encoding: PublicKeyEncoding,
     pkcs8_der: SecretVec,
@@ -513,7 +620,7 @@ impl RingSigningKey {
         };
         Ok(Arc::new(Self {
             scheme,
-            kind,
+            kind: ErasedOnDrop::new(kind),
             public_key,
             public_key_encoding,
             pkcs8_der: SecretVec::new(pkcs8_der.to_vec()),
@@ -526,7 +633,7 @@ impl SigningKey for RingSigningKey {
         // An RSA key with the rsaEncryption OID signs PKCS#1 v1.5 and RSASSA-PSS alike
         // (RFC 8446 section 4.2.3, the rsa_pss_rsae schemes).
         self.scheme == scheme
-            || (matches!(self.kind, RingSigningKeyKind::Rsa(_))
+            || (matches!(self.kind.get(), RingSigningKeyKind::Rsa(_))
                 && matches!(
                     scheme,
                     SignatureScheme::RsaPssSha256
@@ -548,7 +655,7 @@ impl SigningKey for RingSigningKey {
                 CryptoAlgorithm::Signature(scheme),
             ));
         }
-        match &self.kind {
+        match self.kind.get() {
             RingSigningKeyKind::Ed25519(key) => Ok(key.sign(message).as_ref().to_vec()),
             RingSigningKeyKind::EcdsaP256(key) => key
                 .sign(&SystemRandom::new(), message)
@@ -651,16 +758,36 @@ type HmacSha1 = ::hmac::Hmac<Sha1>;
 /// composite (AES-CTR, CCM, CBC and MD5 come from RustCrypto too), so HMAC-SHA1 is composed the
 /// same way rather than making the slower backend the default. `aws-lc-rs` has fast SHA-1 and
 /// keeps its own.
+///
+/// The keyed state is the key in another form: the SHA-1 states after `key XOR ipad` and
+/// `key XOR opad` compute any MAC under it. RustCrypto `hmac` 0.12 has no `zeroize` support, so
+/// the state is overwritten here when this is dropped (RFC 7714 section 13.1; RFC 3711 section
+/// 9.3 for SRTP; the record MAC keys of the DTLS CBC suite).
 pub(crate) struct RustCryptoHmacSha1 {
-    keyed: HmacSha1,
+    keyed: ManuallyDrop<HmacSha1>,
 }
 
 impl RustCryptoHmacSha1 {
     pub(crate) fn new(key: &[u8]) -> Self {
         Self {
             // HMAC accepts any key length: it hashes longer keys and zero-pads shorter ones.
-            keyed: <HmacSha1 as RustCryptoMac>::new_from_slice(key)
-                .expect("HMAC accepts keys of any length"),
+            keyed: ManuallyDrop::new(
+                <HmacSha1 as RustCryptoMac>::new_from_slice(key)
+                    .expect("HMAC accepts keys of any length"),
+            ),
+        }
+    }
+}
+
+impl Drop for RustCryptoHmacSha1 {
+    fn drop(&mut self) {
+        // SAFETY: the state is dropped once, here, and never used again: `ManuallyDrop` keeps
+        // the drop glue from touching it after the overwrite. `Hmac<Sha1>` is plain data (block
+        // buffers and hash words; no pointers, no heap), so overwriting its bytes once it has
+        // been dropped is a write to memory this value owns.
+        unsafe {
+            ManuallyDrop::drop(&mut self.keyed);
+            zeroize::zeroize_flat_type(&mut self.keyed as *mut ManuallyDrop<HmacSha1>);
         }
     }
 }
@@ -672,7 +799,7 @@ impl Mac for RustCryptoHmacSha1 {
 
     fn sign(&mut self, input: &[&[u8]], output: &mut [u8]) -> Result<(), CryptoError> {
         check_tag_len(20, output.len())?;
-        let mut mac = self.keyed.clone();
+        let mut mac = HmacSha1::clone(&self.keyed);
         for part in input {
             mac.update(part);
         }
@@ -690,4 +817,20 @@ impl Mac for RustCryptoHmacSha1 {
             Err(CryptoError::AuthenticationFailed)
         }
     }
+}
+
+/// Test support: the ring provider's key exchange with its private key drawn from `seed`
+/// (exactly the seed length of the curve), so that a test knows the private scalar. Not part
+/// of the supported API.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[allow(deprecated)]
+pub fn ring_key_exchange_with_seed(
+    algorithm: KeyExchangeAlgorithm,
+    seed: &[u8],
+) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+    RingKeyExchange::start_with(
+        algorithm,
+        &ring::test::rand::FixedSliceRandom { bytes: seed },
+    )
 }

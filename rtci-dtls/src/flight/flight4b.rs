@@ -65,7 +65,7 @@ impl Flight for Flight4b {
         // RFC 5246 7.4.9: the client's Finished covers the server's.
         let expected = prf_verify_data_client(
             cfg.provider().crypto(),
-            &state.master_secret,
+            state.master_secret.as_ref(),
             &abbreviated_transcript(cache, cfg, true),
             cipher_suite.hash_func(),
         )
@@ -144,7 +144,7 @@ impl Flight for Flight4b {
         if state.local_verify_data.is_empty() {
             state.local_verify_data = prf_verify_data_server(
                 cfg.provider().crypto(),
-                &state.master_secret,
+                state.master_secret.as_ref(),
                 &transcript,
                 cipher_suite.hash_func(),
             )

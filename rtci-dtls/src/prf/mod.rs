@@ -4,7 +4,8 @@ mod prf_test;
 use crate::record_layer::record_layer_header::RecordLayerHeader;
 use std::fmt;
 
-use crypto::{Mac, RTCCrypto};
+use crypto::{Mac, RTCCrypto, SecretVec};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::cipher_suite::CipherSuiteHash;
 use crate::content::ContentType;
@@ -18,9 +19,11 @@ pub(crate) const PRF_KEY_EXPANSION_LABEL: &str = "key expansion";
 pub(crate) const PRF_VERIFY_DATA_CLIENT_LABEL: &str = "client finished";
 pub(crate) const PRF_VERIFY_DATA_SERVER_LABEL: &str = "server finished";
 
-#[derive(PartialEq, Debug, Clone)]
+/// The key block of a DTLS 1.2 connection (RFC 5246 section 6.3), split into its keys.
+///
+/// Every field is key material: zeroized on drop, never printed.
+#[derive(PartialEq, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct EncryptionKeys {
-    pub(crate) master_secret: Vec<u8>,
     pub(crate) client_mac_key: Vec<u8>,
     pub(crate) server_mac_key: Vec<u8>,
     pub(crate) client_write_key: Vec<u8>,
@@ -29,19 +32,13 @@ pub(crate) struct EncryptionKeys {
     pub(crate) server_write_iv: Vec<u8>,
 }
 
-impl fmt::Display for EncryptionKeys {
+impl fmt::Debug for EncryptionKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut out = "EncryptionKeys:\n".to_string();
-
-        out += format!("- master_secret: {:?}\n", self.master_secret).as_str();
-        out += format!("- client_mackey: {:?}\n", self.client_mac_key).as_str();
-        out += format!("- server_mackey: {:?}\n", self.server_mac_key).as_str();
-        out += format!("- client_write_key: {:?}\n", self.client_write_key).as_str();
-        out += format!("- server_write_key: {:?}\n", self.server_write_key).as_str();
-        out += format!("- client_write_iv: {:?}\n", self.client_write_iv).as_str();
-        out += format!("- server_write_iv: {:?}\n", self.server_write_iv).as_str();
-
-        write!(f, "{out}")
+        f.debug_struct("EncryptionKeys")
+            .field("mac_key_len", &self.client_mac_key.len())
+            .field("write_key_len", &self.client_write_key.len())
+            .field("write_iv_len", &self.client_write_iv.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -50,24 +47,24 @@ impl fmt::Display for EncryptionKeys {
 // uint16 with the value N, and the PSK itself.
 //
 // https://tools.ietf.org/html/rfc4279#section-2
-pub(crate) fn prf_psk_pre_master_secret(psk: &[u8]) -> Vec<u8> {
+pub(crate) fn prf_psk_pre_master_secret(psk: &[u8]) -> SecretVec {
     let psk_len = psk.len();
-
-    let mut out = vec![0u8; 2 + psk_len + 2];
-
-    out.extend_from_slice(psk);
     let be = (psk_len as u16).to_be_bytes();
+
+    // Sized up front: a buffer that grew would leave a copy behind.
+    let mut out = vec![0u8; 2 + psk_len + 2 + psk_len];
     out[..2].copy_from_slice(&be);
     out[2 + psk_len..2 + psk_len + 2].copy_from_slice(&be);
+    out[2 + psk_len + 2..].copy_from_slice(psk);
 
-    out
+    SecretVec::new(out)
 }
 
 pub(crate) fn prf_pre_master_secret(
     public_key: &[u8],
     keypair: &mut NamedCurveKeypair,
     curve: NamedCurve,
-) -> Result<Vec<u8>> {
+) -> Result<SecretVec> {
     if keypair.curve != curve {
         return Err(Error::ErrNamedCurveAndPrivateKeyMismatch);
     }
@@ -97,40 +94,46 @@ pub(crate) fn prf_pre_master_secret(
 //  output data.
 //
 // https://tools.ietf.org/html/rfc4346w
-fn hmac_sha(
-    crypto: &dyn RTCCrypto,
-    h: CipherSuiteHash,
-    key: &[u8],
-    input: &[&[u8]],
-) -> Result<Vec<u8>> {
-    let algorithm = h.hmac_algorithm();
-    let mut output = vec![0; algorithm.output_len()];
-    crypto
-        .new_hmac(algorithm, key)
-        .and_then(|mut mac| mac.sign(input, &mut output))
-        .map_err(|error| Error::Crypto(error.to_string()))?;
-    Ok(output)
-}
-
+//
+// Everything P_hash computes is key material, or is derived from the secret: the output, each
+// HMAC output, each A(i). It is all built in zeroizing buffers sized up front (a buffer that grew
+// would leave a copy in the allocation it moved from), and the secret is keyed into the HMAC
+// once.
 pub(crate) fn prf_p_hash(
     crypto: &dyn RTCCrypto,
     secret: &[u8],
     seed: &[u8],
     requested_length: usize,
     h: CipherSuiteHash,
-) -> Result<Vec<u8>> {
-    let mut last_round = seed.to_vec();
-    let mut out = vec![];
+) -> Result<SecretVec> {
+    let algorithm = h.hmac_algorithm();
+    let digest_len = algorithm.output_len();
+    let mut mac = crypto
+        .new_hmac(algorithm, secret)
+        .map_err(|error| Error::Crypto(error.to_string()))?;
+    let mut sign = |input: &[&[u8]], output: &mut [u8]| {
+        mac.sign(input, output)
+            .map_err(|error| Error::Crypto(error.to_string()))
+    };
 
-    let iterations = ((requested_length as f64) / (h.size() as f64)).ceil() as usize;
-    for _ in 0..iterations {
-        last_round = hmac_sha(crypto, h, secret, &[&last_round])?;
-        let with_secret = hmac_sha(crypto, h, secret, &[&last_round, seed])?;
-
-        out.extend_from_slice(&with_secret);
+    let iterations = requested_length.div_ceil(digest_len);
+    let mut out = Zeroizing::new(vec![0u8; iterations * digest_len]);
+    // A(i), and A(i-1) while A(i) is computed from it.
+    let mut a = Zeroizing::new(vec![0u8; digest_len]);
+    let mut previous = Zeroizing::new(vec![0u8; digest_len]);
+    for (i, block) in out.chunks_exact_mut(digest_len).enumerate() {
+        if i == 0 {
+            // A(1) = HMAC_hash(secret, A(0)), A(0) = seed.
+            sign(&[seed], &mut a)?;
+        } else {
+            previous.copy_from_slice(&a);
+            sign(&[&previous], &mut a)?;
+        }
+        sign(&[&a, seed], block)?;
     }
 
-    Ok(out[..requested_length].to_vec())
+    out.truncate(requested_length);
+    Ok(SecretVec::new(std::mem::take(&mut *out)))
 }
 
 pub(crate) fn prf_extended_master_secret(
@@ -138,7 +141,7 @@ pub(crate) fn prf_extended_master_secret(
     pre_master_secret: &[u8],
     session_hash: &[u8],
     h: CipherSuiteHash,
-) -> Result<Vec<u8>> {
+) -> Result<SecretVec> {
     let mut seed = PRF_EXTENDED_MASTER_SECRET_LABEL.as_bytes().to_vec();
     seed.extend_from_slice(session_hash);
     prf_p_hash(crypto, pre_master_secret, &seed, 48, h)
@@ -150,7 +153,7 @@ pub(crate) fn prf_master_secret(
     client_random: &[u8],
     server_random: &[u8],
     h: CipherSuiteHash,
-) -> Result<Vec<u8>> {
+) -> Result<SecretVec> {
     let mut seed = PRF_MASTER_SECRET_LABEL.as_bytes().to_vec();
     seed.extend_from_slice(client_random);
     seed.extend_from_slice(server_random);
@@ -182,8 +185,9 @@ pub(crate) fn prf_encryption_keys(
         (2 * lengths.mac) + (2 * lengths.key) + (2 * lengths.iv),
         h,
     )?;
-    let mut key_material = &material[..];
+    let mut key_material = material.as_ref();
 
+    // Each key is copied into an allocation of its own size, which never grows.
     let client_mac_key = key_material[..lengths.mac].to_vec();
     key_material = &key_material[lengths.mac..];
 
@@ -202,7 +206,6 @@ pub(crate) fn prf_encryption_keys(
     let server_write_iv = key_material[..lengths.iv].to_vec();
 
     Ok(EncryptionKeys {
-        master_secret: master_secret.to_vec(),
         client_mac_key,
         server_mac_key,
         client_write_key,
@@ -225,7 +228,8 @@ pub(crate) fn prf_verify_data(
     let mut seed = label.as_bytes().to_vec();
     seed.extend_from_slice(&result);
 
-    prf_p_hash(crypto, master_secret, &seed, 12, h)
+    // verify_data is no secret: it is sent, in the Finished message.
+    Ok(prf_p_hash(crypto, master_secret, &seed, 12, h)?.into_bytes())
 }
 
 pub(crate) fn prf_verify_data_client(

@@ -43,6 +43,9 @@ openssl = { version = "0.10.72", optional = true }
 
 [dev-dependencies]
 pem.workspace = true
+# The SHA-2 compression function, to compute the HMAC states ring keeps
+# (tests/ring_key_object_erasure.rs).
+sha2 = { workspace = true, features = ["compress"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

@@ -17,10 +17,15 @@ const CRYPTO_GCM_TAG_LENGTH: usize = 16;
 const CRYPTO_GCM_NONCE_LENGTH: usize = 12;
 
 /// AES-GCM authenticated encryption for DTLS records, holding the per-direction keys.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct CryptoGcm {
+    #[zeroize(skip)]
     provider: Arc<dyn RTCCryptoProvider>,
+    #[zeroize(skip)]
     local_gcm: Box<dyn AeadCipher>,
+    #[zeroize(skip)]
     remote_gcm: Box<dyn AeadCipher>,
+    /// The implicit nonce parts of the key block (RFC 5288 section 3): key material.
     local_write_iv: Vec<u8>,
     remote_write_iv: Vec<u8>,
 }
@@ -34,14 +39,19 @@ impl CryptoGcm {
         remote_key: &[u8],
         remote_write_iv: &[u8],
     ) -> Result<Self> {
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let local_gcm = provider
             .crypto()
             .new_aead(AeadAlgorithm::Aes128Gcm, local_key)
             .map_err(crypto_error)?;
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let remote_gcm = provider
             .crypto()
             .new_aead(AeadAlgorithm::Aes128Gcm, remote_key)
             .map_err(crypto_error)?;
+        crypto::scrub_stack();
         Ok(CryptoGcm {
             provider,
             local_gcm,

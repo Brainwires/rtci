@@ -18,7 +18,7 @@ mod key_material;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crypto::RTCCryptoProvider;
 use key_material::{Needle, context_needles, rtcp, rtp};
@@ -40,7 +40,7 @@ const MAX_LIVE: usize = 16_384;
 
 static CHECKING: AtomicBool = AtomicBool::new(false);
 static TRACKING: AtomicBool = AtomicBool::new(false);
-static NEEDLES: Mutex<Vec<Needle>> = Mutex::new(Vec::new());
+static NEEDLES: RwLock<Vec<Needle>> = RwLock::new(Vec::new());
 /// Per needle: blocks freed while checking that held it.
 static FREED: [AtomicU32; MAX_NEEDLES] = [const { AtomicU32::new(0) }; MAX_NEEDLES];
 /// Blocks allocated while tracking and not yet freed: (address, size), 0 = empty.
@@ -87,8 +87,11 @@ unsafe impl GlobalAlloc for Recording {
         if CHECKING.load(Ordering::SeqCst) {
             // SAFETY: `ptr` is a live block of `layout.size()` bytes until it is freed below.
             let block = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
-            // The lock does not allocate; nothing locks it while checking but this.
-            if let Ok(needles) = NEEDLES.try_lock() {
+            // A read lock: frees on several threads at once all check (a `try_lock` skipped
+            // a block whenever two frees met, which could hide a key). The needles are written
+            // only while not checking; the lock does not allocate.
+            {
+                let needles = NEEDLES.read().unwrap_or_else(|e| e.into_inner());
                 for (i, needle) in needles.iter().enumerate() {
                     if needle.found_in(block) {
                         FREED[i].fetch_add(1, Ordering::SeqCst);
@@ -137,7 +140,7 @@ fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) ->
     for counter in &FREED {
         counter.store(0, Ordering::SeqCst);
     }
-    *NEEDLES.lock().unwrap_or_else(|e| e.into_inner()) = needles.clone();
+    *NEEDLES.write().unwrap_or_else(|e| e.into_inner()) = needles.clone();
 
     TRACKING.store(true, Ordering::SeqCst);
     let keying = Keying {
@@ -235,14 +238,14 @@ fn every_session() -> Vec<(&'static str, ProtectionProfile, Vec<Finding>)> {
 
 fn left_behind(
     sessions: &[(&'static str, ProtectionProfile, Vec<Finding>)],
-    keep: impl Fn(&str, &Finding) -> bool,
+    keep: impl Fn(&str, ProtectionProfile, &Finding) -> bool,
 ) -> Vec<String> {
     sessions
         .iter()
         .flat_map(|(provider, profile, findings)| {
             findings
                 .iter()
-                .filter(|f| f.freed > 0 && keep(provider, f))
+                .filter(|f| f.freed > 0 && keep(provider, *profile, f))
                 .map(move |f| format!("{provider} {profile:?}: {}", f.needle.describe()))
         })
         .collect()
@@ -255,7 +258,7 @@ fn left_behind(
 fn keys_the_crate_holds_are_erased_with_every_provider() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sessions = every_session();
-    let left = left_behind(&sessions, |_, f| f.needle.crate_held);
+    let left = left_behind(&sessions, |_, _, f| f.needle.crate_held);
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
 
@@ -267,22 +270,54 @@ fn keys_the_crate_holds_are_erased_with_every_provider() {
 fn aws_lc_leaves_no_key_in_freed_rust_memory() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sessions = every_session();
-    let left = left_behind(&sessions, |provider, _| provider == "aws-lc-rs");
+    let left = left_behind(&sessions, |provider, _, _| provider == "aws-lc-rs");
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
 
-/// KNOWN LIMIT (RFC 7714 section 13.1 with the ring provider): ring's AES-GCM key
-/// (`ring::aead::LessSafeKey`) keeps the expanded AES key in the Rust heap and does not erase
-/// it when dropped, and the HMAC-SHA1 of the ring provider (RustCrypto `hmac`, chosen for
-/// speed) keeps the two hash states of the authentication key the same way: freed blocks
-/// hold them until the allocator reuses the memory. Fails when run.
+/// With the ring provider no key is left in freed memory, for every profile: the keys the
+/// crate holds, the HMAC-SHA1 states of the AES-CM and NULL profiles' authentication keys
+/// (RustCrypto `hmac`, which `rtci-crypto` builds for the ring provider and overwrites when a
+/// context is dropped; left in freed memory in 0.1.0) and ring's own AES-GCM key objects
+/// (`ring::aead::LessSafeKey`: the session key and every AES round key), which `rtci-crypto`
+/// keeps in an allocation of its own and overwrites after ring has dropped them (left in freed
+/// memory in 0.1.0, a known limit of that provider). Each is found live first: the needles are
+/// the forms the objects keep, so "not found after the drop" means erased.
 #[cfg(feature = "crypto-ring")]
 #[test]
-#[ignore = "KNOWN LIMIT: the ring provider leaves AES-GCM round keys and HMAC-SHA1 states in freed memory; fails when run (-- --ignored known_limit_)"]
-fn known_limit_ring_leaves_no_key_in_freed_rust_memory() {
+fn with_ring_no_key_is_left_in_freed_rust_memory() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sessions = every_session();
-    let left = left_behind(&sessions, |provider, _| provider == "ring");
+    let ring = || {
+        sessions
+            .iter()
+            .filter(|(provider, _, _)| *provider == "ring")
+    };
+    let hmac_states_live =
+        ring()
+            .filter(|(_, profile, _)| !profile.is_aead())
+            .all(|(_, _, findings)| {
+                findings
+                    .iter()
+                    .any(|f| f.live && f.needle.form.starts_with("HMAC inner state"))
+            });
+    assert!(
+        hmac_states_live,
+        "the HMAC-SHA1 states are found live with ring, for every AES-CM and NULL profile"
+    );
+    let aead_keys_live =
+        ring()
+            .filter(|(_, profile, _)| profile.is_aead())
+            .all(|(_, _, findings)| {
+                findings.iter().any(|f| {
+                    f.live && !f.needle.crate_held && f.needle.key.ends_with("encryption key")
+                })
+            });
+    assert!(
+        aead_keys_live,
+        "ring's AES-GCM key objects are found live (the session key or a round key), for both \
+         AEAD profiles"
+    );
+    let left = left_behind(&sessions, |provider, _, _| provider == "ring");
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
 
@@ -301,7 +336,7 @@ fn the_allocator_sees_a_key_schedule_left_behind() {
     for counter in &FREED {
         counter.store(0, Ordering::SeqCst);
     }
-    *NEEDLES.lock().unwrap_or_else(|e| e.into_inner()) = needles.clone();
+    *NEEDLES.write().unwrap_or_else(|e| e.into_inner()) = needles.clone();
     let careless = Box::new(key_material::Schedule::expand(&key).bytes);
     assert!(needles[0].found_in(&careless[..]), "found live");
     CHECKING.store(true, Ordering::SeqCst);

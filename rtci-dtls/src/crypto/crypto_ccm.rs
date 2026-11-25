@@ -30,10 +30,15 @@ pub enum CryptoCcmTagLen {
 }
 
 /// AES-CCM authenticated encryption for DTLS records, holding the per-direction keys.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct CryptoCcm {
+    #[zeroize(skip)]
     provider: Arc<dyn RTCCryptoProvider>,
+    #[zeroize(skip)]
     local_ccm: Box<dyn AeadCipher>,
+    #[zeroize(skip)]
     remote_ccm: Box<dyn AeadCipher>,
+    /// The implicit nonce parts of the key block (RFC 6655 section 3): key material.
     local_write_iv: Vec<u8>,
     remote_write_iv: Vec<u8>,
 }
@@ -52,14 +57,19 @@ impl CryptoCcm {
             CryptoCcmTagLen::CryptoCcmTagLength => AeadAlgorithm::Aes128Ccm,
             CryptoCcmTagLen::CryptoCcm8TagLength => AeadAlgorithm::Aes128Ccm8,
         };
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let local_ccm = provider
             .crypto()
             .new_aead(algorithm, local_key)
             .map_err(crypto_error)?;
+        // Each key schedule is built on the stack before it is boxed: see `scrub_stack`.
+        crypto::scrub_stack();
         let remote_ccm = provider
             .crypto()
             .new_aead(algorithm, remote_key)
             .map_err(crypto_error)?;
+        crypto::scrub_stack();
         Ok(CryptoCcm {
             provider,
             local_ccm,

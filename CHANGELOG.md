@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Key material left in freed memory by rtci-dtls, rtci-srtp and rtci-crypto is now erased**
+  (`conf/zeroize-1-dtls-srtp-key-erasure`; RFC 5246 section 8.1, RFC 8446 section 7.1, RFC 3711
+  section 9.3, RFC 7714 section 13.1; docs/key-erasure.md). In 0.1.0 (and on master until this
+  change) these stayed in heap memory after it was freed, until the allocator reused it:
+  DTLS 1.2: the PRF (`prf_p_hash`) built its output and intermediate values in plain vectors, so
+  the master secret, the key block (every record key and IV) and the DTLS-SRTP exporter output
+  (the SRTP master keys and salts) were left behind; `State` held the master and premaster
+  secrets in plain vectors (replaced or dropped without erasure; the ECDHE shared secret was
+  unwrapped from its `SecretVec`); a PSK returned by the application's callback was not erased;
+  `EncryptionKeys` printed every key through `Display` and `Debug`; the record ciphers' write
+  IVs were plain; the serialized `State` and ticket plaintexts left copies while being built;
+  the previous cookie secret of an endpoint (after a rotation) was never erased, and cookie
+  secrets, like ticket keys and the DTLS 1.3 HelloRetryRequest cookie secret, stayed in the
+  buffered generator's output buffer.
+  DTLS 1.3: record IVs held inline in epochs that live in vectors were copied into memory the
+  vectors freed. SRTP and DTLS with the ring provider: the RustCrypto HMAC-SHA1 states (the
+  AES-CM and NULL profiles' authentication keys, the AES-CBC suite's MAC keys) were not erased;
+  RustCrypto `aes` was built without `zeroize`, so AES-CBC and AES-CCM key schedules and the
+  per-packet AES-CM ones were not erased. With the ring provider, ring's own key objects were
+  freed as they were: the SRTP AES-GCM session keys and every AES round key
+  (`ring::aead::LessSafeKey`), the DTLS record keys of the AES-GCM and ChaCha20-Poly1305 suites,
+  the DTLS 1.3 record-number keys (`aead::quic::HeaderProtectionKey`) and the HMAC-SHA-2 states
+  of the PRF, HKDF and cookie keys (`hmac::Key`); the ECDHE private key, left in the freed
+  key-exchange object (`agreement::EphemeralPrivateKey`), and the certificate's Ed25519 and
+  ECDSA P-256 key pairs. Key schedules and shared secrets also left copies in
+  dead stack frames that later moves carried into heap padding. All of these are now erased:
+  `SecretVec` everywhere (it implements `Zeroize` and `ZeroizeOnDrop`), structs that hold keys
+  derive both, buffers are sized up front, `aes`/`ctr` are built with `zeroize`, the HMAC-SHA1
+  state is overwritten on drop, ring's key objects live in an allocation of the provider's own
+  that is overwritten after ring has dropped them (`ErasedOnDrop`; ring declines to erase them
+  itself, ring issue #15), `crypto::scrub_stack` runs after keyed objects and shared
+  secrets are built, and secrets are drawn with the new `RTCRandom::fill_secret` (the built-in
+  providers read the operating system for it). Tests: `tests/dtls_secret_erasure.rs` (every
+  freed heap block and every block still allocated, all platforms; the whole process on Linux),
+  the DTLS 1.2 exporter test of `tests/dtls_srtp_keying_material_erasure.rs` (was a known
+  limit), `with_ring_no_key_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
+  `key_erasure_process_memory.rs` (were the `known_limit_*` tests),
+  `rtci-crypto/tests/ring_key_object_erasure.rs` (each ring key object, the ECDHE private key
+  drawn from a known seed through the new test-support seam `ring_key_exchange_with_seed`, the
+  signing key pairs). What remains: a ring RSA key pair keeps its private limbs in ring's own
+  heap allocations (not reachable, not measured); stack copies left while key objects are built
+  are scrubbed but not observed by any test (a copy moved onto the stack is not caught), so
+  their absence is not guaranteed (docs/key-erasure.md); RFC7714-13.1-3 stays `partial`
+  (class E) for that. No wire or handshake behaviour changes. Additions to the API:
+  `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
+  for `SecretVec` and `SessionKeys`. Cost (`rtci-srtp` and `rtci-dtls` criterion benchmarks
+  against master 6939a3e8 on the same runner, run 45660052237; master figures in brackets):
+  DTLS record-cipher setup 1.07 µs AES-128-GCM (0.39 µs) and 1.38 µs AES-256-CBC (0.47 µs),
+  of which about 0.7 µs is the 32 KiB stack overwrite (`crypto::scrub_stack`, one bulk fill;
+  the first form, a volatile write per byte, took 13.8 µs and 22.5 µs, run 45654600978);
+  SRTP context setup 1.48 µs AES-CM (1.43 µs) and 1.31 µs AES-128-GCM (1.12 µs: ring's key
+  object in an allocation of its own); per packet SRTP AES-CM RTP 1.52 µs / 1.23 µs encrypt /
+  decrypt (1.53 / 1.26 µs), RTCP 271 ns / 307 ns (264 / 279 ns), SRTP AES-128-GCM RTP 625 ns
+  / 330 ns (627 / 337 ns), DTLS records 258 / 270 ns AES-128-GCM and 3.16 / 2.89 µs
+  AES-256-CBC (within 1-4 % of master, faster). That `scrub_stack` still overwrites is
+  tested: emptied, or with its fill left unobservable to the optimiser, the DTLS erasure
+  tests fail in a release build (the second case cannot be told apart in a debug build,
+  where nothing is optimised away).
+
 ### Breaking changes
 
 - **interceptor, peer connection** (`conf/nack-11-decline-useless-repairs`): **the NACK
@@ -58,7 +119,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   17.85 -> 18.30, 90th percentile 19.10 -> 20.40, per seed +0.26 +-0.24 s; target 15-25 s after
   the cap 1215 -> 1195 kbit/s; 200 calls), and calls over 20 s go from 3 to 31 of 200 since the
   climb clusters at 17-21 s; with both directions capped the 15-25 s target is 44-66 kbit/s
-  lower (not significant) against 89-90 kbit/s more target while the cap holds. Fixed with it: a probe cluster asked for while
+  lower (not significant) against 89-90 kbit/s more target while the cap holds. Paced chains
+  move too on the tree this landed on (train 34 round 7, 58ba8a93, against round 6's rows; the
+  branch's own base showed the paced cells identical): the rules decline repairs there as well,
+  a declined repair leaving an unusable frame that a key frame answers. Both directions capped
+  (`cap/paced/gap300/both/q300/rl0`, 111 of 200 calls move): unusable frames 1.07 -> 2.75 a
+  call, key frames 4.9 -> 5.1, target 15-25 s after the cap 1375 -> 1369 kbit/s, against
+  retransmissions 4.8 -> 2.7 and an oldest picture 2.49 -> 2.44 s; 5 % loss on the reverse path
+  (`cap/paced/gap300/up/q300/rl5`, 107 of 200): target 15-25 s after 1367 -> 1354 kbit/s,
+  seconds to 1000 kbit/s 16.44 -> 16.53, a peer outside `connected` at the end 1 -> 2 of 200;
+  the 4 s outage (`outage/paced/gap300/up/q300/rl0`, 66 of 200: the calls whose picture the
+  restart of probing at a path change had made older) gains: oldest picture 4.76 -> 4.32 s,
+  retransmissions 133 -> 36, first picture after the new pair 0.71 -> 0.26 s. The reference
+  cells (1000 calls each) and the 100 ms queue are identical; the 1000 ms queue moves in 2 of
+  200 (instrument runs 45695138492 / 45695149408 against 45686735759 / 45686744374; the
+  merge-point rule holds, nothing flagged). Fixed with it: a probe cluster asked for while
   the responder's buffer is empty (after a give-up or the pacer's flush, before the next
   packet is written) is still padded, under the header of the newest packet the buffer held;
   before, no padding left, and a chain without a pacer stopped probing.
@@ -199,6 +274,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
     data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
     a lost DTLS ClientHello retransmitted after its timer).
+- **stream-driver** (runtime-1, `conf/runtime-1-trait`, on master since train 25): **`StreamDriver`
+  is no longer `Sync`, `Unpin`, `UnwindSafe` or `RefUnwindSafe`**, and `PeerDriver` no longer
+  `Unpin`; `Accepted`, `SharedAccept` and `DriverInput` are no longer `UnwindSafe` /
+  `RefUnwindSafe` (cargo-semver-checks `auto_trait_impl_removed` against v0.1.0). The driver
+  holds the injected runtime and its tasks as trait objects (`Arc<dyn Runtime>`,
+  `Box<dyn runtime::JoinHandle>`, which is `Send` but not `Sync`; TCP streams as
+  `Arc<dyn runtime::AsyncTcpStream>`) and its input queue is an `async_channel` channel, whose
+  receiver is not `Unpin`. `Send` is kept everywhere. Migration: share a driver across threads
+  behind a `Mutex` (or keep it on one task and talk to it through its handles), pin it
+  (`Box::pin` / `pin!`) where a future that owns it must be `Unpin`, and wrap it in
+  `AssertUnwindSafe` for `catch_unwind`.
 - **`StreamTransmit` has a new public field, `dscp`** (rtci-shared): the codepoint the driver
   sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
   flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
@@ -1865,15 +1951,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
-- **SRTP key erasure (RFC 7714 section 13.1) with the ring provider, and the DTLS 1.2 exporter**
-  (`conf/must-2-feedback-reliance-and-key-erasure`): with the ring provider, the AES-GCM
-  profiles' session keys and all their AES round keys (`ring::aead::LessSafeKey`) and, for the
-  AES-CM and NULL profiles, the two HMAC-SHA1 hash states of each authentication key (RustCrypto
-  `hmac`) are freed without being overwritten, so they persist in freed heap memory until the
-  allocator reuses it; with DTLS 1.2, `prf_p_hash` leaves the exported SRTP keying material in
-  freed heap memory the same way. Tests: `known_limit_*` in `rtci-srtp/tests/key_schedule_erasure.rs`,
-  `rtci-srtp/tests/key_erasure_process_memory.rs` and `tests/dtls_srtp_keying_material_erasure.rs`
-  (fail when run). The AWS-LC provider and DTLS 1.3 leave nothing.
+- **Stack copies of key material with either provider** (`conf/zeroize-1-dtls-srtp-key-erasure`;
+  RFC 7714 section 13.1): building a key object leaves copies in dead stack frames, and the
+  providers' own stack temporaries are not erased by them. The engine scrubs 32 KiB of stack
+  after building keyed objects; the tests see stack residue only where it reaches the heap
+  (DTLS, caught) and in dead worker stacks on Linux (none found), and a copy deliberately moved
+  onto the stack is not caught, so this is a measure, not a tested guarantee
+  (RFC7714-13.1-3 `partial`, class E). With the ring provider an RSA signing key keeps its
+  private limbs in ring's own heap allocations, which ring frees without erasure (not
+  measured). Until this branch, ring's AEAD, header-protection, HMAC, ECDHE and Ed25519/P-256
+  signing key objects were also left in freed memory; they are now erased (Security).
 
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
@@ -1967,8 +2054,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (freed Rust heap, every platform), `rtci-srtp/tests/key_erasure_process_memory.rs` (the whole
   process, Linux) and `tests/dtls_srtp_keying_material_erasure.rs`: every key an SRTP context
   derives, its AES round keys, GHASH key and HMAC-SHA1 states, computed by the tests themselves,
-  are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`, class C
-  instead of E: see Known limits).
+  are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`; class E
+  after `conf/zeroize-1-dtls-srtp-key-erasure`: see Security and Known limits).
 - **benchmarks compared on every pull request; a performance ledger**
   (`conf/perf-1-ledger-and-bench-gate`): the pull-request job "Benchmarks compared with the
   base" of `bench.yml` builds the pull request and its base on one runner and runs every

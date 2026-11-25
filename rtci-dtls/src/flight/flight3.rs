@@ -606,7 +606,7 @@ fn parse_abbreviated(
     };
     let expected = crate::prf::prf_verify_data_server(
         cfg.provider().crypto(),
-        &state.master_secret,
+        state.master_secret.as_ref(),
         &crate::resumption::abbreviated_transcript(cache, cfg, false),
         cipher_suite.hash_func(),
     )
@@ -650,7 +650,7 @@ pub(crate) fn handle_server_key_exchange(
 ) -> Result<(), (Option<Alert>, Option<Error>)> {
     if let Some(local_psk_callback) = &cfg.local_psk_callback {
         let psk = match local_psk_callback(&h.identity_hint) {
-            Ok(psk) => psk,
+            Ok(psk) => crypto::SecretVec::new(psk),
             Err(err) => {
                 return Err((
                     Some(Alert {
@@ -663,7 +663,7 @@ pub(crate) fn handle_server_key_exchange(
         };
 
         state.identity_hint.clone_from(&h.identity_hint);
-        state.pre_master_secret = prf_psk_pre_master_secret(&psk);
+        state.pre_master_secret = prf_psk_pre_master_secret(psk.as_ref());
     } else {
         let mut local_keypair = match h
             .named_curve

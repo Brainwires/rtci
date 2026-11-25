@@ -9,7 +9,7 @@ pub const LABEL_EXTRACTOR_DTLS_SRTP: &str = "EXTRACTOR-dtls_srtp";
 /// The keys and salts are zeroized when the value is dropped, and `Debug` prints their lengths
 /// only (RFC 3711 section 3.2.1: master keys are kept secret; RFC 7714 section 13.1: keys and
 /// salts are erased when no longer needed).
-#[derive(Default, Clone)]
+#[derive(Default, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct SessionKeys {
     /// The master key used to protect outbound packets.
     pub local_master_key: Vec<u8>,
@@ -41,20 +41,6 @@ impl std::fmt::Debug for SessionKeys {
                 &format_args!("[REDACTED; {}]", self.remote_master_salt.len()),
             )
             .finish()
-    }
-}
-
-impl Drop for SessionKeys {
-    fn drop(&mut self) {
-        for secret in [
-            &mut self.local_master_key,
-            &mut self.local_master_salt,
-            &mut self.remote_master_key,
-            &mut self.remote_master_salt,
-        ] {
-            // `SecretVec` zeroizes the allocation it is handed when it drops.
-            drop(crypto::SecretVec::new(std::mem::take(secret)));
-        }
     }
 }
 

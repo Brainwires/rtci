@@ -121,7 +121,7 @@ impl Certificate {
             )));
         }
 
-        let private_key_der = pems[0].contents().to_vec();
+        let private_key_der = crypto::SecretVec::new(pems[0].contents().to_vec());
 
         let mut rustls_certs = Vec::new();
         for p in pems.drain(1..) {
@@ -142,7 +142,11 @@ impl Certificate {
         let signing_key = schemes
             .into_iter()
             .filter(|scheme| crypto.supports(crypto::CryptoAlgorithm::SigningKeyImport(*scheme)))
-            .find_map(|scheme| crypto.import_signing_key(scheme, &private_key_der).ok())
+            .find_map(|scheme| {
+                crypto
+                    .import_signing_key(scheme, private_key_der.as_ref())
+                    .ok()
+            })
             .ok_or_else(|| Error::InvalidPEM("can't decode PKCS#8 signing key".into()))?;
 
         Ok(Certificate::from_signing_key(rustls_certs, signing_key))
@@ -231,7 +235,7 @@ impl CryptoPrivateKey {
     /// Imports an rcgen key pair into an explicit provider.
     #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
     pub fn from_key_pair(key_pair: &KeyPair, crypto: &dyn RTCCrypto) -> Result<Self> {
-        let serialized_der = key_pair.serialize_der();
+        let serialized_der = crypto::SecretVec::new(key_pair.serialize_der());
         let scheme = if key_pair.is_compatible(&rcgen::PKCS_ED25519) {
             CryptoSignatureScheme::Ed25519
         } else if key_pair.is_compatible(&rcgen::PKCS_ECDSA_P256_SHA256) {
@@ -242,7 +246,7 @@ impl CryptoPrivateKey {
             return Err(Error::Other("Unsupported key_pair".to_owned()));
         };
         let signing_key = crypto
-            .import_signing_key(scheme, &serialized_der)
+            .import_signing_key(scheme, serialized_der.as_ref())
             .map_err(crypto_error)?;
         Ok(Self { signing_key })
     }
