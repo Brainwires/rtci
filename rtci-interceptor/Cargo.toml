@@ -26,7 +26,12 @@ interceptor-derive.workspace = true
 bytes.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 
 [[bench]]
 name = "congestion_control"
+harness = false
+
+[[bench]]
+name = "interceptor"
 harness = false

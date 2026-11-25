@@ -10,6 +10,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Two halves:
+# * on a push to master, `benchmark` runs every criterion bench once and `publish` stores the
+#   figures in the history (docs/benchmarks) with a 110 % alert comment;
+# * on a pull request, `compare` runs every bench of the base and of the head IN THE SAME JOB, in
+#   alternating rounds (scripts/bench-compare.sh), and fails when a bench is slower in every round
+#   than the measured noise allows and no accepted-regression entry with a ledger row covers it
+#   (scripts/bench-compare.py, benches/accepted-regressions.toml, docs/performance.md). Figures
+#   from two runs are never compared: hosted runners differ by up to 2x between machines.
+#
 # Read-only by default; only the publishing job, which runs on a push to master and never on a
 # pull request, may write (it pushes the results to the benchmark data branch).
 permissions:
@@ -28,6 +37,8 @@ jobs:
   benchmark:
     timeout-minutes: 60
     name: Run criterion benchmarks
+    # The history's input only: a pull request's figures are the `compare` job's.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -72,11 +83,59 @@ jobs:
       - name: Run benchmarks (rtci-media)
         run: cargo bench -p rtci-media --bench bench -- --output-format bencher | tee -a bench-all.txt
 
+      - name: Run benchmarks (rtci-dtls)
+        run: cargo bench -p rtci-dtls --bench record_protection -- --output-format bencher | tee -a bench-all.txt
+
+      - name: Run benchmarks (rtci-interceptor)
+        run: cargo bench -p rtci-interceptor --bench interceptor -- --output-format bencher | tee -a bench-all.txt
+
       - name: Keep the results for the publishing job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bench-all
           path: bench-all.txt
+
+  # A pull request against its base on one runner. Three shards of about the same bench time
+  # (the stun suite alone is a third), each building both trees and running two rounds of base
+  # and head with a 1 s warm-up and 2 s of measurement per bench.
+  compare:
+    timeout-minutes: 45
+    name: Benchmarks compared with the base (${{ matrix.shard }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: stun
+            targets: rtci-stun:bench
+          - shard: rtp-rtcp-sdp-turn-media
+            targets: rtci-rtcp:bench rtci-turn:bench rtci-rtp:bench rtci-sdp:bench rtci-media:bench
+          - shard: srtp-dtls-interceptor
+            targets: rtci-srtp:bench rtci-dtls:record_protection rtci-interceptor:interceptor
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: bench-compare-${{ matrix.shard }}
+
+      - name: The comparison script's unit tests
+        run: python3 scripts/test_bench_compare.py
+
+      - name: Base and head, alternating rounds on this runner
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TARGETS: ${{ matrix.targets }}
+        # TARGETS is a space-separated list on purpose.
+        run: |
+          # shellcheck disable=SC2086
+          scripts/bench-compare.sh "$BASE_SHA" $TARGETS
 
   publish:
     timeout-minutes: 15
