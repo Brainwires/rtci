@@ -299,13 +299,26 @@ impl<T> ErasedOnDrop<T> {
         // SAFETY: `new` initialized the slot, and the value is dropped only in `drop`.
         unsafe { self.slot.assume_init_ref() }
     }
-}
 
-impl<T> Drop for ErasedOnDrop<T> {
-    fn drop(&mut self) {
-        // SAFETY: `new` initialized the slot; the value is dropped here, once, and never used
-        // again.
-        unsafe { self.slot.assume_init_drop() };
+    /// Hands the value to an API that consumes it by value (ring's `agree_ephemeral` takes the
+    /// ECDHE private key so), overwriting the slot it leaves. The value returned is a copy in
+    /// the caller's frame, which this type cannot reach: the caller scrubs the stack after
+    /// the consuming call. Only for such APIs; everything else borrows with [`Self::get`].
+    fn into_inner(mut self) -> T {
+        // SAFETY: `new` initialized the slot; the value is read out once, the slot is then
+        // overwritten and freed without being dropped (`forget` below skips `Drop`).
+        let value = unsafe { self.slot.assume_init_read() };
+        self.overwrite();
+        // SAFETY: `self.slot` is read out once and `self` is forgotten, so the box is freed
+        // exactly once (as a `Box<MaybeUninit<T>>`, which drops no value).
+        let slot = unsafe { std::ptr::read(&self.slot) };
+        std::mem::forget(self);
+        drop(slot);
+        value
+    }
+
+    /// Overwrites the slot with zeros. Only once it holds no value.
+    fn overwrite(&mut self) {
         let bytes = self.slot.as_mut_ptr().cast::<u8>();
         for offset in 0..size_of::<T>() {
             // SAFETY: `offset` is inside the slot, which this type owns and which holds no
@@ -313,6 +326,15 @@ impl<T> Drop for ErasedOnDrop<T> {
             unsafe { std::ptr::write_volatile(bytes.add(offset), 0) };
         }
         compiler_fence(Ordering::SeqCst);
+    }
+}
+
+impl<T> Drop for ErasedOnDrop<T> {
+    fn drop(&mut self) {
+        // SAFETY: `new` initialized the slot; the value is dropped here, once, and never used
+        // again.
+        unsafe { self.slot.assume_init_drop() };
+        self.overwrite();
     }
 }
 
@@ -464,16 +486,24 @@ impl AeadCipher for RingAead {
 struct RingKeyExchange {
     algorithm: KeyExchangeAlgorithm,
     backend_algorithm: &'static agreement::Algorithm,
-    private_key: agreement::EphemeralPrivateKey,
+    /// ring's ephemeral private key keeps the scalar inline and does not erase it; it is
+    /// consumed by value by `agree_ephemeral`, so it leaves its slot through `into_inner`.
+    private_key: ErasedOnDrop<agreement::EphemeralPrivateKey>,
     public_key: Vec<u8>,
 }
 
 impl RingKeyExchange {
     fn start(algorithm: KeyExchangeAlgorithm) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+        Self::start_with(algorithm, &SystemRandom::new())
+    }
+
+    fn start_with(
+        algorithm: KeyExchangeAlgorithm,
+        rng: &dyn ring::rand::SecureRandom,
+    ) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
         let backend_algorithm = agreement_algorithm(algorithm)?;
-        let private_key =
-            agreement::EphemeralPrivateKey::generate(backend_algorithm, &SystemRandom::new())
-                .map_err(|_| CryptoError::RandomnessFailed)?;
+        let private_key = agreement::EphemeralPrivateKey::generate(backend_algorithm, rng)
+            .map_err(|_| CryptoError::RandomnessFailed)?;
         let public_key = private_key
             .compute_public_key()
             .map_err(|_| CryptoError::Provider("key exchange public-key generation failed".into()))?
@@ -482,7 +512,7 @@ impl RingKeyExchange {
         Ok(Box::new(Self {
             algorithm,
             backend_algorithm,
-            private_key,
+            private_key: ErasedOnDrop::new(private_key),
             public_key,
         }))
     }
@@ -498,8 +528,9 @@ impl ActiveKeyExchange for RingKeyExchange {
     }
 
     fn complete(self: Box<Self>, peer_public_key: &[u8]) -> Result<SecretVec, CryptoError> {
-        let peer = agreement::UnparsedPublicKey::new(self.backend_algorithm, peer_public_key);
-        agreement::agree_ephemeral(self.private_key, &peer, |secret| {
+        let this = *self;
+        let peer = agreement::UnparsedPublicKey::new(this.backend_algorithm, peer_public_key);
+        agreement::agree_ephemeral(this.private_key.into_inner(), &peer, |secret| {
             SecretVec::new(secret.to_vec())
         })
         .map_err(|_| CryptoError::InvalidPublicKey)
@@ -514,7 +545,9 @@ enum RingSigningKeyKind {
 
 struct RingSigningKey {
     scheme: SignatureScheme,
-    kind: RingSigningKeyKind,
+    /// ring's key pairs keep the private key inline (an RSA key also in limb buffers of its
+    /// own) and do not erase it.
+    kind: ErasedOnDrop<RingSigningKeyKind>,
     public_key: Vec<u8>,
     public_key_encoding: PublicKeyEncoding,
     pkcs8_der: SecretVec,
@@ -587,7 +620,7 @@ impl RingSigningKey {
         };
         Ok(Arc::new(Self {
             scheme,
-            kind,
+            kind: ErasedOnDrop::new(kind),
             public_key,
             public_key_encoding,
             pkcs8_der: SecretVec::new(pkcs8_der.to_vec()),
@@ -600,7 +633,7 @@ impl SigningKey for RingSigningKey {
         // An RSA key with the rsaEncryption OID signs PKCS#1 v1.5 and RSASSA-PSS alike
         // (RFC 8446 section 4.2.3, the rsa_pss_rsae schemes).
         self.scheme == scheme
-            || (matches!(self.kind, RingSigningKeyKind::Rsa(_))
+            || (matches!(self.kind.get(), RingSigningKeyKind::Rsa(_))
                 && matches!(
                     scheme,
                     SignatureScheme::RsaPssSha256
@@ -622,7 +655,7 @@ impl SigningKey for RingSigningKey {
                 CryptoAlgorithm::Signature(scheme),
             ));
         }
-        match &self.kind {
+        match self.kind.get() {
             RingSigningKeyKind::Ed25519(key) => Ok(key.sign(message).as_ref().to_vec()),
             RingSigningKeyKind::EcdsaP256(key) => key
                 .sign(&SystemRandom::new(), message)
@@ -784,4 +817,20 @@ impl Mac for RustCryptoHmacSha1 {
             Err(CryptoError::AuthenticationFailed)
         }
     }
+}
+
+/// Test support: the ring provider's key exchange with its private key drawn from `seed`
+/// (exactly the seed length of the curve), so that a test knows the private scalar. Not part
+/// of the supported API.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[allow(deprecated)]
+pub fn ring_key_exchange_with_seed(
+    algorithm: KeyExchangeAlgorithm,
+    seed: &[u8],
+) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+    RingKeyExchange::start_with(
+        algorithm,
+        &ring::test::rand::FixedSliceRandom { bytes: seed },
+    )
 }

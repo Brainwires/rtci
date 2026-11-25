@@ -30,10 +30,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use rtci_crypto::providers::RingProvider;
 use rtci_crypto::{
-    AeadAlgorithm, AeadCipher, HeaderMask, HeaderMaskAlgorithm, HmacAlgorithm, Mac, RTCCrypto,
-    RTCCryptoProvider,
+    ActiveKeyExchange, AeadAlgorithm, AeadCipher, HeaderMask, HeaderMaskAlgorithm, HmacAlgorithm,
+    Mac, RTCCrypto, RTCCryptoProvider, SignatureScheme, SigningKey,
 };
 use sha2::digest::generic_array::GenericArray;
+use std::sync::Arc;
 
 const MAX_NEEDLES: usize = 8;
 const MAX_LIVE: usize = 4096;
@@ -113,6 +114,15 @@ enum Object {
     Aead(Box<dyn AeadCipher>),
     Mask(Box<dyn HeaderMask>),
     Mac(Box<dyn Mac>),
+    Signing(Arc<dyn SigningKey>, SignatureScheme),
+    /// An ECDHE key exchange, completed with the peer's public key when the object is
+    /// finished (after the live search); the shared secret it gives must be `expected`
+    /// (complemented).
+    Exchange {
+        exchange: Option<Box<dyn ActiveKeyExchange>>,
+        peer_public: Vec<u8>,
+        expected: Vec<u8>,
+    },
     /// The control: something boxed and dropped as it is.
     Plain(Box<dyn std::any::Any>),
 }
@@ -135,9 +145,38 @@ impl Object {
                 let mut tag = vec![0u8; mac.output_len()];
                 mac.sign(&[b"input"], &mut tag).expect("a MAC");
             }
+            Object::Signing(key, scheme) => {
+                key.sign(*scheme, b"message").expect("a signature");
+            }
+            Object::Exchange { .. } => {}
             Object::Plain(object) => {
                 std::hint::black_box(&**object);
             }
+        }
+    }
+
+    /// What is done with the object after the live search, before it is dropped.
+    fn finish(&mut self) {
+        if let Object::Exchange {
+            exchange,
+            peer_public,
+            expected,
+        } = self
+        {
+            let shared = exchange
+                .take()
+                .expect("not yet completed")
+                .complete(peer_public)
+                .expect("a shared secret");
+            assert!(
+                shared
+                    .as_ref()
+                    .iter()
+                    .zip(expected.iter())
+                    .all(|(s, e)| *s == !*e)
+                    && shared.len() == expected.len(),
+                "the shared secret is the one computed before"
+            );
         }
     }
 }
@@ -180,6 +219,7 @@ fn run(needles: &[Vec<u8>], make: impl FnOnce() -> Object) -> Outcome {
             live[i] |= holds(block, needle);
         }
     }
+    object.finish();
     drop(object);
     CHECKING.store(false, Ordering::SeqCst);
     for (address, size) in &LIVE {
@@ -352,4 +392,146 @@ fn a_ring_key_object_dropped_as_it_is_leaves_its_key() {
     });
     assert!(outcome.live[0], "found live");
     assert!(outcome.freed[0] > 0, "found in freed memory");
+}
+
+/// RFC 8446 section 7.1, RFC 5246 section 8.1: the ring provider's ECDHE private key (the
+/// scalar seed `ring::agreement::EphemeralPrivateKey` keeps inline; X25519 and P-256) is found
+/// live in the key-exchange object and is left in no block freed while the exchange completes
+/// and its shared secret is dropped; neither is the shared secret. The private key is drawn
+/// from a known seed through the test-support seam; the code path is the provider's.
+#[cfg(feature = "test-support")]
+#[test]
+fn ring_ecdhe_private_key_and_shared_secret_are_erased() {
+    use rtci_crypto::KeyExchangeAlgorithm;
+    use rtci_crypto::providers::ring_key_exchange_with_seed;
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    const SEED: [u8; 32] = [
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f,
+        0x3c, 0x76, 0x2e, 0x71, 0x60, 0xf3, 0x8b, 0x4d, 0xa5, 0x6a, 0x78, 0x4d, 0x90, 0x45, 0x19,
+        0x0c, 0xfe,
+    ];
+    const PEER_SEED: [u8; 32] = [
+        0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf,
+        0xf4, 0x5c, 0x47, 0x2e, 0x10, 0x3a, 0x22, 0x91, 0xc8, 0x0e, 0x6b, 0x55, 0x04, 0x43, 0x3d,
+        0x7f, 0x12,
+    ];
+    let mut not_live = Vec::new();
+    let mut left = Vec::new();
+    for algorithm in [KeyExchangeAlgorithm::X25519, KeyExchangeAlgorithm::P256] {
+        let peer = ring_key_exchange_with_seed(algorithm, &PEER_SEED).expect("the peer");
+        let peer_public = peer.public_key().to_vec();
+        drop(peer);
+        let shared = ring_key_exchange_with_seed(algorithm, &SEED)
+            .expect("a key exchange")
+            .complete(&peer_public)
+            .expect("a shared secret");
+        let expected: Vec<u8> = shared.as_ref().iter().map(|b| !b).collect();
+        let shared_plain = shared.as_ref().to_vec();
+        drop(shared);
+        let outcome = run(&[SEED.to_vec(), shared_plain.clone()], || {
+            Object::Exchange {
+                exchange: Some(
+                    ring_key_exchange_with_seed(algorithm, &SEED).expect("a key exchange"),
+                ),
+                peer_public: peer_public.clone(),
+                expected: expected.clone(),
+            }
+        });
+        println!(
+            "RING ECDHE {algorithm:?}: private key live {}, left in freed memory: private key {}, shared secret {}",
+            outcome.live[0], outcome.freed[0], outcome.freed[1]
+        );
+        if !outcome.live[0] {
+            not_live.push(format!("{algorithm:?}"));
+        }
+        if outcome.freed.iter().any(|freed| *freed > 0) {
+            left.push(format!("{algorithm:?}: {:?}", outcome.freed));
+        }
+    }
+    assert!(
+        not_live.is_empty(),
+        "the private key was not found while alive: {not_live:#?}"
+    );
+    assert!(
+        left.is_empty(),
+        "left in freed memory (private key, shared secret): {left:#?}"
+    );
+}
+
+/// The ring provider's signing key objects, which the crate makes from the PKCS#8 the
+/// application supplies (the application's own copies are its to protect): an Ed25519 key
+/// (its secret prefix, the second half of SHA-512 of the seed, RFC 8032 section 5.1.5) and an
+/// ECDSA P-256 key (its scalar in the Montgomery form ring keeps, `d * 2^256 mod n`, as
+/// little-endian words) are found live and left in no freed block once the key is dropped.
+#[test]
+fn ring_signing_key_objects_are_erased_when_dropped() {
+    use num_bigint::BigUint;
+    use sha2::{Digest, Sha512};
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    #[allow(deprecated)]
+    let fixed = |bytes: &'static [u8]| ring::test::rand::FixedSliceRandom { bytes };
+    const ED_SEED: [u8; 32] = [
+        0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda, 0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e,
+        0x0f, 0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24, 0xda, 0x8c, 0xf6, 0xed, 0x4f, 0xb8,
+        0xa6, 0xfb,
+    ];
+    const P256_D: [u8; 32] = [
+        0x51, 0x9b, 0x42, 0x3d, 0x71, 0x5f, 0x8b, 0x58, 0x1f, 0x4f, 0xa8, 0xee, 0x59, 0xf4, 0x77,
+        0x1a, 0x5b, 0x44, 0xc8, 0x13, 0x0b, 0x4e, 0x3e, 0xac, 0xca, 0x54, 0xa5, 0x6d, 0xda, 0x72,
+        0xb4, 0x64,
+    ];
+    let ed_pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&fixed(&ED_SEED))
+        .expect("an Ed25519 PKCS#8");
+    let ed_prefix = Sha512::digest(ED_SEED)[32..].to_vec();
+    let p256_pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+        &fixed(&P256_D),
+    )
+    .expect("a P-256 PKCS#8");
+    let n = BigUint::parse_bytes(
+        b"FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+        16,
+    )
+    .expect("the P-256 order");
+    let montgomery = (BigUint::from_bytes_be(&P256_D) << 256u32) % &n;
+    let mut p256_needle = montgomery.to_bytes_le();
+    p256_needle.resize(32, 0);
+    let mut not_live = Vec::new();
+    let mut left = Vec::new();
+    for (scheme, pkcs8, needle) in [
+        (
+            SignatureScheme::Ed25519,
+            ed_pkcs8.as_ref().to_vec(),
+            ed_prefix,
+        ),
+        (
+            SignatureScheme::EcdsaP256Sha256,
+            p256_pkcs8.as_ref().to_vec(),
+            p256_needle,
+        ),
+    ] {
+        let outcome = run(std::slice::from_ref(&needle), || {
+            Object::Signing(
+                crypto()
+                    .import_signing_key(scheme, &pkcs8)
+                    .expect("a signing key"),
+                scheme,
+            )
+        });
+        println!(
+            "RING signing key {scheme:?}: live {:?} left in freed memory {:?}",
+            outcome.live, outcome.freed
+        );
+        if !outcome.live[0] {
+            not_live.push(format!("{scheme:?}"));
+        }
+        if outcome.freed[0] > 0 {
+            left.push(format!("{scheme:?}"));
+        }
+    }
+    assert!(
+        not_live.is_empty(),
+        "not found while alive (the search cannot vouch for these): {not_live:#?}"
+    );
+    assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
