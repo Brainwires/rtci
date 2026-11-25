@@ -73,6 +73,7 @@ GATED_SHARES = [
     ("slow recovery", "recover", 20.0),
     ("a flow ceased by the circuit breaker", "cb", 0.0),
     ("a peer left Connected", "disc", 0.0),
+    ("audio silent to the end", "audio_tail", 1.0),
 ]
 # Means: (figure, whether more is worse, the margin). The head is worse when its mean is beyond
 # the base's by more than the margin: a tenth of a second of picture or of audio (five packets),
@@ -113,6 +114,7 @@ BASELINE = [
     ("cb", "hi", [("limit", 0.0)]),
     ("disc", "hi", [("limit", 0.0)]),
     ("audio_share", "lo", [("limit", 0.9)]),
+    ("audio_tail", "hi", [("limit", 1.0)]),
     ("under", "lo", [0.1]),
     ("window", "lo", [0.1]),
 ]

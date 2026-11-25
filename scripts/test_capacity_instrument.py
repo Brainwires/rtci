@@ -22,7 +22,7 @@ sys.modules["capacity_instrument"] = ci
 spec.loader.exec_module(ci)
 
 CELL = "cap/paced/gap300/up/q300/rl0"
-FIGURES = ["max_age", "age_p50", "stale1", "stale2", "fresh_gap", "freeze", "tail_gap", "resume", "audio_gap", "audio_lost", "recover", "under", "window", "paused", "rtx", "discards", "cb", "cb_audio", "disc", "pc_failed", "audio_share"]
+FIGURES = ["max_age", "age_p50", "stale1", "stale2", "fresh_gap", "freeze", "tail_gap", "resume", "audio_gap", "audio_lost", "recover", "under", "window", "paused", "rtx", "discards", "cb", "cb_audio", "disc", "pc_failed", "audio_share", "audio_tail"]
 
 
 def run(seed, cell=CELL, **figures):
@@ -144,10 +144,10 @@ class Compare(unittest.TestCase):
     def test_two_draws_of_one_tree_hold_the_rule(self):
         tests, level = ci.compare(ensemble(1, 1000, violators=0.08), ensemble(2, 1000, violators=0.08))
         self.assertEqual([], [t.what for t in tests if t.broken])
-        # Fourteen tests with a p-value in a cap cell (these runs have no rate under the cap):
+        # Fifteen tests with a p-value in a cap cell (these runs have no rate under the cap):
         # the family's 1 % over them.
-        self.assertEqual(14, sum(1 for t in tests if t.p is not None))
-        self.assertAlmostEqual(0.01 / 14, level)
+        self.assertEqual(15, sum(1 for t in tests if t.p is not None))
+        self.assertAlmostEqual(0.01 / 15, level)
 
     def test_a_picture_half_a_second_older_breaks_it(self):
         tests, _ = ci.compare(ensemble(1, 1000), ensemble(2, 1000, shift=0.5))

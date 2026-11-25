@@ -1,0 +1,37 @@
+@@ -667,14 +672,18 @@
+     (samples.iter().sum::<f64>() / samples.len() as f64) as u32
+ }
+ 
+-/// The measurement behind the default of `rtcp_report_from_every_ssrc` (RFC 8108 section 5.1
+-/// as written is `true`: every SSRC reports on every other, the co-located ones included):
+-/// the default chain through a capacity cap, on two seeds (and three wall clocks each with
+-/// `RTC_CAP_FULL`), with the report blocks from every SSRC and carried once. With the larger
+-/// compound packets of the RFC form the video froze longer after the cap and lagged more.
+-/// Run with `--nocapture` for the figures.
++/// The two forms of `rtcp_report_from_every_ssrc` (RFC 8108 section 5.1 as written is `true`:
++/// every SSRC reports on every other, the co-located ones included) through a capacity cap,
++/// for comparison: the default chain on two seeds (and three wall clocks each with
++/// `RTC_CAP_FULL`), with the report blocks from every SSRC and carried once. Prints the freeze
++/// and the lag of each run and their means, asserts nothing: which form freezes longer on a
++/// handful of seeds is chance (the order reversed under an unrelated change), so it is no
++/// check. What the setting does is checked in the RTCP itself:
++/// `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without`
++/// (`tests/rtcp_session_rtc2rtc.rs`).
+ #[test]
+-fn report_blocks_from_every_ssrc_measured_against_once() -> Result<()> {
++#[ignore = "measurement: run with --ignored --nocapture"]
++fn measure_report_blocks_from_every_ssrc_against_once() -> Result<()> {
+     let anchors: &[Duration] = if full() { &ANCHORS } else { &ANCHORS[..1] };
+     let runs = 2 * anchors.len() as u32;
+     let mut totals = [(Duration::ZERO, Duration::ZERO, Duration::ZERO); 2];
+@@ -703,10 +712,6 @@
+             totals[form].2 / runs
+         );
+     }
+-    assert!(
+-        totals[0].0 > totals[1].0,
+-        "the RFC form froze no longer: {totals:?}"
+-    );
+     Ok(())
+ }
+ 
