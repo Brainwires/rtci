@@ -78,12 +78,24 @@ fn announce(
     pc: &mut crate::peer_connection::RTCPeerConnection,
     notice: CircuitBreakerNotice,
 ) -> Vec<Told> {
+    hand(
+        pc,
+        AttributedPacket::new(Packet::Rtcp(vec![]))
+            .with(Attribute::Custom(std::sync::Arc::new(notice))),
+    )
+}
+
+/// Hands `message` to the connection's interceptor handler as its chain would on the read
+/// leg, and returns the `OnCircuitBreaker` events the application is given for it.
+fn hand(
+    pc: &mut crate::peer_connection::RTCPeerConnection,
+    message: AttributedPacket,
+) -> Vec<Told> {
     let mut chain = ReadChain::default();
     chain.reads.push_back(TaggedPacket {
         now: Instant::now(),
         transport: TransportContext::default(),
-        message: AttributedPacket::new(Packet::Rtcp(vec![]))
-            .with(Attribute::Custom(std::sync::Arc::new(notice))),
+        message,
     });
     let media_engine = MediaEngine::default();
     let context = &mut pc.pipeline_context;
@@ -320,4 +332,62 @@ fn a_ceased_encoding_takes_no_share_of_the_target_until_it_is_restarted() {
     );
     announce(&mut pc, notice(VOICE, None, Duration::ZERO));
     assert_eq!(vec![(VOICE, 200_000.0)], shares(&mut pc, voice));
+}
+
+/// While the pacer has the source paused the streams' target is zero and the congestion
+/// controller's estimate rides along (`PacerPause`): `availableOutgoingBitrate` stays the
+/// estimate. A flow that ceases or restarts during the pause has the (zero) target divided
+/// again, and the estimate is still what the congestion controller said: dividing is not a
+/// new estimate.
+#[test]
+fn a_flow_ceasing_while_the_source_is_paused_leaves_the_estimate_alone() {
+    let (mut pc, _video, _voice) = connection();
+    let estimate = |pc: &crate::peer_connection::RTCPeerConnection| {
+        pc.pipeline_context
+            .stats
+            .outgoing_estimates
+            .get(&0)
+            .copied()
+    };
+    // The pacer's pause as the chain hands it over: a target of zero, the estimate with it.
+    hand(
+        &mut pc,
+        AttributedPacket::new(Packet::Rtcp(vec![]))
+            .with(Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            })
+            .with(Attribute::Custom(std::sync::Arc::new(
+                interceptor::PacerPause {
+                    target_bits_per_second: 250_000.0,
+                },
+            ))),
+    );
+    assert_eq!(
+        Some(&0.0),
+        pc.pipeline_context
+            .interceptor_handler_context
+            .transport_targets
+            .get(&0),
+        "the streams are paused"
+    );
+    assert_eq!(Some(250_000.0), estimate(&pc));
+
+    let told = announce(
+        &mut pc,
+        notice(
+            VOICE,
+            Some(CircuitBreakerReason::MediaTimeout),
+            Duration::from_millis(125),
+        ),
+    );
+    assert_eq!(1, told.len());
+    assert_eq!(Some(250_000.0), estimate(&pc), "a flow ceased in the pause");
+
+    let told = announce(&mut pc, notice(VOICE, None, Duration::ZERO));
+    assert_eq!(1, told.len());
+    assert_eq!(
+        Some(250_000.0),
+        estimate(&pc),
+        "a flow restarted in the pause"
+    );
 }

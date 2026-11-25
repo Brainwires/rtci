@@ -1546,6 +1546,21 @@ impl RTCStatsAccumulator {
         bits_per_second: f64,
         shares: &HashMap<SSRC, f64>,
     ) {
+        self.on_target_shares(transport, bits_per_second, shares);
+        self.on_outgoing_estimate(transport, bits_per_second);
+    }
+
+    /// The outbound streams' shares of transport `transport`'s target, divided again without a
+    /// new target from the congestion controller (a flow the circuit breaker ceased or
+    /// restarted): the `targetBitrate` of each stream, and nothing else. The estimate is not
+    /// this call's to set: while the pacer has the source paused the target divided here is
+    /// zero and the estimate is what it was (`on_outgoing_estimate`).
+    pub(crate) fn on_target_shares(
+        &mut self,
+        transport: usize,
+        bits_per_second: f64,
+        shares: &HashMap<SSRC, f64>,
+    ) {
         // The estimate is transport `transport`'s (one congestion controller per transport);
         // each outbound stream on it has its share as `targetBitrate`
         // (`allocate_target_bitrate_on`: by priority, capped at maxBitrate). A stream without a
@@ -1566,7 +1581,6 @@ impl RTCStatsAccumulator {
                 None => {}
             }
         }
-        self.on_outgoing_estimate(transport, bits_per_second);
     }
 
     /// The congestion controller's estimate for transport `transport`, where it is not the

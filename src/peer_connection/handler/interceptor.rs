@@ -1945,7 +1945,10 @@ impl<'a> InterceptorHandler<'a> {
                     |mid: &str| stats.section_transport_key(mid) == key,
                     &self.ctx.ceased_flows,
                 );
-                self.stats.on_target_bitrate(key, total, &shares);
+                // The shares only: `total` is the target the streams were last given, zero
+                // while the pacer has the source paused, and not the path's estimate
+                // (`availableOutgoingBitrate` keeps what the congestion controller said).
+                self.stats.on_target_shares(key, total, &shares);
             }
         }
         let found = self
