@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptor, peer connection** (`conf/nack-11-decline-useless-repairs`): **the NACK
+  responder declines repairs that cannot be useful, and asks for a key frame instead.** Two
+  rules, on by default in every chain (RFC 8834 section 6.1: "It is not appropriate to
+  blindly retransmit RTP packets in response to a NACK. The importance of lost packets and
+  the likelihood of them arriving in time to be useful need to be considered"; RFC 4588
+  section 7: "If congestion is not kept under control, then retransmission SHOULD NOT be
+  used"): (1) a NACK for a packet written more than 2 s ago is not answered
+  (`NackResponderBuilder::with_max_repair_age`, `NACK_MAX_REPAIR_AGE`); (2) when the requests
+  waiting would take 2 s or more to send at the target and the target has fallen to half or
+  less within 2 s, they are given up (`with_repair_backlog_bound`,
+  `NACK_REPAIR_BACKLOG_BOUND`). Giving a video stream up forgets everything sent on it so far,
+  releases the retransmission reserve at once and asks the application for one key frame of
+  it (a PLI with sender SSRC 0 on `poll_read`, `OnKeyFrameRequest`: the pacer's flush has the
+  same request), at most once per stream in 2 s for a backlog (`NACK_GIVE_UP_HOLD`). Audio is
+  only declined by age. Ordinary loss at a steady target is repaired as before and asks for
+  no key frame. Before, every NACK for a packet still in the 1024-packet buffer was served in
+  order: a call without a pacer that met a capacity drop from 2.5 Mbit/s to 300 kbit/s sent
+  142 retransmissions (38 dropped again) with its target held at the reserve's floor, now 18
+  (16), median target under the cap 229 -> 257 kbit/s (behind a 100 ms queue 142 -> 252); a
+  receiver without a bound in time showed a picture 7.5 s old, now 1.1 s; after a 4 s outage
+  the default chain resumed later than 2 s in 66 of 200 calls with such a receiver, now in
+  none (`docs/capacity-collapse.md`, "The NACK responder": the figures by cell, why 2 s).
+  `DefaultInterceptorOptions` has two new public fields, `nack_max_repair_age` and
+  `nack_repair_backlog_bound` (a struct literal without `..Default::default()` no longer
+  compiles), governed by the behaviour profiles (`nack.max-repair-age`,
+  `nack.repair-backlog-bound`: `None` in the `Chrome` profile, whose sender never asks itself
+  for a key frame). **`PacerBacklog::Keep` now also switches both rules off** in the default
+  interceptor set: the option means "keep and repair everything" (its name is unchanged).
+  Migration, for a receiver that plays strictly in order and cannot resume at a key frame:
+  `options.pacer_backlog = PacerBacklog::Keep`, or on a chain built by hand
+  `NackResponderBuilder::with_max_repair_age(None).with_repair_backlog_bound(None)`. An
+  application must answer a key-frame request with a key frame, as for a remote PLI. No
+  `rtx-time` is announced for the age bound. Fixed with it: a probe cluster asked for while
+  the responder's buffer is empty (after a give-up or the pacer's flush, before the next
+  packet is written) is still padded, under the header of the newest packet the buffer held;
+  before, no padding left, and a chain without a pacer stopped probing.
 - **interceptor, peer connection** (`conf/flush-1r-backlog-flush-at-collapse`): **the default
   pacer discards queued video when the path's capacity collapses.** When what waits in the
   pacer would take a second or more to leave and the target is half or less of what it was
