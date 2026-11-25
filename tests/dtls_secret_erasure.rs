@@ -68,16 +68,68 @@ static BLOCK_ADDRESS: [AtomicUsize; QUARANTINE] = [const { AtomicUsize::new(0) }
 static BLOCK_SIZE: [AtomicUsize; QUARANTINE] = [const { AtomicUsize::new(0) }; QUARANTINE];
 static BLOCK_ALIGN: [AtomicUsize; QUARANTINE] = [const { AtomicUsize::new(0) }; QUARANTINE];
 
+/// Blocks allocated while the window is open and not yet freed: an open-addressing table of
+/// (address, size); 0 is an empty slot, `usize::MAX` a freed one.
+const LIVE_SLOTS: usize = 1 << 18;
+static LIVE_ADDRESS: [AtomicUsize; LIVE_SLOTS] = [const { AtomicUsize::new(0) }; LIVE_SLOTS];
+static LIVE_SIZE: [AtomicUsize; LIVE_SLOTS] = [const { AtomicUsize::new(0) }; LIVE_SLOTS];
+static LIVE_FULL: AtomicUsize = AtomicUsize::new(0);
+/// The live table is kept up to date (frees after the window closes too, until the search).
+static TRACKING: AtomicBool = AtomicBool::new(false);
+
+fn live_slot(address: usize) -> usize {
+    (address >> 4).wrapping_mul(0x9e37_79b9_7f4a_7c15) % LIVE_SLOTS
+}
+
+fn note_alloc(address: usize, size: usize) {
+    let start = live_slot(address);
+    for probe in 0..LIVE_SLOTS {
+        let slot = (start + probe) % LIVE_SLOTS;
+        let current = LIVE_ADDRESS[slot].load(Ordering::SeqCst);
+        if (current == 0 || current == usize::MAX)
+            && LIVE_ADDRESS[slot]
+                .compare_exchange(current, address, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            LIVE_SIZE[slot].store(size, Ordering::SeqCst);
+            return;
+        }
+    }
+    LIVE_FULL.fetch_add(1, Ordering::SeqCst);
+}
+
+fn note_free(address: usize) {
+    let start = live_slot(address);
+    for probe in 0..LIVE_SLOTS {
+        let slot = (start + probe) % LIVE_SLOTS;
+        let current = LIVE_ADDRESS[slot].load(Ordering::SeqCst);
+        if current == address {
+            LIVE_ADDRESS[slot].store(usize::MAX, Ordering::SeqCst);
+            return;
+        }
+        if current == 0 {
+            return;
+        }
+    }
+}
+
 struct Quarantine;
 
 unsafe impl GlobalAlloc for Quarantine {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { System.alloc(layout) }
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() && WINDOW.load(Ordering::SeqCst) {
+            note_alloc(ptr as usize, layout.size());
+        }
+        ptr
     }
 
     // `realloc` is the default one: `alloc`, copy, `dealloc`, so a block a buffer grew out of
     // is quarantined too.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if TRACKING.load(Ordering::SeqCst) {
+            note_free(ptr as usize);
+        }
         if WINDOW.load(Ordering::SeqCst) {
             let slot = QUARANTINED.fetch_add(1, Ordering::SeqCst);
             if slot < QUARANTINE {
@@ -99,6 +151,11 @@ static ALLOCATOR: Quarantine = Quarantine;
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn open_window() {
+    for slot in 0..LIVE_SLOTS {
+        LIVE_ADDRESS[slot].store(0, Ordering::SeqCst);
+    }
+    LIVE_FULL.store(0, Ordering::SeqCst);
+    TRACKING.store(true, Ordering::SeqCst);
     QUARANTINED.store(0, Ordering::SeqCst);
     OVERFLOWED.store(0, Ordering::SeqCst);
     WINDOW.store(true, Ordering::SeqCst);
@@ -121,6 +178,30 @@ fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
     let prefixes = Prefixes::of(needles);
     let mut ours = Vec::new();
     let mut providers = Vec::new();
+    assert_eq!(
+        0,
+        LIVE_FULL.load(Ordering::SeqCst),
+        "the live-block table overflowed"
+    );
+    // Blocks allocated during the association and still allocated after it was dropped:
+    // a secret in one of them was never released (a leak, or a cache that outlives it).
+    for slot in 0..LIVE_SLOTS {
+        let address = LIVE_ADDRESS[slot].load(Ordering::SeqCst);
+        if address == 0 || address == usize::MAX {
+            continue;
+        }
+        let size = LIVE_SIZE[slot].load(Ordering::SeqCst);
+        // SAFETY: the block is allocated (its free would have cleared the slot) and nothing
+        // else runs while the serial lock is held; its bytes are only read.
+        let block = unsafe { std::slice::from_raw_parts(address as *const u8, size) };
+        for needle in prefixes.found_in(needles, block) {
+            ours.push(format!(
+                "{} in a block of {size} bytes still allocated after the drop",
+                needle.describe()
+            ));
+        }
+    }
+    TRACKING.store(false, Ordering::SeqCst);
     for slot in 0..held {
         let address = BLOCK_ADDRESS[slot].load(Ordering::SeqCst);
         let size = BLOCK_SIZE[slot].load(Ordering::SeqCst);
