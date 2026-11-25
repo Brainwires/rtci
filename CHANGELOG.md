@@ -54,15 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their absence is not guaranteed (docs/key-erasure.md); RFC7714-13.1-3 stays `partial`
   (class E) for that. No wire or handshake behaviour changes. Additions to the API:
   `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
-  for `SecretVec` and `SessionKeys`. Cost (`rtci-srtp` and `rtci-dtls` benchmarks against master
-  6939a3e8, same runner, run 45647996020): per packet within noise (SRTP AES-CM RTP +0.3 % /
-  +0.4 %, RTCP -2.3 % / -3.9 %; SRTP AES-128-GCM +0.6 % / +1.4 %, the wrapper's extra
-  indirection; DTLS AES-128-GCM -0.9 % / -1.6 %, AES-256-CBC +0.3 % / 0.0 %); setup: SRTP
-  AES-CM context +6.9 % (1.28 µs), SRTP AES-128-GCM context unchanged once the trial scrub was
-  removed (the wrapper adds one allocation), DTLS record setup 15.0 µs (AES-128-GCM) and
-  24.4 µs (AES-256-CBC) against about 0.4 µs on master: almost all of it is the 32 KiB stack
-  overwrite (`crypto::scrub_stack`, a volatile byte-by-byte write) run after each key schedule
-  is built.
+  for `SecretVec` and `SessionKeys`. Cost (`rtci-srtp` and `rtci-dtls` criterion benchmarks
+  against master 6939a3e8 on the same runner, run 45660052237; master figures in brackets):
+  DTLS record-cipher setup 1.07 µs AES-128-GCM (0.39 µs) and 1.38 µs AES-256-CBC (0.47 µs),
+  of which about 0.7 µs is the 32 KiB stack overwrite (`crypto::scrub_stack`, one bulk fill;
+  the first form, a volatile write per byte, took 13.8 µs and 22.5 µs, run 45654600978);
+  SRTP context setup 1.48 µs AES-CM (1.43 µs) and 1.31 µs AES-128-GCM (1.12 µs: ring's key
+  object in an allocation of its own); per packet SRTP AES-CM RTP 1.52 µs / 1.23 µs encrypt /
+  decrypt (1.53 / 1.26 µs), RTCP 271 ns / 307 ns (264 / 279 ns), SRTP AES-128-GCM RTP 625 ns
+  / 330 ns (627 / 337 ns), DTLS records 258 / 270 ns AES-128-GCM and 3.16 / 2.89 µs
+  AES-256-CBC (within 1-4 % of master, faster). That `scrub_stack` still overwrites is
+  tested: emptied, or with its fill left unobservable to the optimiser, the DTLS erasure
+  tests fail in a release build (the second case cannot be told apart in a debug build,
+  where nothing is optimised away).
 
 ### Breaking changes
 

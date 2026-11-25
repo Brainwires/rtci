@@ -73,8 +73,17 @@ What remains with ring:
   Linux process scan also searches the dead worker stacks and finds nothing after the drop. A
   copy deliberately moved onto the stack before the drop (mutation m3) was NOT caught, nor was
   a scrub added after the SRTP AES-GCM context is built ever needed (its removal, m5, changed
-  nothing any test sees; it cost about 10 µs per context, so it was taken out): residue that
+  nothing any test sees; it cost about 10 µs per context with the per-byte form, so it was taken out): residue that
   stays on the stack is not observed by the tests, and its absence is not guaranteed.
+  `scrub_stack` is one bulk zero fill of a 32 KiB buffer in a never-inlined frame, made
+  observable to the optimiser (`black_box` and a compiler fence) so it is not dropped as a
+  dead store; it reaches the stack below its caller only, never registers or the frames above.
+  Tested (zeroize3, ubuntu): its body emptied, the DTLS erasure tests fail in debug and release
+  builds (runs 45659948616, 45659954724); the fill left unobservable, they fail in a release
+  build (45659972471) and pass in a debug build (45659963417: at opt-level 0 nothing is
+  removed, so the two cannot be told apart there). Cost: about 0.7 µs per call (DTLS
+  record-cipher setup 1.07 µs AES-128-GCM and 1.38 µs AES-256-CBC against 0.39 and 0.47 µs on
+  master, run 45660052237; the first form, a volatile write per byte, took 13.8 and 22.5 µs).
 
 The AWS-LC provider (`crypto-aws-lc-rs`) cleanses its `EVP_AEAD_CTX` and `HMAC_CTX` itself; the
 process-memory tests find nothing after the drop, for every SRTP profile and the DTLS suites
