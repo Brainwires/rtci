@@ -212,6 +212,8 @@ jobs:
         run: python3 scripts/check-changelog-released.py
       - name: The committed nested Cargo.lock files resolve their manifests (--locked)
         run: python3 scripts/check-nested-locks.py
+      - name: The performance ledger names its CHANGELOG tags, files and tests (docs/performance.md)
+        run: python3 scripts/test_check_performance_ledger.py && python3 scripts/check-performance-ledger.py
 
   # The `chrome-defaults` feature makes `BehaviourProfile::default()` Chrome, and with it every
   # default of the setting engine, media engine and interceptor options. One job, not a test

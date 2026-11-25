@@ -5,9 +5,10 @@
 #   scripts/bench-compare.sh <base-ref-or-sha> <crate>:<bench> [<crate>:<bench> ...]
 #
 # Hosted runners differ by up to 2x between machines, so a figure is only ever compared with one
-# measured in the same job. The base is checked out into a second worktree; both trees build into
-# one target directory (the workspace crates of the two trees get distinct artifacts, the
-# registry dependencies are shared). Round r runs every benchmark of the base and then of the head
+# measured in the same job. The base is checked out into a second worktree with a target
+# directory of its own: with one shared target directory cargo gave both trees' bench executables
+# the same name, so one tree's binary was measured as both (a mutation run measured 51.7 us of
+# DTLS setup for base and head alike). Round r runs every benchmark of the base and then of the head
 # for odd r and the other way round for even r, so drift during the job (a neighbour on the host,
 # thermal state) falls on both trees alike.
 #
@@ -30,7 +31,8 @@ rounds=${BENCH_ROUNDS:-2}
 warmup=${BENCH_WARMUP:-1}
 measure=${BENCH_MEASURE:-2}
 out=${BENCH_OUT:-$root/target/bench-compare-out}
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target}
+head_target=${CARGO_TARGET_DIR:-$root/target}
+unset CARGO_TARGET_DIR
 mkdir -p "$out"
 rm -f "$out"/base-*.txt "$out"/head-*.txt
 
@@ -47,8 +49,12 @@ git worktree remove --force "$base_dir" 2>/dev/null || rm -rf "$base_dir"
 git worktree add --detach "$base_dir" "$base_sha" >/dev/null
 trap 'git -C "$root" worktree remove --force "$base_dir" 2>/dev/null || true' EXIT
 
+target_of() { # tree
+  if [ "$1" = "$root" ]; then echo "$head_target"; else echo "$base_dir/target"; fi
+}
+
 build() { # tree crate bench
-  (cd "$1" && cargo bench --quiet -p "$2" --bench "$3" --no-run)
+  (cd "$1" && CARGO_TARGET_DIR=$(target_of "$1") cargo bench --quiet -p "$2" --bench "$3" --no-run)
 }
 
 base_has=()
@@ -67,7 +73,7 @@ for target in "$@"; do
 done
 
 run() { # tree crate bench output
-  (cd "$1" && cargo bench --quiet -p "$2" --bench "$3" -- --output-format bencher \
+  (cd "$1" && CARGO_TARGET_DIR=$(target_of "$1") cargo bench --quiet -p "$2" --bench "$3" -- --output-format bencher \
      --warm-up-time "$warmup" --measurement-time "$measure" --noplot) >> "$4"
 }
 
