@@ -128,7 +128,8 @@ so the job tests a fresh draw against it.
 
 ## The reference receiver
 
-`SampleBuilder::new(256, ..).with_max_gap_wait(300 ms)`, a PLI when the builder gives a gap up
+`SampleBuilder::new(256, ..).with_max_gap_wait(300 ms)` (the builder's default for video since
+`conf/flush-2-receiver-gap-bound`), a PLI when the builder gives a gap up
 or the decoder has no reference, at most one a second (docs/receiver-gap-policy.md). 300 ms is
 two NACK rounds on the open path (the generator asks every 100 ms, the round trip is 20 ms) and
 inside the 200 ms to 1 s of playout delay of interactive video; under the cap a first repair

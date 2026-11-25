@@ -170,7 +170,8 @@ pub struct Setup {
     pub perturbation: Perturbation,
     /// How long the receivers wait for a missing video packet before they give the gap up and
     /// ask for a key frame (`SampleBuilder::with_max_gap_wait`, docs/receiver-gap-policy.md).
-    /// `None`: no bound in time, the gap is held for the builder's 256 packets.
+    /// `None`: no bound in time (the builder's default bound turned off), the gap is held for
+    /// the builder's 256 packets or until a complete key frame releases it.
     pub gap_wait: Option<Duration>,
     /// Per cent of the datagrams the callee sends (its media and all its feedback: the
     /// caller's reverse path) that are lost, drawn from the run's seed. Zero: none.
@@ -807,10 +808,7 @@ impl Peer {
             force_key: true,
             keyframes_sent: Vec::new(),
             video_receiver: None,
-            builder: match setup.gap_wait {
-                Some(wait) => builder.with_max_gap_wait(wait),
-                None => builder,
-            },
+            builder: builder.with_max_gap_wait(setup.gap_wait),
             gap_wait: setup.gap_wait,
             audio_arrivals: Vec::new(),
             left_connected: 0,

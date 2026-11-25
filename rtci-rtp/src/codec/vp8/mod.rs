@@ -429,6 +429,43 @@ impl Depacketizer for Vp8Packet {
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
         marker
     }
+
+    fn has_key_frames(&self) -> bool {
+        true
+    }
+
+    /// The first packet of a frame (`S`=1, `PID`=0) whose payload header has `P`=0 (RFC 7741
+    /// section 4.3: "P: Inverse key frame flag. When set to 0, the current frame is a key
+    /// frame"; the payload header is in the first packet of each frame only, and key frames
+    /// "are decoded without reference to any other frame", section 3).
+    fn is_key_frame_start(&self, payload: &Bytes) -> bool {
+        if !self.is_partition_head(payload) {
+            return false;
+        }
+        // The descriptor (RFC 7741 section 4.2): the first octet, with X the extension octet,
+        // then the picture ID (one or two octets), TL0PICIDX and the TID/KEYIDX octet.
+        let mut index = 1;
+        if payload[0] & 0x80 != 0 {
+            let Some(&extension) = payload.get(1) else {
+                return false;
+            };
+            index += 1;
+            if extension & 0x80 != 0 {
+                index += match payload.get(index) {
+                    Some(m) if m & 0x80 != 0 => 2,
+                    Some(_) => 1,
+                    None => return false,
+                };
+            }
+            if extension & 0x40 != 0 {
+                index += 1;
+            }
+            if extension & 0x30 != 0 {
+                index += 1;
+            }
+        }
+        payload.get(index).is_some_and(|header| header & 0x01 == 0)
+    }
 }
 
 /// Decides which packets of a VP8 stream with temporal layers to forward for a target frame

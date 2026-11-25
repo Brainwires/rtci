@@ -990,6 +990,39 @@ impl Depacketizer for Vp9Packet {
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
         marker
     }
+
+    fn has_key_frames(&self) -> bool {
+        true
+    }
+
+    /// The first packet of a picture ([`is_partition_head`](Depacketizer::is_partition_head):
+    /// `B`=1, not dependent on a lower spatial layer) of the base spatial layer whose `P` bit
+    /// is clear (RFC 9628 section 4.2: "P: Inter-picture predicted frame. When set to zero,
+    /// the frame does not utilize inter-picture prediction"). An upper spatial layer's frame
+    /// with `P`=0 (a layer synchronization frame) is not one: the picture's lower layers and
+    /// the other layers' earlier pictures are still needed.
+    fn is_key_frame_start(&self, payload: &Bytes) -> bool {
+        let Some(&b) = payload.first() else {
+            return false;
+        };
+        if b & 0x40 != 0 || !self.is_partition_head(payload) {
+            return false;
+        }
+        if b & 0x20 != 0 {
+            let mut index = 1;
+            if b & 0x80 != 0 {
+                index += match payload.get(1) {
+                    Some(m) if m & 0x80 != 0 => 2,
+                    _ => 1,
+                };
+            }
+            // L: |  T  |U|  S  |D|
+            return payload
+                .get(index)
+                .is_some_and(|layer| (layer >> 1) & 0x07 == 0);
+        }
+        true
+    }
 }
 
 impl Vp9Packet {
