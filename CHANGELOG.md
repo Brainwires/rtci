@@ -1170,8 +1170,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - both directions capped: every run of the default chain misses the picture requirement
     (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
     ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
-  - without the pacer: the picture requirement is missed in 7.0 % of runs (interval 4.2 to
-    11.4 %), close to the bound and not met.
+  - without the pacer: the picture requirement is violated in 7.0 % of runs (interval 4.2 to
+    11.4 %) and the freeze one in 5.5 %: at the bound, neither met nor missed can be claimed
+    (their 300-run tests pass on one draw and fail on the next; run on demand).
   - a peer leaves Connected (ICE consent answers arrive later than the consent wait) in 16 %
     of runs of the default chain, and in 197 of 200 without the pacer with a 1000 ms queue, 3 of
     them to Failed.
