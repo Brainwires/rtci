@@ -1248,6 +1248,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **video sent as RED was never repaired by retransmission** (red-2; the `Chrome` profile's
+  `fec.video-red-ulpfec`). Two defects, either of which made every retransmission of a RED
+  packet useless:
+  - The NACK responder sent every retransmission of a stream under the one RTX payload type
+    of the format the stream was bound with. RFC 4588 section 8.1 ties a retransmission
+    format to one original payload type (`apt`: "the payload type of the associated original
+    stream"), and a receiver restores the payload type from the `apt` of the format the
+    retransmission arrives under: a RED packet (payload type 116) retransmitted under the
+    RTX of VP8 (97, `apt=96`) came back as VP8 with the RED header in front of it (traced
+    call: 87 retransmissions, none usable). The responder now takes the RTX format whose
+    `apt` is the payload type the packet left under, among the formats of the stream's
+    section and the stream's own pair, as libwebrtc does (`rtp_sender.cc`, `BuildRtxPacket`).
+    A packet whose payload type has no RTX format, on a stream that negotiated RTX, is not
+    retransmitted at all (libwebrtc sends nothing either): never as a second copy on the
+    media SSRC. A stream that negotiated no RTX is repaired with the packet again as it was
+    sent, as before. This also holds for a source that switches between the formats of its
+    section (RFC 7160): each packet goes under its own format's RTX.
+  - An offerer dropped `rtx apt=<red>` when it applied the answer: entering the answer's
+    formats under its own payload type numbers counted only media and FEC formats as the
+    primary of an RTX format, so the RTX of a RED format was left out of the negotiated list,
+    and the offerer could neither send nor read a retransmitted RED packet (between two
+    engines only the answerer's direction had the format).
+  - A FEC packet in RED (ULPFEC in a RED packet of its own, in the media's sequence space)
+    is not retransmitted when it is asked for: the media's own retransmission answers the
+    loss. libwebrtc keeps no FEC packet for retransmission (`ulpfec_generator.cc`,
+    `set_allow_retransmission(false)`).
+
+  Tests `rtci-interceptor/tests/nack_rtx_red.rs`,
+  `in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red`,
+  `an_rtx_format_whose_primary_is_a_red_format_is_numbered_with_it`. Not affected: streams
+  not sent in RED with one media format (the default profile).
+
 - **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
   profile) two engines never raised their send rate** (red-1). A receiver learns a
   stream's format from the payload type of its first packet; when that is the `red` format
