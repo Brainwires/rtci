@@ -1312,6 +1312,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the rate asked for; the delay-based controller corrects it once the media follows
   (`burst_estimate`). Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
 
+- **After an ICE restart onto a new path the default chain climbed at 8% a second** (in 0.1.0
+  too): bandwidth probing was told nothing of a path change. The estimator starts over at its
+  starting rate on a new selected pair (`PathChanged`, or
+  `CongestionControlHandle::notify_path_change`), but the probe controller kept what it had
+  noted of the old path. During an outage the estimator halves at every feedback timeout, and
+  each halving is a "large drop" that the probe after a drop asks about a second later: the
+  cluster for the rate before the last halving (133 kbit/s), asked into the dead path, still
+  awaited its result when the new pair was selected, held the controller's one slot through
+  the half second in which a cluster for an application-limited sender would have been due,
+  and no start-up cluster followed. On the capacity instrument's outage cell (a 4 s outage
+  ended by an ICE restart, the new path open at 2.5 Mbit/s, 200 calls) the target was back at
+  1 Mbit/s 15.1 s after the new pair and averaged 1504 kbit/s 15 to 25 s after it; with the
+  probe after a drop turned off, 1.0 s in 140 of the 200 calls and 12.2 s in the others. Now a
+  path change starts probing over as at the start of the call
+  (`ProbeController::on_path_change`, new): the start-up clusters again, at three and six
+  times the rate the estimator starts over at and on while the new path carries what is
+  asked, and the target's recent high, the drop below it and the cluster awaiting its result
+  are dropped with the old path (the fall to the starting rate is not a capacity drop).
+  libwebrtc does the same (`GoogCcNetworkController::OnNetworkRouteChange`:
+  `ProbeController::Reset`, then the exponential probes again). Tests:
+  `cc::probe::tests::a_path_change_starts_probing_over_and_forgets_the_drop`,
+  `the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop`,
+  `rtci-interceptor/tests/probing_across_a_path_change.rs`,
+  `tests/capacity_cap_video_rtc2rtc.rs::an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain`.
+
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
   report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the

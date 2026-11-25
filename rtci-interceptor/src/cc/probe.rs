@@ -428,6 +428,54 @@ impl ProbeController {
         self.unpaced = unpaced;
     }
 
+    /// The path changed and the estimator started over at `start_bitrate`: probing starts over
+    /// too, as at the beginning of the call, and what was noted of the old path is dropped.
+    ///
+    /// The start-up clusters are owed again, at three and six times `start_bitrate` and on
+    /// while the new path carries what is asked (RFC 8836 section 2, requirement 4: the
+    /// conditions of a new path are initial conditions). The target's recent high, the drop
+    /// below it and the cluster awaiting its result belong to the path that was left: the
+    /// estimator's fall back to its starting rate is not a drop of the path's capacity, and
+    /// the rate "before" it is the old path's.
+    ///
+    /// Without this an outage ended by an ICE restart left the call at the estimator's 8% a
+    /// second on the new path (traced on the capacity instrument's outage cell, the default
+    /// chain: 1 Mbit/s 15.1 s after the new pair). While nothing is acknowledged the
+    /// estimator halves at every feedback timeout, each halving a large drop, and the probe
+    /// for the rate before the last of them (133 kbit/s, asked into the dead path half a
+    /// second before the new pair) was still awaiting its result when the path changed. It
+    /// held the controller's one slot for the half second in which the sender, still sending
+    /// at the old path's floor, counted as application limited against the new starting
+    /// rate; after it nothing was due. Without the probe after a drop that
+    /// application-limited cluster did find the path (1.0 s), but only in the calls where
+    /// one happened to be due (140 of 200; 12.2 s in the others).
+    ///
+    /// libwebrtc does the same on a network route change: `ProbeController::Reset`
+    /// (goog_cc `probe_controller.cc`) returns to its initial state and forgets the rate
+    /// before the last large drop, and the constraints set next start the exponential probes
+    /// again (`GoogCcNetworkController::OnNetworkRouteChange`).
+    pub fn on_path_change(&mut self, now: Instant, start_bitrate: f64) {
+        self.initial = INITIAL_PROBES
+            .iter()
+            .rev()
+            .map(|multiple| start_bitrate * multiple)
+            .collect();
+        self.started = false;
+        self.outstanding = None;
+        self.last_probe = None;
+        self.further = None;
+        self.peak = None;
+        self.drop = None;
+        self.drop_probe = false;
+        self.last_target = None;
+        self.step_drop = None;
+        // libwebrtc's `Reset` counts the change as the time of its last probe after a drop.
+        self.last_drop_probe = Some(now);
+        self.application_limited_ended = None;
+        self.usage = Usage::Normal;
+        self.recovered_from_overuse = false;
+    }
+
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
     /// outside it (REMB, TMMBR, the session bit rate).
     pub fn set_max_bitrate(&mut self, max_bitrate: f64) {
@@ -970,6 +1018,110 @@ mod tests {
             .poll(at(4_000), 900_000.0, 900_000.0, true)
             .expect("paced clusters: the rate before the drop");
         assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
+    }
+
+    /// A path change starts probing over: the start-up clusters again, from the rate the
+    /// estimator starts over at, and nothing of the old path's drop. The script is an outage
+    /// ended by an ICE restart, as the default chain's estimator goes through it: at
+    /// 2.5 Mbit/s, then halved every half second while nothing is acknowledged (each halving
+    /// a large drop), a probe for the rate before the last one asked into the dead path, and
+    /// the new path while that probe still awaits its result.
+    #[test]
+    fn a_path_change_starts_probing_over_and_forgets_the_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_500_000.0, 2_500_000.0, true)
+            );
+        }
+        // The outage: 1250, 625, 312, 156 kbit/s, then the floor.
+        let mut target = 2_500_000.0;
+        for ms in (2_000..4_500).step_by(500) {
+            target = f64::max(target / 2.0, 100_000.0);
+            assert_eq!(None, controller.poll(at(ms), target, target, true));
+        }
+        assert_eq!(100_000.0, target);
+        let stale = controller
+            .poll(at(5_000), target, target, true)
+            .expect("the rate before the last halving");
+        assert_eq!(0.85 * 156_250.0, stale.bits_per_second);
+
+        // The new path, 300 ms later: the estimator starts over at 300 kbit/s.
+        controller.on_path_change(at(5_300), 300_000.0);
+        assert_eq!(None, controller.outstanding(), "the old path's cluster");
+        assert_eq!(None, controller.poll_timeout(), "nothing of the old path");
+        let first = controller
+            .poll(at(5_300), 300_000.0, 100_000.0, true)
+            .expect("the first start-up cluster, at once");
+        assert_eq!(900_000.0, first.bits_per_second);
+        assert_eq!(
+            None,
+            controller.on_result(stale.cluster, 120_000.0),
+            "a late result of the old path's cluster is nobody's"
+        );
+        assert_eq!(
+            Some(900_000.0),
+            controller.on_result(first.cluster, 900_000.0)
+        );
+        let second = controller
+            .poll(at(5_450), 900_000.0, 300_000.0, true)
+            .expect("the second start-up cluster");
+        assert_eq!(1_800_000.0, second.bits_per_second);
+        // The new path carries it: a further cluster, as at the start of the call.
+        assert_eq!(
+            Some(1_800_000.0),
+            controller.on_result(second.cluster, 1_800_000.0)
+        );
+        let third = controller
+            .poll(at(5_600), 1_800_000.0, 900_000.0, true)
+            .expect("a further cluster");
+        assert_eq!(3_600_000.0, third.bits_per_second);
+        // It found the bottleneck. From here on the sender is at its target, and nothing of
+        // the old path's drops is probed for in the seconds that follow.
+        assert_eq!(
+            Some(2_375_000.0),
+            controller.on_result(third.cluster, 2_375_000.0)
+        );
+        for ms in (5_700..12_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_375_000.0, 2_375_000.0, true),
+                "at {ms} ms"
+            );
+        }
+    }
+
+    /// The estimator's fall to its starting rate at a path change is not a drop to probe
+    /// after: from 2.5 Mbit/s to 300 kbit/s on a new path that carries no more than the
+    /// start-up clusters show, no cluster asks for the old path's rate.
+    #[test]
+    fn the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_500_000.0, 2_500_000.0, true)
+            );
+        }
+        controller.on_path_change(at(2_000), 300_000.0);
+        let mut asked = Vec::new();
+        for ms in (2_000..10_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), 300_000.0, 300_000.0, true) {
+                asked.push(request.bits_per_second);
+                // The new path is narrow: every cluster shows 350 kbit/s.
+                controller.on_result(request.cluster, 350_000.0);
+            }
+        }
+        assert_eq!(
+            vec![900_000.0, 1_800_000.0],
+            asked,
+            "the start-up clusters, and no probe for 85% of 2.5 Mbit/s"
+        );
     }
 
     /// A controller with libwebrtc's probe after a drop, settled, application limited (it

@@ -1106,7 +1106,12 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     // This file's receiver plays strictly in order and its bounds were set for a sender that
     // pauses and delivers its queue: the backlog policy that is for (docs/capacity-collapse.md).
     // The instrument's cells run the engine's default.
-    let setup = &setup.pacer_backlog(PacerBacklog::Keep);
+    path_change_run_as_set(&setup.pacer_backlog(PacerBacklog::Keep))
+}
+
+/// [`path_change_run`] with `setup` as it is: the pacer's backlog policy is the setup's (the
+/// engine's default unless it names one).
+fn path_change_run_as_set(setup: &Setup) -> Result<PathChangeOutcome> {
     let mut world = World::connected(setup)?;
     let t = world.now + Duration::from_secs(10);
     world.advance(t)?;
@@ -1286,6 +1291,75 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
             "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
         );
+    }
+    Ok(())
+}
+
+/// A new selected pair is a new path for bandwidth probing too (RFC 8836 section 2,
+/// requirement 4: the algorithm "SHOULD adapt as quickly as possible to initial network
+/// conditions", and the conditions of a new path are initial ones; libwebrtc's
+/// `GoogCcNetworkController::OnNetworkRouteChange` resets its probe controller and starts the
+/// exponential probes again). In the default chain, after the four-second outage and the ICE
+/// restart of [`path_change_run`], the new path is open: the start-up clusters are asked for
+/// again from the 300 kbit/s the estimate starts over at, and each peer's estimate is past
+/// 1 Mbit/s within a second of the new pair and at the 2.5 Mbit/s maximum within two, without
+/// a step down on the way. With the pacer's backlog policy as the engine has it and with the
+/// backlog kept.
+///
+/// Before, the probe controller was told nothing of the new path: the probe for the rate
+/// before the outage's last halving of the target (133 kbit/s), asked into the dead path,
+/// still awaited its result at the new pair, no start-up cluster followed, and the estimate
+/// climbed at the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5: 1 Mbit/s 15.1 s after
+/// the new pair (the capacity instrument's outage cell, 200 calls), 650 kbit/s at the end of
+/// this run.
+#[test]
+fn an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain()
+-> Result<()> {
+    for backlog in [None, Some(PacerBacklog::Keep)] {
+        for seed in seed_range(1, 3) {
+            let mut setup = Setup::new(seed, None)
+                .chain(Chain::Default)
+                .anchor(ANCHORS[0]);
+            if let Some(backlog) = backlog {
+                setup = setup.pacer_backlog(backlog);
+            }
+            let outcome = path_change_run_as_set(&setup)?;
+            assert_eq!(
+                Some(300_000),
+                outcome.at_switch,
+                "backlog {backlog:?} seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+            );
+            for (i, who) in ["caller", "callee"].into_iter().enumerate() {
+                let after: Vec<_> = outcome.estimates[i]
+                    .iter()
+                    .filter(|(at, _)| *at >= outcome.switched_at)
+                    .copied()
+                    .collect();
+                let reached = |bps: u32| {
+                    after
+                        .iter()
+                        .find(|(_, estimate)| *estimate >= bps)
+                        .map(|(at, _)| *at - outcome.switched_at)
+                };
+                let (at_1m, at_max) = (reached(1_000_000), reached(MAX_BPS));
+                println!(
+                    "RESTART-PROBE backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}, the maximum after {at_max:?}"
+                );
+                assert!(
+                    at_1m.is_some_and(|after| after <= Duration::from_secs(1)),
+                    "backlog {backlog:?} seed {seed} {who}: 1 Mbit/s after {at_1m:?}: {after:?}"
+                );
+                assert!(
+                    at_max.is_some_and(|after| after <= Duration::from_secs(2)),
+                    "backlog {backlog:?} seed {seed} {who}: the maximum after {at_max:?}: {after:?}"
+                );
+                assert_eq!(
+                    None,
+                    first_step_down(&after),
+                    "backlog {backlog:?} seed {seed} {who}: the estimate fell on the new path: {after:?}"
+                );
+            }
+        }
     }
     Ok(())
 }

@@ -843,6 +843,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         };
         if path_changed {
             self.estimator.on_path_change(now);
+            self.restart_probing(now);
         }
 
         let max = [session, remb, tmmbr, breaker]
@@ -901,13 +902,26 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
     /// likewise "only reports packets sent on the new route"
     /// (`RtpTransportControllerSend::OnNetworkRouteChanged`,
     /// `TransportFeedbackAdapter::SetNetworkRoute`). The probe clusters in flight go with
-    /// them: their packets are among those forgotten.
+    /// them: their packets are among those forgotten. And probing starts over
+    /// ([`restart_probing`](Self::restart_probing)).
     fn on_new_path(&mut self, now: Instant) {
         self.estimator.on_path_change(now);
         self.history.forget_sent();
         self.probe_packets.clear();
         self.probe_clusters.clear();
         self.probe_asked = None;
+        self.restart_probing(now);
+    }
+
+    /// After the estimator started over on a new path: the probe controller starts over from
+    /// the estimator's rate now ([`ProbeController::on_path_change`]). The estimator's fall
+    /// to its starting rate is not a capacity drop to probe after, and the new path's rate is
+    /// looked for as the first path's was.
+    fn restart_probing(&mut self, now: Instant) {
+        let start = self.estimator.target_bitrate();
+        if let Some(probing) = self.probing.as_mut() {
+            probing.on_path_change(now, start);
+        }
     }
 
     /// Bits per second sent over the last second.
