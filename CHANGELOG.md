@@ -1161,6 +1161,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
+  while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
+  report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the
+  controller took the probe's measurement for what the path delivers whenever one was held
+  (six seconds after any probe result), and from the second report of an over-use on that
+  measurement was the estimate itself, so the estimate fell by 15% every 50 ms whatever
+  arrived: 268 kbit/s to the 100 kbit/s floor in 0.3 s while 213 to 252 kbit/s was received
+  (the path of `tests/capacity_cap_video_rtc2rtc.rs`, where the estimate under a 300 kbit/s
+  cap averaged 200 kbit/s and fell to the floor again and again). The measurement now stands
+  in for the received rate only while the sender is received below it (application limited,
+  as before); a sender received at the measurement or above it is cut to 0.85 times the
+  received rate, and over-use never raises an estimate that rests on a probe.
+  `rate_control::tests::lasting_over_use_with_a_probe_measurement_follows_the_received_rate`.
+
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
   one run in fifty (28 of 1500 runs on master, alike under every crypto feature set; in CI it
