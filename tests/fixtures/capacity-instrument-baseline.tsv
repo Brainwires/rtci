@@ -2,7 +2,7 @@
 # many of the baseline's runs were beyond it (over for hi, under for lo, or did not complete).
 # A percentile's threshold is the baseline's value and 10% of slack. Written by
 # scripts/capacity-instrument.py baseline; do not edit by hand.
-# Source: train 34 round 4 tree 8e95ad65, runs 45653020697 45653031592
+# Source: train 34 round 6 tree 98ab4298, runs 45686735759 45686744374
 cell	figure	direction	threshold	beyond	runs	level
 cap/paced/gap300/up/q300/rl0	max_age	hi	1.461	195	1000	p50
 cap/paced/gap300/up/q300/rl0	max_age	hi	1.672	24	1000	p90
