@@ -585,8 +585,9 @@ fn reports_of_a_sender_told_its_send_rate(follows: bool, told: Option<u64>) -> (
             chain
                 .handle_read(rtcp(now, remote_receiver_report(77)))
                 .unwrap();
-            let (packets, _) = read(&mut chain);
-            for packet in packets {
+            // The chain's end keeps the attributes and hands on an empty carrier in place
+            // of the report (the application did not ask for RTCP): every item is looked at.
+            while let Some(packet) = chain.poll_read() {
                 if let Some(interval) = packet
                     .message
                     .custom::<rtci_interceptor::RtcpReportingInterval>()
@@ -599,7 +600,7 @@ fn reports_of_a_sender_told_its_send_rate(follows: bool, told: Option<u64>) -> (
     (regular_after(&sent, base + secs(4.0)), calculated)
 }
 
-/// `with_share_following_send_rate` (tuning, no specification asks for it; the `Performance`
+/// `with_share_following_send_rate` (tuning, no specification asks for it; off in every
 /// profile): an endpoint whose congestion controller allows it 100 kbit/s while the session
 /// measures about 270 kbit/s schedules its own regular reports with 5% of 100 kbit/s for each
 /// of its SSRCs' places among the members, here with one remote member twice that: fewer

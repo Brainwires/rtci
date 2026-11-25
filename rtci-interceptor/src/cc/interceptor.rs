@@ -969,7 +969,6 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         })
     }
 
-    /// Publish the estimate, and return the attribute to announce when it moved.
     /// Tells the RTCP session wire-ward the estimate, when it has moved by a twentieth since
     /// it was last told ([`CongestionControlBuilder::with_send_rate_told_to_rtcp`]).
     fn tell_rtcp(&mut self, now: Instant) {
@@ -989,6 +988,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         );
     }
 
+    /// Publish the estimate, and return the attribute to announce when it moved.
     fn publish(&mut self) -> Option<Attribute> {
         let target = self.estimator.target_bitrate();
         {

@@ -50,7 +50,13 @@
 //!
 //! - scenario: `cap` or `outage`;
 //! - chain: `paced` (the engine's default interceptors), `nopacer` (the same without the pacer),
-//!   `parolnet` (ParolNet's chain; measurement only);
+//!   `parolnet` (ParolNet's chain; measurement only); and the default chain with other
+//!   settings, measurement only: `share` (the defaults with
+//!   `DefaultInterceptorOptions::rtcp_share_follows_send_rate`), `perf` (the `Performance`
+//!   behaviour profile's interceptor settings), `perfshare` (the same with the share
+//!   following the send rate), `perfnoshare` (the same with it off: `perf`, since the
+//!   profile leaves it off), `chrome` (the `Chrome` behaviour profile's interceptor settings;
+//!   the media engine and the session description stay this world's);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
 //!   .with_max_gap_wait(300 ms)` and a PLI when the builder gives a gap up
 //!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time, which holds
@@ -407,7 +413,9 @@ enum Tuning {
     Share,
     /// `perf`: the `Performance` behaviour profile's interceptor settings.
     Performance,
-    /// `perfnoshare`: the same with `rtcp_share_follows_send_rate` off.
+    /// `perfshare`: the same with `rtcp_share_follows_send_rate` on.
+    PerformanceWithShare,
+    /// `perfnoshare`: the same with `rtcp_share_follows_send_rate` off (what the profile is).
     PerformanceWithoutShare,
     /// `chrome`: the `Chrome` behaviour profile's interceptor settings.
     Chrome,
@@ -445,7 +453,9 @@ impl Cell {
                 other => bail!("unknown scenario {other} in {name}"),
             },
             chain: match chain {
-                "paced" | "share" | "perf" | "perfnoshare" | "chrome" => Chain::Default,
+                "paced" | "share" | "perf" | "perfshare" | "perfnoshare" | "chrome" => {
+                    Chain::Default
+                }
                 "nopacer" => Chain::DefaultWithoutPacer,
                 "parolnet" => Chain::ParolNet,
                 other => bail!("unknown chain {other} in {name}"),
@@ -453,6 +463,7 @@ impl Cell {
             tuning: match chain {
                 "share" => Tuning::Share,
                 "perf" => Tuning::Performance,
+                "perfshare" => Tuning::PerformanceWithShare,
                 "perfnoshare" => Tuning::PerformanceWithoutShare,
                 "chrome" => Tuning::Chrome,
                 _ => Tuning::Default,
@@ -479,6 +490,7 @@ impl Cell {
                 (Chain::Default, Tuning::Default) => "paced",
                 (_, Tuning::Share) => "share",
                 (_, Tuning::Performance) => "perf",
+                (_, Tuning::PerformanceWithShare) => "perfshare",
                 (_, Tuning::PerformanceWithoutShare) => "perfnoshare",
                 (_, Tuning::Chrome) => "chrome",
                 (Chain::DefaultWithoutPacer, Tuning::Default) => "nopacer",
@@ -500,6 +512,9 @@ impl Cell {
             Tuning::Default => setup,
             Tuning::Share => setup.share_follows_send_rate(true),
             Tuning::Performance => setup.profile(BehaviourProfile::Performance),
+            Tuning::PerformanceWithShare => setup
+                .profile(BehaviourProfile::Performance)
+                .share_follows_send_rate(true),
             Tuning::PerformanceWithoutShare => setup
                 .profile(BehaviourProfile::Performance)
                 .share_follows_send_rate(false),

@@ -902,20 +902,6 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.rtcp_minimum_session_bandwidth,
     },
     {
-        id: "rtcp.share-follows-send-rate",
-        setting: "DefaultInterceptorOptions::rtcp_share_follows_send_rate",
-        clause: "none (tuning); RFC 3550 6.2, 6.3.1",
-        rfc: false => "false",
-        chrome: false => "false",
-        strict_rfc: false => "false",
-        performance: true => "true",
-        performance_note: "NO specification asks for this: RFC 3550 6.2 sizes the RTCP bandwidth from the session bandwidth (here the media measured both ways) and 6.3.1 shares it equally among the members, whatever each direction carries; RFC 4585 4.3 leaves an asymmetric link to the application's b=RS / b=RR. It is tuning for a one-way collapse: this endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which every endpoint sends at this endpoint's congestion-controlled rate (5% x send rate x members / local SSRCs), so the endpoint behind the collapsed link stops spending the other direction's share on it. The intervals calculated for the peer are untouched. Figures: CHANGELOG and docs/capacity-instrument.md",
-        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: the report interval is fixed (1 s video, 5 s audio; for video sent above 72 kbit/s min(360 s / kbit/s, 1 s), which shortens with the send rate and never lengthens beyond the fixed interval), no RTCP bandwidth is computed and so no share to follow: the engine's value stands, with rtcp.t-rr-interval 1 s",
-        evidence: Source,
-        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_share_follows_send_rate = v,
-        read: |o: &DefaultInterceptorOptions| o.rtcp_share_follows_send_rate,
-    },
-    {
         id: "cc.feedback-share",
         setting: "DefaultInterceptorOptions::congestion_feedback_share",
         clause: "RFC 8888 4, RFC 3550 6.2",
@@ -1660,6 +1646,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
         class: NotGovernedClass::Same,
         note: "the same in every profile: the engine default (UpToTarget on master, the measured choice in tests/capacity_cap_video_rtc2rtc.rs; WithinTarget, RFC 4588 7, once conf/gcc-2-rfc-retransmission lands). libwebrtc has no retransmission rate limit on video at a222406d: call/rtp_video_sender.cc (lines 292-354) configures no retransmission_rate_limiter, which modules/rtp_rtcp/source/rtp_rtcp_interface.h line 92 defaults to nullptr, so RTPSender::ReSendPacket's TryUseRate check (rtp_sender.cc lines 331-333) never applies; instead modules/video_coding/fec_controller_default.cc (lines 146-167) lowers the encoder target by the share NACK and FEC took, capped at kProtectionOverheadRateThreshold 0.5 (line 31). That is the RFC's form (retransmissions inside the target, the originals lowered to make room) closer than UpToTarget, which is not libwebrtc's rule at this revision; Performance keeps the default (UpToTarget measured worse than WithinTarget on the paced default chain by gcc-2's owner)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::rtcp_share_follows_send_rate",
+        class: NotGovernedClass::EngineOnly,
+        note: "tuning with NO specification behind it, off in every profile (opt-in): this endpoint's own SSRCs schedule their regular reports with at most 5% of a session in which every endpoint sends at this endpoint's congestion-controlled rate (5% x send rate x members / local SSRCs), so the endpoint behind a link that collapsed one way stops spending the other direction's share on it; the intervals calculated for the peer are untouched. RFC 3550 6.2 sizes the RTCP bandwidth from the session bandwidth and 6.3.1 shares it equally among the members, whatever each direction carries; RFC 4585 4.3 leaves an asymmetric link to the application's b=RS / b=RR. Not a Performance value: that profile's T_rr_interval of 1 s already takes regular RTCP to about 22 kbit/s on such a link, and measured beside it the option adds nothing (CHANGELOG, docs/capacity-instrument.md). libwebrtc computes no RTCP bandwidth (modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: a fixed report interval, 1 s video, 5 s audio), so there is no share to follow",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::circuit_breaker_automatic_restart",

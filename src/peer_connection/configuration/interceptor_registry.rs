@@ -467,7 +467,7 @@ pub struct DefaultInterceptorOptions {
     /// Tuning with no specification behind it: whether this endpoint's own share of the RTCP
     /// bandwidth follows the rate its congestion controller allows it to send at, so that an
     /// endpoint behind a collapsed link reports less while the other direction still flows.
-    /// `false` by default; `true` in the `Performance` behaviour profile. See
+    /// `false` by default and in every behaviour profile: an option to turn on. See
     /// [`RtcpSessionBuilder::with_share_following_send_rate`](interceptor::RtcpSessionBuilder::with_share_following_send_rate).
     pub rtcp_share_follows_send_rate: bool,
     /// The share of the media received that congestion control feedback (transport-wide and
