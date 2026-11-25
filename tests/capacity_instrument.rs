@@ -31,6 +31,10 @@
 //! | `audio_delay` | the most an Opus packet was delayed beyond the call's best |
 //! | `cb`, `cb_audio` | flows (of either peer) the RTP circuit breaker (RFC 8083) had ceased at the end, and how many of them are audio: the engine drops what is written on a ceased flow |
 //! | `disc`, `pc_failed` | how often a peer connection left Connected, and whether one reached Failed |
+//! | `disc_time`, `disc_max`, `disc_open` | the episodes in which a peer was not Connected (after it first was): their total length over both peers, the longest, and how many were still open at the end of the run (a peer that never came back, or failed) |
+//! | `stun_lost` | STUN datagrams (ICE consent checks and their responses, RFC 7675) that did not arrive: dropped at a link's queue or lost on the reverse path. One lost check makes its sender `disconnected` when the next check's answer comes later than 5 s after it |
+//! | `low`, `mean10` | kbit/s: the caller's lowest target in the 5 s after the drop (a pause left out), and its mean over the 10 s after |
+//! | `back_low`, `back_mean` | the same of the callee's target: the direction whose capacity did not change unless the cell is `both` (its feedback crosses the capped link) |
 //! | `recover` | from the capacity's return until the encoder's target is back to 0.4 of what it was before the drop; 99 when not within the 25 s observed |
 //! | `before`, `under`, `window` | kbit/s: the target before the drop, its median under the cap, its mean 15 to 25 s after the cap |
 //! | `reacted` | from the drop until the target is under 400 kbit/s (99: not within 5 s); in the outage, from the restart to the new pair |
@@ -48,7 +52,9 @@
 //!
 //! A cell names everything but the seed: `scenario/chain/gapN/direction/qN/rlN`.
 //!
-//! - scenario: `cap` or `outage`;
+//! - scenario: `cap`, `outage`, or `fbgap` (the capacity does not change; none of the callee's
+//!   RTCP arrives for 300 ms: what a gap in the feedback alone costs the caller's target, read
+//!   in `low` and `mean10`);
 //! - chain: `paced` (the engine's default interceptors), `nopacer` (the same without the pacer),
 //!   `parolnet` (ParolNet's chain; measurement only);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
@@ -136,6 +142,7 @@ mod capacity_common;
 
 use anyhow::{Result, anyhow, bail};
 use capacity_common::*;
+use rtci::peer_connection::state::RTCPeerConnectionState;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -312,6 +319,57 @@ fn recovered_after(
         .map(|(at, _)| *at - from)
 }
 
+/// The lowest target in `from..to`, a pause (zero) left out: the estimate's own low point.
+fn lowest(targets: &[(Duration, u32)], from: Duration, to: Duration) -> u32 {
+    let mut low = target_at(targets, from);
+    for (at, bps) in targets {
+        if *at >= from && *at < to && *bps > 0 && (*bps < low || low == 0) {
+            low = *bps;
+        }
+    }
+    low
+}
+
+/// The mean target over `from..to`, sampled every 100 ms.
+fn mean_target(targets: &[(Duration, u32)], from: Duration, to: Duration) -> u32 {
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    let mut at = from;
+    while at < to {
+        sum += u64::from(target_at(targets, at));
+        n += 1;
+        at += Duration::from_millis(100);
+    }
+    (sum / n.max(1)) as u32
+}
+
+/// The episodes in which a peer was not Connected after it first was: their total length,
+/// the longest, and how many are still open at `end`.
+fn disconnects(
+    states: &[(Duration, RTCPeerConnectionState)],
+    end: Duration,
+) -> (Duration, Duration, u32) {
+    let mut total = Duration::ZERO;
+    let mut longest = Duration::ZERO;
+    let mut was_connected = false;
+    let mut since: Option<Duration> = None;
+    for (at, state) in states {
+        if *state == RTCPeerConnectionState::Connected {
+            was_connected = true;
+            if let Some(from) = since.take() {
+                total += *at - from;
+                longest = longest.max(*at - from);
+            }
+        } else if was_connected && since.is_none() {
+            since = Some(*at);
+        }
+    }
+    let Some(from) = since else {
+        return (total, longest, 0);
+    };
+    (total + (end - from), longest.max(end - from), 1)
+}
+
 /// For how much of `from..to` the target was zero.
 fn paused(targets: &[(Duration, u32)], from: Duration, to: Duration) -> Duration {
     let mut total = Duration::ZERO;
@@ -329,7 +387,7 @@ fn paused(targets: &[(Duration, u32)], from: Duration, to: Duration) -> Duration
 // ---------------------------------------------------------------------------------------------
 
 /// The figures of a run, in the order they are printed (the module's table).
-const NAMES: [&str; 35] = [
+const NAMES: [&str; 43] = [
     "max_age",
     "age_p50",
     "age_p95",
@@ -365,6 +423,14 @@ const NAMES: [&str; 35] = [
     "audio_back",
     "audio_tail",
     "end",
+    "disc_time",
+    "disc_max",
+    "disc_open",
+    "stun_lost",
+    "low",
+    "mean10",
+    "back_low",
+    "back_mean",
 ];
 
 /// What stands for "it never happened" in a figure that is a time until something.
@@ -394,6 +460,9 @@ enum Scenario {
     Cap,
     /// The path is gone for 4 s and comes back with an ICE restart.
     Outage,
+    /// The capacity does not change: none of the callee's RTCP (the feedback about the
+    /// caller's media) arrives for 300 ms.
+    FeedbackGap,
 }
 
 /// Everything of a run but its seed (the module's "Cells").
@@ -424,6 +493,7 @@ impl Cell {
             scenario: match scenario {
                 "cap" => Scenario::Cap,
                 "outage" => Scenario::Outage,
+                "fbgap" => Scenario::FeedbackGap,
                 other => bail!("unknown scenario {other} in {name}"),
             },
             chain: match chain {
@@ -449,6 +519,7 @@ impl Cell {
             match self.scenario {
                 Scenario::Cap => "cap",
                 Scenario::Outage => "outage",
+                Scenario::FeedbackGap => "fbgap",
             },
             match self.chain {
                 Chain::Default => "paced",
@@ -488,6 +559,7 @@ const OPEN_BEFORE: Duration = Duration::from_secs(20);
 const CAP_HELD: Duration = Duration::from_secs(20);
 const OPEN_AFTER: Duration = Duration::from_secs(25);
 const OUTAGE: Duration = Duration::from_secs(4);
+const FEEDBACK_GAP: Duration = Duration::from_millis(300);
 
 /// One run of `cell`: its figures.
 fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
@@ -534,6 +606,13 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
             }
             (reacted, under, world.elapsed())
         }
+        Scenario::FeedbackGap => {
+            world.feedback_outage_until = Some(world.now + FEEDBACK_GAP);
+            let t = world.now + CAP_HELD;
+            world.advance(t)?;
+            let under = target_at(&world.peers[0].targets, world.elapsed());
+            (None, under, world.elapsed())
+        }
         Scenario::Outage => {
             // As `path_change_run` of capacity_cap_video_rtc2rtc.rs: nothing arrives either
             // way, then an ICE restart whose checks arrive while the media path still does
@@ -570,6 +649,10 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
     }
     let caller = &world.peers[0];
     let callee = &world.peers[1];
+    let (caller_out, caller_longest, caller_open) = disconnects(&caller.states, end);
+    let (callee_out, callee_longest, callee_open) = disconnects(&callee.states, end);
+    let after = dropped_at + Duration::from_secs(5);
+    let ten = dropped_at + Duration::from_secs(10);
     let frames = screen(callee);
     let fresh = fresh_times(&frames, FRESH);
     let seconds = |d: Duration| d.as_secs_f64();
@@ -634,6 +717,14 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
         audio(&caller.audio_arrivals, dropped_at, end).share,
         seconds(sound.tail),
         seconds(end),
+        seconds(caller_out + callee_out),
+        seconds(caller_longest.max(callee_longest)),
+        f64::from(caller_open + callee_open),
+        f64::from(world.stun_lost),
+        f64::from(lowest(&caller.targets, dropped_at, after) / 1000),
+        f64::from(mean_target(&caller.targets, dropped_at, ten) / 1000),
+        f64::from(lowest(&callee.targets, dropped_at, after) / 1000),
+        f64::from(mean_target(&callee.targets, dropped_at, ten) / 1000),
     ];
     Ok(Figures(figures))
 }
@@ -1530,6 +1621,9 @@ fn a_cell_has_one_name() -> Result<()> {
             cell.reverse_loss
         )
     );
+    let gap = "fbgap/paced/gap300/up/q300/rl0";
+    assert_eq!(gap, Cell::parse(gap)?.name());
+    assert_eq!(Scenario::FeedbackGap, Cell::parse(gap)?.scenario);
     assert!(Cell::parse("cap/paced/gap300/up/q300").is_err());
     assert!(Cell::parse("cap/paced/wait300/up/q300/rl0").is_err());
     // A third of the seeds at each phase.
@@ -1618,6 +1712,92 @@ fn a_tripwire_allows_for_the_baseline_being_a_sample() {
         "IROW cell=cap/paced/gap300/up/q300/rl0 seed=1 phase=0 failed=peer_0_failed",
         rows[2].line()
     );
+}
+
+#[test]
+fn a_disconnect_lasts_from_leaving_connected_to_coming_back() {
+    use RTCPeerConnectionState::{Connected, Connecting, Disconnected, Failed};
+    let ms = Duration::from_millis;
+    let end = ms(60_000);
+    // Connecting before the first Connected is not a disconnect.
+    let once = [(ms(0), Connecting), (ms(100), Connected)];
+    assert_eq!((ms(0), ms(0), 0), disconnects(&once, end));
+    // Two episodes: 700 ms and 300 ms; a state between (Disconnected then Failed, say) does
+    // not start a new one.
+    let twice = [
+        (ms(0), Connecting),
+        (ms(100), Connected),
+        (ms(25_000), Disconnected),
+        (ms(25_700), Connected),
+        (ms(31_000), Disconnected),
+        (ms(31_300), Connected),
+    ];
+    assert_eq!((ms(1_000), ms(700), 0), disconnects(&twice, end));
+    // One that never comes back lasts to the end of the run and is still open.
+    let open = [
+        (ms(100), Connected),
+        (ms(25_000), Disconnected),
+        (ms(50_000), Failed),
+    ];
+    assert_eq!((ms(35_000), ms(35_000), 1), disconnects(&open, end));
+}
+
+#[test]
+fn the_lowest_and_the_mean_target_are_read_from_the_target() {
+    let ms = Duration::from_millis;
+    let targets = [
+        (ms(0), 2_500_000),
+        (ms(20_500), 1_250_000),
+        (ms(21_000), 0),
+        (ms(22_000), 300_000),
+        (ms(26_000), 100_000),
+    ];
+    // The pause is not a target; what follows the window is not in it.
+    assert_eq!(300_000, lowest(&targets, ms(20_000), ms(25_000)));
+    assert_eq!(2_500_000, lowest(&targets, ms(10_000), ms(20_000)));
+    // 20.0 to 21.0 s: five samples at 2.5 M, five at 1.25 M.
+    assert_eq!(1_875_000, mean_target(&targets, ms(20_000), ms(21_000)));
+}
+
+/// RFC 8888 section 5: "If only a single congestion control feedback packet is lost, an
+/// appropriate response is to assume that the level of congestion has remained roughly the
+/// same". On a path whose capacity does not change, 300 ms without any of the receiver's
+/// RTCP (several feedback packets, less than the controller's missing-feedback timeout)
+/// leaves the sender's target where it was, and no peer leaves Connected.
+#[test]
+fn a_feedback_gap_shorter_than_the_timeout_does_not_lower_the_target() -> Result<()> {
+    let cell = Cell::parse("fbgap/paced/gap300/up/q300/rl0")?;
+    let figures = run_cell(cell, 7, phase_of(7))?;
+    let value = |name: &str| figures.0[NAMES.iter().position(|n| *n == name).unwrap()];
+    assert!(value("before") >= 1000.0, "the call had not ramped up");
+    assert_eq!(value("before"), value("low"), "the target fell in the gap");
+    assert_eq!(value("before"), value("mean10"));
+    assert_eq!(0.0, value("disc"));
+    assert_eq!(0.0, value("stun_lost"));
+    Ok(())
+}
+
+/// The outage of the `fbgap` scenario takes RTCP, and only the callee's, for its 300 ms.
+#[test]
+fn the_feedback_outage_takes_the_callees_rtcp_for_300_ms() -> Result<()> {
+    let cell = Cell::parse("fbgap/paced/gap300/up/q300/rl0")?;
+    let mut world = World::connected(&cell.setup(7))?;
+    let t = world.now + Duration::from_secs(5);
+    world.advance(t)?;
+    assert_eq!(0, world.feedback_outage_lost);
+    world.feedback_outage_until = Some(world.now + FEEDBACK_GAP);
+    let t = world.now + Duration::from_secs(2);
+    world.advance(t)?;
+    // The callee sends some 60 RTCP datagrams a second: 300 ms hold between 6 and 40.
+    assert!(
+        (6..=40).contains(&world.feedback_outage_lost),
+        "{} RTCP datagrams lost",
+        world.feedback_outage_lost
+    );
+    assert_eq!(0, world.stun_lost);
+    let audio = world.peers[0].audio_arrivals.len();
+    assert!(audio > 300, "the callee's audio went on arriving: {audio}");
+    Ok(())
 }
 
 /// The baseline file parses, and names only cells and figures there are.
