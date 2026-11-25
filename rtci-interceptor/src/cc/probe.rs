@@ -77,8 +77,9 @@ const PROBE_AFTER_DROP_DELAY: Duration = Duration::from_secs(1);
 const PROBE_AFTER_DROP_INTERVAL: Duration = Duration::from_secs(1);
 /// A probe after a drop asks for this share of the rate before it.
 const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
-/// How long the rate before a large drop is remembered as the rate the path had: the
-/// highest such rate of this long is what [`AfterDropProbe::Repeated`] asks for.
+/// How long the rate before a large drop is remembered as the rate the path had, for
+/// recovery probing ([`ProbeController::with_recovery_probing`]): the highest such rate of
+/// this long.
 pub const PROBE_DROP_MEMORY: Duration = Duration::from_secs(60);
 /// How often a recovery cluster is sent while the target is below the remembered rate
 /// ([`ProbeController::with_recovery_probing`]).
@@ -97,12 +98,28 @@ const LIBWEBRTC_PROBE_UNCERTAINTY: f64 = 0.05;
 /// ([`ProbeController::with_after_drop_probe`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AfterDropProbe {
-    /// The engine's form. A drop of the target below two thirds of its high of the last two
-    /// seconds is followed, from a second on and once a second for five seconds, by a cluster
-    /// at 85% of the rate before the drop while the target is still below that: the highest
-    /// rate before a large drop of the last minute ([`PROBE_DROP_MEMORY`]), so that the
-    /// smaller drops under a limit (the controller's own sawtooth) ask for the rate the path
-    /// had before the limit, not for the sawtooth's peak.
+    /// The engine's form, and the default. A drop of the target below two thirds of its high
+    /// of the last two seconds is followed, from a second on and once a second for five
+    /// seconds, by a cluster at 85% of that high while the target is still below it, whether
+    /// or not the sender is application limited.
+    ///
+    /// No specification says how to probe after a drop (RFC 8836 section 2, 1f, asks only
+    /// that a flow regain its share quickly), so the default is the form the capacity
+    /// instrument measured best (`tests/capacity_instrument.rs`; the default chain, a
+    /// 2.5 Mbit/s path that drops to 300 kbit/s for 20 s; 1000 calls in each of the two
+    /// reference cells and 200 in six others, each form against this one by the merge-point
+    /// rule of `docs/capacity-instrument.md`). Without a probe ([`Off`](Self::Off)) and with
+    /// libwebrtc's ([`Libwebrtc`](Self::Libwebrtc), which never fires for a sender that
+    /// keeps up with its target, so the two measure alike) seven figures are worse: with
+    /// both directions limited the oldest picture is 3.07 s against 2.64 s, with 5% of the
+    /// feedback lost the rate is not back within 20 s in 30 (24) of 200 calls against 2, and
+    /// the target 15 to 25 s after the limit is 1205 against 1278 kbit/s. Asking for the
+    /// highest rate of the last minute instead of the last drop's own high (the rate before
+    /// the limit, not the peak of the controller's sawtooth under it) makes fifteen figures
+    /// worse (audio packets lost 27 -> 35 a call, behind a 1000 ms queue over 2 s without a
+    /// new picture in 33 of 200 calls against 6) and was not taken. What this form costs
+    /// against no probe: behind a 1000 ms queue 96 audio packets lost a call against 66, and
+    /// under a limit that lasts a minute 74 against 45.
     #[default]
     Repeated,
     /// libwebrtc's form (`ProbeController::RequestProbe`, goog_cc `probe_controller.cc`): a
@@ -311,9 +328,6 @@ pub struct ProbeController {
     polled_at: Option<Instant>,
     /// Whether clusters leave as bursts of padding ([`set_unpaced`](Self::set_unpaced)).
     unpaced: bool,
-    /// The highest rate the target had before a large drop of the last
-    /// [`PROBE_DROP_MEMORY`], and when that drop was.
-    remembered: Option<(f64, Instant)>,
     /// The target at the last [`poll`](Self::poll).
     last_target: Option<f64>,
     /// [`AfterDropProbe::Libwebrtc`]: the last update of the target below two thirds of the
@@ -331,6 +345,9 @@ pub struct ProbeController {
     /// Whether the rate before a large drop is probed back towards for as long as it is
     /// remembered ([`with_recovery_probing`](Self::with_recovery_probing)).
     recovery: bool,
+    /// The highest rate the target had before a large drop of the last
+    /// [`PROBE_DROP_MEMORY`], and when that drop was.
+    remembered: Option<(f64, Instant)>,
     /// When the last recovery cluster was asked for.
     last_recovery: Option<Instant>,
 }
@@ -357,7 +374,6 @@ impl ProbeController {
             drop_probe: false,
             polled_at: None,
             unpaced: false,
-            remembered: None,
             last_target: None,
             step_drop: None,
             last_drop_probe: None,
@@ -366,6 +382,7 @@ impl ProbeController {
             usage: Usage::Normal,
             recovered_from_overuse: false,
             recovery: false,
+            remembered: None,
             last_recovery: None,
         }
     }
@@ -504,10 +521,9 @@ impl ProbeController {
             Some(rate)
         } else if let Some(rate) = self.further.take() {
             Some(rate)
-        } else if let Some((_, at)) = self.drop
+        } else if let Some((before, at)) = self.drop
             && self.after_drop == AfterDropProbe::Repeated
             && !self.unpaced
-            && let Some((before, _)) = self.remembered
             && now.saturating_duration_since(at) >= PROBE_AFTER_DROP_DELAY
             && target < PROBE_AFTER_DROP_SHARE * before
             && self
@@ -1044,43 +1060,6 @@ mod tests {
             .poll(at(4_000), 900_000.0, 900_000.0, true)
             .expect("paced clusters: the rate before the drop");
         assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
-    }
-
-    /// [`AfterDropProbe::Repeated`] asks for the rate the path had before the limit, not for
-    /// the peak of the controller's sawtooth under it: the highest rate before a large drop
-    /// of the last minute. Once that is over a minute old, a drop asks for its own rate.
-    #[test]
-    fn the_repeated_probe_asks_for_the_rate_before_the_limit_for_a_minute() {
-        let epoch = Instant::now();
-        let mut controller = settled(epoch);
-        let at = |ms: u64| epoch + Duration::from_millis(ms);
-        assert_eq!(
-            None,
-            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
-        );
-        // The limit: down to 300 kbit/s. Under it a sawtooth, up to 350 kbit/s and cut to 220.
-        assert_eq!(None, controller.poll(at(1_100), 300_000.0, 300_000.0, true));
-        assert_eq!(None, controller.poll(at(2_000), 350_000.0, 350_000.0, true));
-        assert_eq!(None, controller.poll(at(2_100), 220_000.0, 220_000.0, true));
-        let request = controller
-            .poll(at(3_100), 220_000.0, 220_000.0, true)
-            .expect("a second after the sawtooth's cut");
-        assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
-        controller.on_result(request.cluster, 250_000.0);
-
-        // Over a minute later the same cut asks for the sawtooth's own peak.
-        assert_eq!(
-            None,
-            controller.poll(at(70_000), 350_000.0, 350_000.0, true)
-        );
-        assert_eq!(
-            None,
-            controller.poll(at(70_100), 220_000.0, 220_000.0, true)
-        );
-        let request = controller
-            .poll(at(71_100), 220_000.0, 220_000.0, true)
-            .expect("a second after the cut");
-        assert_eq!(0.85 * 350_000.0, request.bits_per_second);
     }
 
     /// A controller with libwebrtc's probe after a drop, settled, application limited (it
