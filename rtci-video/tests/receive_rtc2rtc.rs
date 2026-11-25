@@ -498,10 +498,28 @@ struct Receiver {
     first_render: Option<Instant>,
 }
 
+/// Whether the sender's congestion controller probes for bandwidth.
+#[derive(Clone, Copy)]
+enum Probing {
+    /// `GccInterceptorBuilder::with_bandwidth_probing(false)`: the calls of this file. The file
+    /// is about the receiving pipeline, and its calls are those of a sender that does not
+    /// probe: most send at a fixed rate, and the one that follows the estimate
+    /// (`a_capacity_drop_and_recovery_leaves_no_long_freeze`) meets its cap 10 s into the call
+    /// while the estimate is still climbing at 8% a second, which is the call its one-second
+    /// bound was set on.
+    Off,
+    /// The builder as it comes (it probes): with the start-up clusters the call stands at
+    /// 2.5 Mbit/s when the cap comes, the collapse from the path's rate that
+    /// `known_limit_a_capacity_drop_from_the_paths_rate_leaves_no_long_freeze` states and
+    /// `tests/capacity_instrument.rs` measures over ensembles (cells `cap/parolnet/..`).
+    BuilderDefault,
+}
+
 fn build_pc(
     seed: u64,
     send: bool,
     nack_interval: Option<Duration>,
+    probing: Probing,
     log: TapLog,
     doomed: Doomed,
 ) -> Result<(RTCPeerConnection, GccHandle, Option<RTCRtpSenderId>)> {
@@ -546,23 +564,14 @@ fn build_pc(
     configure_receiver_reference_time(&mut media_engine);
     let registry = configure_key_frame_requests(registry);
     let (gcc, handle) = GccInterceptorBuilder::new();
-    // Without bandwidth probing (the builder probes by default). This file is about the
-    // receiving pipeline, and its calls are those of a sender that does not probe: most send
-    // at a fixed rate, and the one that follows the estimate
-    // (`a_capacity_drop_and_recovery_leaves_no_long_freeze`) meets its cap 10 s into the call
-    // while the estimate is still climbing at 8% a second, which is the call its one-second
-    // bound was set on. With the start-up clusters that call stands at 2.5 Mbit/s when the
-    // cap comes and its one seed renders nothing for 1.13 s: the price of a collapse from
-    // the path's rate, which `tests/capacity_instrument.rs` measures over ensembles (cells
-    // `cap/parolnet/..`) and the changelog states.
+    let gcc = gcc.with_min_bitrate(100_000).with_max_bitrate(2_500_000);
+    let gcc = match probing {
+        Probing::Off => gcc.with_bandwidth_probing(false),
+        Probing::BuilderDefault => gcc,
+    };
     let registry = configure_twcc(registry, &mut media_engine)?.with(
         Slot::CongestionControl,
-        PassThroughInterceptor::new().with(
-            gcc.with_min_bitrate(100_000)
-                .with_max_bitrate(2_500_000)
-                .with_bandwidth_probing(false)
-                .build(),
-        ),
+        PassThroughInterceptor::new().with(gcc.build()),
     );
     let registry = if send {
         registry.with(
@@ -660,13 +669,30 @@ impl Call {
         fixed_bitrate: Option<u32>,
         nack_interval: Option<Duration>,
     ) -> Result<Self> {
+        Self::build(link, seed, fixed_bitrate, nack_interval, Probing::Off)
+    }
+
+    fn build(
+        link: Link,
+        seed: u64,
+        fixed_bitrate: Option<u32>,
+        nack_interval: Option<Duration>,
+        probing: Probing,
+    ) -> Result<Self> {
         let trace = RepairTrace::default();
-        let (spc, gcc, track) =
-            build_pc(seed, true, None, trace.log.clone(), trace.doomed.clone())?;
+        let (spc, gcc, track) = build_pc(
+            seed,
+            true,
+            None,
+            probing,
+            trace.log.clone(),
+            trace.doomed.clone(),
+        )?;
         let (rpc, _, _) = build_pc(
             seed ^ 0xabcd,
             false,
             nack_interval,
+            probing,
             trace.log.clone(),
             trace.doomed.clone(),
         )?;
@@ -1144,9 +1170,29 @@ fn ten_percent_loss_waits_only_for_repairs() -> Result<()> {
     Ok(())
 }
 
+/// The sender does not probe (`Probing::Off`): the cap comes 10 s into the call, while the
+/// estimate is still climbing at 8% a second from 300 kbit/s.
 #[test]
 fn a_capacity_drop_and_recovery_leaves_no_long_freeze() -> Result<()> {
-    let mut call = Call::new(Link::lossy(0.0, 0), 13, None)?;
+    a_capacity_drop_and_recovery(Probing::Off)
+}
+
+/// The same call with `GccInterceptorBuilder` as it comes: it probes at the start, so the call
+/// stands at 2.5 Mbit/s when the cap comes, and the collapse from the path's rate renders
+/// nothing for 1128 ms on this seed (hosted run 45574623720) against the one-second bound the
+/// call without probes keeps. A chain without a pacer has nothing that pauses or flushes at a
+/// collapse: the NACK responder repairs the whole backlog in order, also the packets the
+/// receiver has given up. A responder that declines repairs by age is expected to remove the
+/// limit; this test then passes, and becomes the requirement (drop the `#[ignore]` and the
+/// row in `docs/test-exclusions.md`).
+#[test]
+#[ignore = "KNOWN LIMIT: with the builder's default probing the call meets the cap at 2.5 Mbit/s and renders nothing for 1128 ms (bound 1000 ms; one seed, hosted run 45574623720); fails when run (-- --ignored known_limit_)"]
+fn known_limit_a_capacity_drop_from_the_paths_rate_leaves_no_long_freeze() -> Result<()> {
+    a_capacity_drop_and_recovery(Probing::BuilderDefault)
+}
+
+fn a_capacity_drop_and_recovery(probing: Probing) -> Result<()> {
+    let mut call = Call::build(Link::lossy(0.0, 0), 13, None, None, probing)?;
     call.run_for(Duration::from_secs(10))?;
     call.link.rate_bps = Some(300_000);
     call.link.delay = Duration::from_millis(30);
