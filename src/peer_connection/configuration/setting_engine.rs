@@ -3130,14 +3130,21 @@ impl SettingEngineBuilder {
     /// (RFC 5764 section 4.4); at the limit nothing more is protected with the key and the
     /// DTLS transport fails (`dtls-failure`, RFC 3711 section 9.2: re-key, or end the session).
     ///
-    /// The re-keying has the last sixteenth of the lifetime to complete: an offer and its
-    /// answer through the application's signalling, ICE checks on new candidates and a DTLS
-    /// handshake, which takes seconds on a relayed path or with loss (the DTLS retransmission
-    /// timer starts at 1 s). A lifetime short enough that a sixteenth of it lasts less than
-    /// that at the stream's packet rate ends the session instead (a 9600-packet lifetime at 188
-    /// packets a second leaves 3.2 s); the connection logs a warning when the margin it has is
-    /// under 2 seconds. Lifetimes shorter than the profile's are for tests and constrained
-    /// deployments; size them as `16 x packet rate x re-keying time` at least.
+    /// The re-keying has to complete before the key runs out: an offer and its answer through
+    /// the application's signalling, ICE checks on new candidates and a DTLS handshake, which
+    /// takes seconds on a relayed path or with loss. Its margin is the larger of two: the last
+    /// sixteenth of the lifetime, and the packets the key protects, at the rate it has been
+    /// used since its first packet, in the time a re-keying needs as measured on the
+    /// handshake that gave the key (twice its duration: the handshake and the ICE checks
+    /// before it, which take no more round trips; and one DTLS retransmission timer for a
+    /// lost flight). On a slow path the second is the larger and
+    /// the re-keying starts earlier than the sixteenth (the lifetime event still comes at
+    /// the sixteenth). The signalling's own delay is not measured: a lifetime so short that
+    /// neither margin covers it ends the session instead (a 9600-packet lifetime at 188
+    /// packets a second leaves 3.2 s at the sixteenth); the connection logs a warning when
+    /// the time it has left is under 2 seconds. Lifetimes shorter than the profile's are for
+    /// tests and constrained deployments; size them as `16 x packet rate x re-keying time`
+    /// at least.
     ///
     /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
     /// fail.
@@ -3201,11 +3208,15 @@ impl SettingEngineBuilder {
 
     /// Which side starts the automatic SRTP re-keying ([`Self::with_srtp_automatic_rekeying`])
     /// when both could. The default is `true`: the DTLS client of the current association asks
-    /// for the new association at the lifetime warning (a sixteenth of a key's lifetime left);
-    /// the DTLS server waits a little first, for the client's offer: at most 500 ms, and at
-    /// most an eighth of the time the keys have left at the rate they are used. If no new
-    /// association has come by then (or a thirty-second of the lifetime is left, if that comes
-    /// first), it asks itself.
+    /// for the new association at the re-keying margin (a sixteenth of a key's lifetime left,
+    /// or, when that is the larger, what a re-keying needs in time at the key's packet rate:
+    /// [`Self::with_srtp_key_lifetime`]); the DTLS server waits a little first, for the
+    /// client's offer: at most 500 ms, and at most an eighth of the time the keys have left at
+    /// the rate they are used. If no new association has come by then (or a thirty-second of
+    /// the lifetime is left, if that comes first), it asks itself. The client measures its
+    /// handshake from its first flight, the server from the first datagram it reads, so with
+    /// the same lifetime and rate the client's margin is never the smaller: it still asks
+    /// first.
     ///
     /// Two peers with the same key lifetime reach the warning at about the same packet count:
     /// if both asked at once, their re-keying offers would cross (glare), which RFC 9429

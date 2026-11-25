@@ -266,15 +266,14 @@ impl PacerBuilder {
 ///
 /// **Known limit.** After a sudden drop the picture a receiver shows can be seconds old while
 /// those retransmissions leave: in that test (2.5 Mbit/s into a path that drops to
-/// 300 kbit/s) the receiver never went 2 s without a usable frame (1.38 to 1.90 s), but the
-/// oldest picture it showed was 5.95 to 8.56 s old, against 2.26 to 3.21 s in a chain without
+/// 300 kbit/s) the receiver never went 2 s without a usable frame (0.75 to 1.13 s), but the
+/// oldest picture it showed was 4.14 to 6.58 s old, against 2.90 to 3.20 s in a chain without
 /// a pacer. The 55 to 62 video packets the path dropped are repaired inside an estimate of 100
-/// to 250 kbit/s of which the audio takes 76, under every retransmission rule, and 35 to 41
-/// of the 90 to 103 retransmissions repeat a packet whose first repair was still in flight
-/// when the receiver asked again (they arrive after it). Dropping the repairs and asking for
-/// a key frame instead is worse for a receiver that plays in order (measured: frozen for 8 s,
-/// as it holds the gap for its whole packet window); what is planned is no repeat repair of a
-/// packet whose first repair transport-wide feedback reports received.
+/// to 250 kbit/s of which the audio takes 76, under every retransmission rule (59 to 80
+/// retransmissions; a request for a packet whose retransmission the feedback reports received
+/// is not answered, see the NACK responder). Dropping the repairs and asking for a key frame
+/// instead is worse for a receiver that plays in order (measured: frozen for 8 s, as it holds
+/// the gap for its whole packet window).
 ///
 /// **A target of zero means: produce nothing until the next target.** An encoder skips (does
 /// not encode) the frames captured meanwhile; it does not need a key frame to resume, because
