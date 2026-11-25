@@ -1307,8 +1307,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again" of the capacity review (both directions capped; a 1000 ms queue). Now the breaker
   sends `CircuitBreakerNotice` application-ward when a flow ceases and when a restart takes
   effect, and the peer connection raises `RTCPeerConnectionEvent::OnCircuitBreaker` (sender,
-  RID, SSRC, the breaker that tripped, how long until a restart is accepted).
-  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`.
+  RID, SSRC, the breaker that tripped, how long until a restart is accepted). The pacer reads
+  the notice too and no longer charges a ceased flow's packets to its budget: a voice the
+  application kept writing took 76 of a 100 kbit/s target for packets that never left, and
+  the estimate, bound by one and a half times what arrives, could not climb.
+  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`,
+  `pacing.rs::a_flow_the_circuit_breaker_ceased_is_not_charged_to_the_budget`.
+
+- **interceptors (pacer): the target the pacer announces carries the congestion controller's
+  minimum** (`conf/breaker-2-pacer-ceased-flow`). When a pause of the source begins or ends
+  the pacer says the controller's target again application-ward
+  (`Attribute::TargetBitrateChanged`), and it did so without the controller's minimum
+  (`MinimumTarget`). The NACK responder takes the minimum from each target it reads and never
+  tells the original media less; from the end of a pause until the controller's next target
+  it read "no minimum" and lowered the target by its whole retransmission reserve, floor or
+  not, and the peer connection reported that as `availableOutgoingBitrate` (46 850 bit/s with
+  the estimator at its 100 000 bit/s floor: a 53 150 bit/s reserve announced before the
+  target reached the floor; hosted run 45501349668, the reason `conf/collapse-4` was not
+  green). The pacer now keeps the minimum that rode with the controller's last target and
+  attaches it to its own announcements.
+  `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
+
+- **rtci (statistics): `availableOutgoingBitrate` survives `set_parameters` during a pacer
+  pause** (`conf/breaker-2-pacer-ceased-flow`). `RTCRtpSender::set_parameters` divides the
+  transport's target among the encodings again; while the pacer had the source paused that
+  target is zero, and the division wrote it as the transport's estimate: the statistic was
+  gone until the congestion controller's next target. The division now sets the streams'
+  shares only.
+  `interceptor_circuit_breaker_test::dividing_the_target_again_while_the_source_is_paused_leaves_the_estimate_alone`.
 
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
