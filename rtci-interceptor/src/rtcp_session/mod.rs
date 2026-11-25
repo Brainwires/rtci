@@ -1772,8 +1772,12 @@ impl RtcpSessionInterceptor {
             return false;
         }
 
-        self.rate
-            .add(now, header.marshal_size() + packet.payload.len());
+        // RFC 3550 6.2: "Bandwidth calculations for control and data traffic include lower-
+        // layer transport and network protocols (e.g., UDP and IP)".
+        self.rate.add(
+            now,
+            LOWER_LAYER_OVERHEAD + header.marshal_size() + packet.payload.len(),
+        );
         self.heard(now, arrival_ssrc, true);
         for &csrc in &header.csrc {
             self.heard(now, csrc, false);
@@ -3200,8 +3204,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                     local.stream.process_rtp(now, packet);
                     local.last_rtp = Some(now);
                     local.rtp_sent = true;
-                    self.rate
-                        .add(now, packet.header.marshal_size() + packet.payload.len());
+                    self.rate.add(
+                        now,
+                        LOWER_LAYER_OVERHEAD + packet.header.marshal_size() + packet.payload.len(),
+                    );
                     // A repair SSRC joins with its first packet.
                     self.sync(now);
                 }
@@ -3646,5 +3652,62 @@ mod tests {
         assert!((measured - 500_000.0).abs() < 75_000.0, "{measured}");
         // Long after the last packet: nothing.
         assert_eq!(0.0, rate.bits_per_second(base + Duration::from_secs(30)));
+    }
+
+    /// RFC 3550 6.2: "Bandwidth calculations for control and data traffic include lower-layer
+    /// transport and network protocols (e.g., UDP and IP)". The media a session measures for
+    /// its session bandwidth is each RTP packet with its 28 octets of UDP and IPv4, sent and
+    /// received alike: 100 packets a second of 12 + 160 octets are 160 kbit/s, not 137.6.
+    #[test]
+    fn the_measured_session_bandwidth_counts_udp_and_ip() {
+        let media = |now: Instant, ssrc: u32, sequence_number: u16| TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    ssrc,
+                    payload_type: 96,
+                    sequence_number,
+                    ..Default::default()
+                },
+                payload: vec![0u8; 160].into(),
+            })),
+        };
+        let stream = |ssrc: u32| StreamInfo {
+            ssrc,
+            clock_rate: 90_000,
+            mime_type: "video/VP8".to_owned(),
+            ..Default::default()
+        };
+        let base = Instant::now();
+        let end = base + Duration::from_secs(3);
+        // What the window reads for these packets at 200 octets each.
+        let mut expected = RateWindow::default();
+        for n in 0..300u32 {
+            expected.add(base + Duration::from_millis(10) * n, 28 + 12 + 160);
+        }
+        let expected = expected.bits_per_second(end);
+        assert!((expected - 160_000.0).abs() < 16_000.0, "{expected}");
+
+        for sending in [true, false] {
+            let mut session = RtcpSessionBuilder::new().build();
+            session.bind_local_stream(&stream(100));
+            session.bind_remote_stream(&stream(200));
+            session.control(base, &RtcpSessionControl::Start);
+            for n in 0..300u32 {
+                let now = base + Duration::from_millis(10) * n;
+                if sending {
+                    session.handle_write(media(now, 100, n as u16)).unwrap();
+                } else {
+                    session.handle_read(media(now, 200, n as u16)).unwrap();
+                }
+            }
+            assert_eq!(
+                expected,
+                session.session_bandwidth(end),
+                "sending {sending}"
+            );
+        }
     }
 }
