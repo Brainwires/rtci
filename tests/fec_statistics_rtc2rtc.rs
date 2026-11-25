@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use rtci::interceptor::{RedPlacement, Registry, Slot, UlpfecReceiveBuilder, UlpfecSendBuilder};
+use rtci::media_stream::MediaStreamTrack;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
@@ -23,7 +24,8 @@ use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtci::rtp::header::Header;
 use rtci::rtp_transceiver::RTCRtpSenderId;
 use rtci::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RTCRtpRtxParameters, RtpCodecKind,
 };
 use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtci::sansio::Protocol;
@@ -54,6 +56,8 @@ struct Peer {
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
     read_rtp: usize,
+    /// The RTP packets handed to the application: payload type, timestamp, payload.
+    read: Vec<(u8, u32, Bytes)>,
 }
 
 impl Peer {
@@ -101,6 +105,7 @@ impl Peer {
             connected: false,
             states: Vec::new(),
             read_rtp: 0,
+            read: Vec::new(),
         })
     }
     /// The `Chrome` behaviour profile's codecs and interceptors, nothing added by hand.
@@ -124,6 +129,7 @@ impl Peer {
             connected: false,
             states: Vec::new(),
             read_rtp: 0,
+            read: Vec::new(),
         })
     }
 
@@ -159,6 +165,10 @@ struct World {
     lost: u64,
     /// RTP packets of the first peer that crossed the wire, lost ones included.
     sent_rtp: u64,
+    /// The payload type of every RTP packet of the first peer that was not under the RED
+    /// payload type and carried a payload (retransmissions, not a probe's padding; none of
+    /// them is lost).
+    not_red: Vec<u8>,
 }
 
 impl World {
@@ -190,6 +200,11 @@ impl World {
                         self.lost += 1;
                         continue;
                     }
+                } else if i == 0
+                    && let Some(header) = wire_rtp_header(&data)
+                    && !header.padding
+                {
+                    self.not_red.push(header.payload_type);
                 }
                 let Some(peer) = self.peers.iter_mut().find(|p| p.addr == to) else {
                     continue;
@@ -217,8 +232,13 @@ impl World {
                 }
             }
             while let Some(message) = peer.pc.poll_read() {
-                if let RTCMessage::RtpPacket(_, _) = message.message {
+                if let RTCMessage::RtpPacket(_, packet) = message.message {
                     peer.read_rtp += 1;
+                    peer.read.push((
+                        packet.header.payload_type,
+                        packet.header.timestamp,
+                        packet.payload,
+                    ));
                 }
             }
         }
@@ -247,28 +267,56 @@ impl World {
     }
 
     fn connected_with(make: fn(&str) -> Result<Peer>) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_sending(make, None)
+    }
+
+    /// [`connected_with`](Self::connected_with); with `rtx`, the first peer's video has that
+    /// retransmission SSRC (RFC 4588), so a repair leaves as an RTX packet.
+    fn connected_sending(
+        make: fn(&str) -> Result<Peer>,
+        rtx: Option<u32>,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [make("10.0.0.1:5000")?, make("10.0.0.2:5000")?],
             now: Instant::now(),
             lost: 0,
             sent_rtp: 0,
+            not_red: Vec::new(),
         };
-        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
-            RtpCodecKind::Video,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Sendonly,
-                streams: vec![],
-                send_encodings: vec![RTCRtpEncodingParameters {
-                    active: true,
+        let sender = if let Some(rtx) = rtx {
+            world.peers[0].pc.add_track(MediaStreamTrack::new(
+                "call".to_owned(),
+                "video".to_owned(),
+                "video".to_owned(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(rtx.wrapping_sub(1)),
+                        rtx: Some(RTCRtpRtxParameters { ssrc: rtx }),
+                        ..Default::default()
+                    },
+                    codec: codec(MIME_TYPE_VP8),
                     ..Default::default()
                 }],
-            }),
-        )?;
-        let sender = world.peers[0]
-            .pc
-            .rtp_transceiver(transceiver)
-            .and_then(|t| t.sender())
-            .expect("a sendonly transceiver has a sender");
+            ))?
+        } else {
+            let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Sendonly,
+                    streams: vec![],
+                    send_encodings: vec![RTCRtpEncodingParameters {
+                        active: true,
+                        ..Default::default()
+                    }],
+                }),
+            )?;
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .expect("a sendonly transceiver has a sender")
+        };
         let now = world.now;
         let offer = world.peers[0].pc.create_offer(None)?;
         world.peers[0]
@@ -432,5 +480,85 @@ fn in_the_chrome_profile_fec_in_red_rebuilds_what_the_network_lost() -> Result<(
     assert_eq!(received.len(), 1, "{received:?}");
     assert!(received[0].fec_packets_in_red > 0, "{received:?}");
     assert!(received[0].packets_recovered > 0, "{received:?}");
+    Ok(())
+}
+
+/// RFC 4588 section 8.1: a retransmission format repairs the ONE payload type its `apt`
+/// names, and a receiver gives a retransmitted packet back that payload type. Video sent in
+/// RED (the `Chrome` profile, as Chromium sends it) leaves under the `red` payload type, so
+/// its retransmissions go under the RTX format whose `apt` is `red`
+/// ([`VIDEO_RED_RTX_PAYLOAD_TYPE`], `a=fmtp:117 apt=116`), as libwebrtc sends them
+/// (`rtp_sender.cc`: the RTX payload type is looked up by the payload type of the packet
+/// retransmitted), and the receiver restores a RED packet, which its FEC decoder opens. Sent
+/// under the RTX of the media format (`apt=96`), a retransmitted RED packet was restored as
+/// VP8 with the RED header in front of the payload.
+///
+/// The network loses one RED packet in five and no retransmission: every frame reaches the
+/// application with the payload it was written with.
+#[test]
+fn in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red() -> Result<()> {
+    use rtci::peer_connection::configuration::interceptor_registry::VIDEO_RED_RTX_PAYLOAD_TYPE;
+    use std::collections::BTreeSet;
+
+    let (mut world, sender) = World::connected_sending(Peer::chrome, Some(0x5252_0002))?;
+    for seq in 1000..1150 {
+        world.send(sender, seq)?;
+    }
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    assert!(world.lost > 0, "the network lost packets");
+
+    // The offerer's sender has the retransmission format of red among the formats it sends
+    // with: the answer lists it (`a=fmtp:117 apt=116`), and entering the answer's formats
+    // under this side's numbers used to drop it (an RTX format whose primary is a RED
+    // format), so the offerer had no format to retransmit a RED packet in.
+    let codecs = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .clone();
+    assert!(
+        codecs.iter().any(|codec| {
+            codec.payload_type == VIDEO_RED_RTX_PAYLOAD_TYPE
+                && codec.rtp_codec.mime_type.eq_ignore_ascii_case("video/rtx")
+                && codec.rtp_codec.sdp_fmtp_line == format!("apt={RED_PT}")
+        }),
+        "the offerer sends with the RTX format of red: {codecs:?}"
+    );
+
+    // What left that was not RED is retransmission, all of it under the RTX of red.
+    let retransmitted: BTreeSet<u8> = world.not_red.iter().copied().collect();
+    assert_eq!(
+        BTreeSet::from([VIDEO_RED_RTX_PAYLOAD_TYPE]),
+        retransmitted,
+        "payload types of the packets that were not RED ({} of them)",
+        world.not_red.len()
+    );
+
+    // Every frame arrived, and each packet handed to the application is the VP8 that was
+    // written: nothing with a RED header left in front of it.
+    let read = &world.peers[1].read;
+    for (payload_type, timestamp, payload) in read {
+        let seq = (timestamp / 3000) as u16;
+        let mut written = vec![0x10u8];
+        written.extend((0..200u16).map(|i| (i as u8) ^ (seq as u8)));
+        assert_eq!(
+            (VP8_PT, &written[..]),
+            (*payload_type, &payload[..]),
+            "the packet of timestamp {timestamp}"
+        );
+    }
+    let frames: BTreeSet<u32> = read.iter().map(|(_, timestamp, _)| *timestamp).collect();
+    assert_eq!(
+        (1000..1150u32)
+            .map(|seq| seq * 3000)
+            .collect::<BTreeSet<_>>(),
+        frames,
+        "every frame written reached the application ({} packets lost on the way)",
+        world.lost
+    );
     Ok(())
 }
