@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PacerBuilder::with_backlog(PacerBacklog::Keep)`. `DefaultInterceptorOptions` has a new
   public field, `pacer_backlog`: a struct literal without `..Default::default()` no longer
   compiles.
+  Performance: flush-1r
 - **media** (`conf/flush-2-receiver-gap-bound`): `SampleBuilder` gives a gap up by default.
   A builder of a video format (`Depacketizer::has_key_frames`: VP8, VP9, AV1, H.264, H.265)
   (1) waits for a missing packet at most `DEFAULT_MAX_GAP_WAIT`, 300 ms from the arrival of the
@@ -42,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured best of 300, 600 and 1000 ms, and libwebrtc's receiver (3 s without a decodable
   frame, 200 ms while waiting for a key frame) is `rtci-video`'s `ReceiveConfig::chrome()`:
   `docs/receiver-gap-policy.md`.
+  Performance: flush-2
 
 - **interceptor, peer connection** (breaker-1): `DefaultInterceptorOptions` has two new public
   fields, `circuit_breaker` and `circuit_breaker_automatic_restart` (both `true`; see "Fixed"
@@ -61,6 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's `ice` group. **Migration**: a struct literal of either adds `..Default::default()`
   or `consent_response_wait: ConsentResponseWait::Rto`. `stun::timer::RtoEstimator` is now
   `Copy` (an addition).
+  Performance: ice-26-consent
 
 - **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
@@ -343,6 +346,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feedback naming every number, requests and lost reports without end against the rate
   limit, and the sizes of what is remembered (`nack_repeat_repairs.rs`,
   `nack::responder::tests`, `twcc::sender::tests`); each rule has a mutation a test catches.
+  Performance: rtx-1r2
 
 - **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
   6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
@@ -383,6 +387,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells of 100 ms reordering at 2 Mbit/s, higher (1 %: 331 -> 340 kbit/s, 5 %: 100 -> 218);
   the rate-limited link 574 / 539 / 535 kbit/s (574 / 538 / 535). Audit row GCC-5.4-4 is
   `tested`.
+  Performance: gcc-9
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
@@ -1441,6 +1446,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   green). The pacer now keeps the minimum that rode with the controller's last target and
   attaches it to its own announcements.
   `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
+  Performance: breaker-2
 
 - **rtci (statistics): `availableOutgoingBitrate` survives `set_parameters` during a pacer
   pause** (`conf/breaker-2-pacer-ceased-flow`). `RTCRtpSender::set_parameters` divides the
@@ -1652,6 +1658,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **benchmarks compared on every pull request; a performance ledger**
+  (`conf/perf-1-ledger-and-bench-gate`): the pull-request job "Benchmarks compared with the
+  base" of `bench.yml` builds the pull request and its base on one runner and runs every
+  criterion bench of both in alternating rounds (`scripts/bench-compare.sh`), and fails when a
+  bench is slower in every round than the measured noise allows unless
+  `benches/accepted-regressions.toml` accepts it with a ledger row (`scripts/bench-compare.py`).
+  New benches: every DTLS 1.2 record cipher (AES-CCM, AES-CCM-8 and ChaCha20-Poly1305 added) and
+  a whole in-memory DTLS 1.2 handshake (`rtci-dtls/benches/record_protection.rs`); the pacer, the
+  NACK responder, GCC feedback handling and ULPFEC encoding (`rtci-interceptor/benches/interceptor.rs`).
+  The once-per-merge run that feeds the published history runs on pushes to master only and now
+  includes `rtci-dtls` and `rtci-interceptor`. `docs/performance.md` records every measured
+  performance decision (accepted, queued or refused) with its figures, guard and runs; a CHANGELOG
+  entry that moves a measured figure carries a line `Performance: <row id>`, and
+  `scripts/check-performance-ledger.py` holds the tags, the allowlist and the rows' files and
+  tests to the tree.
+  Performance: perf-1
 - **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
   (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
   capacity's return until the target is at 1000 kbit/s; `recover` waits for 0.4 of the target
