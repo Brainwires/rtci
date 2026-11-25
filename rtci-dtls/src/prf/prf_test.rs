@@ -37,7 +37,7 @@ fn test_cross_provider_pre_master_secret() -> Result<()> {
         let right_public = right.public_key.clone();
         let left_secret = prf_pre_master_secret(&right_public, &mut left, curve)?;
         let right_secret = prf_pre_master_secret(&left_public, &mut right, curve)?;
-        assert_eq!(left_secret, right_secret);
+        assert_eq!(left_secret.as_ref(), right_secret.as_ref());
     }
 
     Ok(())

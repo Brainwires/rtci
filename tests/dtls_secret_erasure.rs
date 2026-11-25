@@ -18,12 +18,12 @@
 //!
 //! A test allocator keeps every block freed while the association runs (a quarantine: no
 //! block is handed back to the system until the end), then searches each one for every secret
-//! found. A block that still holds one was freed without being erased. Blocks of objects the
-//! ring provider makes (its AES-GCM, ChaCha20-Poly1305 and header-protection keys) are left
-//! out and reported apart: ring does not erase them, which is a limit of that provider
-//! (`docs/conformance/audit/rfc7714.md`, RFC7714-13.1-3), not of this crate. Memory AWS-LC
-//! allocates in C is not in the Rust heap; on Linux the process-memory test below searches the
-//! whole process.
+//! found. A block that still holds one was freed without being erased. That includes the
+//! blocks of the ring provider's own key objects (its AES-GCM, ChaCha20-Poly1305,
+//! header-protection and HMAC keys): ring does not erase them itself, so `rtci-crypto` keeps
+//! each in an allocation of its own and overwrites it after the drop (until 0.2 they were
+//! left out of the search, a known limit of that provider). Memory AWS-LC allocates in C is
+//! not in the Rust heap; on Linux the process-memory test below searches the whole process.
 //!
 //! The needles are checked against what the association used (the key block recomputed holds
 //! the record keys the provider was handed, the exporter output recomputed is what the
@@ -35,7 +35,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rtci::crypto::{
     ActiveKeyExchange, AeadAlgorithm, AeadCipher, BlockCipherAlgorithm, CbcAlgorithm, CbcCipher,
@@ -162,8 +162,8 @@ fn open_window() {
 }
 
 /// Closes the window, searches every quarantined block for `needles` and frees it. Returns
-/// one line per (needle, block) found, those in blocks of a provider's own objects apart.
-fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
+/// one line per (needle, block) found.
+fn close_window(needles: &[Needle]) -> Vec<String> {
     WINDOW.store(false, Ordering::SeqCst);
     let held = QUARANTINED.load(Ordering::SeqCst).min(QUARANTINE);
     assert_eq!(
@@ -171,13 +171,8 @@ fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
         OVERFLOWED.load(Ordering::SeqCst),
         "the quarantine overflowed: blocks were freed unsearched"
     );
-    let provider_objects = PROVIDER_OBJECTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
     let prefixes = Prefixes::of(needles);
     let mut ours = Vec::new();
-    let mut providers = Vec::new();
     assert_eq!(
         0,
         LIVE_FULL.load(Ordering::SeqCst),
@@ -209,13 +204,9 @@ fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
         // SAFETY: the block was handed to `dealloc` and kept: nothing else uses it until it is
         // freed below. Its bytes are only read.
         let block = unsafe { std::slice::from_raw_parts(address as *const u8, size) };
-        let owner = provider_objects
-            .iter()
-            .find(|(start, len, _)| *start == address && *len <= size)
-            .map(|(_, _, what)| *what);
         for needle in prefixes.found_in(needles, block) {
             let line = format!("{} in a freed block of {size} bytes", needle.describe());
-            if owner.is_none() && std::env::var_os("RTCI_ERASURE_DUMP").is_some() {
+            if std::env::var_os("RTCI_ERASURE_DUMP").is_some() {
                 let at = (0..size).find(|i| needle.at(block, *i)).unwrap_or_default();
                 let hex: String = block[..size.min(192)]
                     .iter()
@@ -223,10 +214,7 @@ fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
                     .collect();
                 println!("DUMP {line} at {at}: {hex}");
             }
-            match owner {
-                Some(what) => providers.push(format!("{line} ({what})")),
-                None => ours.push(line),
-            }
+            ours.push(line);
         }
         // SAFETY: allocated by `System` with this layout (it came through `dealloc`).
         unsafe {
@@ -238,9 +226,7 @@ fn close_window(needles: &[Needle]) -> (Vec<String>, Vec<String>) {
     }
     ours.sort();
     ours.dedup();
-    providers.sort();
-    providers.dedup();
-    (ours, providers)
+    ours
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -342,9 +328,6 @@ struct Record {
 
 static RECORDS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 
-/// Blocks holding objects of the ring provider that keep a key: (address, size, what).
-static PROVIDER_OBJECTS: Mutex<Vec<(usize, usize, &'static str)>> = Mutex::new(Vec::new());
-
 fn record(kind: Kind, secret: &[u8]) -> usize {
     let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
     records.push(Record {
@@ -353,15 +336,6 @@ fn record(kind: Kind, secret: &[u8]) -> usize {
         inputs: Vec::new(),
     });
     records.len() - 1
-}
-
-fn provider_object<T: ?Sized>(object: &T, what: &'static str) {
-    let address = object as *const T as *const u8 as usize;
-    let size = std::mem::size_of_val(object);
-    PROVIDER_OBJECTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((address, size, what));
 }
 
 struct Recording {
@@ -396,12 +370,6 @@ impl RTCCryptoProvider for Recording {
 
 struct RecordingCrypto {
     inner: Arc<dyn RTCCryptoProvider>,
-}
-
-impl RecordingCrypto {
-    fn ring(&self) -> bool {
-        self.inner.name() == "ring"
-    }
 }
 
 impl RTCCrypto for RecordingCrypto {
@@ -444,20 +412,7 @@ impl RTCCrypto for RecordingCrypto {
         key: &[u8],
     ) -> Result<Box<dyn AeadCipher>, CryptoError> {
         record(Kind::Aead(algorithm), key);
-        let aead = self.inner.crypto().new_aead(algorithm, key)?;
-        // ring's own AEAD objects (its AES-GCM and ChaCha20-Poly1305) keep the key schedule
-        // and do not erase it; its AES-CCM is RustCrypto's, which the crate builds.
-        if self.ring()
-            && matches!(
-                algorithm,
-                AeadAlgorithm::Aes128Gcm
-                    | AeadAlgorithm::Aes256Gcm
-                    | AeadAlgorithm::ChaCha20Poly1305
-            )
-        {
-            provider_object(&*aead, "ring AEAD key");
-        }
-        Ok(aead)
+        self.inner.crypto().new_aead(algorithm, key)
     }
 
     fn new_header_mask(
@@ -466,11 +421,7 @@ impl RTCCrypto for RecordingCrypto {
         key: &[u8],
     ) -> Result<Box<dyn HeaderMask>, CryptoError> {
         record(Kind::HeaderMask, key);
-        let mask = self.inner.crypto().new_header_mask(algorithm, key)?;
-        if self.ring() {
-            provider_object(&*mask, "ring header-protection key");
-        }
-        Ok(mask)
+        self.inner.crypto().new_header_mask(algorithm, key)
     }
 
     fn new_cbc(
@@ -753,6 +704,7 @@ fn derive_needles(provider: &dyn RTCCryptoProvider, extra: &[Needle]) -> Derived
 
 const CLIENT: &str = "127.0.0.1:44201";
 const SERVER: &str = "127.0.0.1:44202";
+const SECOND_CLIENT: &str = "127.0.0.1:44203";
 
 /// The PSK the application provisions, inverted (the plain bytes are made only when handed
 /// over).
@@ -818,6 +770,41 @@ impl Association {
                 moved = true;
                 completed |= self
                     .client
+                    .read(now, server_addr, packet.transport.ecn, packet.message)?
+                    .iter()
+                    .any(|event| matches!(event, EndpointEvent::HandshakeComplete));
+            }
+            if !moved {
+                break;
+            }
+        }
+        Ok(completed)
+    }
+}
+
+impl Association {
+    /// A second client, at another address, makes a DTLS 1.2 association with the same server
+    /// at `now`; it is dropped when done. Returns whether its handshake completed.
+    fn second_client(
+        &mut self,
+        configs: &Configs,
+        now: Instant,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let client_addr: SocketAddr = SECOND_CLIENT.parse()?;
+        let server_addr = Self::server_addr();
+        let mut client = Box::new(Endpoint::new(client_addr, TransportProtocol::UDP, None));
+        client.connect(now, server_addr, configs.client.clone(), None)?;
+        let mut completed = false;
+        for _ in 0..8 {
+            let mut moved = false;
+            while let Some(packet) = client.poll_transmit() {
+                moved = true;
+                self.server
+                    .read(now, client_addr, packet.transport.ecn, packet.message)?;
+            }
+            while let Some(packet) = self.server.poll_transmit() {
+                moved = true;
+                completed |= client
                     .read(now, server_addr, packet.transport.ecn, packet.message)?
                     .iter()
                     .any(|event| matches!(event, EndpointEvent::HandshakeComplete));
@@ -960,12 +947,10 @@ fn providers() -> Vec<Arc<dyn RTCCryptoProvider>> {
     providers
 }
 
-/// What one scenario left: the needles derived, the secrets found in freed blocks of the
-/// crate's (failures) and of the provider's own objects (its limit).
+/// What one scenario left: the needles derived and the secrets found in freed blocks.
 struct Outcome {
     derived: Derived,
     left: Vec<String>,
-    provider_left: Vec<String>,
 }
 
 /// Runs `scenario` inside the window with a recording wrapper around `inner`, then derives the
@@ -980,10 +965,6 @@ fn scan(
     ) -> Result<Vec<Needle>, Box<dyn std::error::Error>>,
 ) -> Outcome {
     RECORDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    PROVIDER_OBJECTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
     let provider = Recording::wrap(inner.clone());
     open_window();
     let outcome = scenario(&provider);
@@ -999,25 +980,17 @@ fn scan(
     };
     own.extend(extra);
     let derived = derive_needles(inner.as_ref(), &own);
-    let (left, provider_left) = close_window(&derived.needles);
+    let left = close_window(&derived.needles);
     for line in &left {
         println!("LEFT {:<10} {name}: {line}", inner.name());
     }
-    for line in &provider_left {
-        println!("PROVIDER {:<10} {name}: {line}", inner.name());
-    }
     println!(
-        "SCAN {:<10} {name}: {} secrets looked for, {} left by the crate, {} in the provider's objects",
+        "SCAN {:<10} {name}: {} secrets looked for, {} left",
         inner.name(),
         derived.needles.len(),
-        left.len(),
-        provider_left.len()
+        left.len()
     );
-    Outcome {
-        derived,
-        left,
-        provider_left,
-    }
+    Outcome { derived, left }
 }
 
 /// The needles are what the association used: each record key the provider was handed is in
@@ -1423,15 +1396,35 @@ fn dtls13_resumption_and_external_psk_secrets_are_erased() {
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
 
-/// RFC 6347 section 4.2.1: the secret a server endpoint makes its cookies with (an HMAC key,
-/// recorded as such) is erased when the endpoint is dropped.
+/// The first HMAC-SHA-256 key recorded from `from` on: the cookie secret, when a server's
+/// HelloVerifyRequest is the first thing after `from` that MACs with SHA-256.
+fn first_sha256_key_from(from: usize) -> Vec<u8> {
+    RECORDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .skip(from)
+        .find(|record| record.kind == Kind::Hmac(HmacAlgorithm::Sha256))
+        .map(|record| record.inverted.clone())
+        .unwrap_or_default()
+}
+
+fn records_so_far() -> usize {
+    RECORDS.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// The cookie secrets of RFC 6347 section 4.2.1 (and RFC 9147 section 5.1), the current one
+/// and the one before it, are erased with the endpoint. A second client arrives once the
+/// first secret has served its lifetime, so the server rotates: the first secret becomes the
+/// previous one, a new one signs. Both are looked for after the server is dropped (0.1.0
+/// never erased the previous one).
 #[test]
 fn cookie_secrets_are_erased_with_the_endpoint() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut left = Vec::new();
     for provider in providers() {
         let certificate = certificate(&provider);
-        let cookie_secret = Mutex::new(Vec::new());
+        let cookie_secrets = Mutex::new(Vec::new());
         let outcome = scan(&provider, "cookie exchange", Vec::new(), |provider| {
             let now = Instant::now();
             let configs = configs(
@@ -1442,43 +1435,54 @@ fn cookie_secrets_are_erased_with_the_endpoint() {
                 Auth::Certificates,
                 None,
             )?;
-            let association = associate(&configs, now)?;
+            let mut association = associate(&configs, now)?;
             // The cookie MACs are HMAC-SHA-256 under the cookie secret; the first HMAC key of
             // the handshake is that secret (the server makes a HelloVerifyRequest first).
-            *cookie_secret.lock().unwrap() = RECORDS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .find(|record| record.kind == Kind::Hmac(HmacAlgorithm::Sha256))
-                .map(|record| record.inverted.clone())
-                .unwrap_or_default();
+            let first = first_sha256_key_from(0);
+            // A second client, one lifetime later: the server makes a new secret and keeps
+            // the first as the previous one.
+            // (A secret signs for 60 s, `rtci-dtls/src/cookie.rs`; the inequality of the two
+            // secrets below shows the rotation happened.)
+            let later = now + Duration::from_secs(61);
+            let from = records_so_far();
+            let completed = association.second_client(&configs, later)?;
+            assert!(completed, "the second handshake completes");
+            let second = first_sha256_key_from(from);
+            *cookie_secrets.lock().unwrap() = vec![first, second];
             drop(association);
             drop(configs);
             Ok(Vec::new())
         });
-        let secret = cookie_secret.lock().unwrap().clone();
-        assert_eq!(32, secret.len(), "the cookie secret was recorded");
-        let cookie = Needle::new("the cookie secret", &secret);
+        let secrets = cookie_secrets.lock().unwrap().clone();
+        assert!(
+            secrets.iter().all(|secret| secret.len() == 32),
+            "both cookie secrets were recorded"
+        );
+        assert_ne!(
+            secrets[0], secrets[1],
+            "the server rotated its cookie secret"
+        );
+        for (secret, which) in secrets.iter().zip(["previous", "current"]) {
+            assert!(
+                outcome
+                    .derived
+                    .needles
+                    .iter()
+                    .any(|n| n.inverted == *secret),
+                "the {which} cookie secret is one of the needles"
+            );
+        }
         left.extend(
             outcome
                 .left
                 .iter()
                 .map(|line| format!("{}: {line}", provider.name())),
         );
-        assert!(
-            outcome
-                .derived
-                .needles
-                .iter()
-                .any(|n| n.inverted == cookie.inverted),
-            "the cookie secret is one of the needles"
-        );
     }
     assert!(left.is_empty(), "left in freed memory: {left:#?}");
 }
 
-/// The check itself: secrets copied into vectors that are freed without erasure are seen, in
-/// the crate's blocks; and with ring, the provider's own key objects are told apart.
+/// The check itself: secrets copied into vectors that are freed without erasure are seen.
 #[test]
 fn the_quarantine_sees_secrets_left_behind() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -1525,13 +1529,6 @@ fn the_quarantine_sees_secrets_left_behind() {
         "the careless copy of a record key is found: {:#?}",
         outcome.left
     );
-    // With ring, its AES-GCM key objects hold the record keys and are told apart (where its
-    // key schedule keeps the key bytes as they are, as the AES-NI and ARMv8 ones do).
-    println!(
-        "{}: {} finding(s) in the provider's own objects",
-        provider.name(),
-        outcome.provider_left.len()
-    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1575,24 +1572,16 @@ mod process_memory_tests {
     }
 
     /// Where each needle is found in the process: one region name per hit. The searching
-    /// thread's stack (`test_stack` is an address on it), the scan buffer and the `skip`
-    /// ranges (the ring provider's key objects) are left out; the region holding
-    /// `worker_stack` is named as the worker's stack.
-    fn search(
-        needles: &[Needle],
-        test_stack: usize,
-        worker_stack: usize,
-        skip: &[(usize, usize)],
-    ) -> Vec<String> {
+    /// thread's stack (`test_stack` is an address on it) and the scan buffer are left out;
+    /// the region holding `worker_stack` is named as the worker's stack.
+    fn search(needles: &[Needle], test_stack: usize, worker_stack: usize) -> Vec<String> {
         const CHUNK: usize = 1 << 20;
         let longest = needles.iter().map(|n| n.inverted.len()).max().unwrap_or(0);
         let prefixes = Prefixes::of(needles);
         let mem = File::open("/proc/self/mem").expect("/proc/self/mem");
         let mut buffer = vec![0u8; CHUNK + longest];
         let buffer_range = buffer.as_ptr() as usize..buffer.as_ptr() as usize + buffer.len();
-        let mut holes: Vec<(usize, usize)> = skip.to_vec();
-        holes.push((buffer_range.start, buffer_range.end));
-        holes.sort();
+        let holes = [(buffer_range.start, buffer_range.end)];
         let mut found = Vec::new();
         for region in writable_regions() {
             if (region.start..region.end).contains(&test_stack) {
@@ -1663,10 +1652,6 @@ mod process_memory_tests {
         suite: CipherSuiteId,
     ) -> (Derived, Vec<String>, Vec<String>) {
         RECORDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        PROVIDER_OBJECTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
         let certificate = certificate(inner);
         let (ready_tx, ready_rx) = mpsc::channel::<(Vec<u8>, usize)>();
         let (go_tx, go_rx) = mpsc::channel::<()>();
@@ -1704,24 +1689,18 @@ mod process_memory_tests {
             inner.as_ref(),
             &[Needle::new("the exported keying material", &exported)],
         );
-        let skip: Vec<(usize, usize)> = PROVIDER_OBJECTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(start, len, _)| (*start, *start + *len))
-            .collect();
         let test_stack = &derived as *const _ as usize;
-        let before = search(&derived.needles, test_stack, worker_stack, &skip);
+        let before = search(&derived.needles, test_stack, worker_stack);
         go_tx.send(()).expect("the worker waits");
         worker.join().expect("the worker ends");
-        let after = search(&derived.needles, test_stack, worker_stack, &skip);
+        let after = search(&derived.needles, test_stack, worker_stack);
         (derived, before, after)
     }
 
     /// No secret of a DTLS association outlives it in the process's heap and data: found while
     /// the association is alive (the master secret or the traffic secrets, and the exported
-    /// material: the search sees what it looks for), gone once it is dropped, everywhere but
-    /// in the ring provider's own key objects (its limit, left out by address). What dead
+    /// material: the search sees what it looks for), gone once it is dropped, with both
+    /// providers (the ring provider's own key objects included, since 0.2). What dead
     /// frames of the worker thread's stack still hold is printed, not asserted: the
     /// providers' own stack buffers (an ECDH output, a nonce built from an IV) are not erased
     /// by them, and what a frame keeps depends on what ran over it since.
