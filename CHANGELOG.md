@@ -924,6 +924,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptor / bandwidth probing: the probe after a large drop has three forms**
+  (`AfterDropProbe`: `Repeated`, `Libwebrtc`, `Off`), set with
+  `ProbeController::with_after_drop_probe`, `CongestionControlBuilder::with_after_drop_probe`
+  and `DefaultInterceptorOptions::probe_after_drop`; the behaviour row `cc.probe-after-drop`
+  governs it (`Rfc` and `StrictRfc`: `Repeated`; `Chrome`: `Libwebrtc`).
+  `with_probe_after_drop(bool)` stays (`true` is `Repeated`, `false` is `Off`). THE DEFAULT
+  DOES NOT CHANGE: `Repeated` is what the engine did (from a second after the target fell
+  below two thirds of its 2 s high, once a second for five seconds, a cluster at 85% of that
+  high); on the capacity instrument 1400 calls in seven cells of the default chain are
+  identical to the tree before, figure for figure (hosted run 45607015088 against
+  45582695439). `Libwebrtc` is libwebrtc's `ProbeController::RequestProbe`: a drop is one
+  update of the estimate below 0.66 of the one before it, and one cluster at 0.85 of the
+  estimate before it is asked when the delay detector has returned from under-use to normal,
+  only for a sender that is application limited or was within 3 s, within 5 s of the drop, at
+  most once in 5 s, and only when 95% of it is above the estimate. For it the estimator
+  says how it reads the path: `BandwidthEstimator::usage() -> Usage` (new, default
+  `Usage::Normal`; `Gcc`: the reading of the last feedback), passed on with
+  `ProbeController::set_usage`. No specification says how to probe after a drop (RFC 8836
+  section 2, 1f, asks that a flow regain its share quickly), so the default is the form that
+  measured best. Four forms, the default chain, a 2.5 Mbit/s path that drops to 300 kbit/s
+  for 20 s, 1000 calls in each of the two reference cells and 200 in six others, each form
+  against the default by the merge-point rule of `docs/capacity-instrument.md`: without a
+  probe and with libwebrtc's (which never fires for a sender that keeps up with its target:
+  the two measure alike) seven figures are worse (both directions limited: oldest picture
+  3.07 s against 2.64 s; 5% of the feedback lost: the rate not back within 20 s in 30 and 24
+  of 200 calls against 2; target 15 to 25 s after the limit 1205 against 1278 kbit/s); the
+  repeated probe aimed at the highest rate of the last minute instead of the last drop's own
+  high makes fifteen worse (audio packets lost 27 -> 35 a call; behind a 1000 ms queue over
+  2 s without a new picture in 33 of 200 calls against 6) and was not taken. What the default
+  costs against no probe: behind a 1000 ms queue 96 audio packets lost a call against 66,
+  under a limit that lasts a minute 74 against 45. Tests:
+  `cc::probe::tests::libwebrtcs_probe_after_a_drop_is_one_cluster_once_overuse_has_ended`,
+  `libwebrtcs_probe_after_a_drop_has_its_conditions`,
+  `gcc::estimator::tests::usage_follows_the_last_feedback`,
+  `rtci-interceptor/tests/after_drop_probe_requests.rs`, `tests/default_probe_after_drop.rs`.
 - **congestion control feedback cadence as a setting** (rtcpbudget-2):
   `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
   `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
