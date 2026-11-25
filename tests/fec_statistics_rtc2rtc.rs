@@ -169,6 +169,10 @@ struct World {
     /// payload type and carried a payload (retransmissions, not a probe's padding; none of
     /// them is lost).
     not_red: Vec<u8>,
+    /// The network also loses the packet after every second lost one: two RED packets in a
+    /// row out of every ten, a media packet with the FEC packet that protects it, which FEC
+    /// cannot rebuild.
+    bursts: bool,
 }
 
 impl World {
@@ -196,7 +200,9 @@ impl World {
                     && header.payload_type == RED_PT
                 {
                     self.sent_rtp += 1;
-                    if header.sequence_number % 5 == 2 {
+                    if header.sequence_number % 5 == 2
+                        || (self.bursts && header.sequence_number % 10 == 3)
+                    {
                         self.lost += 1;
                         continue;
                     }
@@ -282,6 +288,7 @@ impl World {
             lost: 0,
             sent_rtp: 0,
             not_red: Vec::new(),
+            bursts: false,
         };
         let sender = if let Some(rtx) = rtx {
             world.peers[0].pc.add_track(MediaStreamTrack::new(
@@ -493,14 +500,19 @@ fn in_the_chrome_profile_fec_in_red_rebuilds_what_the_network_lost() -> Result<(
 /// under the RTX of the media format (`apt=96`), a retransmitted RED packet was restored as
 /// VP8 with the RED header in front of the payload.
 ///
-/// The network loses one RED packet in five and no retransmission: every frame reaches the
-/// application with the payload it was written with.
+/// The network loses RED packets, some of them two in a row (a media packet and the FEC that
+/// protects it), and no retransmission: every frame reaches the application with the payload
+/// it was written with. FEC packets are not retransmitted (libwebrtc keeps none for it): what
+/// leaves that is not RED is the retransmission of media, under the RTX of red.
 #[test]
 fn in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red() -> Result<()> {
     use rtci::peer_connection::configuration::interceptor_registry::VIDEO_RED_RTX_PAYLOAD_TYPE;
     use std::collections::BTreeSet;
 
     let (mut world, sender) = World::connected_sending(Peer::chrome, Some(0x5252_0002))?;
+    // One RED packet in five is lost, and two in a row out of every ten: FEC rebuilds a media
+    // packet lost alone, and one lost together with its FEC packet is left to retransmission.
+    world.bursts = true;
     for seq in 1000..1150 {
         world.send(sender, seq)?;
     }
