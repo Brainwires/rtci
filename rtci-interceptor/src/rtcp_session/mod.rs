@@ -322,6 +322,25 @@ pub struct RtcpReportingInterval {
     pub receiver: Duration,
 }
 
+/// This endpoint's share of the RTCP bandwidth as the session calculates it now: the RTCP
+/// bandwidth (RFC 3550 section 6.2: 5% of the session bandwidth, or what `b=RS` / `b=RR`
+/// give) divided equally among the members (section 6.3.1), times the number of this
+/// endpoint's SSRCs that take part (RFC 8108 section 5: each is a member).
+///
+/// The session attaches it to every RTCP packet it hands application-ward, beside
+/// [`RtcpReportingInterval`]. The congestion control feedback generators read it: with
+/// [`CongestionFeedbackCadence::PerFrame`](crate::CongestionFeedbackCadence) their interval
+/// grows towards 100 ms where this share does not hold a feedback packet per interval (RFC
+/// 4585 section 3.2: feedback is "subject to the RTCP bandwidth constraints";
+/// draft-ietf-rmcat-gcc-02 section 3: "If the feedback overhead needs to be limited this
+/// interval can be increased to 100 ms"). Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RtcpBandwidthShare {
+    /// The share, bits per second.
+    pub bits_per_second: f64,
+}
+
 /// Builder for [`RtcpSessionInterceptor`].
 ///
 /// ```
@@ -1405,6 +1424,15 @@ impl RtcpSessionInterceptor {
         RtcpReportingInterval {
             sender: td(true),
             receiver: td(false),
+        }
+    }
+
+    /// This endpoint's share of the RTCP bandwidth ([`RtcpBandwidthShare`]).
+    fn bandwidth_share(&self, now: Instant) -> RtcpBandwidthShare {
+        let (rtcp_bw, _) = self.rtcp_bandwidth(now);
+        let local = self.locals.iter().filter(|l| l.participates()).count();
+        RtcpBandwidthShare {
+            bits_per_second: rtcp_bw * 8.0 * local as f64 / self.member_count().max(1) as f64,
         }
     }
 
@@ -3035,6 +3063,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
             // application-ward (RFC 8083 section 3, Tdr).
             let interval = self.reporting_interval(now);
             msg.message.add(Attribute::Custom(Arc::new(interval)));
+            // And what the RTCP bandwidth gives this endpoint, for the congestion control
+            // feedback generators' cadence.
+            let share = self.bandwidth_share(now);
+            msg.message.add(Attribute::Custom(Arc::new(share)));
         }
         if pass {
             self.read_queue.push_back(msg);

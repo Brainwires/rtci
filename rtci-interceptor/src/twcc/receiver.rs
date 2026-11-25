@@ -4,7 +4,7 @@ use super::recorder::Recorder;
 use super::{flow_ssrcs, stream_supports_twcc};
 use crate::Interceptor;
 use crate::cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
-use crate::cc::feedback_cadence::FeedbackCadence;
+use crate::cc::feedback_cadence::{CongestionFeedbackCadence, FeedbackCadence};
 use crate::stream_info::StreamInfo;
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
@@ -34,8 +34,10 @@ const DEFAULT_INTERVAL: Duration = Duration::from_millis(100);
 pub struct TwccReceiverBuilder {
     /// Interval between feedback reports.
     interval: Duration,
-    /// Whether the interval stretches to what the RTCP bandwidth allows.
+    /// Whether the interval follows [`Self::with_cadence`] (or is fixed).
     adaptive_interval: bool,
+    /// See [`Self::with_cadence`].
+    cadence: CongestionFeedbackCadence,
     /// Whether packets already reported received are reported again (libwebrtc).
     rereport_received: bool,
     /// See [`Self::with_feedback_share`].
@@ -52,6 +54,7 @@ impl Default for TwccReceiverBuilder {
         Self {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
+            cadence: CongestionFeedbackCadence::default(),
             feedback_share: crate::cc::feedback_cadence::FEEDBACK_SHARE,
             max_adaptive_interval: crate::cc::feedback_cadence::MAX_ADAPTIVE_INTERVAL,
             rereport_received: false,
@@ -72,39 +75,40 @@ impl TwccReceiverBuilder {
         self
     }
 
-    /// Whether the interval stretches to what the RTCP bandwidth holds one feedback packet
-    /// in. On by default.
-    ///
-    /// All RTCP of an endpoint shares 5% of the session bandwidth (RFC 3550 section 6.2,
-    /// unless `b=RS` / `b=RR` say otherwise), and the RTCP session sends no more than that.
-    /// At low media rates a tenth of a second of it does not hold a feedback packet, so
-    /// feedback built every 100 ms queues in the session and reaches the sender late or not
-    /// at all. With this on, the interval is the configured one where the bandwidth allows
-    /// it and longer where it does not, up to half a second ("with low uplink bandwidth
-    /// feedback may be sent less often", section 3 of the draft): one feedback packet for
-    /// every RTCP packet the session may send, each covering everything since the last.
-    /// `false` keeps the interval fixed.
+    /// Whether the interval follows the cadence ([`Self::with_cadence`]: by default the
+    /// drafts' "every frame received", "at least once every 30 ms") or stays fixed at
+    /// [`Self::with_interval`] (`false`). On by default.
     pub fn with_adaptive_interval(mut self, adaptive_interval: bool) -> Self {
         self.adaptive_interval = adaptive_interval;
         self
     }
 
-    /// The share of the media received that the feedback may take while the interval is
-    /// adaptive: the interval is the time in which this share holds one feedback packet (with
-    /// its lower layers, and the minimal compound packet around it without reduced-size
-    /// RTCP). Default 0.05, RFC 3550 section 6.2's 5% for all of RTCP. A smaller share leaves
-    /// room in the 5% for the regular reports (the `Performance` behaviour profile: 0.025).
+    /// When feedback is built while the interval is not fixed: see
+    /// [`CongestionFeedbackCadence`]. Default [`CongestionFeedbackCadence::PerFrame`]:
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3, "It is recommended that
+    /// a feedback message is sent for every frame received, but in cases of low uplink
+    /// bandwidth it is acceptable to send them less frequently", with
+    /// draft-ietf-rmcat-gcc-02 section 3's intervals (30 ms, up to 100 ms).
+    pub fn with_cadence(mut self, cadence: CongestionFeedbackCadence) -> Self {
+        self.cadence = cadence;
+        self
+    }
+
+    /// The share of the rate it is sized to that the feedback may take with
+    /// [`CongestionFeedbackCadence::SendEstimate`] (of the send estimate) and
+    /// [`CongestionFeedbackCadence::ReceivedMedia`] (of the media received): the interval is
+    /// the time in which this share holds one feedback packet. Default 0.05 (libwebrtc: "Let
+    /// TWCC reports occupy 5% of total bandwidth"); the `Performance` behaviour profile
+    /// takes 0.025. [`CongestionFeedbackCadence::PerFrame`] does not use it.
     pub fn with_feedback_share(mut self, share: f64) -> Self {
         self.feedback_share = share;
         self
     }
 
-    /// The longest the adaptive interval stretches to while media flows. Default 250 ms.
-    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: "in cases of low uplink
-    /// bandwidth it is acceptable to send them less frequently, e.g., for instance once per
-    /// RTT"; RFC 8888 section 4 leaves the interval to the application ("Applications need to
-    /// negotiate an appropriate congestion control feedback interval ... based on ... the
-    /// acceptable feedback overhead"). The `Performance` behaviour profile takes 500 ms.
+    /// The longest interval of [`CongestionFeedbackCadence::SendEstimate`] and
+    /// [`CongestionFeedbackCadence::ReceivedMedia`] while media flows. Default 250 ms
+    /// (libwebrtc's `kMaxInterval`); the `Performance` behaviour profile takes 500 ms.
+    /// [`CongestionFeedbackCadence::PerFrame`] has the draft's own ceiling, 100 ms.
     pub fn with_max_adaptive_interval(mut self, max_interval: Duration) -> Self {
         self.max_adaptive_interval = max_interval;
         self
@@ -137,6 +141,7 @@ impl TwccReceiverBuilder {
     pub fn build(self) -> TwccReceiverInterceptor {
         let mut interceptor = TwccReceiverInterceptor::new(self.interval, self.adaptive_interval);
         interceptor.cadence = FeedbackCadence::new(self.interval, self.adaptive_interval)
+            .with_form(self.cadence)
             .with_limits(self.feedback_share, self.max_adaptive_interval);
         interceptor.rereport_received = self.rereport_received;
         interceptor.extension_alone = self.extension_alone;
@@ -155,7 +160,7 @@ struct RemoteStream {
 /// This interceptor examines incoming RTP packets for transport-wide CC sequence
 /// numbers and periodically generates TransportLayerCC feedback packets.
 pub struct TwccReceiverInterceptor {
-    /// When feedback is built: the configured interval, stretched to the RTCP bandwidth.
+    /// When feedback is built ([`TwccReceiverBuilder::with_cadence`]).
     cadence: FeedbackCadence,
 
     /// Start time for calculating arrival times.
@@ -212,6 +217,7 @@ impl TwccReceiverInterceptor {
     }
 
     fn generate_feedback(&mut self, now: Instant) {
+        self.cadence.reported(now);
         let Some(recorder) = self.recorder.as_mut() else {
             return;
         };
@@ -236,7 +242,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccReceiverInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        self.cadence.on_packet(&msg);
+        // Whether this packet ends a frame the cadence reports at once (per-frame feedback).
+        let frame_ended = self.cadence.on_packet(&msg);
         // Process incoming RTP packets with TWCC extension
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet
             && !self.rfc8888_ssrcs.contains(&rtp_packet.header.ssrc)
@@ -276,6 +283,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccReceiverInterceptor {
 
                 if let Some(recorder) = self.recorder.as_mut() {
                     recorder.record(rtp_packet.header.ssrc, tcc.transport_sequence, arrival_time);
+                }
+                if frame_ended {
+                    self.generate_feedback(msg.now);
+                    self.next_timeout = Some(msg.now + self.cadence.interval(msg.now));
                 }
             }
         }
@@ -328,6 +339,7 @@ impl Interceptor for TwccReceiverInterceptor {
         if negotiated_congestion_feedback(info) == Some(CongestionFeedbackFormat::Rfc8888) {
             self.rfc8888_ssrcs.extend(flow_ssrcs(info));
             self.streams.remove(&info.ssrc);
+            self.cadence.unbind_remote(info);
             return;
         }
         for ssrc in flow_ssrcs(info) {
@@ -345,6 +357,7 @@ impl Interceptor for TwccReceiverInterceptor {
             // Don't track if ID is 0 (invalid)
             if hdr_ext_id != 0 {
                 self.streams.insert(info.ssrc, RemoteStream { hdr_ext_id });
+                self.cadence.bind_remote(info);
                 // An extension ID maps to exactly one URI within an RTP session, and BUNDLE
                 // makes the bundled m-lines one session, so every binding here carries the
                 // same transport-cc ID: taking the newest is taking the only one. A genuinely
@@ -359,6 +372,7 @@ impl Interceptor for TwccReceiverInterceptor {
             self.rfc8888_ssrcs.remove(&ssrc);
         }
         self.streams.remove(&info.ssrc);
+        self.cadence.unbind_remote(info);
         // Any binding that remains carries the same ID (see `bind_remote_stream`), so only the
         // loss of the last one leaves no negotiated ID to fall back on. Dropping it then keeps
         // a stale ID from outliving the negotiation and being misread as transport-cc.

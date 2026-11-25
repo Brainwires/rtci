@@ -387,7 +387,9 @@ macro_rules! governed_behaviours {
 }
 
 use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance};
-use interceptor::{EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase};
+use interceptor::{
+    CongestionFeedbackCadence, EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase,
+};
 
 governed_behaviours! {
     // ---- ICE ----
@@ -900,6 +902,20 @@ governed_behaviours! {
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_minimum_session_bandwidth = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_minimum_session_bandwidth,
+    },
+    {
+        id: "cc.feedback-cadence",
+        setting: "DefaultInterceptorOptions::congestion_feedback_cadence",
+        clause: "draft-ietf-rmcat-gcc-02 3, draft-holmer-rmcat-transport-wide-cc-extensions-01 3",
+        rfc: CongestionFeedbackCadence::PerFrame => "PerFrame",
+        chrome: CongestionFeedbackCadence::SendEstimate => "SendEstimate",
+        strict_rfc: CongestionFeedbackCadence::PerFrame => "PerFrame",
+        performance: CongestionFeedbackCadence::ReceivedMedia => "ReceivedMedia",
+        performance_note: "No text has this form: feedback sized to a share of the media RECEIVED (cc.feedback-share, cc.feedback-max-interval), the engine's cadence before the drafts' became the default. Kept for the profile because its measured figures (cc.feedback-share) were taken with it",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: send_interval = kTwccReportSize (68 octets) / (0.05 * estimate) held between kMinInterval 50 ms and kMaxInterval 250 ms, kDefaultInterval 100 ms before; the estimate is call/call.cc::Call::OnTargetTransferRate's msg.target_rate, the endpoint's own send estimate",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_cadence = v,
+        read: |o: &DefaultInterceptorOptions| o.congestion_feedback_cadence,
     },
     {
         id: "cc.feedback-share",
