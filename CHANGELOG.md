@@ -1282,6 +1282,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **media** (`conf/red-3-fec-sequence-holes`): `SampleBuilder` gave a sample a duration of
+  zero when the packet that follows it had the last sequence number before the wrap (65535):
+  the search for the next packet's timestamp ran over a range that does not wrap. It walks
+  the sequence numbers as they wrap now.
 - **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
   profile) two engines never raised their send rate** (red-1). A receiver learns a
   stream's format from the payload type of its first packet; when that is the `red` format

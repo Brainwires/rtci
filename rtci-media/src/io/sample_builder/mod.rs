@@ -675,13 +675,16 @@ impl<T: Depacketizer> SampleBuilder<T> {
 
         // scan for any packet after the current and use that time stamp as the diff point.
         // A packet without a payload is not media and starts no sample: it is passed over.
-        for i in consume.tail..self.active.tail {
+        // Sequence numbers wrap (RFC 3550 section 5.1): the walk does too.
+        let mut i = consume.tail;
+        while i != self.active.tail {
             if let Some(ref packet) = self.buffer[i as usize]
                 && !packet.payload.is_empty()
             {
                 after_timestamp = packet.header.timestamp;
                 break;
             }
+            i = i.wrapping_add(1);
         }
 
         // prior to decoding all the packets, check if this packet

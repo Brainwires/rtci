@@ -230,3 +230,30 @@ fn empty_packets_behind_a_frame_that_was_given_up_are_padding() {
         "packet 2 and the missing packet 3"
     );
 }
+
+/// A sample lasts until the next one starts wherever the sequence numbers are: with the next
+/// frame's packet at 65535, the last number before the wrap, the frame at 65534 has its real
+/// duration (it used to come out with none: the search for the next packet did not wrap).
+#[test]
+fn a_sample_before_the_sequence_number_wrap_has_its_duration() {
+    let t0 = Instant::now();
+    let mut builder = SampleBuilder::new(256, Vp8Packet::default(), 90_000);
+    builder.push(t0, vp8(65_534, 3000, true, true));
+    builder.push(t0 + ms(33), vp8(65_535, 6000, true, true));
+    let samples = pop_all(&mut builder, t0 + ms(33));
+    assert_eq!(1, samples.len());
+    assert_eq!(3000, samples[0].packet_timestamp);
+    assert_eq!(
+        Duration::from_secs_f64(3000.0 / 90_000.0),
+        samples[0].duration
+    );
+
+    // And across it: the frame at 65535 lasts until the one at 0.
+    builder.push(t0 + ms(66), vp8(0, 10_500, true, true));
+    let samples = pop_all(&mut builder, t0 + ms(66));
+    assert_eq!(1, samples.len());
+    assert_eq!(
+        Duration::from_secs_f64(4500.0 / 90_000.0),
+        samples[0].duration
+    );
+}
