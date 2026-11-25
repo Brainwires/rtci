@@ -86,11 +86,13 @@ fn random_session_id(cfg: &HandshakeConfig) -> Result<Vec<u8>, Error> {
     Ok(id)
 }
 
-/// Whether this side resumes DTLS 1.2 sessions at all: a certificate handshake (the PSK
-/// suites are not resumed), with the extended master secret possible (RFC 7627 section 5.3: a
-/// client that offers an abbreviated handshake sends the extension).
+/// Whether this side resumes DTLS 1.2 sessions at all: not switched off
+/// (`ConfigBuilder::with_dtls12_resumption`), a certificate handshake (the PSK suites are not
+/// resumed), with the extended master secret possible (RFC 7627 section 5.3: a client that
+/// offers an abbreviated handshake sends the extension).
 fn resumes(cfg: &HandshakeConfig) -> bool {
-    cfg.supports_dtls12()
+    cfg.dtls12_resumption
+        && cfg.supports_dtls12()
         && cfg.local_psk_callback.is_none()
         && cfg.extended_master_secret != ExtendedMasterSecretType::Disable
 }
@@ -275,29 +277,42 @@ fn acceptable(
         && cfg.local_cipher_suites.contains(&suite)
         && cipher_suite_for_id(suite).is_ok_and(|cipher_suite| !cipher_suite.is_psk());
     let name_ok = session.server_name == state.server_name;
-    let authentication_ok = match cfg.client_auth {
-        ClientAuthType::NoClientCert | ClientAuthType::RequestClientCert => true,
-        ClientAuthType::RequireAnyClientCert => !session.peer_certificates.is_empty(),
-        ClientAuthType::VerifyClientCertIfGiven => {
-            session.peer_certificates.is_empty() || session.peer_certificates_verified
-        }
-        ClientAuthType::RequireAndVerifyClientCert => {
-            !session.peer_certificates.is_empty() && session.peer_certificates_verified
-        }
-    };
+    // A configured peer-certificate check is run again on the session's certificates
+    // (`resume`). A server that asks its clients for a certificate resumes no session
+    // without one: the handshake is a full one, in which it asks again and the check runs on
+    // what comes. A server that asks for none (`NoClientCert`) had no client certificate in
+    // the full handshake either: there is nothing to check again, and the session resumes.
+    let checkable = cfg.verify_peer_certificate.is_none()
+        || cfg.client_auth == ClientAuthType::NoClientCert
+        || !session.peer_certificates.is_empty();
+    let authentication_ok = checkable
+        && match cfg.client_auth {
+            ClientAuthType::NoClientCert | ClientAuthType::RequestClientCert => true,
+            ClientAuthType::RequireAnyClientCert => !session.peer_certificates.is_empty(),
+            ClientAuthType::VerifyClientCertIfGiven => {
+                session.peer_certificates.is_empty() || session.peer_certificates_verified
+            }
+            ClientAuthType::RequireAndVerifyClientCert => {
+                !session.peer_certificates.is_empty() && session.peer_certificates_verified
+            }
+        };
     suite_ok && name_ok && authentication_ok
 }
 
 /// Server: takes `session` up for this handshake: its suite, master secret and the peer's
 /// certificates, keys from the new randoms. The configured peer-certificate check runs again
-/// on the client's certificates, if it sent any.
+/// on the client's certificates. A session without any reaches here only at a server that
+/// asks its clients for none (`acceptable`): the full handshake had no client certificate
+/// for the check either, and it is not called with an empty list.
 fn resume(
     state: &mut State,
     client_hello: &HandshakeMessageClientHello,
     cfg: &HandshakeConfig,
     session: Dtls12Session,
 ) -> Result<(), FlightError> {
-    if !session.peer_certificates.is_empty()
+    let checked =
+        !session.peer_certificates.is_empty() || cfg.client_auth != ClientAuthType::NoClientCert;
+    if checked
         && let Some(verify_peer_certificate) = &cfg.verify_peer_certificate
         && let Err(err) = verify_peer_certificate(&session.peer_certificates, &[])
     {
@@ -413,6 +428,16 @@ pub(crate) fn client_resume(state: &mut State, cfg: &HandshakeConfig) -> Result<
                     .map_err(|err| fatal(AlertDescription::BadCertificate, err))?;
         }
         if let Some(verify_peer_certificate) = &cfg.verify_peer_certificate {
+            // Fails closed: a session that carries no certificate is not checked as if it
+            // had passed.
+            if session.peer_certificates.is_empty() {
+                return Err(fatal(
+                    AlertDescription::BadCertificate,
+                    Error::Other(
+                        "a resumption carries no certificate for the configured check".to_owned(),
+                    ),
+                ));
+            }
             verify_peer_certificate(&session.peer_certificates, &chains)
                 .map_err(|err| fatal(AlertDescription::BadCertificate, err))?;
         }
@@ -453,18 +478,23 @@ pub(crate) fn new_session_ticket(
     if let Some(ticket) = &state.pending_ticket {
         return Ok(ticket.clone());
     }
+    // A ServerHello that announced a ticket is followed by one; an empty ticket says there
+    // is none after all (RFC 5077 section 3.3): without an issuer or a clock, and from an
+    // issuer whose keys were wiped (`SessionTicketIssuer::retire`).
+    let none = HandshakeMessageNewSessionTicket {
+        ticket_lifetime_hint: 0,
+        ticket: vec![],
+    };
     let (Some(issuer), Some(now)) = (cfg.ticket_issuer.as_ref(), state.clock) else {
-        // A ServerHello that announced a ticket is followed by one; an empty ticket says
-        // there is none after all (RFC 5077 section 3.3).
-        return Ok(HandshakeMessageNewSessionTicket {
-            ticket_lifetime_hint: 0,
-            ticket: vec![],
-        });
+        return Ok(none);
     };
     let session = session_of(state, cfg, now);
-    let ticket = issuer
+    let Some(ticket) = issuer
         .seal_dtls12(cfg.provider().as_ref(), now, &session)
-        .map_err(|err| fatal(AlertDescription::InternalError, err))?;
+        .map_err(|err| fatal(AlertDescription::InternalError, err))?
+    else {
+        return Ok(none);
+    };
     // The ticket's id is its AEAD nonce, its first bytes.
     let mut id = [0u8; 12];
     id.copy_from_slice(&ticket[..12]);

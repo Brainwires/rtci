@@ -549,6 +549,8 @@ pub struct SettingEngine {
     pub(crate) dtls_connection_id_length: Option<usize>,
     /// [`SettingEngineBuilder::with_dtls_alpn`]: `true` when it is turned off.
     pub(crate) dtls_alpn_off: bool,
+    /// [`SettingEngineBuilder::with_dtls_session_resumption`]: `true` when it is turned on.
+    pub(crate) dtls_session_resumption: bool,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
     /// [`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`]: `true` when it is
@@ -727,6 +729,7 @@ impl SettingEngine {
             cryptex_required_on_every_bundled_section: Default::default(),
             dtls_connection_id_length: Default::default(),
             dtls_alpn_off: Default::default(),
+            dtls_session_resumption: Default::default(),
             write_ssrc_attributes_for_simulcast: Default::default(),
             ecn: Default::default(),
             ecn_initiation: Default::default(),
@@ -3179,6 +3182,82 @@ impl SettingEngineBuilder {
     /// gives what was selected. `false` leaves the extension out.
     pub fn with_dtls_alpn(mut self, alpn: bool) -> Self {
         self.0.dtls_alpn_off = !alpn;
+        self
+    }
+
+    /// Whether the DTLS transports of a connection share one DTLS session (RFC 5764 section
+    /// 3). The default is `false`.
+    ///
+    /// With sections that are not bundled a connection has a DTLS association per transport.
+    /// RFC 5764 section 3: "As an optimization, the DTLS-SRTP implementation SHOULD use the
+    /// following strategy: a single DTLS association is established, and all other DTLS
+    /// associations wait until that connection is established before proceeding with their
+    /// handshakes. This establishes a single session and all other associations can take
+    /// advantage of TLS session resumption." With `true`, when the negotiation that sets up the
+    /// transports sets up more than one in the same DTLS role, the first client transport to
+    /// start runs a full handshake; every other one waits until it is complete, then resumes
+    /// with one of the peer's DTLS 1.3 tickets (RFC 8446 section 4.6.1). As the server, every
+    /// such transport accepts, for its first handshake, a ticket another transport of the
+    /// connection issued.
+    ///
+    /// Off by default, a standing departure from that SHOULD, because where it does anything
+    /// it makes the connection slower, and with most peers it cannot do anything:
+    ///
+    /// - **It costs connection time.** The other transports' handshakes run after the first
+    ///   one instead of beside it. Measured with three unbundled transports on links with
+    ///   latency (`tests/multi_transport_rtc2rtc.rs`,
+    ///   `the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`),
+    ///   the time until every DTLS transport is connected: at a 100 ms round trip 453 ms
+    ///   with it off, 753 ms with it on against a peer that issues no ticket (+300 ms, about
+    ///   3 round trips: the whole first handshake, and nothing is resumed) and 703 ms
+    ///   between two peers that have it on (+250 ms, about 2.5 round trips); at a 300 ms
+    ///   round trip 1.353 s, 2.253 s (+900 ms) and 2.103 s (+750 ms). What it saves is one
+    ///   signature and one signature verification per other transport, and no round trip.
+    /// - **One lost datagram delays every transport.** A datagram lost on the first
+    ///   handshake holds all the others back, where without the session it delays that
+    ///   transport alone
+    ///   (`a_datagram_lost_on_the_first_handshake_delays_every_transport_with_the_session_on`).
+    /// - **No browser can take part.** A browser issues no session ticket and offers none:
+    ///   libwebrtc (Chromium, Safari) sets `SSL_OP_NO_TICKET` and makes an `SSL_CTX` per
+    ///   transport; Firefox's `TransportLayerDtls::Setup()` turns session tickets off
+    ///   (`SSL_ENABLE_SESSION_TICKETS`, `PR_FALSE`) and the session cache too
+    ///   (`SSL_NO_CACHE`). Against a browser the setting only adds the wait.
+    /// - **With BUNDLE it does nothing.** A bundled connection (every browser's, and any
+    ///   connection whose answer bundles its sections) has one transport: nothing waits, no
+    ///   ticket is asked for or issued, and the DTLS datagrams are the same as with the
+    ///   setting off.
+    ///
+    /// So it is for an application whose both ends are this engine, whose sections are not
+    /// bundled, and for which a signature per transport matters more than about 2.5 round
+    /// trips of connection time.
+    ///
+    /// The wait is bounded. A first handshake that does not complete holds the others back
+    /// at most three of their initial flight intervals (1.2 s at the RFC 9147 400 ms; 4.5
+    /// round trips where ICE measured the round trip) and never more than 3 s, after which
+    /// they run full handshakes; one that fails, is closed or cannot start holds them back
+    /// no longer; and no time is spent waiting for a ticket that does not come. (Until 0.2,
+    /// on by default, the wait had no bound, and a peer without tickets cost two flight
+    /// intervals, 800 ms, on top of the first handshake.)
+    ///
+    /// The certificate check is not weakened: only the first association of each transport,
+    /// set up by the negotiation that set up the transports, takes part, and only when its
+    /// section names the same remote fingerprints as the transport that made the session; the
+    /// section's own fingerprints are checked against the certificates stored with the
+    /// ticket, so a resumption for a section that names another certificate fails with
+    /// `fingerprint-failure`, as a full handshake does. Nothing is shared between connections.
+    /// DTLS 1.3 only, with `psk_dhe_ke` only: the PSK is combined with a fresh (EC)DHE
+    /// exchange; no DTLS 1.2 session id or ticket is asked for, issued or accepted, in any
+    /// configuration. A later association (SRTP re-keying, RFC 5764 section 4.4; an ICE
+    /// restart with new DTLS parameters; a transport added later) and a server's later
+    /// handshake on the same transport are always full handshakes. The client keeps tickets
+    /// at most five minutes and drops them all once every transport taking part has started;
+    /// closing the connection wipes whatever tickets are left and the keys the server side
+    /// seals its tickets under.
+    ///
+    /// `false`: every association runs a full handshake at once, and none offers or accepts
+    /// a resumption. Bundled connections (one transport) are the same either way.
+    pub fn with_dtls_session_resumption(mut self, resumption: bool) -> Self {
+        self.0.dtls_session_resumption = resumption;
         self
     }
 

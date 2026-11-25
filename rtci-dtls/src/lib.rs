@@ -42,6 +42,24 @@
 //! # let _ = builder;
 //! ```
 //!
+//! # Session resumption
+//!
+//! Off unless configured ([`session`]). DTLS 1.3 resumes with tickets and a new (EC)DHE
+//! exchange (`psk_dhe_ke`), which keeps forward secrecy. DTLS 1.2 resumes too, by default,
+//! as soon as tickets, a session cache or a session store are configured, and that is a
+//! different trade: a resumed DTLS 1.2 association runs no key exchange, and an RFC 5077
+//! ticket is the master secret sealed under the server's ticket key, so there is no forward
+//! secrecy against the ticket key, the cache or the store.
+//! [`ConfigBuilder::with_dtls12_resumption`](config::ConfigBuilder::with_dtls12_resumption)`(false)`
+//! takes DTLS 1.2 out of resumption; see the notes on
+//! [`ConfigBuilder`](config::ConfigBuilder#session-resumption-and-forward-secrecy).
+//!
+//! A peer-certificate check
+//! ([`ConfigBuilder::with_verify_peer_certificate`](config::ConfigBuilder::with_verify_peer_certificate))
+//! runs again on the certificates a resumption carries, and is not called for a DTLS 1.3
+//! external PSK handshake, which has no certificate and authenticates by the key (RFC 8446
+//! section 4.2.11).
+//!
 //! Most applications do not depend on this crate directly — the
 //! [`rtci`](https://docs.rs/rtc) crate drives it as one layer of the peer-connection
 //! pipeline.
