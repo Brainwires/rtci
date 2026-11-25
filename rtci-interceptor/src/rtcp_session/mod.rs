@@ -364,7 +364,7 @@ impl Default for RtcpSessionBuilder {
             mtu: RTCP_SESSION_DEFAULT_MTU,
             cname: None,
             point_to_point: None,
-            report_from_every_ssrc: false,
+            report_from_every_ssrc: true,
             immediate_congestion_feedback: true,
             congestion_feedback_in_budget: false,
             minimum_session_bandwidth: RTCP_SESSION_MIN_BANDWIDTH,
@@ -454,11 +454,12 @@ impl RtcpSessionBuilder {
     /// RFC 8108 5.1: "each SSRC will send RTCP reports for all other SSRCs, including those
     /// co-located at the same endpoint": every local SSRC carries a report block for every
     /// remote SSRC and for each of the endpoint's other SSRCs that has sent (`true`, the
-    /// `StrictRfc` behaviour profile). Default `false`: the blocks are carried once, by the
-    /// first local media SSRC, and none about the co-located SSRCs, as libwebrtc does and as
-    /// RFC 8861 reporting groups allow where they are signalled; the larger compound packets
-    /// of the RFC form were measured to cost the video through a capacity cap
-    /// (`measure_report_blocks_from_every_ssrc_against_once` in the root crate's tests).
+    /// default: the section's MUST, while RFC 8861 reporting groups, its one exception, are
+    /// not implemented and so never signalled). With `false` the blocks are carried once, by
+    /// the first local media SSRC, and none about the co-located SSRCs, as libwebrtc does (the
+    /// `Chrome` behaviour profile). The RTCP bandwidth is the same either way (RFC 3550
+    /// section 6.3: the interval follows the average compound packet size): the RFC form
+    /// sends larger compound packets less often.
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self

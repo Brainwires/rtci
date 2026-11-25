@@ -159,8 +159,9 @@ pub struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     pub video: [bool; 2],
-    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains, the
-    /// options' default when `None`.
+    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains and
+    /// `RtcpSessionBuilder::with_report_from_every_ssrc` for ParolNet's, their default when
+    /// `None`.
     pub report_from_every_ssrc: Option<bool>,
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
@@ -721,6 +722,10 @@ impl Peer {
         let session = RtcpSessionBuilder::new()
             .with_t_rr_interval(Duration::ZERO)
             .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match setup.report_from_every_ssrc {
+            Some(every) => session.with_report_from_every_ssrc(every),
+            None => session,
+        };
         let session = match wall_clock {
             Some(anchor) => session.with_wall_clock(anchor),
             None => session,
