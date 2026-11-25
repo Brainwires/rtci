@@ -43,6 +43,10 @@ pub const FUA_NALU_TYPE: u8 = 28;
 /// NAL type 29: FU-B, the first fragment of a NAL unit in interleaved mode: an FU-A with a
 /// decoding order number.
 pub const FUB_NALU_TYPE: u8 = 29;
+/// NAL type 5: a coded slice of an IDR picture.
+pub const IDR_NALU_TYPE: u8 = 5;
+/// NAL type 6: supplemental enhancement information.
+pub const SEI_NALU_TYPE: u8 = 6;
 /// NAL type 7: sequence parameter set.
 pub const SPS_NALU_TYPE: u8 = 7;
 /// NAL type 8: picture parameter set.
@@ -1246,5 +1250,67 @@ impl Depacketizer for H264Packet {
 
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
         marker
+    }
+
+    fn has_key_frames(&self) -> bool {
+        true
+    }
+
+    /// A packet that carries the first slice of an IDR picture (`nal_unit_type` 5 with
+    /// `first_mb_in_slice` 0, ITU-T H.264 sections 7.3.3 and 7.4.1.2.4: an IDR picture is
+    /// decoded without reference to any earlier picture): as a single NAL unit packet, as the
+    /// first fragment of an FU-A or FU-B, or inside an STAP-A or STAP-B behind nothing but
+    /// parameter sets, SEI and access unit delimiters (RFC 6184 sections 5.6 to 5.8).
+    /// Parameter sets sent in packets of their own before it belong to the same access unit
+    /// (the same RTP timestamp) and are not what this names.
+    fn is_key_frame_start(&self, payload: &Bytes) -> bool {
+        /// Whether a NAL unit (header octet first) is the first slice of an IDR picture:
+        /// `first_mb_in_slice` is ue(v), and zero is the single bit 1.
+        fn first_idr_slice(unit: &[u8]) -> bool {
+            unit.first()
+                .is_some_and(|header| header & NALU_TYPE_BITMASK == IDR_NALU_TYPE)
+                && unit.get(1).is_some_and(|slice| slice & 0x80 != 0)
+        }
+        let Some(&b0) = payload.first() else {
+            return false;
+        };
+        match b0 & NALU_TYPE_BITMASK {
+            IDR_NALU_TYPE => first_idr_slice(payload),
+            kind @ (FUA_NALU_TYPE | FUB_NALU_TYPE) => {
+                let data = if kind == FUA_NALU_TYPE {
+                    FUA_HEADER_SIZE
+                } else {
+                    FUB_HEADER_SIZE
+                };
+                payload.get(1).is_some_and(|fu_header| {
+                    fu_header & FU_START_BITMASK != 0
+                        && fu_header & NALU_TYPE_BITMASK == IDR_NALU_TYPE
+                }) && payload.get(data).is_some_and(|slice| slice & 0x80 != 0)
+            }
+            kind @ (STAPA_NALU_TYPE | STAPB_NALU_TYPE) => {
+                let mut offset = if kind == STAPA_NALU_TYPE {
+                    STAPA_HEADER_SIZE
+                } else {
+                    STAPB_HEADER_SIZE
+                };
+                while let Some(size) = payload.get(offset..offset + STAPA_NALU_LENGTH_SIZE) {
+                    let size = usize::from(u16::from_be_bytes([size[0], size[1]]));
+                    offset += STAPA_NALU_LENGTH_SIZE;
+                    let Some(unit) = payload.get(offset..offset + size) else {
+                        return false;
+                    };
+                    if first_idr_slice(unit) {
+                        return true;
+                    }
+                    match unit.first().map(|header| header & NALU_TYPE_BITMASK) {
+                        Some(SEI_NALU_TYPE | SPS_NALU_TYPE | PPS_NALU_TYPE | AUD_NALU_TYPE) => {}
+                        _ => return false,
+                    }
+                    offset += size;
+                }
+                false
+            }
+            _ => false,
+        }
     }
 }

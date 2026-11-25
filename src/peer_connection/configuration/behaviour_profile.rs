@@ -1612,6 +1612,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget and lets a burst build up over send_burst_interval (modules/pacing/pacing_controller.h @ a222406d), which Chromium sets to 40 ms (rtc_peer_connection_handler.cc pacer_burst_interval @ Chromium 8dafa8bc)",
     },
     NotGoverned {
+        setting: "DefaultInterceptorOptions::pacer_backlog",
+        class: NotGovernedClass::EngineOnly,
+        note: "the pacer's queue is flushed, with a key-frame request, when the target collapses (RFC 8834 section 6.1, RFC 8836 section 2); libwebrtc has no counterpart: it drops frames before they are numbered and drains its pacer above the target (modules/pacing/pacing_controller.cc MaybeUpdateMediaRateDueToLongQueue @ a222406d), which is pacer_queue_overflow Drain, the Chrome profile's value, under which nothing is flushed",
+    },
+    NotGoverned {
         setting: "DefaultInterceptorOptions::bandwidth_probing",
         class: NotGovernedClass::Same,
         note: "probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate)",

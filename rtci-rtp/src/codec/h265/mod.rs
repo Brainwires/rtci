@@ -1945,4 +1945,74 @@ impl Depacketizer for H265Packet {
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
         marker
     }
+
+    fn has_key_frames(&self) -> bool {
+        true
+    }
+
+    /// A packet that carries the first slice segment of an intra random access point picture
+    /// (`nal_unit_type` 16 to 21: BLA, IDR and CRA, with `first_slice_segment_in_pic_flag`
+    /// set; ITU-T H.265 sections 3.69 and 7.3.6.1: decoding can begin there, and the pictures
+    /// that follow it in output order need nothing before it): as a single NAL unit packet,
+    /// as the first fragment of a fragmentation unit, or inside an aggregation packet behind
+    /// nothing but parameter sets, SEI and access unit delimiters (RFC 7798 sections 4.4.1 to
+    /// 4.4.3). A PACI packet is not looked into.
+    fn is_key_frame_start(&self, payload: &Bytes) -> bool {
+        /// Types 16 to 21 (22 and 23 are reserved IRAP types no encoder sends).
+        fn irap(nalu_type: u8) -> bool {
+            (16..=21).contains(&nalu_type)
+        }
+        /// Whether a NAL unit (its two header octets first) is the first slice segment of an
+        /// IRAP picture: the flag is the first bit of the slice segment header.
+        fn first_irap_slice(unit: &[u8]) -> bool {
+            unit.first()
+                .is_some_and(|header| irap((header >> 1) & 0x3F))
+                && unit
+                    .get(H265NALU_HEADER_SIZE)
+                    .is_some_and(|slice| slice & 0x80 != 0)
+        }
+        if payload.len() < H265NALU_HEADER_SIZE {
+            return false;
+        }
+        let donl = if self.might_need_donl { 2 } else { 0 };
+        match (payload[0] >> 1) & 0x3F {
+            H265NALU_FRAGMENTATION_UNIT_TYPE => {
+                let Some(&fu_header) = payload.get(H265NALU_HEADER_SIZE) else {
+                    return false;
+                };
+                fu_header & 0x80 != 0
+                    && irap(fu_header & 0x3F)
+                    && payload
+                        .get(H265NALU_HEADER_SIZE + 1 + donl)
+                        .is_some_and(|slice| slice & 0x80 != 0)
+            }
+            H265NALU_AGGREGATION_PACKET_TYPE => {
+                // The first unit is behind a DONL and each later one behind a DOND, when the
+                // stream has them (RFC 7798 section 4.4.2).
+                let mut offset = H265NALU_HEADER_SIZE + donl;
+                while let Some(size) = payload.get(offset..offset + 2) {
+                    let size = usize::from(u16::from_be_bytes([size[0], size[1]]));
+                    offset += 2;
+                    let Some(unit) = payload.get(offset..offset + size) else {
+                        return false;
+                    };
+                    if first_irap_slice(unit) {
+                        return true;
+                    }
+                    // VPS, SPS, PPS, access unit delimiter, prefix SEI.
+                    match unit.first().map(|header| (header >> 1) & 0x3F) {
+                        Some(32..=35 | 39) => {}
+                        _ => return false,
+                    }
+                    offset += size + donl / 2;
+                }
+                false
+            }
+            H265NALU_PACI_PACKET_TYPE => false,
+            nalu_type if irap(nalu_type) => payload
+                .get(H265NALU_HEADER_SIZE + donl)
+                .is_some_and(|slice| slice & 0x80 != 0),
+            _ => false,
+        }
+    }
 }
