@@ -1129,6 +1129,9 @@ pub struct World {
     /// [`Setup::reverse_loss`] and the generator its losses are drawn from.
     pub reverse_loss: u32,
     pub loss_rng: Rng,
+    /// Per cent of the datagrams the caller sends that are lost while this is not zero (the
+    /// instrument's forward-loss scenario), drawn from the same generator.
+    pub forward_loss: u32,
     /// A peer connection that fails does not end the run ([`Peer::failed`] records it): for
     /// a measurement that reports the failure as a figure. Off: the run ends with an error.
     pub tolerate_failure: bool,
@@ -1166,6 +1169,10 @@ impl World {
                     let lost = i == 1
                         && self.reverse_loss > 0
                         && self.loss_rng.next_u64() % 100 < u64::from(self.reverse_loss);
+                    let lost = lost
+                        || (i == 0
+                            && self.forward_loss > 0
+                            && self.loss_rng.next_u64() % 100 < u64::from(self.forward_loss));
                     let arrives = if lost {
                         None
                     } else {
@@ -1587,6 +1594,7 @@ impl World {
             sampling: false,
             samples: Vec::new(),
             reverse_loss: setup.reverse_loss,
+            forward_loss: 0,
             tolerate_failure: false,
             loss_rng: Rng(setup.seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xfeed_beef),
         };

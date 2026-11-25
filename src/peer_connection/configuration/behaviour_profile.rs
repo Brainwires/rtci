@@ -1097,6 +1097,30 @@ governed_behaviours! {
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_max_nacks_per_packet = v,
         read: |o: &DefaultInterceptorOptions| o.nack_max_nacks_per_packet,
     },
+    {
+        id: "nack.max-repair-age",
+        setting: "DefaultInterceptorOptions::nack_max_repair_age",
+        clause: "RFC 8834 6.1, RFC 4588 7",
+        rfc: Some(Duration::from_secs(2)) => "Some(2s)",
+        chrome: None => "None",
+        strict_rfc: Some(Duration::from_secs(2)) => "Some(2s)",
+        chrome_source: "libwebrtc has no sender-side counterpart: RTPSender::OnReceivedNack / ReSendPacket (modules/rtp_rtcp/source/rtp_sender.cc @ a222406d, lines 387-400, 245-335) resend whatever RtpPacketHistory still holds and never ask the encoder for a key frame; it is the RECEIVER that gives a NACK list up and asks (modules/video_coding/nack_requester.cc lines 213-219). So the rule is off in the Chrome profile. What bounds a repair's age in libwebrtc is the history's culling (modules/rtp_rtcp/source/rtp_packet_history.cc::CullOldPackets lines 343-380, .h lines 55-58: a packet is kept at least max(3 x RTT, 1 s) and removed after 3 x that, or sooner once 600 are held, call/rtp_video_sender.cc line 92), silently; that history form is NOT modelled: the Chrome profile keeps the engine's buffer, bounded by count (1024 packets a stream), an engine form recorded under \"not expressible\". Measured (tests/capacity_instrument.rs, 200 calls a cell): a 1 s bound, libwebrtc's shortest, breaks the cell with a 1 s path queue (pictures older than 2 s in 109 -> 200 of 200 calls). Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_max_repair_age = v,
+        read: |o: &DefaultInterceptorOptions| o.nack_max_repair_age,
+    },
+    {
+        id: "nack.repair-backlog-bound",
+        setting: "DefaultInterceptorOptions::nack_repair_backlog_bound",
+        clause: "RFC 4588 7, RFC 8834 6.1",
+        rfc: Some(Duration::from_secs(2)) => "Some(2s)",
+        chrome: None => "None",
+        strict_rfc: Some(Duration::from_secs(2)) => "Some(2s)",
+        chrome_source: "libwebrtc has no counterpart: its sender serves every NACK the packet history can answer (modules/rtp_rtcp/source/rtp_sender.cc::RTPSender::OnReceivedNack @ a222406d, lines 387-400), with no retransmission rate limiter on video (call/rtp_video_sender.cc lines 292-354), and never gives a backlog of repairs up for a key frame; its receiver does (nack_requester.cc lines 213-219: \"NACK list full, clearing NACK list and requesting keyframe\"). Off in the Chrome profile. Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_repair_backlog_bound = v,
+        read: |o: &DefaultInterceptorOptions| o.nack_repair_backlog_bound,
+    },
 }
 
 /// Why a setting is not governed by the profiles.
@@ -1702,6 +1726,11 @@ pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
         behaviour: "NACK request limits counted in packets",
         chrome: "modules/video_coding/nack_requester.cc @ a222406d: a missing packet more than kMaxPacketAge 10,000 sequence numbers behind the newest is no longer asked for (lines 34, 210-211), and a NACK list that would pass kMaxNackPackets 1000 entries is cleared and a key frame requested instead (lines 35, 214-219). kMaxPacketAgeToNack 450 in video/rtp_video_stream_receiver2.cc (line 114) is not a NACK limit: it is the receive statistics' reordering threshold (SetMaxReorderingThreshold, lines 337-340)",
         needed: "limits in sequence numbers in NackGeneratorBuilder: its with_max_packet_age is a time (Duration), not a packet count, and no setting clears the list for a key frame. Both profiles keep no age limit (RFC 4588 6.3 gives none)",
+    },
+    NotExpressible {
+        behaviour: "How long a sent packet is kept for retransmission",
+        chrome: "modules/rtp_rtcp/source/rtp_packet_history.cc::RtpPacketHistory::CullOldPackets @ a222406d (lines 343-380; constants rtp_packet_history.h lines 55-58): a packet is kept at least max(kMinPacketDurationRtt 3 x RTT, kMinPacketDuration 1 s) and removed after kPacketCullingDelayFactor 3 x that (max(9 x RTT, 3 s)), or as soon as the first has passed once the history holds its 600 packets for video (call/rtp_video_sender.cc line 92), never while pending in the pacer; a packet is not retransmitted twice within one RTT (GetPacketAndMarkAsPending / VerifyRtt lines 245-253)",
+        needed: "a packet history in NackResponderBuilder that culls by round-trip time and by count together; the engine's send buffer is bounded by count alone (1024 packets a stream) and its repairs by a fixed age with a key-frame request (nack_max_repair_age, off in the Chrome profile, where the buffer's count is the only bound) and a 20 ms resend interval. A fixed 1 s age was measured and breaks a path with a 1 s queue",
     },
     NotExpressible {
         behaviour: "ICE connectivity check retransmission",

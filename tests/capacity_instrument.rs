@@ -48,7 +48,9 @@
 //!
 //! A cell names everything but the seed: `scenario/chain/gapN/direction/qN/rlN`.
 //!
-//! - scenario: `cap` or `outage`;
+//! - scenario: `cap`, `outage`, or `flN` (no change of capacity: N per cent of the caller's
+//!   datagrams lost at random for 20 s; the guard that ordinary loss is repaired and asks for
+//!   no key frames);
 //! - chain: `paced` (the engine's default interceptors), `nopacer` (the same without the pacer),
 //!   `parolnet` (ParolNet's chain; measurement only);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
@@ -121,7 +123,7 @@
 //! - `cargo test --test capacity_instrument`: the figures' and the statistics' unit tests and
 //!   the determinism check (debug build, every platform).
 //! - `cargo test --release --test capacity_instrument -- --ignored ensemble_`: the pull-request
-//!   ensemble ([`PR_CELLS`], 606 runs): the tripwires of every cell and the requirements the
+//!   ensemble ([`PR_CELLS`], 630 runs): the tripwires of every cell and the requirements the
 //!   engine meets in ParolNet's chain. Release build: a run takes 1.7 to 7.4 s of one core
 //!   (3.1 s on average over the ensemble), about eight minutes on a four-core hosted runner.
 //! - `cargo test --release --test capacity_instrument -- --ignored on_demand_`: a requirement
@@ -396,6 +398,11 @@ enum Scenario {
     Cap,
     /// The path is gone for 4 s and comes back with an ICE restart.
     Outage,
+    /// The capacity does not change: this many per cent of the caller's datagrams (its media
+    /// and its feedback) are lost at random for 20 s ([`CAP_HELD`]), at the full rate. The
+    /// guard that ordinary loss is repaired by retransmission and not by key frames
+    /// (`fl3/...`: the tripwire on `keyframes`).
+    ForwardLoss(u32),
 }
 
 /// Everything of a run but its seed (the module's "Cells").
@@ -426,7 +433,10 @@ impl Cell {
             scenario: match scenario {
                 "cap" => Scenario::Cap,
                 "outage" => Scenario::Outage,
-                other => bail!("unknown scenario {other} in {name}"),
+                other => match other.strip_prefix("fl").and_then(|n| n.parse().ok()) {
+                    Some(per_cent) => Scenario::ForwardLoss(per_cent),
+                    None => bail!("unknown scenario {other} in {name}"),
+                },
             },
             chain: match chain {
                 "paced" => Chain::Default,
@@ -449,8 +459,9 @@ impl Cell {
         format!(
             "{}/{}/gap{}/{}/q{}/rl{}",
             match self.scenario {
-                Scenario::Cap => "cap",
-                Scenario::Outage => "outage",
+                Scenario::Cap => "cap".to_owned(),
+                Scenario::Outage => "outage".to_owned(),
+                Scenario::ForwardLoss(per_cent) => format!("fl{per_cent}"),
             },
             match self.chain {
                 Chain::Default => "paced",
@@ -535,6 +546,14 @@ fn run_cell(cell: Cell, seed: u64, phase_ms: u64) -> Result<Figures> {
                 world.uplinks[1].set_profile(LinkProfile::open());
             }
             (reacted, under, world.elapsed())
+        }
+        Scenario::ForwardLoss(per_cent) => {
+            world.forward_loss = per_cent;
+            let t = world.now + CAP_HELD;
+            world.advance(t)?;
+            world.forward_loss = 0;
+            let under = target_at(&world.peers[0].targets, world.elapsed());
+            (None, under, world.elapsed())
         }
         Scenario::Outage => {
             // As `path_change_run` of capacity_cap_video_rtc2rtc.rs: nothing arrives either
@@ -1025,7 +1044,7 @@ const PR_SEED_BASE: u64 = 5000;
 /// receiver without a bound in both chains, then one dimension at a time from the reference
 /// (both directions, the queue's depth, loss on the reverse path) and the outage. The whole
 /// cross is `measure`'s and the dispatched comparison's.
-const PR_CELLS: [(&str, usize); 13] = [
+const PR_CELLS: [(&str, usize); 15] = [
     ("cap/paced/gap300/up/q300/rl0", 60),
     ("cap/paced/gap0/up/q300/rl0", 40),
     ("cap/nopacer/gap300/up/q300/rl0", 40),
@@ -1038,6 +1057,10 @@ const PR_CELLS: [(&str, usize); 13] = [
     ("outage/paced/gap300/up/q300/rl0", 20),
     (MET_OUTAGE, 20),
     ("cap/parolnet/gap0/up/q300/rl0", 20),
+    // Ordinary loss, no collapse: the repairs are made and no key-frame storm follows (the
+    // tripwire on `keyframes`: the NACK responder's give-up must not fire here).
+    (FORWARD_LOSS, 12),
+    (FORWARD_LOSS_PAROLNET, 12),
     // The cell the requirements are met in: the runs their tests need.
     (MET_CAP, REQUIREMENT_RUNS),
 ];
@@ -1048,6 +1071,13 @@ const PR_CELLS: [(&str, usize); 13] = [
 /// (300 more runs would not fit the pull-request job; its tripwires hold it meanwhile).
 const MET_CAP: &str = "cap/parolnet/gap300/up/q300/rl0";
 const MET_OUTAGE: &str = "outage/nopacer/gap300/up/q300/rl0";
+
+/// 3 % of the caller's datagrams lost for 20 s at the full rate, with and without the pacer:
+/// the guard that the rules by which the NACK responder gives repairs up
+/// (`docs/capacity-collapse.md`) do not turn ordinary loss into key-frame requests. Their
+/// baseline holds `keyframes` (3 a call: the two of the start and one more) and `rtx` (149).
+const FORWARD_LOSS: &str = "fl3/paced/gap300/up/q300/rl0";
+const FORWARD_LOSS_PAROLNET: &str = "fl3/parolnet/gap300/up/q300/rl0";
 
 /// The default chain's cells, where the requirements are known limits.
 const DEFAULT_CHAIN: &str = "cap/paced/gap300/up/q300/rl0";
@@ -1680,6 +1710,102 @@ fn the_recorded_baseline_is_well_formed() -> Result<()> {
             "{tripwire:?}"
         );
     }
+    Ok(())
+}
+
+// The NACK responder declines repairs that cannot be useful (docs/capacity-collapse.md, "The
+// NACK responder"): one call per problem it removes, through two peer connections, in a debug
+// build on every platform. The ensembles hold the distributions; these hold the mechanism.
+// Without the rule the same runs give (hosted runs 45582591567 / 45582601276, 200 calls a
+// cell): 120 to 188 retransmissions and an oldest picture of 7.2 to 9.3 s in the first cell;
+// in the second, at this phase, 294 retransmissions and no fresh picture for 8.7 to 8.8 s.
+
+/// A chain without a pacer (ParolNet's) stands at the path's 2.5 Mbit/s when the capacity
+/// drops to 300 kbit/s: a fifth of a megabyte is lost at the queue before the estimate reacts,
+/// and nothing pauses or flushes. The responder gives that backlog up and asks for a key
+/// frame instead of repairing it in order at a rate the path drops again: few
+/// retransmissions, and a receiver WITHOUT a bound in time (it holds a gap until a key frame
+/// releases it) shows a current picture again within seconds. The target under the cap is the
+/// path's, not the floor the retransmission reserve held it at.
+#[test]
+fn an_unpaced_call_collapsing_from_the_paths_rate_gives_its_repairs_up_for_a_key_frame()
+-> Result<()> {
+    let cell = Cell::parse("cap/parolnet/gap0/up/q300/rl0")?;
+    for seed in [2, 3] {
+        let run = run_cell(cell, seed, phase_of(seed))?;
+        assert!(
+            run.get("before") >= 2_300.0,
+            "seed {seed}: the call stood at the path's rate: {run:?}"
+        );
+        assert!(
+            run.get("rtx") <= 60.0,
+            "seed {seed}: {} retransmissions: {run:?}",
+            run.get("rtx")
+        );
+        assert!(
+            run.get("max_age") <= 3.0,
+            "seed {seed}: a picture {} s old: {run:?}",
+            run.get("max_age")
+        );
+        assert!(
+            run.get("keyframes") >= 4.0,
+            "seed {seed}: the key frame asked for was made (two at the start, one for the \
+             receiver's request, one for the responder's): {run:?}"
+        );
+        assert!(
+            run.get("under") >= 240.0,
+            "seed {seed}: the target under the cap is {} kbit/s: {run:?}",
+            run.get("under")
+        );
+    }
+    Ok(())
+}
+
+/// The default chain through an outage of 4 s, with a receiver without a bound in time: what
+/// was sent into the dead path is two seconds old and more when the path returns, and the
+/// receiver asks for all of it. The responder declines by age and asks for a key frame, so
+/// the picture resumes within 2 s of the new pair (the phase of these seeds is the one at
+/// which the pacer's flush does not fire and, without the rule, 294 packets were repaired in
+/// order first).
+#[test]
+fn a_paced_call_resumes_within_two_seconds_of_an_outage_with_a_receiver_without_a_bound()
+-> Result<()> {
+    let cell = Cell::parse("outage/paced/gap0/up/q300/rl0")?;
+    for seed in [3, 6] {
+        let run = run_cell(cell, seed, phase_of(seed))?;
+        assert!(
+            run.get("resume") <= 2.0,
+            "seed {seed}: no fresh picture for {} s after the path's return: {run:?}",
+            run.get("resume")
+        );
+        assert!(
+            run.get("rtx") <= 120.0,
+            "seed {seed}: {} retransmissions: {run:?}",
+            run.get("rtx")
+        );
+    }
+    Ok(())
+}
+
+/// The guard on the other side: 3 % of the caller's packets lost for 20 s at the full rate is
+/// ordinary loss. It is repaired by retransmission (well over a hundred of them), the picture
+/// stays current, and no key frame is made beyond the call's start and at most two more: the
+/// rules that give repairs up do not fire.
+#[test]
+fn ordinary_loss_is_repaired_and_asks_for_no_key_frames() -> Result<()> {
+    let cell = Cell::parse(FORWARD_LOSS_PAROLNET)?;
+    let run = run_cell(cell, 1, phase_of(1))?;
+    assert!(
+        run.get("rtx") >= 80.0,
+        "{} retransmissions: {run:?}",
+        run.get("rtx")
+    );
+    assert!(run.get("max_age") <= 1.0, "{run:?}");
+    assert!(
+        run.get("keyframes") <= 5.0,
+        "{} key frames: {run:?}",
+        run.get("keyframes")
+    );
     Ok(())
 }
 

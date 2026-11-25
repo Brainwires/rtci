@@ -117,7 +117,12 @@ BASELINE = [
     ("audio_tail", "hi", [("limit", 1.0)]),
     ("under", "lo", [0.1]),
     ("window", "lo", [0.1]),
+    # Key frames the caller made: held in the forward-loss cells only (BASELINE_ONLY).
+    ("keyframes", "hi", [0.5, 0.9]),
 ]
+# Figures recorded only for the cells of these scenarios (a prefix of the cell's name): the
+# forward-loss cells guard against ordinary loss being answered with key frames.
+BASELINE_ONLY = {"keyframes": "fl"}
 
 
 @dataclass
@@ -475,6 +480,8 @@ def baseline_lines(runs: list[Run]) -> list[str]:
         for figure, direction, levels in BASELINE:
             xs = values(of_cell, figure)
             if not xs or (figure in ("under", "window") and max(xs) == 0):
+                continue
+            if not cell.startswith(BASELINE_ONLY.get(figure, "")):
                 continue
             high = direction == "hi"
             seen = set()

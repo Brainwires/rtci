@@ -534,7 +534,7 @@ jobs:
         run: cargo check --workspace --all-features --verbose
 
   # What a call's user sees when the path's capacity collapses (tests/capacity_instrument.rs):
-  # the pull-request ensemble in a release build, on GitHub's runners only: 606 runs, about
+  # the pull-request ensemble in a release build, on GitHub's runners only: 630 runs, about
   # twelve minutes with the build (up to twice that on a slow runner). Its tripwires hold
   # every cell against the recorded baseline and its requirement tests are sized for a stated
   # power (the test file's doc). The fine comparison of a congestion-control, pacing,
