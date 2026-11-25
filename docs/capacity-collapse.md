@@ -101,9 +101,11 @@ Either way the **video stream is given up**: everything sent on it so far is for
 later NACK for any of it is answered by nothing), the retransmission reserve those repairs
 held is released at once, and the application is asked for one key frame of the stream, the
 same request as at a flush (below). What is written afterwards is buffered and repaired as
-ever. After a give-up a backlog does not give the same stream up again for two seconds
-(`NACK_GIVE_UP_HOLD`), and the target history is cleared as at a flush, so the key frame that
-answers is never forgotten by a second request. **Audio** is declined by age and nothing
+ever. The target history is cleared at a give-up as at a flush: the key frame that answers
+is written for the target now, and a backlog of its own losses gives the stream up again
+only if the target halves again. (A fixed hold of two seconds after a give-up was built and
+measured: 200 calls in each of 14 cells without a pacer came out row for row the same with
+and without it, since no run gave a stream up twice within it. It is not there.) **Audio** is declined by age and nothing
 else: no key frame is asked of it, its waiting requests survive a give-up of the video.
 
 A backlog at a target that did not just halve is ordinary loss and is repaired, however
@@ -119,6 +121,26 @@ profile has both off: libwebrtc's sender serves every NACK its packet history ca
 never asks itself for a key frame (its receiver does). The age bound is the sender's own
 judgement and is not announced as `rtx-time` (RFC 4588 section 8.1): it would change every
 offer, and a receiver learns of a give-up by the key frame.
+
+**Where an `rtx-time` is set, it is the age bound.** RFC 4588 section 8.1 defines `rtx-time`
+as "the maximum time a sender will keep an original RTP packet in its buffers available for
+retransmission", and section 8.8 has the receiver "take into account the signalled sender
+retransmission buffer length". A time in force for a stream (announced in the session
+description or set by the application for the stream's retransmission format,
+`NackControl::LocalRtxTime`; or `NackResponderBuilder::with_max_packet_age`) is what the
+other side counts on: a packet of that stream is repaired for that long, whether that is
+shorter or longer than two seconds, and the two seconds do nothing for the stream. Past the
+`rtx-time` a packet is not retransmitted and nothing else happens: the stream is not given
+up and no key frame is asked for, since the receiver was told the time and gives the gap up
+by its own rule. The backlog rule is not changed by an `rtx-time` (the time is the most a
+packet is kept; a collapse ends the repairs of what was sent before it, as the flush does).
+
+What the responder remembers of a repair (`DELIVERED_MEMORY`, four seconds from the report
+that a retransmission arrived; four seconds for a retransmission a pacer never reports on)
+is longer than the default age bound and stays so: under the default a packet's memory can
+no longer be reached once the packet is two seconds old (the request is declined by age
+first), and the four seconds are the bound for the configurations in which a packet is
+repaired longer, an `rtx-time` over two seconds or the age rule off.
 
 ### Why two seconds of backlog and not one
 

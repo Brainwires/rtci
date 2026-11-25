@@ -119,9 +119,14 @@ const ORIGINALS: u16 = 60;
 /// retransmissions leave the chain in the six seconds that follow. The pacer drains its queue
 /// above the target (`PacerQueueOverflow::Drain`), so it drops none of them; whatever the
 /// responder lets through leaves. Ends before the RTP circuit breaker's RTCP timeout (15 s).
+///
+/// The packets asked for are three to five seconds old, past the responder's own repair age
+/// (`nack_max_repair_age`, two seconds): that rule is off here, so that the rate limit is the
+/// only thing that holds a retransmission back.
 fn retransmissions_for_a_nack_of_every_packet(limit: RetransmissionRateLimit) -> usize {
     let mut options = DefaultInterceptorOptions::default();
     options.nack_retransmission_rate_limit = limit;
+    options.nack_max_repair_age = None;
     options.pacer_queue_overflow = PacerQueueOverflow::Drain;
     let mut chain = default_chain(options);
     chain.bind_local_stream(&stream_info(LOCAL_SSRC, Some(LOCAL_RTX_SSRC)));

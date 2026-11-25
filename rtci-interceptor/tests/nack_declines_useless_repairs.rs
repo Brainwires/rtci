@@ -6,7 +6,8 @@
 //! packets that it deems important and ignore NACK messages for other packets").
 //!
 //! Two rules, both settings of `NackResponderBuilder`:
-//! - **age** (`with_max_repair_age`, 2 s): a packet written longer ago is not repaired;
+//! - **age** (`with_max_repair_age`, 2 s): a packet written longer ago is not repaired; where
+//!   an `rtx-time` (RFC 4588 8.1) is in force for the stream, that time is the bound instead;
 //! - **backlog** (`with_repair_backlog_bound`, 2 s): requests waiting that would take that
 //!   long at the target, after the target fell to half or less within two seconds, are given
 //!   up.
@@ -17,9 +18,9 @@
 //! `docs/capacity-collapse.md`.
 
 use rtci_interceptor::{
-    Attribute, AttributedPacket, Interceptor, NACK_GIVE_UP_HOLD, NACK_MAX_REPAIR_AGE,
-    NackResponderBuilder, Packet, ProbePacket, ProbeRequest, RTCPFeedback, Registry,
-    RetransmissionRateLimit, RetransmissionReserve, Slot, StreamInfo, TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, NACK_MAX_REPAIR_AGE, NackResponderBuilder, Packet,
+    ProbePacket, ProbeRequest, RTCPFeedback, Registry, RetransmissionRateLimit,
+    RetransmissionReserve, Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::transport_feedbacks::transport_layer_nack::{
@@ -311,6 +312,41 @@ fn without_an_age_bound_an_old_packet_is_repaired() {
     assert!(seen.key_frames.is_empty());
 }
 
+/// RFC 4588 8.1: where an `rtx-time` is in force for the stream it takes the place of the
+/// repair age, longer or shorter. A packet inside it is repaired (four seconds old under a
+/// time of five, where the repair age alone would have given the stream up); one past it is
+/// not retransmitted and that is all: no key frame is asked for and nothing is forgotten, a
+/// younger packet named in the same request is repaired.
+#[test]
+fn an_rtx_time_takes_the_place_of_the_repair_age() {
+    for (rtx_time, inside, past) in [
+        (ms(5_000), ms(4_000), ms(5_100)),
+        (ms(500), ms(400), ms(600)),
+    ] {
+        let mut chain = responder(
+            unlimited().with_max_packet_age(Some(rtx_time)),
+            vec![video(true)],
+        );
+        let epoch = Instant::now();
+        let mut seen = Seen::default();
+        write(&mut chain, epoch, ms(1), VIDEO, 0..10);
+        nack(&mut chain, epoch + inside, VIDEO, &[0, 1]);
+        drain(&mut chain, &mut seen);
+        assert_eq!(vec![(VIDEO, 0), (VIDEO, 1)], seen.repaired, "{rtx_time:?}");
+
+        let mut seen = Seen::default();
+        write(&mut chain, epoch + past - ms(50), ms(1), VIDEO, 10..20);
+        nack(&mut chain, epoch + past, VIDEO, &[2, 3, 15]);
+        drain(&mut chain, &mut seen);
+        assert_eq!(vec![(VIDEO, 15)], seen.repaired, "{rtx_time:?}");
+        assert!(
+            seen.key_frames.is_empty(),
+            "{rtx_time:?}: {:?}",
+            seen.key_frames
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Backlog
 // ---------------------------------------------------------------------------------------
@@ -414,11 +450,12 @@ fn without_a_backlog_bound_the_backlog_is_repaired_in_order() {
     assert_eq!(Some(&(VIDEO, 0)), seen.repaired.first());
 }
 
-/// After a give-up the stream is left alone for the hold: a second fall of the target with a
-/// second backlog (losses in the key frame that answered the first request) does not forget
-/// that key frame and ask again. Once the hold is over a backlog is judged afresh.
+/// A give-up forgets the targets from before it: the answer (the key frame, written for the
+/// target now) is not given up in its turn for the same fall, however large a backlog its own
+/// losses make, and is repaired. Only when the target halves again is a backlog a collapse
+/// again.
 #[test]
-fn a_second_backlog_within_the_hold_does_not_give_the_stream_up_again() {
+fn after_a_give_up_only_another_halving_gives_the_stream_up_again() {
     let mut chain = responder(NackResponderBuilder::new(), vec![video(true)]);
     let epoch = Instant::now();
     let mut seen = Seen::default();
@@ -431,21 +468,20 @@ fn a_second_backlog_within_the_hold_does_not_give_the_stream_up_again() {
     assert!(seen.repaired.is_empty());
     let given_up = at + ms(10);
 
-    // The answer is written; the target falls again, to a quarter; 60 of the new packets
-    // are asked for: 4.9 s of 100 kbit/s, a collapse by the rule.
+    // The answer is written and 120 of its packets are asked for: 2.4 s of the target again,
+    // 400 ms after the fall from 2.5 Mbit/s. The target has not moved since the give-up.
     write(&mut chain, given_up + ms(100), ms(1), VIDEO, 150..350);
-    target(&mut chain, given_up + ms(400), LOW);
-    nack(&mut chain, given_up + ms(410), VIDEO, &numbers(150..210));
+    nack(&mut chain, given_up + ms(410), VIDEO, &numbers(150..270));
     run(
         &mut chain,
         given_up + ms(410),
-        given_up + NACK_GIVE_UP_HOLD - ms(10),
+        given_up + ms(800),
         &mut seen,
     );
     assert_eq!(
         vec![VIDEO],
         seen.key_frames,
-        "no second request in the hold"
+        "no second request for the same fall"
     );
     assert!(
         seen.repaired.contains(&(VIDEO, 150)),
@@ -453,13 +489,10 @@ fn a_second_backlog_within_the_hold_does_not_give_the_stream_up_again() {
         seen.repaired
     );
 
-    // Past the hold (the second fall is still within two seconds): given up again.
-    nack(
-        &mut chain,
-        given_up + NACK_GIVE_UP_HOLD + ms(10),
-        VIDEO,
-        &numbers(250..310),
-    );
+    // The target falls again, to a quarter: what still waits (and 60 more) is 4.9 s of it or
+    // more, a collapse by the rule.
+    target(&mut chain, given_up + ms(800), LOW);
+    nack(&mut chain, given_up + ms(810), VIDEO, &numbers(270..330));
     drain(&mut chain, &mut seen);
     assert_eq!(vec![VIDEO, VIDEO], seen.key_frames);
 }

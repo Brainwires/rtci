@@ -22,8 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NACK_REPAIR_BACKLOG_BOUND`). Giving a video stream up forgets everything sent on it so far,
   releases the retransmission reserve at once and asks the application for one key frame of
   it (a PLI with sender SSRC 0 on `poll_read`, `OnKeyFrameRequest`: the pacer's flush has the
-  same request), at most once per stream in 2 s for a backlog (`NACK_GIVE_UP_HOLD`). Audio is
-  only declined by age. Ordinary loss at a steady target is repaired as before and asks for
+  same request); the targets from before a give-up no longer count, so the key frame that
+  answers is given up in its turn only if the target halves again. Audio is only declined by
+  age. **An `rtx-time` takes the place of the age bound** (RFC 4588 section 8.1: "the maximum
+  time a sender will keep an original RTP packet in its buffers available for
+  retransmission"): where one is in force for a stream (`NackControl::LocalRtxTime` from the
+  session description or the application, `NackResponderBuilder::with_max_packet_age`), a
+  packet of the stream is repaired for that long, shorter or longer than 2 s, and past it the
+  packet is not retransmitted and nothing else happens, as before (no give-up, no key-frame
+  request); the 2 s are the sender's own judgement where no time was set. Ordinary loss at a steady target is repaired as before and asks for
   no key frame. Before, every NACK for a packet still in the 1024-packet buffer was served in
   order: a call without a pacer that met a capacity drop from 2.5 Mbit/s to 300 kbit/s sent
   142 retransmissions (38 dropped again) with its target held at the reserve's floor, now 18
@@ -41,7 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `options.pacer_backlog = PacerBacklog::Keep`, or on a chain built by hand
   `NackResponderBuilder::with_max_repair_age(None).with_repair_backlog_bound(None)`. An
   application must answer a key-frame request with a key frame, as for a remote PLI. No
-  `rtx-time` is announced for the age bound. Fixed with it: a probe cluster asked for while
+  `rtx-time` is announced for the age bound. `DELIVERED_MEMORY` (4 s) is unchanged: under the
+  default age bound a packet's memory is unreachable once the packet is 2 s old, and it is
+  the bound where a packet is repaired longer (an `rtx-time` over 2 s, the age rule off). Fixed with it: a probe cluster asked for while
   the responder's buffer is empty (after a give-up or the pacer's flush, before the next
   packet is written) is still padded, under the header of the newest packet the buffer held;
   before, no padding left, and a chain without a pacer stopped probing.
