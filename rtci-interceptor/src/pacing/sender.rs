@@ -78,6 +78,13 @@ pub enum Backlog {
     /// retransmission asked for ("Pausing the source" on [`PacerInterceptor`]): for a receiver
     /// that plays strictly in order and cannot resume at a key frame. After a sharp drop the
     /// picture such a receiver shows is seconds old.
+    ///
+    /// "Keep and repair everything" is one choice for a whole chain: the default interceptor
+    /// set (`DefaultInterceptorOptions::pacer_backlog`) also switches off the NACK
+    /// responder's own rules that give repairs up
+    /// ([`NackResponderBuilder::with_max_repair_age`](crate::NackResponderBuilder::with_max_repair_age),
+    /// [`with_repair_backlog_bound`](crate::NackResponderBuilder::with_repair_backlog_bound)).
+    /// A chain built by hand sets both to `None` on its responder.
     Keep,
 }
 

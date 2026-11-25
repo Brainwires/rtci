@@ -324,7 +324,9 @@ fn a_request_no_longer_made_is_dropped() {
         assert_eq!(0, nack(&mut chain, at, &lost, Some(8_000.0)));
         let mut last = at;
         if asked_again {
-            last = at + Duration::from_millis(900);
+            // Asked again while the packets are still young enough to be repaired at the end
+            // of the new lifetime (the repair age, two seconds, would end the wait first).
+            last = at + Duration::from_millis(400);
             assert_eq!(0, nack(&mut chain, last, &lost, None));
         }
         let due = chain.poll_timeout().expect("the requests run out");
@@ -519,6 +521,10 @@ fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
 /// 1700 ms; 4 would at 2380 ms, but written at 310 ms it has waited the bound at 2310 ms, and
 /// 4 to 9 are discarded. A NACK for all ten, with a target that has room for them, has
 /// exactly those that left (0 to 3) resent.
+///
+/// The NACK comes three seconds after the packets were written (the pacer's two-second bound
+/// sets the timeline), past the responder's own repair age: that rule is off here
+/// (`with_max_repair_age(None)`), so that what is not resent is what the pacer discarded.
 #[test]
 fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
     let base = Instant::now();
@@ -527,7 +533,12 @@ fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
             Slot::Pacer,
             PacerBuilder::new().with_target_bitrate(12_000.0).build(),
         )
-        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .with(
+            Slot::NackResponder,
+            NackResponderBuilder::new()
+                .with_max_repair_age(None)
+                .build(),
+        )
         .build();
     chain.bind_local_stream(&stream_info());
 

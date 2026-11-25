@@ -76,6 +76,12 @@ fn chain(twcc: bool) -> impl Interceptor {
     chain_with(twcc, RetransmissionRateLimit::Unlimited)
 }
 
+/// The responder's own repair age is off in this file (`with_max_repair_age(None)`): what is
+/// remembered of a repair lasts four seconds (`DELIVERED_MEMORY`, a retransmission the pacer
+/// never reports on), longer than the default repair age of two, under which a packet that old
+/// is not repaired whatever is remembered of it. These tests are about the memories and where
+/// they end, which shows where a packet is repaired that long: an `rtx-time` over two
+/// seconds, or the age rule off as here.
 fn chain_with(twcc: bool, rate_limit: RetransmissionRateLimit) -> impl Interceptor {
     let mut chain = Registry::new()
         .with(Slot::TwccSender, TwccSenderBuilder::new().build())
@@ -83,6 +89,7 @@ fn chain_with(twcc: bool, rate_limit: RetransmissionRateLimit) -> impl Intercept
             Slot::NackResponder,
             NackResponderBuilder::new()
                 .with_rate_limit(rate_limit)
+                .with_max_repair_age(None)
                 .build(),
         )
         .build();

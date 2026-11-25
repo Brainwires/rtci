@@ -161,6 +161,16 @@ fn retransmitted(
     announced: Option<(u8, Duration)>,
     nack_after: Duration,
 ) -> usize {
+    answered(configured, announced, nack_after).0
+}
+
+/// The same, and how many key frames the responder asked the application for (a Picture Loss
+/// Indication on the read leg).
+fn answered(
+    configured: Option<Duration>,
+    announced: Option<(u8, Duration)>,
+    nack_after: Duration,
+) -> (usize, usize) {
     let mut chain = Registry::new()
         .with(
             Slot::NackResponder,
@@ -199,28 +209,52 @@ fn retransmitted(
             })])),
         })
         .unwrap();
-    while chain.poll_read().is_some() {}
-    std::iter::from_fn(|| chain.poll_write())
+    let key_frames = std::iter::from_fn(|| chain.poll_read())
+        .filter(|tagged| {
+            matches!(&tagged.message.packet, Packet::Rtcp(packets) if packets.iter().any(|packet| {
+                packet
+                    .as_any()
+                    .is::<rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
+            }))
+        })
+        .count();
+    let retransmitted = std::iter::from_fn(|| chain.poll_write())
         .filter(|tagged| matches!(tagged.message.packet, Packet::Rtp(_)))
-        .count()
+        .count();
+    (retransmitted, key_frames)
 }
 
+/// RFC 4588 8.1: `rtx-time` is "the maximum time a sender will keep an original RTP packet in
+/// its buffers available for retransmission". The time announced for a stream's retransmission
+/// format is how old a packet of the stream may be and still be repaired: it takes the place
+/// of the responder's own repair age (two seconds, `NACK_MAX_REPAIR_AGE`, the sender's
+/// judgement where nothing was announced), whether shorter or longer, and of the configured
+/// `rtx-time`. Past an announced time the packet is not retransmitted and that is all: the
+/// stream is not given up and no key frame is asked for, as the repair age does.
 #[test]
 fn the_responder_keeps_a_packet_for_the_announced_rtx_time() {
     let ms = Duration::from_millis;
     let announced = Some((RTX_PAYLOAD_TYPE, ms(500)));
 
-    // Nothing configured: without an announced time a packet is kept as long as the buffer
-    // holds it; with one, for that long.
-    assert_eq!(1, retransmitted(None, None, ms(60_000)));
+    // Nothing configured and nothing announced: the responder's own repair age, past which
+    // the video stream is given up for a key frame. With a time announced, that long.
+    assert_eq!((1, 0), answered(None, None, ms(1_900)));
+    assert_eq!((0, 1), answered(None, None, ms(2_100)));
     assert_eq!(1, retransmitted(None, announced, ms(400)));
-    assert_eq!(0, retransmitted(None, announced, ms(600)));
+    assert_eq!((0, 0), answered(None, announced, ms(600)));
+
+    // A time longer than the repair age is the one that counts: a packet four seconds old is
+    // repaired, one six seconds old is not, and nothing is given up.
+    let long = Some((RTX_PAYLOAD_TYPE, ms(5_000)));
+    assert_eq!((1, 0), answered(None, long, ms(4_000)));
+    assert_eq!((0, 0), answered(None, long, ms(6_000)));
 
     // What was announced is what the remote side counts on: it replaces the configured age,
     // shorter or longer.
     assert_eq!(1, retransmitted(Some(ms(100)), announced, ms(400)));
     assert_eq!(0, retransmitted(Some(ms(5000)), announced, ms(600)));
 
-    // Another retransmission format's time is not this stream's.
+    // Another retransmission format's time is not this stream's: the repair age stays.
     assert_eq!(1, retransmitted(None, Some((99, ms(500))), ms(600)));
+    assert_eq!((0, 1), answered(None, Some((99, ms(5_000))), ms(2_100)));
 }

@@ -40,10 +40,12 @@ violating (exact binomial: a tree at 5 % passes with probability 0.951, a tree a
 
 ### The pull-request job
 
-606 runs: the reference cell (default chain, the receiver with the 300 ms bound) 60, the
+630 runs: the reference cell (default chain, the receiver with the 300 ms bound) 60, the
 receiver without a bound 40, the pacer-less chain 40 and 20, both directions capped 30 and 20,
 the queue at 100 and 1000 ms and 5 % loss on the reverse path 12 each, the outage 20 and 20,
-ParolNet's chain 20 and, for its three requirement tests, 300. A run costs 1.7 to 7.4 s of one
+ParolNet's chain 20, 3 % loss on the forward path with no change of capacity 12 and 12 (default
+chain, ParolNet's: the guard that ordinary loss is repaired and asks for no key frames) and, for
+ParolNet's three requirement tests, 300. A run costs 1.7 to 7.4 s of one
 core (measured on hosted runners). Measured (hosted run 45516163858, the job's steps on master
 687ac4a7): the ensemble 5 min 14 s, the whole job 8 min 49 s with the release build; allow
 twelve minutes, and twice that on a slow hosted runner (the same 2000-run measurement took
@@ -139,7 +141,7 @@ trains later). One measurement and one command:
 
     # on the merged head, on a hosted runner (agent-test.yml), two runs:
     RTC_INSTR_CELLS=cap/paced/gap300/up/q300/rl0,cap/paced/gap0/up/q300/rl0 RTC_INSTR_SEEDS=1-1000 cargo test --release -p rtci --test capacity_instrument -- --ignored --nocapture --exact measure
-    RTC_INSTR_CELLS=<the other cells of PR_CELLS, comma separated> RTC_INSTR_SEEDS=1-200 cargo test --release -p rtci --test capacity_instrument -- --ignored --nocapture --exact measure
+    RTC_INSTR_CELLS=<the other cells of PR_CELLS, comma separated (the two fl3 cells may go in a third run)> RTC_INSTR_SEEDS=1-200 cargo test --release -p rtci --test capacity_instrument -- --ignored --nocapture --exact measure
     # then, with the two logs:
     python3 scripts/capacity-instrument.py baseline gate.log star.log --source "master <sha>, runs <ids>" > tests/fixtures/capacity-instrument-baseline.tsv
 
