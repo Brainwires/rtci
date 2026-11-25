@@ -502,8 +502,9 @@ fn in_the_chrome_profile_fec_in_red_rebuilds_what_the_network_lost() -> Result<(
 ///
 /// The network loses RED packets, some of them two in a row (a media packet and the FEC that
 /// protects it), and no retransmission: every frame reaches the application with the payload
-/// it was written with. FEC packets are not retransmitted (libwebrtc keeps none for it): what
-/// leaves that is not RED is the retransmission of media, under the RTX of red.
+/// it was written with. No FEC data is sent again (libwebrtc keeps none for it; a NACK for a
+/// FEC packet is answered with its sequence number alone, under the RTX of red too): what
+/// leaves that is not RED is retransmission, under the RTX of red.
 #[test]
 fn in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red() -> Result<()> {
     use rtci::peer_connection::configuration::interceptor_registry::VIDEO_RED_RTX_PAYLOAD_TYPE;
@@ -551,9 +552,19 @@ fn in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red
     );
 
     // Every frame arrived, and each packet handed to the application is the VP8 that was
-    // written: nothing with a RED header left in front of it.
+    // written: nothing with a RED header left in front of it. A FEC packet reaches the
+    // application too, under the media payload type and without a payload (a sequence
+    // number that is present and is not media).
     let read = &world.peers[1].read;
+    assert!(
+        read.iter().any(|(_, _, payload)| payload.is_empty()),
+        "FEC packets reached the application emptied"
+    );
     for (payload_type, timestamp, payload) in read {
+        if payload.is_empty() {
+            assert_eq!(VP8_PT, *payload_type, "an emptied FEC packet");
+            continue;
+        }
         let seq = (timestamp / 3000) as u16;
         let mut written = vec![0x10u8];
         written.extend((0..200u16).map(|i| (i as u8) ^ (seq as u8)));
@@ -563,7 +574,11 @@ fn in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red
             "the packet of timestamp {timestamp}"
         );
     }
-    let frames: BTreeSet<u32> = read.iter().map(|(_, timestamp, _)| *timestamp).collect();
+    let frames: BTreeSet<u32> = read
+        .iter()
+        .filter(|(_, _, payload)| !payload.is_empty())
+        .map(|(_, timestamp, _)| *timestamp)
+        .collect();
     assert_eq!(
         (1000..1150u32)
             .map(|seq| seq * 3000)
