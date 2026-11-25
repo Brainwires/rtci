@@ -1249,7 +1249,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
-  profile) two engines never raised their send rate** (rtcpbudget-6). A receiver learns a
+  profile) two engines never raised their send rate** (red-1). A receiver learns a
   stream's format from the payload type of its first packet; when that is the `red` format
   (RFC 2198), which is described without `a=rtcp-fb` lines, the stream was bound to the
   interceptors with no feedback at all, while the sender, which knows the stream by its
@@ -1265,6 +1265,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole call); the row at fault was `fec.video-red-ulpfec`, alone. Not affected: the
   default profile (no video RED), and a peer whose feedback is transport-wide (bound by
   the header extension: Chromium). Test `a_red_stream_has_the_feedback_of_the_format_it_carries`.
+  Still open after this entry: a RED packet retransmitted over RTX is not usable by the
+  receiver (it leaves under the media format's RTX payload type); see red-2.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
