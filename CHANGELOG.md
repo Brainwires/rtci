@@ -136,6 +136,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **The session bandwidth an RTCP session measures counts UDP and IP** (RFC 3550 section 6.2:
+  "Bandwidth calculations for control and data traffic include lower-layer transport and
+  network protocols (e.g., UDP and IP)"). Where no `b=AS` / `b=TIAS` gives the session
+  bandwidth, the session measures the RTP sent and received over the last two seconds; each
+  packet now counts with 28 octets of UDP and IPv4, as the RTCP packets always did in the
+  average packet size. Before, the RTP header and payload alone were counted, which
+  understated the session (and so its 5 % of RTCP) by 28 octets a packet: 2 to 3 % beside
+  video, a quarter for 20 ms Opus packets. Test
+  `the_measured_session_bandwidth_counts_udp_and_ip`. Audit: RFC3550-6.2-1 (note).
 - **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
   section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
   the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
