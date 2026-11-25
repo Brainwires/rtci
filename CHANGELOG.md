@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptor, peer connection** (breaker-1): `DefaultInterceptorOptions` has two new public
+  fields, `circuit_breaker` and `circuit_breaker_automatic_restart` (both `true`; see "Fixed"
+  and "Added"). **Migration**: a struct literal adds them or builds on
+  `..DefaultInterceptorOptions::default()`.
+  `CircuitBreakerHandle::report_round_trip_time` now takes each round trip measurement as it
+  is made and smooths them itself (RFC 8083 section 3); it used to store the value given.
+  **Migration**: a caller that handed in an average hands in the samples.
+  The RTP circuit breaker restarts a ceased flow by itself when the receiver's reports show
+  the cause has gone (it never did). **Migration**: an application that wants every restart to
+  be its own sets `circuit_breaker_automatic_restart: false`
+  (`CircuitBreakerBuilder::with_automatic_restart(false)`).
+  With the `Chrome` behaviour profile the default chain has no circuit breaker (`cb.enabled`).
+
 - **ice** (`conf/ice-26-consent-late-responses`): `ice::AgentConfig` has a new public field,
   `consent_response_wait` (`ConsentResponseWait`, default `Rto`), and so has the setting
   engine's `ice` group. **Migration**: a struct literal of either adds `..Default::default()`
@@ -130,6 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
   and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
   section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
+  With breaker-1's rate-now rule (see "Fixed") section 3's form ceases that call in 5 of the
+  test's 6 runs (after 3.6 to 31.6 s; hosted run 45521916073), the default still in none.
   Audit: RFC8083-3-3 is `setting` (measured); it was `partial`. Returned in
   `conf/ccrows-8r-cb-last-frames-test` after train 24 took it out: with the RTP/RTCP family
   (rtp-1, -2, -3, -5, -6, -8) its test, then one seed's first 15 s, saw no trip. The breaker
@@ -836,6 +851,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
   that much; a chain without a pacer has no such attribute and the whole cluster is padding,
   as before.
+- **interceptors** (breaker-1): `CircuitBreakerBuilder::with_automatic_restart` and
+  `DefaultInterceptorOptions::circuit_breaker_automatic_restart` (on by default: RFC 8083
+  section 4.5's restart on information that the congestion has dissipated; off leaves every
+  restart to the application); `DefaultInterceptorOptions::circuit_breaker` and the governed
+  behaviour `cb.enabled` (`Rfc` and `StrictRfc` on: RFC 8834 section 7.1; `Chrome` off:
+  libwebrtc has no RTP circuit breaker); `RtcpReportingInterval`, the deterministic
+  reporting interval the RTCP session calculates, attached to the RTCP it hands
+  application-ward.
+
+- **rtci, interceptor** (collapse-3): `RTCPeerConnectionEvent::OnCircuitBreaker` and
+  `CircuitBreakerNotice` (see "Fixed"). An application that sends media should handle the
+  event: a flow the circuit breaker ceased stays silent until the application restarts it
+  (`DefaultInterceptorHandles::circuit_breaker`, `CircuitBreakerHandle::restart`).
 
 - **ice: `ConsentResponseWait`, how long a consent request waits for its response**
   (`conf/ice-26-consent-late-responses`): `AgentConfig::consent_response_wait`,
@@ -1199,6 +1227,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feedback that left during a cluster was waited for and never came), and a cluster one of
   whose reports is still missing 500 ms after it left is measured on the others instead of
   being given up. `rtci-interceptor/tests/probe_cluster_padding.rs`.
+- **interceptors (RTP circuit breaker, RFC 8083): a call's voice no longer goes silent for
+  good after a capacity drop** (breaker-1). In a call between two peers of this engine a
+  sudden drop of the path's capacity ceased the voice 145 ms later (seven voice packets
+  dropped in a row at the bottleneck's full queue; the peer reports every 25 ms, so
+  MEDIA_TIMEOUT = 5 reports), and with both directions capped, or a 1 s queue, the video
+  (and voice) a few seconds later for congestion. Nothing restarted them. Read against the
+  text:
+  - **Restart (section 4.5).** "RTP flows halted by the circuit breaker SHOULD NOT be
+    restarted automatically unless the sender has received information that the congestion
+    has dissipated". The breaker now restarts a ceased flow, never before the triggering
+    interval has passed again, on the receiver's reports on another flow sent over the same
+    transport: packets of that flow arriving (media timeout); its loss over a whole hold at
+    which the rate that tripped is within ten times TCP again (congestion); loss and round
+    trip inside the application's bound (media usability); a report on an SSRC of this
+    endpoint (RTCP timeout). A flow that trips again within ten holds of a restart is held
+    twice as long each time (up to 64 times). When every flow of a transport has ceased
+    there is nothing a report could speak of, and the restart is the application's:
+    `OnCircuitBreaker`, then `CircuitBreakerHandle::restart` once `restart_after` has passed.
+  - **The sending rate (section 4.3)** compared with ten times the TCP throughput was the
+    average over all of CB_INTERVAL, which after a drop still holds what was sent before the
+    congestion controller reacted. "The actual sending rate" is now also taken over the last
+    round trip (RFC 3551: "The timescale on which TCP throughput is measured is the
+    round-trip time"): the breaker trips on a flow that was above the bound over the interval
+    the loss is averaged over and still is.
+  - **The media timeout (section 4.2)** counted reports that could not have shown the packet
+    they were held against (they arrived less than a round trip after it left), and went on
+    counting for a flow that had stopped sending (a paused pacer); "When stopping sending an
+    RTP stream, a sender MUST cancel the corresponding media timeout circuit breaker".
+  - **Tr (section 3)** was smoothed twice in the default chain (by the congestion controller
+    and again by the breaker) and trailed a filling queue; once now.
+  - **Tdr (section 3)** was the spacing of the receiver's reports; it is the estimate of the
+    receiver's calculated interval: what the chain's RTCP session calculates (RFC 3550
+    6.3.1; `RtcpReportingInterval`), or the spacing of the reports where that is longer.
+    Reports that come closer together than the calculated interval are each counted and no
+    longer stretch the counts (section 5).
+  What stays as the RFC has it: with a peer that reports every few tens of milliseconds
+  (RTP/AVPF without a `T_rr_interval`, this engine's default beside video) five reports
+  without a new packet of a flow that is being sent are a media timeout, in a quarter of a
+  second or less. The flow now comes back when the flow beside it is seen arriving.
+  A ceased encoding takes no share of the congestion controller's target
+  (`RTCRtpSender::target_bitrates`) until it is restarted; dividing the target again for
+  that sets the streams' shares only, so a flow that ceases or restarts while the pacer has
+  the source paused (a target of zero) leaves `availableOutgoingBitrate` at the congestion
+  controller's estimate
+  (`interceptor_circuit_breaker_test::a_flow_ceasing_while_the_source_is_paused_leaves_the_estimate_alone`).
+  Measured (the capacity instrument's cells, 300 kbit/s cap for 20 s; hosted runs
+  45516841561 / 45516852677, 45516861432 / 45516870845; before = the same tree without this
+  change): with a 300 ms bottleneck queue the caller's voice was silent to the end of the call
+  in 63 of 534 runs, now no flow is ceased in any; with a 1000 ms queue it was ceased for good
+  in 96 of 300, now the congestion breaker ceases it in 84 of 300 and the engine restarts it
+  every time (silent 3.7 s in the median, 7.3 s at the 90th percentile, 10.9 s at worst: a
+  known limit, `docs/circuit-breaker.md`); with both directions capped a flow was left ceased
+  in 94 of 100 runs, now one ceases in 7 and is restarted.
+  The capacity file's per-seed check that a sender following the target never freezes for
+  more than 2 s (`a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer`,
+  retired with the capacity instrument in favour of its ensemble requirement) had been met
+  in seed 6 only with the call's voice dead: there the breaker ceased the caller's audio
+  0.166 s after the cap and it never came back, which left the video the whole floor (freeze
+  0.98 s); with the voice alive that seed freezes 2.22 s (the link then carries 74 kbit/s of
+  audio, 22 of new video and 91 of retransmissions in the pause). Over seeds 1 to 200 of that
+  cell at the test's phase the voice was dead in 29; in the other 171 the freeze is the same
+  to the digit with and without this change, and over 2 s in 14 of them (8.2 %) either way
+  (hosted runs 45516852677, 45516841561). The bound is not changed and no seed is chosen: the
+  requirement is the instrument's, over the ensemble, where it is a known limit.
+  Audit rows RFC8083-3-1, 3-6, 4.2-4, 4.2-5, 4.2-6, 4.3-4, 4.5-1, 4.5-2, 5-3.
+
+- **rtci, interceptor / RTP circuit breaker** (collapse-3): the application is told when the
+  circuit breaker (RFC 8083, in the default interceptor set) ceases one of its flows. A ceased
+  flow's packets are dropped until the application restarts it (section 4.5: "SHOULD NOT be
+  restarted automatically"), and nothing said so: the state could only be polled
+  (`CircuitBreakerHandle::ceased`). With a peer that sends a receiver report with every
+  congestion feedback packet (this engine does, every 25 to 50 ms) a breaker trips within a
+  fraction of a second of a sudden capacity drop (the media timeout after five reports without
+  a new packet of the flow: 145 ms after a 2.5 Mbit/s path fell to 300 kbit/s in
+  `tests/capacity_cap_video_rtc2rtc.rs`'s scenario; the congestion breaker over ten round
+  trips: 2 to 3.4 s), and the call lost its audio or its video for good, silently: the
+  audio in 17 of 100 runs of that scenario, the video in the runs "that never show video
+  again" of the capacity review (both directions capped; a 1000 ms queue). Now the breaker
+  sends `CircuitBreakerNotice` application-ward when a flow ceases and when a restart takes
+  effect, and the peer connection raises `RTCPeerConnectionEvent::OnCircuitBreaker` (sender,
+  RID, SSRC, the breaker that tripped, how long until a restart is accepted).
+  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`.
 
 - **tests** (`conf/rtp-9-reporting-ssrc-intermittent`): the RFC 8108 section 6.1 test
   `a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from` no longer fails about
@@ -1356,8 +1466,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in 27.2 % of runs (that test's two to six seeds at one phase of the cap showed 8 %, and
     passed more often than not); the picture on the screen is 8.3 s old in the median all the
     same.
-  - the audio never returns in 8.9 % of runs of the default chain (33 % with a 1000 ms queue):
-    the RTP circuit breaker ceases the audio flow at the drop and nothing restarts it.
+  - (no longer a limit, breaker-1: the audio never returned in 8.9 % of runs of the default
+    chain, 33 % with a 1000 ms queue; now no flow is left ceased in any cell, and
+    `ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end` guards it on
+    every pull request.) With a 1000 ms queue the voice is still silent for some seconds in
+    about a quarter of runs while the congestion breaker holds it (53 of 200 runs with more
+    than 1 s without audio; 3.7 s in the median): `docs/circuit-breaker.md`.
   - both directions capped: every run of the default chain misses the picture requirement
     (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
     ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.

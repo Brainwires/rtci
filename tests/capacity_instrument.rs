@@ -1085,6 +1085,55 @@ fn ensemble_requirement_audio_in_parolnets_chain() -> Result<()> {
     Ok(())
 }
 
+/// THE AUDIO GUARD: in the default chain's two reference cells of the pull-request ensemble
+/// (100 runs), no run ends with a flow left ceased by the circuit breaker (`cb`) or with the
+/// audio silent (`audio_tail` over 1 s). Not a share: one such run fails it (with 100 runs, a
+/// tree in which 3 % of calls end so fails with probability 0.95). `cb` is read at the end of
+/// the run: a flow the breaker ceased and restarted reads 0. A requirement since the breaker's
+/// rules were corrected (breaker-1): until then it ceased the audio at the drop in 8.9 % of
+/// runs and nothing restarted it (this test was `known_limit_…` and failed when run, hosted
+/// run 45516189525's kind); with the corrected rules no flow is ceased at any time in these
+/// cells (0 of 2000 runs, hosted run 45525698919).
+#[test]
+#[ignore = "release ensemble: the capacity-instrument job runs it (cargo test --release -- --ignored ensemble_)"]
+fn ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end() -> Result<()> {
+    let mut dead = Vec::new();
+    for cell in [DEFAULT_CHAIN, DEFAULT_CHAIN_NO_BOUND] {
+        for row in pr_rows(cell)? {
+            let ceased = row.value("cb").is_none_or(|flows| flows > 0.0);
+            let silent = row.value("audio_tail").is_none_or(|tail| tail > 1.0);
+            if ceased || silent {
+                dead.push(format!(
+                    "{cell} seed {}: {} flow(s) ceased, {} of them audio; audio silent for the \
+                     last {} s",
+                    row.seed,
+                    row.value("cb").unwrap_or(f64::NAN),
+                    row.value("cb_audio").unwrap_or(f64::NAN),
+                    row.value("audio_tail").unwrap_or(f64::NAN),
+                ));
+            }
+        }
+    }
+    assert!(
+        dead.is_empty(),
+        "REQUIREMENT not met: no call ends with a flow left ceased or its audio dead; {} \
+         run(s) did:\n{}",
+        dead.len(),
+        dead.join("\n")
+    );
+    Ok(())
+}
+
+/// The 1 s audio requirement in the default chain: met since breaker-1 (0 of 1000 runs with
+/// more than 1 s without audio, hosted run 45525698919; 89 of 1000 before). On 300 runs, on
+/// demand: the reference cell has 60 runs in the pull-request ensemble, where
+/// `ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end` guards it.
+#[test]
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_audio_in_the_default_chain() -> Result<()> {
+    AUDIO.test(DEFAULT_CHAIN)
+}
+
 #[test]
 #[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
 fn on_demand_requirement_resume_after_an_outage_without_the_pacer() -> Result<()> {
@@ -1124,53 +1173,6 @@ fn known_limit_picture_in_the_default_chain() -> Result<()> {
 #[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); 7.6 s in the median"]
 fn known_limit_freeze_in_the_default_chain() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN)
-}
-
-/// THE AUDIO GUARD: in the default chain's two reference cells of the pull-request ensemble
-/// (100 runs), no run ends with a flow left ceased by the circuit breaker (`cb`) or with the
-/// audio silent (`audio_tail` over 1 s). Not a share: one such run fails it (with 100 runs, a
-/// tree in which 3 % of calls end so fails with probability 0.95). A KNOWN LIMIT today: the
-/// breaker ceases the audio at the drop in 8.9 % of runs and nothing restarts it. Until then
-/// the tripwires `cb > 0` and `audio_tail > 1` hold that share on every pull request (they
-/// fail above 15 of 60 runs in the reference cell). The change that makes the breaker restart
-/// a flow turns this into the guard of every pull request: rename it
-/// `ensemble_requirement_no_flow_is_left_ceased_and_audio_is_alive_at_the_end`, give it the
-/// attribute of the other `ensemble_` tests, change its row in docs/test-exclusions.md
-/// likewise, and re-record the baseline.
-#[test]
-#[ignore = "KNOWN LIMIT: a flow left ceased by the circuit breaker or audio silent to the end in 8.9 % of the default chain's runs on master (required: in none)"]
-fn known_limit_no_flow_is_left_ceased_and_audio_is_alive_at_the_end() -> Result<()> {
-    let mut dead = Vec::new();
-    for cell in [DEFAULT_CHAIN, DEFAULT_CHAIN_NO_BOUND] {
-        for row in pr_rows(cell)? {
-            let ceased = row.value("cb").is_none_or(|flows| flows > 0.0);
-            let silent = row.value("audio_tail").is_none_or(|tail| tail > 1.0);
-            if ceased || silent {
-                dead.push(format!(
-                    "{cell} seed {}: {} flow(s) ceased, {} of them audio; audio silent for the \
-                     last {} s",
-                    row.seed,
-                    row.value("cb").unwrap_or(f64::NAN),
-                    row.value("cb_audio").unwrap_or(f64::NAN),
-                    row.value("audio_tail").unwrap_or(f64::NAN),
-                ));
-            }
-        }
-    }
-    assert!(
-        dead.is_empty(),
-        "REQUIREMENT not met: no call ends with a flow left ceased or its audio dead; {} \
-         run(s) did:\n{}",
-        dead.len(),
-        dead.join("\n")
-    );
-    Ok(())
-}
-
-#[test]
-#[ignore = "KNOWN LIMIT: more than 1 s without audio in 89 of 1000 runs on master 0ca11557, 8.9 % (required: at most 5 %): the circuit breaker ceases the audio and it never returns"]
-fn known_limit_audio_in_the_default_chain() -> Result<()> {
-    AUDIO.test(DEFAULT_CHAIN)
 }
 
 #[test]

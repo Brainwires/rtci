@@ -634,6 +634,57 @@ pub enum RTCPeerConnectionEvent {
         target_bitrate: f64,
     },
 
+    /// The RTP circuit breaker (RFC 8083, in the default interceptor set) **ceased a flow of
+    /// this sender**, or a ceased flow was restarted (by the application, or by the breaker).
+    /// While a flow is ceased every RTP packet written for it is dropped: the stream is silent
+    /// at the far end, and its encoding takes no share of the congestion controller's target
+    /// (`RTCRtpSender::target_bitrates`).
+    ///
+    /// RFC 8083 section 4.5: "RTP flows halted by the circuit breaker SHOULD NOT be restarted
+    /// automatically unless the sender has received information that the congestion has
+    /// dissipated or can reasonably be expected to have dissipated. [...] Ideally, a human
+    /// user will be involved in the decision to try to restart the flow", and restarts are
+    /// rate limited "so that the reaction to a triggered circuit breaker lasts for at least
+    /// the triggering interval".
+    ///
+    /// **What restarts a ceased flow.** The breaker does, once `restart_after` has passed,
+    /// when the receiver's reports on another flow of the same transport show that what
+    /// stopped this one has gone (a voice stream stopped by the media timeout while the video
+    /// beside it is still arriving; a video stream stopped for congestion once the voice
+    /// stream's reports show no such loss any more): a second event with `ceased: None`
+    /// follows. That information exists only while another flow of the transport is being
+    /// sent. **When every flow of the transport has ceased** (a call with one stream, or all
+    /// of them stopped at once) nothing is sent that a report could speak of, and the flows
+    /// stay silent until the application restarts them: after `restart_after`, call
+    /// `DefaultInterceptorHandles::circuit_breaker` `.restart(ssrc, now)` (refused before
+    /// `restart_after`), or stop writing and tell the user. A flow that trips again soon
+    /// after a restart is held twice as long each time.
+    /// `DefaultInterceptorOptions::circuit_breaker_automatic_restart` set to `false` leaves
+    /// every restart to the application.
+    ///
+    /// **How fast a breaker trips** follows the receiver's reporting interval, as the RFC has
+    /// it: the media timeout after five reports that show no new packet of a flow that is
+    /// being sent, each a round trip at least after a packet they do not cover (section 4.2);
+    /// the congestion breaker when the flow has been above ten times the TCP throughput for
+    /// ten round trips and still is (section 4.3). Under RTP/AVPF without a `T_rr_interval` a
+    /// peer reports every few tens of milliseconds beside a video stream, so five reports are
+    /// a quarter of a second or less, and a burst that loses six voice packets in a row is
+    /// enough to stop the voice stream; a peer that reports every second (a browser) needs
+    /// five seconds of it.
+    OnCircuitBreaker {
+        /// The sender whose flow it is.
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+        /// The RID of the encoding, `None` when it has none.
+        rid: Option<String>,
+        /// The flow: the encoding's media, RTX or FEC SSRC. What
+        /// `CircuitBreakerHandle::restart` takes.
+        ssrc: crate::rtp_transceiver::SSRC,
+        /// The breaker that tripped; `None` when the flow was restarted.
+        ceased: Option<interceptor::CircuitBreakerReason>,
+        /// For a ceased flow: how long until a restart is accepted.
+        restart_after: std::time::Duration,
+    },
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),

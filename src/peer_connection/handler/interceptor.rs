@@ -96,6 +96,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// `allocate_target_bitrate_on` divides among that transport's encodings, again when the
     /// encodings change.
     pub(crate) transport_targets: std::collections::BTreeMap<usize, f64>,
+    /// The SSRCs of the flows the RTP circuit breaker has ceased and not restarted
+    /// (`CircuitBreakerNotice`): an encoding whose media SSRC is here takes no share of the
+    /// target.
+    pub(crate) ceased_flows: std::collections::BTreeSet<u32>,
     /// The RTP sessions (transport ids) whose RTCP session has been told to join and not to
     /// leave since (`RTCPeerConnection::sync_rtcp_sessions`).
     pub(crate) rtcp_joined: std::collections::BTreeSet<usize>,
@@ -181,6 +185,7 @@ impl Default for InterceptorHandlerContext {
             arrival_mids: None,
             target_bitrate: None,
             transport_targets: std::collections::BTreeMap::new(),
+            ceased_flows: std::collections::BTreeSet::new(),
             rtcp_joined: Default::default(),
             rtcp_leaving: Default::default(),
             fec_session_map: None,
@@ -1917,6 +1922,74 @@ impl<'a> InterceptorHandler<'a> {
         }
     }
 
+    /// A flow the RTP circuit breaker ceased or restarted (`CircuitBreakerNotice`):
+    /// `OnCircuitBreaker` for the sender that sends it (the flow is its encoding's media,
+    /// RTX or FEC SSRC), with the encoding's RID. The target is divided again: a ceased
+    /// encoding takes no share of it, a restarted one has its share back.
+    fn announce_circuit_breaker(
+        &mut self,
+        now: Instant,
+        notice: &interceptor::CircuitBreakerNotice,
+    ) {
+        let changed = if notice.ceased.is_some() {
+            self.ctx.ceased_flows.insert(notice.ssrc)
+        } else {
+            self.ctx.ceased_flows.remove(&notice.ssrc)
+        };
+        if changed {
+            for (key, total) in self.ctx.transport_targets.clone() {
+                let stats = &*self.stats;
+                let shares = crate::peer_connection::priority::allocate_target_bitrate_on(
+                    self.rtp_transceivers,
+                    total,
+                    |mid: &str| stats.section_transport_key(mid) == key,
+                    &self.ctx.ceased_flows,
+                );
+                // The shares only: `total` is the target the streams were last given, zero
+                // while the pacer has the source paused, and not the path's estimate
+                // (`availableOutgoingBitrate` keeps what the congestion controller said).
+                self.stats.on_target_shares(key, total, &shares);
+            }
+        }
+        let found = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .find_map(|(id, t)| {
+                let sender = t.sender().as_ref()?;
+                sender
+                    .send_encodings()
+                    .iter()
+                    .find(|e| {
+                        let coding = &e.rtp_coding_parameters;
+                        coding.ssrc == Some(notice.ssrc)
+                            || coding
+                                .rtx
+                                .as_ref()
+                                .is_some_and(|rtx| rtx.ssrc == notice.ssrc)
+                            || coding
+                                .fec
+                                .as_ref()
+                                .is_some_and(|fec| fec.ssrc == notice.ssrc)
+                    })
+                    .map(|e| (id, e.rtp_coding_parameters.rid.clone()))
+            });
+        if let Some((id, rid)) = found {
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnCircuitBreaker {
+                        sender: crate::rtp_transceiver::RTCRtpSenderId::from(id),
+                        rid: (!rid.is_empty()).then_some(rid),
+                        ssrc: notice.ssrc,
+                        ceased: notice.ceased,
+                        restart_after: notice.restart_after,
+                    },
+                ),
+            });
+        }
+    }
+
     /// Records the SSRC and CSRCs of a packet the chain released, on the receiver that owns
     /// the SSRC (`RTCRtpReceiver::get_synchronization_sources`, `get_contributing_sources`).
     fn record_sources(&mut self, now: Instant, header: &rtp::Header) {
@@ -2439,6 +2512,7 @@ impl<'a>
                                     self.rtp_transceivers,
                                     *bits_per_second,
                                     on_transport,
+                                    &self.ctx.ceased_flows,
                                 );
                             self.stats.on_target_bitrate(key, *bits_per_second, &shares);
                             // A pause of the source (the pacer's queue is long) is a target
@@ -2457,6 +2531,11 @@ impl<'a>
                                 value.downcast_ref::<interceptor::PacerDiscard>()
                             {
                                 self.announce_pacer_discard(packet.now, discard);
+                            } else if let Some(notice) =
+                                value.downcast_ref::<interceptor::CircuitBreakerNotice>()
+                            {
+                                let notice = *notice;
+                                self.announce_circuit_breaker(packet.now, &notice);
                             } else if let Some(fec) =
                                 value.downcast_ref::<interceptor::UlpfecReceiveStats>()
                             {
@@ -2701,6 +2780,10 @@ mod interceptor_session_test;
 #[cfg(test)]
 #[path = "interceptor_early_media_test.rs"]
 mod interceptor_early_media_test;
+
+#[cfg(test)]
+#[path = "interceptor_circuit_breaker_test.rs"]
+mod interceptor_circuit_breaker_test;
 
 /// The octets SRTCP adds to a compound packet under `context`'s profile (RFC 3711 section
 /// 3.3 and 3.4, RFC 7714 section 9): the E flag and SRTCP index, and the HMAC or AEAD tag. No

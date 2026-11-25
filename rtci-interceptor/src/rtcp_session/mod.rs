@@ -302,6 +302,26 @@ pub enum RtcpSessionEvent {
     },
 }
 
+/// The deterministic RTCP reporting interval Td (RFC 3550 section 6.3.1: the calculated
+/// interval without its random variation) as this session calculates it now, for a member
+/// that sends RTP and for one that does not.
+///
+/// The session attaches it to every RTCP packet it hands application-ward. It is what RFC
+/// 8083 section 3 has a sender estimate its receiver's interval by ("Tdr ... can be estimated
+/// by executing the algorithm in Section 6.2 of \[RFC3550\] using the average RTCP packet size
+/// seen at the sender, the number of members ... and whether the receiver is sending SR or RR
+/// packets"): the RTP circuit breaker application-ward of the session reads it. Both values
+/// are computed with the session's own bandwidth, membership, average packet size and
+/// minimum interval (none under RTP/AVPF); a `T_rr_interval` is not in them. Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RtcpReportingInterval {
+    /// Td of a member that has sent RTP lately (it reports with sender reports).
+    pub sender: Duration,
+    /// Td of a member that has not (receiver reports).
+    pub receiver: Duration,
+}
+
 /// Builder for [`RtcpSessionInterceptor`].
 ///
 /// ```
@@ -1363,6 +1383,29 @@ impl RtcpSessionInterceptor {
         let td = deterministic_interval(&self.interval_input(now, we_sent, initial, senders));
         let random = self.unit();
         randomized_interval(td, random).max(MIN_INTERVAL)
+    }
+
+    /// Td as the session calculates it now for a member that sends and for one that does not
+    /// ([`RtcpReportingInterval`]).
+    fn reporting_interval(&self, now: Instant) -> RtcpReportingInterval {
+        let senders = self.sender_count(now);
+        let td = |we_sent: bool| {
+            // A member that sends is one of the senders, whether or not it has been heard to.
+            let senders = if we_sent { senders.max(1) } else { senders };
+            let td = deterministic_interval(&self.interval_input(now, we_sent, false, senders));
+            // A member with no share of the RTCP bandwidth sends no regular report: an hour
+            // stands for never.
+            let td = if td.is_finite() {
+                td.min(3600.0)
+            } else {
+                3600.0
+            };
+            Duration::from_secs_f64(td.max(MIN_INTERVAL))
+        };
+        RtcpReportingInterval {
+            sender: td(true),
+            receiver: td(false),
+        }
     }
 
     /// The `T_rr_interval` regular reports keep (RFC 4585 3.5.3), seconds: the configured or
@@ -2974,7 +3017,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         let now = msg.now;
         self.sync(now);
         let pass = match &msg.message.packet {
@@ -2984,6 +3027,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                 true
             }
         };
+        if pass
+            && self.started
+            && matches!(&msg.message.packet, Packet::Rtcp(packets) if !packets.is_empty())
+        {
+            // What this session calculates as the reporting interval, for the circuit breaker
+            // application-ward (RFC 8083 section 3, Tdr).
+            let interval = self.reporting_interval(now);
+            msg.message.add(Attribute::Custom(Arc::new(interval)));
+        }
         if pass {
             self.read_queue.push_back(msg);
         }
@@ -3262,6 +3314,63 @@ mod tests {
         session.send(Instant::now(), vec![rr(1), rr(2)]);
         // (28 + 16) / 2 = 22: 100 * 15/16 + 22 / 16.
         assert!((session.avg_rtcp_size - (93.75 + 1.375)).abs() < 1e-9);
+    }
+
+    /// RFC 8083 section 3 has a sender estimate its receiver's reporting interval "by
+    /// executing the algorithm in Section 6.2 of \[RFC3550\]". The session executes it and
+    /// attaches what it gives to the RTCP it hands application-ward: Td for a member that
+    /// sends and for one that does not, from the session's bandwidth, members and average
+    /// packet size, with the profile's minimum (five seconds under RTP/AVP, none under
+    /// RTP/AVPF).
+    #[test]
+    fn the_calculated_reporting_interval_rides_on_the_rtcp_handed_application_ward() {
+        let now = Instant::now();
+        let read = |profile: RtcpProfile| {
+            let mut session = RtcpSessionBuilder::new()
+                .with_profile(profile)
+                .with_bandwidth(RtcpBandwidth {
+                    session: Some(1_000_000),
+                    ..Default::default()
+                })
+                .build();
+            session.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+            assert!(session.started);
+            session
+                .handle_read(TaggedPacket {
+                    now,
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtcp(vec![rr(7)])),
+                })
+                .unwrap();
+            // What the session says of itself application-ward comes first; then the packet.
+            let packet = std::iter::from_fn(|| session.poll_read())
+                .find(|packet| matches!(&packet.message.packet, Packet::Rtcp(p) if !p.is_empty()))
+                .expect("the packet is passed on");
+            let interval = *packet
+                .message
+                .custom::<RtcpReportingInterval>()
+                .expect("the calculated interval rides on it");
+            // The remote reporter is a member now; nobody has sent RTP.
+            let input = session.interval_input(now, false, false, 0);
+            (interval, input)
+        };
+
+        let (interval, input) = read(RtcpProfile::Avpf);
+        // 5 % of 1 Mbit/s is 6250 octets a second. Nobody is a sender yet, so the receivers
+        // (both members) share three quarters of it. A member that sends is one sender of
+        // two members, more than a quarter of them: then everyone shares all of it alike.
+        assert!((input.rtcp_bw - 6250.0).abs() < 1e-9);
+        assert_eq!(2, input.members);
+        let receiver = input.avg_rtcp_size * 2.0 / (6250.0 * 0.75);
+        let sender = input.avg_rtcp_size * 2.0 / 6250.0;
+        assert!(receiver > MIN_INTERVAL && receiver < 0.1, "{receiver}");
+        assert!((interval.receiver.as_secs_f64() - receiver).abs() < 1e-6);
+        assert!((interval.sender.as_secs_f64() - sender).abs() < 1e-6);
+
+        // RTP/AVP: the same calculation is held to the five second minimum.
+        let (interval, _) = read(RtcpProfile::Avp);
+        assert_eq!(Duration::from_secs(5), interval.receiver);
+        assert_eq!(Duration::from_secs(5), interval.sender);
     }
 
     /// RFC 3711 section 3.4: the SRTCP index, E flag and authentication tag are part of the
