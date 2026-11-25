@@ -1123,3 +1123,88 @@ fn test_lite_lifecycle() -> Result<()> {
     b.close()?;
     Ok(())
 }
+
+/// RFC 8838 Section 11: a check can outrun the candidate it comes from (a datagram is faster
+/// than trickled signalling). The peer-reflexive candidate the agent learns from that check is
+/// replaced by the signalled one when it arrives: one remote candidate on the address, with the
+/// signalled type and priority and the identity its pairs already have, and the controlling
+/// agent nominates it without the peer-reflexive acceptance wait.
+#[test]
+fn test_signalled_candidate_replaces_the_peer_reflexive_one_it_duplicates() -> Result<()> {
+    let base = Instant::now();
+    let mut a = Agent::new(base, Arc::new(quiet_config()), provider())?;
+    let mut b = Agent::new(base, Arc::new(quiet_config()), provider())?;
+    a.add_local_candidate(host(A_ADDR))?;
+    b.add_local_candidate(host(B_ADDR))?;
+    // `b` knows `a`'s candidate; `b`'s own has not reached `a` yet.
+    b.add_remote_candidate(host(A_ADDR))?;
+    start_both(&mut a, &mut b, base)?;
+
+    // `b`'s first check reaches `a`, which learns its source as a peer-reflexive candidate.
+    b.handle_timeout(base)?;
+    assert!(deliver(&mut b, &mut a, base) > 0, "b sent a check");
+    assert_eq!(a.remote_candidates.len(), 1);
+    assert_eq!(
+        a.remote_candidates[0].candidate_type(),
+        CandidateType::PeerReflexive
+    );
+    let learned_id = a.remote_candidates[0].id().to_string();
+    let pairs = a.candidate_pairs.len();
+
+    // Then signalling delivers the candidate.
+    let signalled = host(B_ADDR);
+    let signalled_priority = signalled.priority();
+    assert!(a.add_remote_candidate(signalled)?);
+    assert_eq!(a.remote_candidates.len(), 1, "one candidate per address");
+    assert_eq!(a.remote_candidates[0].candidate_type(), CandidateType::Host);
+    assert_eq!(a.remote_candidates[0].priority(), signalled_priority);
+    assert_eq!(a.remote_candidates[0].id(), learned_id);
+    assert_eq!(a.candidate_pairs.len(), pairs, "its pairs are kept");
+    assert!(
+        a.candidate_pairs
+            .iter()
+            .all(|p| p.remote_priority == signalled_priority),
+        "its pairs take the signalled priority"
+    );
+
+    // A host pair is nominated at once: well inside the peer-reflexive acceptance wait.
+    let connected_at = connect(&mut a, &mut b, base)?;
+    assert!(
+        connected_at.duration_since(base) < DEFAULT_PRFLX_ACCEPTANCE_MIN_WAIT / 2,
+        "connected after {:?}",
+        connected_at.duration_since(base)
+    );
+    assert_eq!(a.remote_candidates.len(), 1);
+
+    a.close()?;
+    b.close()?;
+    Ok(())
+}
+
+/// A peer-reflexive candidate nobody signals stays one, and keeps its acceptance wait.
+#[test]
+fn test_unsignalled_peer_reflexive_candidate_keeps_its_acceptance_wait() -> Result<()> {
+    let base = Instant::now();
+    let mut a = Agent::new(base, Arc::new(quiet_config()), provider())?;
+    let mut b = Agent::new(base, Arc::new(quiet_config()), provider())?;
+    a.add_local_candidate(host(A_ADDR))?;
+    b.add_local_candidate(host(B_ADDR))?;
+    b.add_remote_candidate(host(A_ADDR))?;
+    start_both(&mut a, &mut b, base)?;
+
+    let connected_at = connect(&mut a, &mut b, base)?;
+    assert_eq!(a.remote_candidates.len(), 1);
+    assert_eq!(
+        a.remote_candidates[0].candidate_type(),
+        CandidateType::PeerReflexive
+    );
+    assert!(
+        connected_at.duration_since(base) >= DEFAULT_PRFLX_ACCEPTANCE_MIN_WAIT,
+        "connected after {:?}",
+        connected_at.duration_since(base)
+    );
+
+    a.close()?;
+    b.close()?;
+    Ok(())
+}

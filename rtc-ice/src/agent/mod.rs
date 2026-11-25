@@ -722,6 +722,19 @@ impl Agent {
                 );
                 continue;
             }
+            // RFC 8838 Section 11: a signalled candidate with the transport address of a
+            // peer-reflexive one the agent learned from a check is that same candidate, so it
+            // takes its place rather than being held beside it.
+            if c.candidate_type() != CandidateType::PeerReflexive
+                && let Some(learned) = self.remote_candidates.iter().position(|cand| {
+                    cand.candidate_type() == CandidateType::PeerReflexive
+                        && cand.addr() == c.addr()
+                        && cand.network_type() == c.network_type()
+                })
+            {
+                self.replace_peer_reflexive_remote_candidate(learned, c);
+                continue;
+            }
             if !self.remote_candidates.iter().any(|cand| cand.equal(&c)) {
                 self.remote_candidates.push(c);
                 let remote_index = self.remote_candidates.len() - 1;
@@ -737,6 +750,39 @@ impl Agent {
                 self.request_connectivity_check();
             }
         }
+    }
+
+    /// RFC 8838 Section 11: a signalled candidate with the address of a peer-reflexive one the
+    /// agent learned from a check takes its place. A check that outruns the candidate it comes
+    /// from (trickled signalling is slower than a datagram) would otherwise leave two remote
+    /// candidates on one address: everything arriving from it is credited to the first, the
+    /// peer-reflexive one, so the signalled candidate's pairs never succeed and the controlling
+    /// agent holds its nomination for the peer-reflexive acceptance wait although the peer said
+    /// what the candidate is.
+    ///
+    /// The pairs the learned candidate is in are kept (it was paired with every local candidate
+    /// when it was learned), with the signalled priority.
+    fn replace_peer_reflexive_remote_candidate(&mut self, remote_index: usize, mut c: Candidate) {
+        let learned = &self.remote_candidates[remote_index];
+        c.last_sent = learned.last_sent;
+        c.last_received = learned.last_received;
+        c.last_authenticated = learned.last_authenticated;
+        c.last_consent = learned.last_consent;
+        // The candidate keeps the identity its pairs are known by: the statistics of a pair
+        // are keyed by the two candidates' ids, and a pair that is carrying data must not
+        // become another pair because its remote candidate was signalled after all.
+        c.id = learned.id.clone();
+        if c.tcp_type() == TcpType::Unspecified {
+            c.tcp_type = learned.tcp_type();
+        }
+        let priority = c.priority();
+        self.remote_candidates[remote_index] = c;
+        for p in &mut self.candidate_pairs {
+            if p.remote_index == remote_index {
+                p.remote_priority = priority;
+            }
+        }
+        self.request_connectivity_check();
     }
 
     /// Sets the credentials of the remote agent.
