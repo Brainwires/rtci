@@ -18,7 +18,7 @@ mod key_material;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crypto::RTCCryptoProvider;
 use key_material::{Needle, context_needles, rtcp, rtp};
@@ -40,7 +40,7 @@ const MAX_LIVE: usize = 16_384;
 
 static CHECKING: AtomicBool = AtomicBool::new(false);
 static TRACKING: AtomicBool = AtomicBool::new(false);
-static NEEDLES: Mutex<Vec<Needle>> = Mutex::new(Vec::new());
+static NEEDLES: RwLock<Vec<Needle>> = RwLock::new(Vec::new());
 /// Per needle: blocks freed while checking that held it.
 static FREED: [AtomicU32; MAX_NEEDLES] = [const { AtomicU32::new(0) }; MAX_NEEDLES];
 /// Blocks allocated while tracking and not yet freed: (address, size), 0 = empty.
@@ -87,8 +87,11 @@ unsafe impl GlobalAlloc for Recording {
         if CHECKING.load(Ordering::SeqCst) {
             // SAFETY: `ptr` is a live block of `layout.size()` bytes until it is freed below.
             let block = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
-            // The lock does not allocate; nothing locks it while checking but this.
-            if let Ok(needles) = NEEDLES.try_lock() {
+            // A read lock: frees on several threads at once all check (a `try_lock` skipped
+            // a block whenever two frees met, which could hide a key). The needles are written
+            // only while not checking; the lock does not allocate.
+            {
+                let needles = NEEDLES.read().unwrap_or_else(|e| e.into_inner());
                 for (i, needle) in needles.iter().enumerate() {
                     if needle.found_in(block) {
                         FREED[i].fetch_add(1, Ordering::SeqCst);
@@ -137,7 +140,7 @@ fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) ->
     for counter in &FREED {
         counter.store(0, Ordering::SeqCst);
     }
-    *NEEDLES.lock().unwrap_or_else(|e| e.into_inner()) = needles.clone();
+    *NEEDLES.write().unwrap_or_else(|e| e.into_inner()) = needles.clone();
 
     TRACKING.store(true, Ordering::SeqCst);
     let keying = Keying {
@@ -333,7 +336,7 @@ fn the_allocator_sees_a_key_schedule_left_behind() {
     for counter in &FREED {
         counter.store(0, Ordering::SeqCst);
     }
-    *NEEDLES.lock().unwrap_or_else(|e| e.into_inner()) = needles.clone();
+    *NEEDLES.write().unwrap_or_else(|e| e.into_inner()) = needles.clone();
     let careless = Box::new(key_material::Schedule::expand(&key).bytes);
     assert!(needles[0].found_in(&careless[..]), "found live");
     CHECKING.store(true, Ordering::SeqCst);
