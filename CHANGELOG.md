@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptor, peer connection** (`conf/flush-1r-backlog-flush-at-collapse`): **the default
+  pacer discards queued video when the path's capacity collapses.** When what waits in the
+  pacer would take a second or more to leave and the target is half or less of what it was
+  when that media was written (or within the last two seconds), the queue and its
+  retransmissions are discarded, the NACK responder answers no NACK for what was sent before,
+  and the application is asked for a key frame of each video stream (a PLI with sender SSRC 0
+  on `poll_read`, `OnKeyFrameRequest`, `OnPacerDiscard`); the source is not paused. Before,
+  the source was paused and everything was delivered in order, which left the receiver's
+  picture 7.9 s old in the median after a drop from 2.5 Mbit/s to 300 kbit/s; now 1.33 s
+  (`docs/capacity-collapse.md`: the texts, the figures by cell, the limits). An application
+  must answer a key-frame request with a key frame, and a receiver must bound its wait for a
+  missing packet or resume at a key frame (`SampleBuilder` does by default). Migration, for
+  a receiver that plays strictly in order: `options.pacer_backlog = PacerBacklog::Keep`, or
+  `PacerBuilder::with_backlog(PacerBacklog::Keep)`. `DefaultInterceptorOptions` has a new
+  public field, `pacer_backlog`: a struct literal without `..Default::default()` no longer
+  compiles.
 - **media** (`conf/flush-2-receiver-gap-bound`): `SampleBuilder` gives a gap up by default.
   A builder of a video format (`Depacketizer::has_key_frames`: VP8, VP9, AV1, H.264, H.265)
   (1) waits for a missing packet at most `DEFAULT_MAX_GAP_WAIT`, 300 ms from the arrival of the
@@ -869,6 +885,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retransmissions waiting in the pacer's queue. The NACK responder fills the cluster with
   that much; a chain without a pacer has no such attribute and the whole cluster is padding,
   as before.
+- **interceptor** (`conf/flush-1r-backlog-flush-at-collapse`): `PacerBacklog` (`Flush`, the
+  default, and `Keep`), `PacerBuilder::with_backlog`, `DefaultInterceptorOptions::pacer_backlog`,
+  the notice `PacerFlush { ssrcs }` the pacer sends application-ward at a flush (the NACK
+  responder forgets those streams), and `PacerInterceptor::flushes()`.
 - **rtp, media** (`conf/flush-2-receiver-gap-bound`): `Depacketizer::has_key_frames()` and
   `Depacketizer::is_key_frame_start(payload)` (both with a default of `false`, so an
   implementation outside the workspace compiles unchanged): the first packet of a key frame by
@@ -1498,6 +1518,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
+- **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
+  docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
+  the entry below): the default chain now meets the picture and freeze requirements in the
+  standard cell and with a receiver without a bound in time (0 of 200; oldest picture 1.33 s),
+  and the resume requirement after an outage with the bounded receiver (0 of 200); their tests
+  are `on_demand_requirement_*`. Still missed:
+  - both directions capped: 119 of 200 runs miss the picture requirement (oldest picture 2.6 s
+    in the median, 10.9 s at worst; 200 and 12.9 s before). The estimate falls only by the
+    rule for missing feedback; there is no backlog at the sender to flush.
+  - a 1000 ms queue on the path: 109 of 200 (2.52 s in the median; 200 and 7.0 s before): the
+    second already in the path's queue cannot be recalled; about 2.0 s is reachable.
+  - an outage with a receiver that has no bound in time: 66 of 200 runs resume later than 2 s
+    (200 before): no flush fires when nothing queued at the sender during the outage.
 - **congestion control, default (paced) chain: a sudden capacity drop can freeze the video for
   more than 2 s** (`tests/capacity_cap_video_rtc2rtc.rs`, the 300 kbit/s cap arriving at
   2.5 Mbit/s). Over 108 runs (six seeds, three wall clocks, six perturbations of incidental wire
