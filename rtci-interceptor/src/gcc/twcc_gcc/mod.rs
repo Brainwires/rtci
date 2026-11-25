@@ -813,6 +813,115 @@ mod tests {
         );
     }
 
+    /// The two ends do not take a new path into use at the same instant: what this endpoint
+    /// sends after its own change and before the path carries media to the other end (here a
+    /// burst of twenty-four packets, a probe cluster's worth) is lost, and is no loss of the
+    /// new path's either. Counted, twenty-four of the first thirty-nine packets would lower
+    /// the estimate that has just started over (the loss-based controller's 10 %). A packet
+    /// lost after one that arrived is a loss as ever
+    /// (`rtpfb::history::tests::a_loss_before_anything_arrived_on_a_new_path_is_not_reported`).
+    #[test]
+    fn packets_sent_before_a_new_path_carried_anything_are_not_its_loss() {
+        let feedback = |base_sequence_number: u16, lost: u16, received_us: &[i64], now| {
+            let reference_time = (received_us[0] / 64_000) as u32;
+            let mut recv = reference_time as i64 * 64_000;
+            let recv_deltas = received_us
+                .iter()
+                .map(|t| {
+                    let delta = t - recv;
+                    recv = *t;
+                    RecvDelta {
+                        type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                        delta,
+                    }
+                })
+                .collect();
+            let run = |symbol, run_length| {
+                PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                    type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                    packet_status_symbol: symbol,
+                    run_length,
+                })
+            };
+            let mut packet_chunks = Vec::new();
+            if lost > 0 {
+                packet_chunks.push(run(SymbolTypeTcc::PacketNotReceived, lost));
+            }
+            packet_chunks.push(run(
+                SymbolTypeTcc::PacketReceivedSmallDelta,
+                received_us.len() as u16,
+            ));
+            TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerCc {
+                    base_sequence_number,
+                    packet_status_count: lost + received_us.len() as u16,
+                    reference_time,
+                    packet_chunks,
+                    recv_deltas,
+                    ..Default::default()
+                })])),
+            }
+        };
+        // The estimate after the first feedback on the new path, and after the next one,
+        // which makes the losses the first one named final.
+        let (before, after) = {
+            let (mut chain, handle) = make_chain();
+            let ssrc = 1001u32;
+            chain.bind_local_stream(&stream_info_with_twcc(ssrc));
+            let base = Instant::now();
+            let at = |ms: u64| base + Duration::from_millis(ms);
+            // A clean path first, so that the loss average is zero as after a call's start.
+            for i in 0..10u16 {
+                chain
+                    .handle_write(make_rtp(ssrc, i, at(u64::from(i) * 20)))
+                    .unwrap();
+            }
+            let recv_us: Vec<i64> = (0..10).map(|k: i64| k * 20_000 + 20_000).collect();
+            chain
+                .handle_read(make_twcc_feedback(0, &recv_us, at(250)))
+                .unwrap();
+            chain
+                .handle_read(crate::PathChanged.into_packet(at(7_000), None))
+                .unwrap();
+            // 10..34 at the instant of the change: the path does not carry them.
+            for i in 10..34u16 {
+                chain.handle_write(make_rtp(ssrc, i, at(7_000))).unwrap();
+            }
+            // 34..42 arrive.
+            for i in 34..42u16 {
+                chain
+                    .handle_write(make_rtp(ssrc, i, at(7_010 + u64::from(i - 34) * 20)))
+                    .unwrap();
+            }
+            while chain.poll_write().is_some() {}
+            let received: Vec<i64> = (0..8).map(|k: i64| 7_030_000 + k * 20_000).collect();
+            chain
+                .handle_read(feedback(10, 24, &received, at(7_250)))
+                .unwrap();
+            let before = handle.estimate_bps().unwrap();
+            // 42..57 arrive: the feedback after which the losses the first one named are
+            // final.
+            for i in 42..57u16 {
+                chain
+                    .handle_write(make_rtp(ssrc, i, at(7_200 + u64::from(i - 42) * 20)))
+                    .unwrap();
+            }
+            while chain.poll_write().is_some() {}
+            let received: Vec<i64> = (0..15).map(|k: i64| 7_220_000 + k * 20_000).collect();
+            chain
+                .handle_read(feedback(42, 0, &received, at(7_550)))
+                .unwrap();
+            (before, handle.estimate_bps().unwrap())
+        };
+        assert!(before >= 300_000, "{before}");
+        assert!(
+            after >= before,
+            "cut from {before} to {after} for packets sent before the path carried anything"
+        );
+    }
+
     /// The target rides with the controller's minimum (`MinimumTarget`), so the NACK
     /// responder knows where the original media cannot be lowered further.
     #[test]

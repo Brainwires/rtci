@@ -1295,6 +1295,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **congestion control: packets sent before a new path carried anything are not the new
+  path's loss.** At a path change (the peer connection's `PathChanged`, or packets from new
+  addresses) the estimate starts over and the packets sent into the path that was left are
+  forgotten. The two ends do not take the new path into use at the same instant, though: what
+  an endpoint sends between its own change and the moment the path carries media to the other
+  end goes nowhere, and those packets were reported as the new path's loss. With bandwidth
+  probing on, a probe cluster asked for at the instant of the change (23 padding packets in
+  a chain without a pacer) is among them: after an ICE restart whose controlled side learned
+  of the pair 10 ms before the controlling side, 24 of the first 47 packets it sent were
+  counted lost and the estimate that had just started over at 300 kbit/s was cut to 298.9
+  (`tests/capacity_cap_video_rtc2rtc.rs::
+  an_estimate_started_over_on_a_new_path_does_not_fall_without_evidence`, which only held
+  while retransmissions of old packets watered the fraction down to under 10 %). Now a packet
+  sent on a new path earlier than every packet reported received over it, and reported as
+  not received, is released without a verdict (the send history, `before_the_path_carried`),
+  as the packets of the old path are; a packet lost after one that arrived is a loss as
+  ever. Tests: `rtpfb::history::tests::
+  a_loss_before_anything_arrived_on_a_new_path_is_not_reported`,
+  `a_loss_before_the_first_arrival_of_a_call_is_reported`, `gcc::twcc_gcc::tests::
+  packets_sent_before_a_new_path_carried_anything_are_not_its_loss`.
 - **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
   (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
   it receives, so a peer that follows it (this engine with
