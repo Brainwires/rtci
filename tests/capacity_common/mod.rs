@@ -23,8 +23,8 @@ use bytes::Bytes;
 use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtci::interceptor::{
     GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder, NackResponderBuilder,
-    PassThroughInterceptor, ReceivedRateBound, Registry, RetransmissionRateLimit, RtcpRandom,
-    RtcpSessionBuilder, Slot,
+    PacerBacklog, PassThroughInterceptor, ReceivedRateBound, Registry, RetransmissionRateLimit,
+    RtcpRandom, RtcpSessionBuilder, Slot,
 };
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
@@ -173,12 +173,17 @@ pub struct Setup {
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     pub received_rate_bound: Option<ReceivedRateBound>,
+    /// What the default chains' pacer does with its backlog when capacity collapses
+    /// (`DefaultInterceptorOptions::pacer_backlog`, docs/capacity-collapse.md); the engine's
+    /// default when `None`.
+    pub pacer_backlog: Option<PacerBacklog>,
     /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
     /// permanent tests run [`Perturbation::None`].
     pub perturbation: Perturbation,
     /// How long the receivers wait for a missing video packet before they give the gap up and
     /// ask for a key frame (`SampleBuilder::with_max_gap_wait`, docs/receiver-gap-policy.md).
-    /// `None`: no bound in time, the gap is held for the builder's 256 packets.
+    /// `None`: no bound in time (the builder's default bound turned off), the gap is held for
+    /// the builder's 256 packets or until a complete key frame releases it.
     pub gap_wait: Option<Duration>,
     /// Per cent of the datagrams the callee sends (its media and all its feedback: the
     /// caller's reverse path) that are lost, drawn from the run's seed. Zero: none.
@@ -238,10 +243,17 @@ impl Setup {
             profile: None,
             share_follows_send_rate: None,
             received_rate_bound: None,
+            pacer_backlog: None,
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
         }
+    }
+
+    /// The default chains' pacer keeps (`Keep`) or flushes (`Flush`) its backlog at a collapse.
+    pub fn pacer_backlog(mut self, backlog: PacerBacklog) -> Self {
+        self.pacer_backlog = Some(backlog);
+        self
     }
 
     /// The receivers give a gap up after `wait` and ask for a key frame.
@@ -553,6 +565,12 @@ pub struct Peer {
     /// requests (PLI / FIR) it was handed.
     pub pacer_discards: Vec<(Duration, u32, usize)>,
     pub key_requests_received: u32,
+    /// The key-frame requests the engine itself made of this peer's application (a Picture
+    /// Loss Indication with sender SSRC 0: the pacer's, at a discard or a flush of its
+    /// backlog): when, and the media SSRC named.
+    pub local_key_requests: Vec<(Duration, u32)>,
+    /// Every `OnKeyFrameRequest`: when, and the sender named.
+    pub key_frame_request_events: Vec<(Duration, RTCRtpSenderId)>,
     /// When the application was told of a selected candidate pair, with the estimate then.
     pub pair_changes: Vec<(Duration, Option<u32>)>,
     /// The lowest `availableOutgoingBitrate` of the nominated pair (webrtc-stats) and the
@@ -703,6 +721,9 @@ impl Peer {
             if let Some(rate_limit) = rate_limit {
                 options.nack_retransmission_rate_limit = rate_limit;
             }
+            if let Some(backlog) = setup.pacer_backlog {
+                options.pacer_backlog = backlog;
+            }
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;
             }
@@ -836,10 +857,7 @@ impl Peer {
             force_key: true,
             keyframes_sent: Vec::new(),
             video_receiver: None,
-            builder: match setup.gap_wait {
-                Some(wait) => builder.with_max_gap_wait(wait),
-                None => builder,
-            },
+            builder: builder.with_max_gap_wait(setup.gap_wait),
             gap_wait: setup.gap_wait,
             audio_arrivals: Vec::new(),
             left_connected: 0,
@@ -852,6 +870,8 @@ impl Peer {
             keyframe_requests: Vec::new(),
             pacer_discards: Vec::new(),
             key_requests_received: 0,
+            local_key_requests: Vec::new(),
+            key_frame_request_events: Vec::new(),
             pair_changes: Vec::new(),
             lowest_outgoing: None,
             lowest_estimate: None,
@@ -1265,6 +1285,9 @@ impl World {
                 RTCPeerConnectionEvent::OnPacerDiscard {
                     frames, packets, ..
                 } => peer.pacer_discards.push((at, frames, packets)),
+                RTCPeerConnectionEvent::OnKeyFrameRequest { sender, .. } => {
+                    peer.key_frame_request_events.push((at, sender));
+                }
                 _ => {}
             }
         }
@@ -1300,6 +1323,13 @@ impl World {
                 {
                     peer.force_key = true;
                     peer.key_requests_received += 1;
+                    for packet in &packets {
+                        if let Some(pli) = packet.as_any().downcast_ref::<PictureLossIndication>()
+                            && pli.sender_ssrc == 0
+                        {
+                            peer.local_key_requests.push((at, pli.media_ssrc));
+                        }
+                    }
                 }
                 _ => {}
             }
