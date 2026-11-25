@@ -1051,7 +1051,13 @@ impl NackResponderInterceptor {
     /// (the request carries its [`RtpSession`](crate::RtpSession)): it is filled on a stream of
     /// that session only, so the probe travels the path whose capacity it measures (RFC 8836
     /// section 2: each path its own capacity).
-    fn fill_probe(&mut self, now: Instant, request: &ProbeRequest, session: Option<usize>) {
+    fn fill_probe(
+        &mut self,
+        now: Instant,
+        request: &ProbeRequest,
+        fill: Option<usize>,
+        session: Option<usize>,
+    ) {
         let sessions = &self.sessions;
         let Some(stream) = self
             .streams
@@ -1078,7 +1084,11 @@ impl NackResponderInterceptor {
             return;
         };
 
-        let wanted = request.octets.min(MAX_PROBE_FILL_OCTETS);
+        // The pacer says how much padding the cluster needs beyond the media it holds
+        // ([`ProbeFill`](crate::ProbeFill)); without a pacer, the whole cluster.
+        let wanted = fill
+            .map_or(request.octets, |octets| octets.min(request.octets))
+            .min(MAX_PROBE_FILL_OCTETS);
         let mut filled = 0usize;
         for _ in 0..MAX_PROBE_FILL_PACKETS {
             if filled >= wanted || self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
@@ -1741,7 +1751,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         // A probe cluster the congestion controller asks for: fill it.
         if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
             let session = crate::RtpSession::of(&msg.message);
-            self.fill_probe(now, &request, session);
+            let fill = msg
+                .message
+                .custom::<crate::ProbeFill>()
+                .filter(|fill| fill.cluster == request.cluster)
+                .map(|fill| fill.octets);
+            self.fill_probe(now, &request, fill, session);
         }
 
         // Process NACK packets

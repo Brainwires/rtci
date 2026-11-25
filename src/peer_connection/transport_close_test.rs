@@ -258,3 +258,70 @@ fn rejecting_every_section_closes_each_of_several_transports() -> Result<()> {
     );
     Ok(())
 }
+
+/// `close()` wipes the connection's DTLS session (`with_dtls_session_resumption(true)`, RFC
+/// 5764 section 3) at once, not when the connection is dropped: the tickets its DTLS client
+/// side holds are dropped and none is kept after, and the keys its DTLS server side seals
+/// tickets under are zeroized (review 2 of the session, R8). Every transport of the
+/// connection shares that one session.
+#[test]
+fn closing_the_connection_wipes_its_dtls_session() -> Result<()> {
+    use sansio::Protocol;
+    let session_peer = |policy| -> Result<RTCPeerConnection> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_bundle_policy(policy)
+                    .build(),
+            )
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_dtls_session_resumption(true)
+                    .build(),
+            )
+            .build(Instant::now())
+    };
+    let mut offerer = session_peer(RTCBundlePolicy::MaxCompat)?;
+    let mut answerer = session_peer(RTCBundlePolicy::MaxCompat)?;
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        offerer.add_transceiver_from_kind(kind, None)?;
+    }
+    exchange(&mut offerer, &mut answerer)?;
+    for pc in [&mut offerer, &mut answerer] {
+        let group = pc
+            .dtls_transport()
+            .resumption
+            .clone()
+            .expect("the connection has a session");
+        for id in pc.pipeline_context.transports.ids() {
+            let shared = pc.with_transport(id, |pc| pc.dtls_transport().resumption.clone());
+            assert!(
+                shared.is_some_and(|shared| std::sync::Arc::ptr_eq(&shared, &group)),
+                "every transport has the connection's session"
+            );
+        }
+        // (The store may be empty already: it is emptied as soon as no transport will take a
+        // ticket from it any more. The keys stay for as long as the connection is open.)
+        assert!(
+            !group.ticket_keys_wiped(),
+            "the ticket keys are held while the connection is open"
+        );
+        pc.close()?;
+        assert!(group.store().is_emptied(), "the client side's tickets");
+        assert!(group.ticket_keys_wiped(), "the server side's ticket keys");
+    }
+    Ok(())
+}
+
+/// Without the setting a connection has no DTLS session to wipe, and closes as before.
+#[test]
+fn a_connection_without_the_dtls_session_setting_has_none() -> Result<()> {
+    use sansio::Protocol;
+    let mut pc = peer(RTCBundlePolicy::MaxCompat, false)?;
+    assert!(pc.dtls_transport().resumption.is_none());
+    pc.close()?;
+    Ok(())
+}
