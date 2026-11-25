@@ -103,6 +103,27 @@ A head that is worse in one figure and better in another has broken the rule; wh
 is wanted is the owner's decision, made on the table, not the integrator's. A change that
 improves a cell re-records the baseline (below).
 
+## Reading the recovery after the cap
+
+Three figures say how the rate comes back once the capacity has. `recover` is the time until the
+target is at 0.4 of what it was before the drop: a RELATIVE level, 1000 kbit/s for a call that
+met the drop at 2.5 Mbit/s and 565 kbit/s for one that met it at 1.4 Mbit/s, so it compares two
+chains or two trees only where `before` is the same (the chains without a pacer read six seconds
+"faster" than the default chain for as long as their start-up did not reach the maximum; the
+climb was the same). `to1000` is the time until the target is at 1000 kbit/s, whatever it was
+before: the ABSOLUTE figure, the one to compare chains and trees with. `window` is the mean
+target 15 to 25 s after the capacity's return. From the under-cap rate of about 240 kbit/s the
+8 % a second of draft-ietf-rmcat-gcc-02 section 5.5 is at 1000 kbit/s after 18 s; no IETF text
+asks for more after a long cap.
+
+`startup` is the time from the start of the call until the target is within 5 % of the 2.5 Mbit/s
+maximum (99: not before the drop at 20 s): the start-up probing of RFC 8836 section 2,
+requirement 4, as a figure of every run.
+
+The scenario `cap60` holds the cap for 60 s instead of 20 (measurement only): what a sender that
+tries for its old rate costs a path that does not come back for a long time is read there, in
+`under`, the picture and the audio figures.
+
 ## Re-recording the baseline
 
 The tripwires compare with `tests/fixtures/capacity-instrument-baseline.tsv`, recorded from

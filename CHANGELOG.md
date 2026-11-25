@@ -1567,6 +1567,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - both directions capped: every run of the default chain misses the picture requirement
     (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
     ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
+  - both directions capped, why: each sender's congestion feedback crosses the other sender's
+    overloaded uplink and is dropped there for about the first second (the queue drops RTCP
+    like media), and what arrives is 0.33 s late, so the estimate is under 400 kbit/s 0.8 to
+    1.9 s after the drop where one way it is 0.5 s. A missing-feedback timeout of three
+    observed feedback intervals (RFC 8888 section 5 permits it) brings that to 0.8 s in the
+    median and was measured and NOT taken: with one direction capped it cuts the healthy
+    direction's target to 915 from 2373 kbit/s (audit row RFC8888-5-2).
+  - a peer reports `disconnected` for 0.2 to 1.4 s in 13 to 17 % of calls through the drop
+    (one ICE consent datagram lost at the full queue; none stays so, none fails): the
+    documented meaning of the state (docs/conformance/audit/rfc7675.md).
   - without the pacer: the picture requirement is violated in 7.0 % of runs (interval 4.2 to
     11.4 %) and the freeze one in 5.5 %: at the bound, neither met nor missed can be claimed
     (their 300-run tests pass on one draw and fail on the next; run on demand).
@@ -1580,6 +1590,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
+  (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the
+  capacity's return until the target is at 1000 kbit/s; `recover` waits for 0.4 of the target
+  before the drop, which is a different rate in a chain that met the drop lower, so it does not
+  compare chains) and `startup` (seconds from the start of the call until the target is within
+  5 % of the 2.5 Mbit/s maximum; 99 when not before the drop); new scenario `cap60` (the cap
+  held 60 s instead of 20; measurement only). The baseline gains two tripwires per cell (the
+  90th percentile of each new figure) when it is next recorded. Test only.
+
+- **capacity instrument: how long a peer is disconnected, the direction that was not capped,
+  a feedback outage** (`conf/instrument-3-disconnect-and-reverse-columns`): new figures
+  `disc_time`, `disc_max`, `disc_open` (episodes outside Connected: total, longest, still open
+  at the end), `stun_lost` (ICE consent datagrams that did not arrive), `low` / `mean10` (the
+  caller's lowest and mean target after the drop) and `back_low` / `back_mean` (the callee's:
+  the direction whose capacity did not change); new scenario `fbgap` (no capacity change, the
+  callee's RTCP lost for 300 ms). The baseline gains three tripwires per cell (`disc_open` > 0,
+  `disc_max` > 2 s, the 10th percentile of `back_mean`) when it is next recorded. Test only.
 
 - **capacity-cap test: bounds from a perturbed ensemble** (`conf/capmatrix-1-perturbed-ensemble`):
   `measure_the_capacity_cap` takes `RTC_CAP_PERTURB` (the ICE SOFTWARE text absent, 27 or 40
