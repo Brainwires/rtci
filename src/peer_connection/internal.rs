@@ -205,6 +205,7 @@ pub(crate) fn ice_agent_config(
         nomination_acceptance: setting_engine.ice.nomination_acceptance,
         failed_nomination: setting_engine.ice.failed_nomination,
         nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
+        consent_response_wait: setting_engine.ice.consent_response_wait,
         ta: setting_engine.ice.pacing,
         pacing_group: setting_engine.ice.pacing_group.clone(),
         unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
