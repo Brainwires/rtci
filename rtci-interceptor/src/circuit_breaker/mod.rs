@@ -108,8 +108,9 @@ pub enum CircuitBreakerReason {
 /// congestion has dissipated or can reasonably be expected to have dissipated"; where no such
 /// information can reach the breaker (every flow of the transport has ceased) only the
 /// application can restart the flow, so it has to hear of it: the peer connection hands this
-/// to the application as `RTCPeerConnectionEvent::OnCircuitBreaker`. Read with
-/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+/// to the application as `RTCPeerConnectionEvent::OnCircuitBreaker`. The pacer reads it on
+/// its way past and stops charging the flow's packets to its budget (they do not leave).
+/// Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CircuitBreakerNotice {
     /// The flow (a media, RTX or FEC SSRC this endpoint sends).
