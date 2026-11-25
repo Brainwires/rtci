@@ -1676,6 +1676,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
+- **the `Chrome` profile shows a stale picture after a capacity collapse** (red-2;
+  docs/capacity-collapse.md, "The Chrome profile keeps its backlog"). Its pacer row is
+  libwebrtc's (`pacer.queue-overflow` `Drain`): the backlog is never flushed, the source is
+  paused and the queued repairs are delivered in order. One direction of a 2.5 Mbit/s call
+  capped at 300 kbit/s, 1000 seeds, with the profile's RED video repaired (red-1, red-3,
+  red-2): oldest picture 5.5 s, older than 2 s for more than half a second in every call
+  (the default: 1.3 s, none); both directions capped 11.5 s against 2.6 s. Not a defect: the
+  profile with that one row set to `Drop` is at 1.46 s, the default with `Drain` at 6.6 s
+  (200 seeds). An application that wants the profile's other rows and a fresh picture sets
+  `DefaultInterceptorOptions::pacer_queue_overflow` to `Drop`. The four-profile table of
+  docs/capacity-instrument.md has the profile's column measured with the repairs.
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
   the entry below): the default chain now meets the picture and freeze requirements in the

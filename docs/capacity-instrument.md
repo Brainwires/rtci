@@ -317,24 +317,32 @@ brackets the difference from the default on the same seeds and its 95 % half-wid
 the endpoint behind the cap sends, with UDP/IP and SRTCP, seed 1 (run 45568130991). The
 default's own rows are those of the base tree to the digit (45563704606).
 
-| | default | Performance | default + share follows send rate | Chrome (before the RED repair fix) |
+The `Chrome` column is of a later tree, measured once its RED video could be repaired: train 32
+at ff4d06af (which has the pacer's flush at a collapse, `conf/flush-1r`) with
+`conf/rtcpbudget-4` and `conf/red-1`, `-3`, `-2`; reference cell seeds 1 to 1000 (run
+45608119054), both directions capped seeds 1 to 200 (45608102463). The default of that tree
+flushes its backlog and is not the default of the other three columns, so each `Chrome` cell
+gives its own default beside it: the figure after "default" and the difference per seed on
+seeds 1 to 200 of that tree (45608102463). Its RTCP rows are as measured before the repairs.
+
+| | default | Performance | default + share follows send rate | Chrome (later tree; its default beside each figure) |
 |---|---|---|---|---|
 | RTCP, open call, kbit/s | 121.9 | 22.5 | 122.2 | 20.3 |
 | RTCP under the cap | 79.9 | 22.3 | 32.9 | 19.8 |
 | RTCP of the other endpoint during the cap | 72.6 | 12.8 | 72.1 | 20.6 |
-| oldest picture, s | 7.92 | 6.07 (-1.85 +-0.05) | 6.21 (-1.70 +-0.06) | 5.82 (-2.09 +-0.11) |
-| freeze, s | 7.60 | 5.77 (-1.84 +-0.05) | 5.90 (-1.70 +-0.06) | 6.18 (-1.43 +-0.12) |
-| audio gap over 1 s (runs); audio packets lost | 0; 27.2 | 0; 22.8 (-4.3 +-0.3) | 0; 24.4 (-2.8 +-0.4) | 0; 26.3 (-0.9 +-0.4) |
-| target under the cap, kbit/s | 237 | 296 (+58.5 +-0.5) | 283 (+46.0 +-0.6) | 208 (-29.3 +-3.1) |
-| time to detect, s | 0.590 | 0.589 | 0.590 | 0.592 |
-| time to recover, s; runs over 20 s | 17.93; 128 | 16.14 (-1.79 +-0.14); 0 | 16.14 (-1.79 +-0.16); 0 | 14.37 (-3.56 +-0.19); 18 |
-| target 15 to 25 s after, kbit/s | 1216 | 1394 (+178 +-14) | 1397 (+182 +-16) | 1397 (+181 +-17) |
+| oldest picture, s | 7.92 | 6.07 (-1.85 +-0.05) | 6.21 (-1.70 +-0.06) | 5.49 (default 1.32: +4.18 +-0.10) |
+| freeze, s | 7.60 | 5.77 (-1.84 +-0.05) | 5.90 (-1.70 +-0.06) | 5.16 (default 1.01: +4.17 +-0.10) |
+| audio gap over 1 s (runs); audio packets lost | 0; 27.2 | 0; 22.8 (-4.3 +-0.3) | 0; 24.4 (-2.8 +-0.4) | 0; 27.5 (default 27.2: +0.6 +-0.8) |
+| target under the cap, kbit/s | 237 | 296 (+58.5 +-0.5) | 283 (+46.0 +-0.6) | 195 (default 246: -49.9 +-3.4) |
+| time to detect, s | 0.590 | 0.589 | 0.590 | 0.587 (default 0.590) |
+| time to recover, s; runs over 20 s | 17.93; 128 | 16.14 (-1.79 +-0.14); 0 | 16.14 (-1.79 +-0.16); 0 | 14.31 (default 17.23: -2.78 +-0.39); 0 |
+| target 15 to 25 s after, kbit/s | 1216 | 1394 (+178 +-14) | 1397 (+182 +-16) | 1384 (default 1283: +91 +-35) |
 | flows ceased by the circuit breaker (`cb`) | 0 | 0 | 0 | 0 |
-| runs in which a peer left Connected | 128 | 178 | 159 | 188 |
-| both capped: oldest picture, s | 12.88 | 14.51 (+1.63 +-1.00) | 12.89 (+0.02 +-0.81) | 9.71 (-3.17 +-0.73) |
-| both capped: target under the cap | 157 | 94 (-63 +-21) | 159 (+2 +-20) | 131 (-26 +-18) |
-| both capped: audio gap over 1 s; packets lost | 2; 63.6 | 6; 69.0 (+5.4 +-7.7) | 2; 64.8 (+1.3 +-4.0) | 0; 76.1 (+12.6 +-4.8) |
-| both capped: time to recover; over 20 s | 16.61; 2 | 16.30 (-0.31 +-0.31); 1 | 16.56 (-0.05 +-0.28); 1 | 14.33 (-2.28 +-0.56); 0 |
+| runs in which a peer left Connected | 128 | 178 | 159 | 172 |
+| both capped: oldest picture, s | 12.88 | 14.51 (+1.63 +-1.00) | 12.89 (+0.02 +-0.81) | 11.52 (default 2.64: +8.88 +-0.53) |
+| both capped: target under the cap | 157 | 94 (-63 +-21) | 159 (+2 +-20) | 117 (default 271: -155 +-9) |
+| both capped: audio gap over 1 s; packets lost | 2; 63.6 | 6; 69.0 (+5.4 +-7.7) | 2; 64.8 (+1.3 +-4.0) | 0; 82.1 (default 61.6: +20.5 +-3.8) |
+| both capped: time to recover; over 20 s | 16.61; 2 | 16.30 (-0.31 +-0.31); 1 | 16.56 (-0.05 +-0.28); 1 | 15.06 (default 16.52: -1.47 +-0.46); 0 |
 
 A hand-built chain (ParolNet's, `parolnet`) takes no profile: 52.6 kbit/s of RTCP open, 68.8
 under the cap.
@@ -349,12 +357,17 @@ under the cap.
 - **Default with the share following the send rate.** Most of that gain when one direction
   collapses (1.70 s, RTCP 33 kbit/s) with the open call and the both-capped call as the
   default's. No specification asks for it; no profile takes it.
-- **Chrome.** Recovers soonest (3.6 s sooner) and does best when both directions collapse, at
-  a lower rate under the cap. Its video is sent in RED with ULPFEC: the send target of an open
-  call is the 2.5 Mbit/s maximum less the FEC (2.05 Mbit/s), and in this column a lost RED
-  packet that was retransmitted could not be used by the receiver (45 unusable frames a call
-  against 9, 20 key frames against 4): the column is to be measured again with that repaired
-  (`conf/rtcpbudget-6`).
+- **Chrome.** Recovers its rate soonest (2.8 s sooner than the default of its tree) at a lower
+  rate under the cap, and its picture is the stalest: 5.5 s at its worst against the 1.3 s of
+  a default that flushes its backlog, older than 2 s for more than half a second in every one
+  of 1000 calls, and 11.5 s against 2.6 s when both directions collapse. The cause is one row,
+  `pacer.queue-overflow`: with `Drain`, libwebrtc's form, the pacer keeps its backlog, the
+  source is paused for 4.7 s and the queued repairs are delivered in order; the profile with
+  that row set to `Drop` is at 1.46 s (docs/capacity-collapse.md, "The Chrome profile keeps
+  its backlog"). Its video is sent in RED with ULPFEC: the send target of an open call is the
+  2.5 Mbit/s maximum less the FEC (2.05 Mbit/s), and under the cap FEC takes 42 to 100 kbit/s
+  of the stream. With the repairs of `conf/red-1`, `-3` and `-2` a call has 2.5 unusable
+  frames (45 before) and sends 8.8 key frames (20 before).
 
 Two settings the default does not take, same cell, seeds 1 to 200: the drafts' feedback cadence
 (`perframe`, on in `StrictRfc`) picture -0.18 +-0.11 s, audio packets lost +5.4 +-1.4, and it
