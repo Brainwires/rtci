@@ -163,6 +163,17 @@ for in that gap is not sent, and a chain without a pacer, which stops asking aft
 unanswered cluster, does not probe again (measured with a give-up at every path change:
 1000 kbit/s reached 14.9 s after the path's return instead of 0.5 s).
 
+### Repairs already in the pacer at a give-up (known small effect)
+
+A give-up does not tell the pacer: a retransmission of a forgotten packet that the responder
+handed to the pacer before the give-up still leaves when its turn comes. It is rare and small,
+so the pacer is not told. Counted in the instrument's paced cells, 100 calls each (the
+standard cap, the 100 ms and 1000 ms queues, both directions capped, 5 % reverse loss, the two
+outages: 700 calls, 247 give-ups): 3 such retransmissions in all, at one give-up in one call
+with both directions capped; none in every other cell. In a paced chain the flush comes first
+at a collapse (it empties the pacer's queue itself), and the age rule fires after an outage,
+when nothing waits in the pacer.
+
 ## The texts
 
 No text obliges a sender to deliver what it queued, or to answer a NACK.

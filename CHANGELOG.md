@@ -50,7 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application must answer a key-frame request with a key frame, as for a remote PLI. No
   `rtx-time` is announced for the age bound. `DELIVERED_MEMORY` (4 s) is unchanged: under the
   default age bound a packet's memory is unreachable once the packet is 2 s old, and it is
-  the bound where a packet is repaired longer (an `rtx-time` over 2 s, the age rule off). Fixed with it: a probe cluster asked for while
+  the bound where a packet is repaired longer (an `rtx-time` over 2 s, the age rule off).
+  Known small effect: a give-up does not tell the pacer, so a retransmission of a forgotten
+  packet already queued there still leaves (counted in 700 paced calls with 247 give-ups: 3 in
+  all, at one give-up). Fixed with it: a probe cluster asked for while
   the responder's buffer is empty (after a give-up or the pacer's flush, before the next
   packet is written) is still padded, under the header of the newest packet the buffer held;
   before, no padding left, and a chain without a pacer stopped probing.
