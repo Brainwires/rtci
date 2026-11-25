@@ -50,7 +50,13 @@
 //!
 //! - scenario: `cap` or `outage`;
 //! - chain: `paced` (the engine's default interceptors), `nopacer` (the same without the pacer),
-//!   `parolnet` (ParolNet's chain; measurement only);
+//!   `parolnet` (ParolNet's chain; measurement only); and the default chain with other
+//!   settings, measurement only: `share` (the defaults with
+//!   `DefaultInterceptorOptions::rtcp_share_follows_send_rate`), `perf` (the `Performance`
+//!   behaviour profile's interceptor settings), `perfshare` (the same with the share
+//!   following the send rate), `perfnoshare` (the same with it off: `perf`, since the
+//!   profile leaves it off), `chrome` (the `Chrome` behaviour profile's interceptor settings;
+//!   the media engine and the session description stay this world's);
 //! - `gapN`: the receiver. `gap300` is the REFERENCE receiver: `SampleBuilder::new(256, ..)
 //!   .with_max_gap_wait(300 ms)` and a PLI when the builder gives a gap up
 //!   (docs/receiver-gap-policy.md). `gap0` is the receiver without a bound in time, which holds
@@ -136,6 +142,7 @@ mod capacity_common;
 
 use anyhow::{Result, anyhow, bail};
 use capacity_common::*;
+use rtci::peer_connection::configuration::BehaviourProfile;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -396,11 +403,30 @@ enum Scenario {
     Outage,
 }
 
+/// The settings a cell's default chain is built with, beside the chain itself: the chain
+/// token of the cell's name says both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Tuning {
+    /// The engine's defaults (`paced`, `nopacer`, `parolnet`).
+    Default,
+    /// `share`: the defaults with `rtcp_share_follows_send_rate`.
+    Share,
+    /// `perf`: the `Performance` behaviour profile's interceptor settings.
+    Performance,
+    /// `perfshare`: the same with `rtcp_share_follows_send_rate` on.
+    PerformanceWithShare,
+    /// `perfnoshare`: the same with `rtcp_share_follows_send_rate` off (what the profile is).
+    PerformanceWithoutShare,
+    /// `chrome`: the `Chrome` behaviour profile's interceptor settings.
+    Chrome,
+}
+
 /// Everything of a run but its seed (the module's "Cells").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Cell {
     scenario: Scenario,
     chain: Chain,
+    tuning: Tuning,
     /// The receiver's bound on a gap in ms; 0 for none.
     gap_ms: u64,
     /// Both directions capped, or the caller's uplink alone.
@@ -427,10 +453,20 @@ impl Cell {
                 other => bail!("unknown scenario {other} in {name}"),
             },
             chain: match chain {
-                "paced" => Chain::Default,
+                "paced" | "share" | "perf" | "perfshare" | "perfnoshare" | "chrome" => {
+                    Chain::Default
+                }
                 "nopacer" => Chain::DefaultWithoutPacer,
                 "parolnet" => Chain::ParolNet,
                 other => bail!("unknown chain {other} in {name}"),
+            },
+            tuning: match chain {
+                "share" => Tuning::Share,
+                "perf" => Tuning::Performance,
+                "perfshare" => Tuning::PerformanceWithShare,
+                "perfnoshare" => Tuning::PerformanceWithoutShare,
+                "chrome" => Tuning::Chrome,
+                _ => Tuning::Default,
             },
             gap_ms: number(gap, "gap")?,
             both: match direction {
@@ -450,10 +486,15 @@ impl Cell {
                 Scenario::Cap => "cap",
                 Scenario::Outage => "outage",
             },
-            match self.chain {
-                Chain::Default => "paced",
-                Chain::DefaultWithoutPacer => "nopacer",
-                Chain::ParolNet => "parolnet",
+            match (self.chain, self.tuning) {
+                (Chain::Default, Tuning::Default) => "paced",
+                (_, Tuning::Share) => "share",
+                (_, Tuning::Performance) => "perf",
+                (_, Tuning::PerformanceWithShare) => "perfshare",
+                (_, Tuning::PerformanceWithoutShare) => "perfnoshare",
+                (_, Tuning::Chrome) => "chrome",
+                (Chain::DefaultWithoutPacer, Tuning::Default) => "nopacer",
+                (Chain::ParolNet, Tuning::Default) => "parolnet",
             },
             self.gap_ms,
             if self.both { "both" } else { "up" },
@@ -467,6 +508,18 @@ impl Cell {
             .chain(self.chain)
             .anchor(ANCHORS[0])
             .reverse_loss(self.reverse_loss);
+        let setup = match self.tuning {
+            Tuning::Default => setup,
+            Tuning::Share => setup.share_follows_send_rate(true),
+            Tuning::Performance => setup.profile(BehaviourProfile::Performance),
+            Tuning::PerformanceWithShare => setup
+                .profile(BehaviourProfile::Performance)
+                .share_follows_send_rate(true),
+            Tuning::PerformanceWithoutShare => setup
+                .profile(BehaviourProfile::Performance)
+                .share_follows_send_rate(false),
+            Tuning::Chrome => setup.profile(BehaviourProfile::Chrome),
+        };
         match self.gap_ms {
             0 => setup,
             ms => setup.gap_wait(Duration::from_millis(ms)),
@@ -1147,13 +1200,13 @@ fn on_demand_requirement_resume_after_an_outage_without_the_pacer() -> Result<()
 // neither is asserted on pull requests; the cell's tripwires hold its level.
 
 #[test]
-#[ignore = "AT THE BOUND, on demand: 14 of 200 runs (7.0 %) on master 63e1b8b8, required at most 5 %; passes or fails by the draw"]
+#[ignore = "AT THE BOUND, on demand: 4 of 200 runs on master 0ca11557 (14 before the repairs stopped repeating), required at most 5 %; passes or fails by the draw"]
 fn on_demand_requirement_picture_without_the_pacer() -> Result<()> {
     PICTURE.test(WITHOUT_PACER)
 }
 
 #[test]
-#[ignore = "AT THE BOUND, on demand: 11 of 200 runs (5.5 %) on master 63e1b8b8, required at most 5 %; passes or fails by the draw"]
+#[ignore = "AT THE BOUND, on demand: 2 of 200 runs on master 0ca11557 (11 before the repairs stopped repeating), required at most 5 %; passes or fails by the draw"]
 fn on_demand_requirement_freeze_without_the_pacer() -> Result<()> {
     FREEZE.test(WITHOUT_PACER)
 }
@@ -1164,37 +1217,41 @@ fn on_demand_requirement_freeze_without_the_pacer() -> Result<()> {
 // level. When the engine meets one, its test moves up among the `ensemble_requirement_` ones.
 
 #[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 63e1b8b8 (required: at most 5 %); the oldest picture is 9.0 s in the median"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); the oldest picture is 7.9 s in the median"]
 fn known_limit_picture_in_the_default_chain() -> Result<()> {
     PICTURE.test(DEFAULT_CHAIN)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 1000 of 1000 runs on master 63e1b8b8 (required: at most 5 %); 8.7 s in the median"]
+#[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); 7.6 s in the median"]
 fn known_limit_freeze_in_the_default_chain() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 63e1b8b8 (required: at most 5 %); the oldest picture is 8.3 s in the median"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 1000 of 1000 runs on master 0ca11557 (required: at most 5 %); the oldest picture is 7.2 s in the median"]
 fn known_limit_picture_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
     PICTURE.test(DEFAULT_CHAIN_NO_BOUND)
 }
 
+/// The requirement as `capacity_cap_video_rtc2rtc.rs` stated it, on that test's receiver:
+/// met since the repairs stopped repeating (`conf/rtx-1r2-duplicate-repairs`: 272 of 1000 runs
+/// over 2 s before it, 15 after). The picture on the screen is 7.2 s old all the same.
 #[test]
-#[ignore = "KNOWN LIMIT: more than 2 s without a new picture of any age in 272 of 1000 runs on master 63e1b8b8, 27.2 % (required: at most 5 %)"]
-fn known_limit_freeze_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
+#[ignore = "release ensemble on demand, 300 runs: cargo test --release -- --ignored on_demand_"]
+fn on_demand_requirement_freeze_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()>
+{
     FREEZE.test(DEFAULT_CHAIN_NO_BOUND)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 200 of 200 runs on master 63e1b8b8 (required: at most 5 %); 20.4 s in the median, and 8.5 % of runs never show a new picture again"]
+#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 200 of 200 runs on master 0ca11557 (required: at most 5 %); 17.4 s in the median, and 8.5 % of runs never show a new picture again"]
 fn known_limit_picture_with_both_directions_capped() -> Result<()> {
     PICTURE.test(BOTH_DIRECTIONS)
 }
 
 #[test]
-#[ignore = "KNOWN LIMIT: no new picture within 2 s of the new pair in 134 of 200 runs on master 63e1b8b8, 67 % (required: at most 5 %)"]
+#[ignore = "KNOWN LIMIT: no new picture within 2 s of the new pair in 134 of 200 runs on master 0ca11557, 67 % (required: at most 5 %)"]
 fn known_limit_resume_after_an_outage_in_the_default_chain() -> Result<()> {
     RESUME.test(OUTAGE_DEFAULT_CHAIN)
 }

@@ -352,7 +352,9 @@ struct TicketKeys {
 pub(crate) struct TicketIssuer {
     pub(crate) count: u8,
     pub(crate) lifetime: Duration,
-    keys: Mutex<TicketKeys>,
+    /// `None` once [retired](Self::retire): the keys are wiped, nothing is sealed and
+    /// nothing opens.
+    keys: Mutex<Option<TicketKeys>>,
     /// The `now` the first ticket of this configuration was dated by: ticket times are
     /// milliseconds from it (the engine reads no clock, and an `Instant` has no value outside
     /// the process).
@@ -370,42 +372,67 @@ impl TicketIssuer {
         Ok(Self {
             count,
             lifetime: lifetime.min(MAX_TICKET_LIFETIME),
-            keys: Mutex::new(TicketKeys {
+            keys: Mutex::new(Some(TicketKeys {
                 current: new_ticket_key(provider)?,
                 since_ms: 0,
                 previous: None,
-            }),
+            })),
             origin: Mutex::new(None),
             used: Mutex::new(HashMap::new()),
         })
     }
 
+    /// Wipes the ticket keys for good (each is zeroized as it is dropped): from now on the
+    /// issuer seals no ticket and opens none, so a ticket it issued gets a full handshake.
+    pub(crate) fn retire(&self) {
+        self.keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    /// Whether the keys were wiped ([`Self::retire`]).
+    pub(crate) fn is_retired(&self) -> bool {
+        self.keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+    }
+
     /// The key to seal with at `now`: a new one once the current one is a ticket lifetime old
-    /// (at least a second), the current one becoming the previous.
-    fn sealing_key(&self, provider: &dyn RTCCryptoProvider, now: Instant) -> Result<SecretVec> {
+    /// (at least a second), the current one becoming the previous. `None` once retired.
+    fn sealing_key(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        now: Instant,
+    ) -> Result<Option<SecretVec>> {
         let now_ms = self.ms(now);
         let rotation_ms = (self.lifetime.as_millis() as u64).max(1000);
         let mut keys = self
             .keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(keys) = keys.as_mut() else {
+            return Ok(None);
+        };
         if now_ms.saturating_sub(keys.since_ms) >= rotation_ms {
             let next = new_ticket_key(provider)?;
             let current = std::mem::replace(&mut keys.current, next);
             keys.previous = Some(current);
             keys.since_ms = now_ms;
         }
-        Ok(keys.current.clone())
+        Ok(Some(keys.current.clone()))
     }
 
-    /// The keys a ticket may be sealed under: the current one, then the previous one.
+    /// The keys a ticket may be sealed under: the current one, then the previous one; none
+    /// once retired.
     fn opening_keys(&self) -> Vec<SecretVec> {
         let keys = self
             .keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::iter::once(keys.current.clone())
-            .chain(keys.previous.clone())
+        keys.iter()
+            .flat_map(|keys| std::iter::once(keys.current.clone()).chain(keys.previous.clone()))
             .collect()
     }
 
@@ -419,7 +446,7 @@ impl TicketIssuer {
         now.saturating_duration_since(origin).as_millis() as u64
     }
 
-    /// Seals a ticket.
+    /// Seals a ticket; `None` once the issuer is retired.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn seal(
         &self,
@@ -431,7 +458,7 @@ impl TicketIssuer {
         server_name: &str,
         peer_certificates: &[Vec<u8>],
         max_early_data: u32,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         let mut plaintext = vec![TICKET_VERSION];
         put_u16(&mut plaintext, suite as u16);
         plaintext.extend_from_slice(&self.ms(now).to_be_bytes());
@@ -451,15 +478,17 @@ impl TicketIssuer {
     }
 
     /// Encrypts `plaintext` under the issuer's key of `now` with a random nonce: nonce,
-    /// ciphertext, tag.
+    /// ciphertext, tag. `None` once the issuer is retired.
     fn seal_plaintext(
         &self,
         provider: &dyn RTCCryptoProvider,
         now: Instant,
         aad: &[u8],
         plaintext: SecretVec,
-    ) -> Result<Vec<u8>> {
-        let key = self.sealing_key(provider, now)?;
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(key) = self.sealing_key(provider, now)? else {
+            return Ok(None);
+        };
         let mut nonce = [0u8; TICKET_NONCE_LEN];
         provider.random().fill(&mut nonce).map_err(crypto_error)?;
         let mut aead = provider
@@ -472,7 +501,7 @@ impl TicketIssuer {
         aead.seal_in_place(&nonce, aad, &mut ticket[TICKET_NONCE_LEN..], &mut tag)
             .map_err(crypto_error)?;
         ticket.extend_from_slice(&tag);
-        Ok(ticket)
+        Ok(Some(ticket))
     }
 
     /// Decrypts a ticket sealed by [`Self::seal_plaintext`] with `aad`: its id (the nonce)
@@ -510,12 +539,13 @@ impl TicketIssuer {
 
     /// Seals a DTLS 1.2 session into a ticket (RFC 5077 section 4 recommends the contents:
     /// the cipher suite, the master secret, the client's identity and when it was issued).
+    /// `None` once the issuer is retired.
     pub(crate) fn seal_dtls12(
         &self,
         provider: &dyn RTCCryptoProvider,
         now: Instant,
         session: &Dtls12Session,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         let mut plaintext = vec![DTLS12_TICKET_VERSION];
         put_u16(&mut plaintext, session.cipher_suite as u16);
         plaintext.extend_from_slice(&self.ms(now).to_be_bytes());
@@ -736,12 +766,14 @@ mod key_rotation_test {
         let issuer = TicketIssuer::new(provider.as_ref(), 1, Duration::from_secs(10))?;
         let start = Instant::now();
         let seal = |at: Duration| {
-            issuer.seal_plaintext(
-                provider.as_ref(),
-                start + at,
-                DTLS12_TICKET_AAD,
-                SecretVec::new(b"session".to_vec()),
-            )
+            issuer
+                .seal_plaintext(
+                    provider.as_ref(),
+                    start + at,
+                    DTLS12_TICKET_AAD,
+                    SecretVec::new(b"session".to_vec()),
+                )
+                .map(|ticket| ticket.expect("not retired"))
         };
         let opens = |ticket: &[u8]| {
             issuer
@@ -770,6 +802,41 @@ mod key_rotation_test {
         seal(Duration::from_secs(22))?;
         assert!(!opens(&first), "two rotations later the first key is gone");
         assert!(opens(&second));
+        Ok(())
+    }
+
+    /// A retired issuer has no keys: it seals nothing more and opens none of the tickets it
+    /// sealed.
+    #[test]
+    fn a_retired_issuer_seals_nothing_and_opens_nothing() -> Result<()> {
+        let provider = crypto::default_provider().map_err(crypto_error)?;
+        let issuer = TicketIssuer::new(provider.as_ref(), 1, Duration::from_secs(10))?;
+        let now = Instant::now();
+        let seal = || {
+            issuer.seal_plaintext(
+                provider.as_ref(),
+                now,
+                TICKET_AAD,
+                SecretVec::new(b"session".to_vec()),
+            )
+        };
+        let ticket = seal()?.expect("a ticket");
+        assert!(
+            issuer
+                .open_plaintext(provider.as_ref(), TICKET_AAD, &ticket)
+                .is_some()
+        );
+        assert!(!issuer.is_retired());
+        issuer.retire();
+        assert!(issuer.is_retired());
+        assert!(issuer.opening_keys().is_empty(), "the keys are gone");
+        assert!(seal()?.is_none(), "nothing is sealed");
+        assert!(
+            issuer
+                .open_plaintext(provider.as_ref(), TICKET_AAD, &ticket)
+                .is_none(),
+            "its tickets no longer open"
+        );
         Ok(())
     }
 }
