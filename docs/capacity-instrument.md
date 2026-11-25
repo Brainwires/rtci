@@ -265,3 +265,17 @@ after it +27 +-13 kbit/s, audio and circuit breaker unchanged in the default cha
 ParolNet's chain 8.8 +-1.1 more audio packets lost at the drop (20.3 to 29.1, 0.18 s of audio),
 which breaks the merge-point rule's audio margin, and in the pacer-less chain the target 15 to
 25 s after the cap is 46 +-16 kbit/s lower.
+
+Since then (master 0ca11557, train 30, against 2299c39e; the baseline file is recorded from
+0ca11557, runs 45531256372 and 45531266403): the consent fix removed the peers that failed and
+most of those that left Connected behind a 1000 ms queue (197 to 32 of 200 without the pacer),
+and left the standard cells as they were (156 of 1000). Not repeating a repair the feedback
+reported received (`conf/rtx-1r2-duplicate-repairs`) made the picture 1.2 s younger in the
+default chain (oldest picture 7.9 s in the median, per seed -1.22 +-0.05 s), took the old
+freeze over 2 s with the receiver without a bound from 272 to 15 of 1000 runs (that requirement
+is now met there; the picture on the screen is still 7.2 s old), and did not slow the
+recovery after the cap: the target 15 to 25 s after it moved by -0.1 +-17 kbit/s in the default
+chain, +14 +-20 without the pacer and -30 +-23 in ParolNet's chain, the time to recover the rate
+by +0.03 +-0.31, -0.17 +-0.22 and +0.31 +-0.24 s. The merge-point rule holds. The picture
+requirement is still missed in every run of the default chain, and the audio is still left dead
+in 8.9 %.
