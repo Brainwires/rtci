@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **ice** (`conf/ice-26-consent-late-responses`): `ice::AgentConfig` has a new public field,
+  `consent_response_wait` (`ConsentResponseWait`, default `Rto`), and so has the setting
+  engine's `ice` group. **Migration**: a struct literal of either adds `..Default::default()`
+  or `consent_response_wait: ConsentResponseWait::Rto`. `stun::timer::RtoEstimator` is now
+  `Copy` (an addition).
+
 - **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
   `new_tie_breaker_on_restart` (both off by default, see "Added"). A struct literal of either
@@ -722,6 +728,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ice: `ConsentResponseWait`, how long a consent request waits for its response**
+  (`conf/ice-26-consent-late-responses`): `AgentConfig::consent_response_wait`,
+  `SettingEngineBuilder::with_ice_consent_response_wait`. `Rto` (the default) is RFC 7675
+  section 5.1's wait based on the round-trip time (see "Fixed"); `Fixed(duration)` is a fixed
+  wait. A governed behaviour, `ice.consent-response-wait`: `BehaviourProfile::Chrome` takes
+  `Fixed(60 s)`, libwebrtc's `kConnectionResponseTimeout` ("in some networks (2G), we observe
+  up to 60s RTTs", `p2p/base/p2p_constants.h` @ a222406d), which takes an answer however far
+  the round trip jumped; `Rfc`, `StrictRfc` and `Performance` keep `Rto`. Test:
+  `agent_consent_delay_test.rs::test_a_response_after_its_wait_renews_nothing_unless_the_wait_is_fixed`,
+  `test_no_consent_transaction_is_kept_past_the_consent_expiry`.
+
 - **mDNS may leave two kinds of host address unwrapped, each an opt-in setting, off by default
   (mdns-5; MDNSICE-3.1.2.2-4, -3.1.2.2-5, -3.1.2.3-1).** Only in `QueryAndGather`; in every
   behaviour profile off; neither ever unwraps an address `ice::mdns::is_global_unicast`
@@ -988,6 +1005,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   figures and asserts nothing, because that order is chance on so few runs (it failed with
   the order reversed under an unrelated change). Row RFC8108-5.1-1 cites the new test. No
   engine change.
+- **ice: a working path whose round trip rose above half a second lost its consent after 30
+  seconds** (`conf/ice-26-consent-late-responses`; RFC7675-5.1-7, -5.1-2, new row -5.1-16).
+  **Engine behaviour change.** A consent request (RFC 7675) waited for its response four times
+  the pair's last round-trip time, clamped to 500 ms .. 4 s; at the end of the wait its
+  transaction was forgotten, so the response, when it came, was discarded as an unknown
+  transaction: it renewed no consent and gave no round-trip time, and the wait never adapted.
+  A path whose round trip jumped from 20 ms to 600 ms and more (a queue filling behind a
+  capacity drop: hosted runs 45493039743 and 45493049553, four consent requests answered after
+  785, 523, 608 and 918 ms) was `disconnected` 5 s after the first such request and `failed`
+  30 s after the last answer that had come within 500 ms, with every request answered. A pair
+  whose round trip was over 500 ms from its first check failed 30 s after it was selected
+  when all its checks had been retransmitted (a retransmitted request gives no round-trip
+  time, so the wait stayed at 500 ms); it survived only when a check happened to be answered
+  without a retransmission, as a cancelled one is.
+  Now a consent request's transaction is in progress for what RFC 8489 section 6.2.1 gives a
+  transaction after its last request, `Rm` (16) times the RTO, where the RTO is the candidate
+  pair's, computed as RFC 6298 does (smoothed round-trip time plus four times its variation,
+  500 ms at least; `stun::timer::RtoEstimator`) from every request answered without a
+  retransmission, and never longer than the consent expiry: 8 s at least, 30 s at most (RFC
+  7675 section 5.1: "An endpoint SHOULD await a binding response for each request it sends for
+  a time based on the estimated round-trip time (RTT) [...] with an allowance for variation in
+  network delay", and "a response might be for a previous request (rather than for the most
+  recently sent request)"). A response within that renews consent and teaches the RTO, so a
+  round trip that keeps growing is followed; one after it is for a transaction that is no
+  longer in progress (RFC 8489 section 6.3) and is discarded, as is, always, a response that
+  matches no request the agent sent, fails its integrity check, comes twice or comes from
+  another address. The same holds on the path an ICE restart keeps (which also takes over the
+  consent requests still open on the selected pair; its own had no end but their number) and
+  over ICE-TCP. Consent still expires 30 s after the last response that renewed it, and the
+  agent is still `disconnected` when a consent request has gone 5 s without any response.
+  What the RFC's wait does not cover: a round trip that jumps past 16 times the current RTO at
+  once (20 ms to more than 8 s); `ConsentResponseWait::Fixed` does (see "Added").
+  `iceCandidatePair.currentRoundTripTime` now also reflects the late answers.
+  Found on the way and left open (audit row RFC7675-1-1, `partial`): consent is kept per remote
+  candidate, not per candidate pair, so a response on another pair to the same remote
+  candidate renews the selected pair's consent.
+  **Known limit of 0.1.0** (for its release notes): a connection can fail 30 s after a path's
+  round trip rises above 500 ms although the path works.
+  Tests: `rtci-ice/src/agent/agent_consent_delay_test.rs` (17 tests),
+  `agent_open_rows_test.rs::test_consent_is_kept_on_a_tcp_pair_whose_round_trip_is_long`,
+  `tests/ice_consent_slow_path_rtc2rtc.rs` (two peers, the whole stack; three of its four
+  tests fail on master d914b929, hosted run 45501729474).
+  `agent_checklist_test.rs::test_consent_response_is_awaited_for_a_time_based_on_the_rtt`,
+  which asserted the old rule, is removed.
+
 - **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
   checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length
   4 followed by other bytes read a New Cumulative TSN it does not hold and panicked. Not
@@ -1108,8 +1170,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - both directions capped: every run of the default chain misses the picture requirement
     (20.4 s in the median), 8.5 % never show a new picture again, and the circuit breaker
     ceases a flow in 187 of 200; without the pacer 32 % miss it and 28.5 % never return.
-  - without the pacer: the picture requirement is missed in 7.0 % of runs (interval 4.2 to
-    11.4 %), close to the bound and not met.
+  - without the pacer: the picture requirement is violated in 7.0 % of runs (interval 4.2 to
+    11.4 %) and the freeze one in 5.5 %: at the bound, neither met nor missed can be claimed
+    (their 300-run tests pass on one draw and fail on the next; run on demand).
   - a peer leaves Connected (ICE consent answers arrive later than the consent wait) in 16 %
     of runs of the default chain, and in 197 of 200 without the pacer with a 1000 ms queue, 3 of
     them to Failed.

@@ -122,7 +122,8 @@
 //!   engine meets in ParolNet's chain. Release build: a run takes 1.7 to 7.4 s of one core
 //!   (3.1 s on average over the ensemble), about eight minutes on a four-core hosted runner.
 //! - `cargo test --release --test capacity_instrument -- --ignored on_demand_`: a requirement
-//!   the engine meets whose 300 runs do not fit the pull-request job.
+//!   the engine meets whose 300 runs do not fit the pull-request job, and two that are at
+//!   the bound (they pass on one draw and fail on the next).
 //! - `cargo test --release --test capacity_instrument -- --ignored known_limit_`: the
 //!   requirements the engine does not meet today (they fail, with the figures).
 //! - `cargo test --release --test capacity_instrument -- --ignored --nocapture --exact
@@ -1076,6 +1077,24 @@ fn on_demand_requirement_resume_after_an_outage_without_the_pacer() -> Result<()
     RESUME.test(MET_OUTAGE)
 }
 
+// At the bound: without the pacer the picture and freeze requirements are violated in 7.0 %
+// and 5.5 % of 200 runs on master (intervals 4.2 to 11.4 % and 3.1 to 9.6 %), and their tests
+// passed on the 300 runs of seeds 5001 on (hosted run 45516189525). A share at the bound passes
+// on one draw and fails on the next, so neither "met" nor "known limit" can be claimed and
+// neither is asserted on pull requests; the cell's tripwires hold its level.
+
+#[test]
+#[ignore = "AT THE BOUND, on demand: 14 of 200 runs (7.0 %) on master 63e1b8b8, required at most 5 %; passes or fails by the draw"]
+fn on_demand_requirement_picture_without_the_pacer() -> Result<()> {
+    PICTURE.test(WITHOUT_PACER)
+}
+
+#[test]
+#[ignore = "AT THE BOUND, on demand: 11 of 200 runs (5.5 %) on master 63e1b8b8, required at most 5 %; passes or fails by the draw"]
+fn on_demand_requirement_freeze_without_the_pacer() -> Result<()> {
+    FREEZE.test(WITHOUT_PACER)
+}
+
 // Requirements the engine does NOT meet today. Not loosened: each test states the requirement
 // and fails when run (`-- --ignored known_limit_`), the attribute carries the share measured
 // on master, CHANGELOG "Known limits" tracks it, and the tripwires of the cell hold today's
@@ -1109,18 +1128,6 @@ fn known_limit_picture_in_the_default_chain_with_a_receiver_without_a_bound() ->
 #[ignore = "KNOWN LIMIT: more than 2 s without a new picture of any age in 272 of 1000 runs on master 63e1b8b8, 27.2 % (required: at most 5 %)"]
 fn known_limit_freeze_in_the_default_chain_with_a_receiver_without_a_bound() -> Result<()> {
     FREEZE.test(DEFAULT_CHAIN_NO_BOUND)
-}
-
-#[test]
-#[ignore = "KNOWN LIMIT: a picture older than 2 s is on the screen for more than 0.5 s in 14 of 200 runs on master 63e1b8b8, 7.0 % (required: at most 5 %)"]
-fn known_limit_picture_without_the_pacer() -> Result<()> {
-    PICTURE.test(WITHOUT_PACER)
-}
-
-#[test]
-#[ignore = "KNOWN LIMIT: more than 2 s without a new picture in 11 of 200 runs on master 63e1b8b8, 5.5 %, interval 3.1 to 9.6 % (required: at most 5 %; not shown to be met)"]
-fn known_limit_freeze_without_the_pacer() -> Result<()> {
-    FREEZE.test(WITHOUT_PACER)
 }
 
 #[test]

@@ -20,7 +20,7 @@ documentation; this page says how the instrument is used and what it found.
 | unit tests, determinism | the figures' and the statistics' arithmetic; the same seed twice gives the same figures | every `cargo test`, every platform |
 | tripwires | each cell of the pull-request ensemble against the recorded baseline | the `capacity_instrument` job (release build) |
 | requirements the engine meets | picture, freeze and audio in ParolNet's chain, 300 runs | the same job |
-| a requirement met, too large for the job | the outage without the pacer, 300 runs | on demand: `-- --ignored on_demand_` |
+| a requirement met, too large for the job; requirements at the bound | the outage without the pacer; picture and freeze without the pacer; 300 runs each | on demand: `-- --ignored on_demand_` |
 | requirements the engine does not meet | `known_limit_*`: ignored, with the measured share in the attribute | they fail when run: `-- --ignored known_limit_` |
 | the fine comparison | the merge-point rule below | `capacity-compare.yml`, by hand |
 
@@ -42,9 +42,15 @@ violating (exact binomial: a tree at 5 % passes with probability 0.951, a tree a
 receiver without a bound 40, the pacer-less chain 40 and 20, both directions capped 30 and 20,
 the queue at 100 and 1000 ms and 5 % loss on the reverse path 12 each, the outage 20 and 20,
 ParolNet's chain 20 and, for its three requirement tests, 300. A run costs 1.7 to 7.4 s of one
-core (measured on hosted runners): about eight minutes of tests on four cores after a release
-build of two and a half minutes, twelve minutes for the job (a slow hosted runner takes up to
-twice that; the timeout is 45 minutes). At this size the job notices: a requirement that
+core (measured on hosted runners). Measured (hosted run 45516163858, the job's steps on master
+687ac4a7): the ensemble 5 min 14 s, the whole job 8 min 49 s with the release build; allow
+twelve minutes, and twice that on a slow hosted runner (the same 2000-run measurement took
+1770 to 4007 s on different runners; the timeout is 45 minutes). Two mutations show it notices
+(`expect: fail` runs): with the pacer's pause removed the tripwire `discards` > 0 fails in every
+cell of the default chain (60 of 60 runs in the reference cell where the baseline has 0 of 1000)
+and the picture tripwires of the receiver without a bound in 40 of 40 (45516199691); with
+retransmissions not rate limited the picture and freeze requirements of ParolNet's chain fail
+(49 and 95 of 300 runs, at most 21 allowed) and 37 tripwires with them (45516206263). At this size the job notices: a requirement that
 ParolNet's chain stops meeting (a share of 10 % fails with 0.95); in every other cell a gross
 regression (a threshold that a tenth of the baseline was beyond fails once a quarter to 40 % of
 the runs are beyond it; in the reference cell that is a picture about a second older); a flow
@@ -97,11 +103,16 @@ improves a cell re-records the baseline (below).
 
 ## Re-recording the baseline
 
-The tripwires compare with `tests/fixtures/capacity-instrument-baseline.tsv`. It is recorded
-from master and is re-recorded after every merge that is meant to move these figures (the
-repairs, the estimator, the circuit breaker's restart, the flush at a collapse, the consent
-fix: each will), in the same change or the one after it, so that the tripwires hold the new
-level. One measurement and one command:
+The tripwires compare with `tests/fixtures/capacity-instrument-baseline.tsv`, recorded from
+master. THE BRANCH THAT MOVES A FIGURE RE-RECORDS THE BASELINE, IN ITS OWN ROUND: a change that
+is meant to move these figures (the repairs, the estimator, the circuit breaker's restart, the
+flush at a collapse, the consent fix: each does) passes the merge-point rule against master
+first, then carries the re-recorded file, the known-limit attributes and the table below in the
+same branch, measured on that branch merged with the master it will land on. The integrator
+merges it only with the new baseline in it; a round that merges two such branches re-records
+once, on the round's head. A branch that moves nothing leaves the file alone (the rows are a
+function of the seeds: master 687ac4a7 gave the same 4800 rows as 63e1b8b8, to the digit, two
+trains later). One measurement and one command:
 
     # on the merged head, on a hosted runner (agent-test.yml), two runs:
     RTC_INSTR_CELLS=cap/paced/gap300/up/q300/rl0,cap/paced/gap0/up/q300/rl0 RTC_INSTR_SEEDS=1-1000 cargo test --release -p rtci --test capacity_instrument -- --ignored --nocapture --exact measure
@@ -239,7 +250,7 @@ Requirements on master, by cell:
 |---|---|---|---|---|
 | default chain, reference receiver | MISSED: 100 % (oldest picture 9.0 s in the median) | MISSED: 100 % (8.7 s) | MISSED: 8.9 % (audio ceased by the circuit breaker and never restarted) | |
 | default chain, receiver without a bound | MISSED: 100 % (8.3 s) | MISSED: 27.2 % | MISSED: 8.9 % | |
-| pacer-less chain, reference receiver | MISSED: 7.0 % (4.2 to 11.4) | not shown met: 5.5 % (3.1 to 9.6) | met: 0 of 200 | |
+| pacer-less chain, reference receiver | at the bound: 7.0 % (4.2 to 11.4) | at the bound: 5.5 % (3.1 to 9.6) | met: 0 of 200 | |
 | ParolNet's chain, reference receiver | met: 0 of 200 (1.33 s) | met: 0 of 200 | met: 0 of 200 | |
 | both directions capped, default chain | MISSED: 100 % (20.4 s; 8.5 % never back) | MISSED: 100 % | 2.5 % | |
 | both directions capped, pacer-less | MISSED: 32 % (28.5 % never back) | MISSED: 32 % | met | |
