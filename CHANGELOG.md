@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0+brainwires.5.1] - 2026-11-25
+
+A patch on the 0.22.0+brainwires.5 line for the Deno WebRTC extension; 0.22.0+brainwires.6
+already has the same fix.
+
+### Bug Fixes
+
+- **ice**: a signalled remote candidate replaces the peer-reflexive candidate of the same
+  address (RFC 8838 section 11), keeping its id and pairs. When the peer's first connectivity
+  check arrived before `addIceCandidate()` delivered its candidate, the agent kept both, credited
+  every check to the peer-reflexive one and nominated it only after the 1 s peer-reflexive
+  acceptance wait, so `connected` came about a second late.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes
