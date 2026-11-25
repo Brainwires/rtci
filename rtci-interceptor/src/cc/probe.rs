@@ -215,6 +215,17 @@ pub fn probe_estimate(reports: &[PacketReport]) -> Option<f64> {
 /// result is never above it, and it is `asked` itself when the arrivals span no time the
 /// receiver's clock resolves.
 ///
+/// A known limit of this measurement: a path that delivers the burst as one aggregate (a
+/// Wi-Fi or cellular link that hands several packets over at once behind the narrow link)
+/// shows no spread, or less than the narrow link made, and is credited with up to the rate
+/// asked for although it carries less. Nothing was sent at that rate, so the cluster cannot
+/// contradict it; the estimate is then above the path until the delay-based controller's
+/// over-use detection brings it down, a few feedback reports after the media follows it. A
+/// paced cluster does not have the limit (its packets leave at the rate asked for, and the
+/// path either carries them so or delays them). The credit is not held to a multiple of
+/// what the path carried in the last second: at the start, which is where the clusters
+/// matter, the path has carried next to nothing yet.
+///
 /// `None` when fewer than four packets of the cluster arrived with a time.
 pub fn burst_estimate(reports: &[PacketReport], asked: f64) -> Option<f64> {
     let arrived: Vec<(Duration, usize)> = reports
