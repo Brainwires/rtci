@@ -233,6 +233,9 @@ pub(super) fn new_dtls_transport(
     dtls_transport_id: RTCTransportId,
     ice_transport_id: RTCTransportId,
     crypto_provider: std::sync::Arc<dyn crypto::RTCCryptoProvider>,
+    resumption: Option<
+        std::sync::Arc<crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup>,
+    >,
 ) -> Result<DtlsTransport> {
     let mut dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
         id: dtls_transport_id,
@@ -252,6 +255,7 @@ pub(super) fn new_dtls_transport(
     dtls_transport.flight_interval_rule = setting_engine.dtls_flight_interval;
     dtls_transport.connection_id_length = setting_engine.dtls_connection_id_length;
     dtls_transport.alpn = !setting_engine.dtls_alpn_off;
+    dtls_transport.resumption = resumption;
     Ok(dtls_transport)
 }
 
@@ -332,12 +336,24 @@ impl RTCPeerConnection {
         // `set_configuration` compares with them (W3C 4.4.1.5). With none configured the DTLS
         // transport generates its own, which the configuration does not list.
         let certificates = configuration.certificates.clone();
+        // RFC 5764 section 3: one DTLS session for the connection's transports, never shared
+        // with another connection.
+        let resumption = if !setting_engine.dtls_session_resumption {
+            None
+        } else {
+            Some(std::sync::Arc::new(
+                crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup::new(
+                    crypto_provider.as_ref(),
+                )?,
+            ))
+        };
         let dtls_transport = new_dtls_transport(
             &setting_engine,
             certificates,
             dtls_transport_id,
             ice_transport_id,
             crypto_provider.clone(),
+            resumption,
         )?;
 
         // Create the SCTP transport. The RFC behaviour is the default for each of these: the

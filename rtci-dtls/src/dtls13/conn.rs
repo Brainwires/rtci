@@ -272,6 +272,9 @@ pub(crate) struct Conn13 {
     pub(crate) psk_without_key_exchange: bool,
     /// The handshake was made with a PSK, so neither side sent a certificate.
     pub(crate) resumed: bool,
+    /// That PSK is an external one (RFC 8446 section 2.2), not a ticket of an earlier
+    /// handshake: it never carries certificates, and authenticates by itself.
+    pub(crate) external_psk: bool,
     /// `resumption_master_secret`, kept while tickets are to be made or taken from it.
     pub(crate) resumption_secret: Option<SecretVec>,
     /// Server: the PSK key exchange modes the client offered; tickets are sent only to a
@@ -438,6 +441,7 @@ impl Conn13 {
             psk: None,
             psk_without_key_exchange: false,
             resumed: false,
+            external_psk: false,
             resumption_secret: None,
             client_psk_modes: vec![],
             tickets_issued: 0,
