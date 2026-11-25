@@ -318,6 +318,29 @@ fn extension_id(info: &StreamInfo, uri: &str) -> Option<u8> {
         .and_then(|extension| u8::try_from(extension.id).ok())
 }
 
+/// The `(apt, rtx)` pairs of the retransmission formats of `info`'s m= section: every format
+/// whose MIME subtype is `rtx` and whose fmtp names an associated payload type (RFC 4588
+/// section 8.1: "apt (associated payload type) ... the value of this parameter is the
+/// payload type of the associated original stream").
+fn section_rtx_payload_types(info: &StreamInfo) -> Vec<(u8, u8)> {
+    info.section_mime_types
+        .iter()
+        .filter(|(_, mime_type)| {
+            mime_type
+                .rsplit_once('/')
+                .is_some_and(|(_, subtype)| subtype.eq_ignore_ascii_case("rtx"))
+        })
+        .filter_map(|(rtx, _)| {
+            let (_, fmtp) = info.section_fmtp_lines.iter().find(|(pt, _)| pt == rtx)?;
+            let apt = fmtp
+                .split(';')
+                .filter_map(|parameter| parameter.trim().strip_prefix("apt="))
+                .find_map(|value| value.trim().parse::<u8>().ok())?;
+            Some((apt, *rtx))
+        })
+        .collect()
+}
+
 /// Per-stream state for the responder.
 struct LocalStream {
     /// Buffer of sent packets for retransmission.
@@ -326,6 +349,12 @@ struct LocalStream {
     ssrc_rtx: Option<u32>,
     /// RTX payload type for RFC4588 retransmission (if configured).
     payload_type_rtx: Option<u8>,
+    /// The retransmission payload type of each payload type of the stream's m= section that
+    /// has one: `(apt, rtx)` for every `rtx` format the binder listed
+    /// ([`StreamInfo::section_mime_types`], [`StreamInfo::section_fmtp_lines`]). Empty when
+    /// the binder did not list the section's formats: `payload_type_rtx` then stands for
+    /// every packet. See [`LocalStream::rtx_payload_type`].
+    rtx_payload_types: Vec<(u8, u8)>,
     /// Sequence number counter for RTX packets.
     rtx_sequence_number: u16,
     /// The sequence number of the packet sent last, and when.
@@ -401,6 +430,34 @@ enum RepairState {
 }
 
 impl LocalStream {
+    /// The retransmission payload type for a packet sent under `payload_type`, `None` when
+    /// it has none and is repaired by sending it again as it was.
+    ///
+    /// RFC 4588 section 8.1 ties a retransmission format to ONE original payload type
+    /// (`apt`), and section 8.6: "the retransmission payload type is mapped to the payload
+    /// type of the original stream with the apt parameter". A stream does not always leave
+    /// under the payload type it was bound with: a FEC encoder application-ward of this
+    /// interceptor rewrites video into RED packets (RFC 2198), whose retransmission format
+    /// is the one whose `apt` names the `red` payload type (`a=fmtp:117 apt=116`), not the
+    /// media format's. A receiver restores the payload type from the `apt` of the payload
+    /// type the retransmission arrives under, so a RED packet retransmitted under the media
+    /// format's RTX would be restored as media with a RED header in front of it. libwebrtc
+    /// looks the RTX payload type up by the payload type of the packet it retransmits
+    /// (modules/rtp_rtcp/source/rtp_sender.cc, `rtx_payload_type_map_.find(packet.PayloadType())`).
+    ///
+    /// When the binder listed the section's formats the packet's own payload type decides,
+    /// and a payload type without a retransmission format has none; otherwise the stream's
+    /// one RTX payload type stands for every packet, as before.
+    fn rtx_payload_type(&self, payload_type: u8) -> Option<u8> {
+        if self.rtx_payload_types.is_empty() {
+            return self.payload_type_rtx;
+        }
+        self.rtx_payload_types
+            .iter()
+            .find(|(apt, _)| *apt == payload_type)
+            .map(|(_, rtx)| *rtx)
+    }
+
     /// The serial of the packet now held under `sequence_number`.
     fn packet(&self, sequence_number: u16) -> Option<u64> {
         self.sent_at[usize::from(sequence_number) % self.sent_at.len()]
@@ -831,34 +888,37 @@ impl NackResponderInterceptor {
             return;
         };
 
-        let packet =
-            if let (Some(ssrc_rtx), Some(pt_rtx)) = (stream.ssrc_rtx, stream.payload_type_rtx) {
-                if stream.repairs_order.len() >= usize::from(self.size).max(1)
-                    && let Some((oldest, made)) = stream.repairs_order.pop_front()
-                    && stream
-                        .repairs_by_rtx
-                        .get(&oldest)
-                        .is_some_and(|(_, at)| *at == made)
-                {
-                    stream.repairs_by_rtx.remove(&oldest);
-                }
-                stream
+        let packet = if let (Some(ssrc_rtx), Some(pt_rtx)) = (
+            stream.ssrc_rtx,
+            stream.rtx_payload_type(original_packet.header.payload_type),
+        ) {
+            if stream.repairs_order.len() >= usize::from(self.size).max(1)
+                && let Some((oldest, made)) = stream.repairs_order.pop_front()
+                && stream
                     .repairs_by_rtx
-                    .insert(stream.rtx_sequence_number, (seq, now));
-                stream
-                    .repairs_order
-                    .push_back((stream.rtx_sequence_number, now));
-                rtx_packet(
-                    &mut stream.rtx_sequence_number,
-                    (stream.rid_extension_id, stream.repaired_rid_extension_id),
-                    original_packet,
-                    ssrc_rtx,
-                    pt_rtx,
-                )
-            } else {
-                // No RTX: retransmit original packet as-is
-                original_packet.clone()
-            };
+                    .get(&oldest)
+                    .is_some_and(|(_, at)| *at == made)
+            {
+                stream.repairs_by_rtx.remove(&oldest);
+            }
+            stream
+                .repairs_by_rtx
+                .insert(stream.rtx_sequence_number, (seq, now));
+            stream
+                .repairs_order
+                .push_back((stream.rtx_sequence_number, now));
+            rtx_packet(
+                &mut stream.rtx_sequence_number,
+                (stream.rid_extension_id, stream.repaired_rid_extension_id),
+                original_packet,
+                ssrc_rtx,
+                pt_rtx,
+            )
+        } else {
+            // No RTX (for the stream, or for this packet's payload type): retransmit the
+            // original packet as-is
+            original_packet.clone()
+        };
         self.retransmitted.add(now, size);
         self.release_at = None;
 
@@ -1870,6 +1930,7 @@ impl Interceptor for NackResponderInterceptor {
                     send_buffer,
                     ssrc_rtx: info.ssrc_rtx,
                     payload_type_rtx: info.payload_type_rtx,
+                    rtx_payload_types: section_rtx_payload_types(info),
                     rtx_sequence_number,
                     last_sent: None,
                     last_retransmit: HashMap::new(),

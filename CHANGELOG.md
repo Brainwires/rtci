@@ -1213,6 +1213,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default profile (no video RED), and a peer whose feedback is transport-wide (bound by
   the header extension: Chromium). Test `a_red_stream_has_the_feedback_of_the_format_it_carries`.
 
+- **a lost video packet sent in RED was retransmitted under the wrong RTX payload type and
+  could not be used** (rtcpbudget-6; the `Chrome` profile, `fec.video-red-ulpfec`). The NACK
+  responder sent every retransmission of a stream under the one RTX payload type of the
+  stream's media format (`apt=96` for VP8), but video in RED leaves under the `red` payload
+  type, whose retransmission format is the one with `apt=<red>` (`a=fmtp:117 apt=116`; RFC
+  4588 section 8.1: `apt` is "the payload type of the associated original stream"). A
+  receiver restores the payload type from the `apt` of the format the retransmission arrives
+  under, so the packet came back as VP8 with the RED header in front of its payload: an
+  engine peer and a browser alike got a packet that could not be decoded, and the loss was
+  repaired by FEC or a key frame only. A retransmission now goes under the RTX format whose
+  `apt` is the payload type the packet left under, as libwebrtc looks it up
+  (`rtp_sender.cc`, `rtx_payload_type_map_.find(packet.PayloadType())`); a packet whose
+  payload type has no RTX format is sent again as it was; a binder that does not list the
+  section's formats (`StreamInfo::section_mime_types` empty) keeps the stream's one RTX
+  payload type. Not affected: the default profile (no video RED). Tests
+  `rtci-interceptor/tests/nack_rtx_red.rs`,
+  `in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red`.
+
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
   report. draft-ietf-rmcat-gcc-02 section 5.5 sets `A_hat(i) = beta * R_hat(i)`; the
