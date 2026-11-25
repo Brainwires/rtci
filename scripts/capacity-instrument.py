@@ -15,9 +15,10 @@ This script reads such lines out of any text (a job log with its own prefixes in
 
 ``compare --base LOG [LOG ...] --head LOG [LOG ...]``
     The merge-point rule of docs/capacity-instrument.md: for every cell both logs hold, every
-    gated share (Fisher's exact test, one-sided: the head has more) and every gated mean (Welch's
-    test, one-sided: the head's is higher) at a family-wise level of 1 % (Bonferroni over the
-    tests made), and every requirement the base meets. Prints the table with each test's p-value
+    gated share (Fisher's exact test, one-sided: the head has more) and every gated mean (the
+    head's worse than the base's by more than a stated margin, one-sided, on the per-seed
+    differences) at a family-wise level of 1 % (Bonferroni over the tests made), and every
+    requirement the base meets. The differences are printed with their 95 % intervals. Prints the table with each test's p-value
     and exits 1 when the rule is broken, 0 when it holds, 2 on unusable input.
 
 ``baseline LOG [LOG ...]``
@@ -73,8 +74,21 @@ GATED_SHARES = [
     ("a flow ceased by the circuit breaker", "cb", 0.0),
     ("a peer left Connected", "disc", 0.0),
 ]
-# Means: figures in seconds (and packets) for which more is worse.
-GATED_MEANS = ["max_age", "stale1", "stale2", "fresh_gap", "audio_lost"]
+# Means: (figure, whether more is worse, the margin). The head is worse when its mean is beyond
+# the base's by more than the margin: a tenth of a second of picture or of audio (five packets),
+# 10 kbit/s under the cap, 50 kbit/s in the recovery window. With the same seeds on both sides
+# the test is on the per-seed differences, which a small change leaves highly correlated (a
+# difference of 0.03 s is measured to +-0.04 s on 1000 seeds): without a margin it would break
+# the rule over eight milliseconds of audio.
+GATED_MEANS = [
+    ("max_age", True, 0.1),
+    ("stale1", True, 0.1),
+    ("stale2", True, 0.1),
+    ("fresh_gap", True, 0.1),
+    ("audio_lost", True, 5.0),
+    ("under", False, 10.0),
+    ("window", False, 50.0),
+]
 FAMILY_ALPHA = 0.01
 
 # What the tables show as percentiles.
@@ -219,6 +233,32 @@ def welch_greater(head: list[float], base: list[float]) -> tuple[float, float, f
     return (difference, error, 1 - NormalDist().cdf(difference / error))
 
 
+def worse_by(head: list[Run], base: list[Run], figure: str, high: bool, margin: float) -> tuple[str, float, float, float]:
+    """Whether the head's mean of `figure` is worse than the base's by more than `margin`
+    (higher when `high`, else lower), one-sided, by the normal approximation: how it was tested
+    ("paired" on the runs both sides completed with the same seed and phase when they are at
+    least half of either side, else "welch"), the difference of the means (head less base), the
+    standard error, and the p-value of "worse by more than the margin"."""
+    sign = 1.0 if high else -1.0
+    of_base = {(run.seed, run.phase): run.value(figure) for run in base}
+    pairs = [(run.value(figure), of_base.get((run.seed, run.phase))) for run in head]
+    differences = [h - b for h, b in pairs if h is not None and b is not None]
+    xh, xb = values(head, figure), values(base, figure)
+    if len(differences) >= 2 and 2 * len(differences) >= max(len(xh), len(xb)):
+        how, n = "paired", len(differences)
+        difference = sum(differences) / n
+        error = math.sqrt(sum((d - difference) ** 2 for d in differences) / (n - 1) / n)
+    elif len(xh) >= 2 and len(xb) >= 2:
+        how = "welch"
+        difference, error, _ = welch_greater(xh, xb)
+    else:
+        return ("none", math.nan, math.nan, 1.0)
+    excess = sign * difference - margin
+    if error == 0:
+        return (how, difference, 0.0, 0.0 if excess > 0 else 1.0)
+    return (how, difference, error, 1 - NormalDist().cdf(excess / error))
+
+
 def beyond(runs: list[Run], figure: str, limit: float, high: bool = True) -> int:
     """How many runs have `figure` over (under, with `high` false) `limit` or did not complete."""
     count = 0
@@ -360,30 +400,36 @@ def compare(base: list[Run], head: list[Run]) -> tuple[list[Test], float]:
                     fisher_greater(kh, len(h), kb, len(b)),
                 )
             )
-        for figure in GATED_MEANS:
+        for figure, high, margin in GATED_MEANS:
             if not (has(b, figure) and has(h, figure)):
                 continue
             xb, xh = values(b, figure), values(h, figure)
-            difference, error, p = welch_greater(xh, xb)
+            if not high and max(xb + xh, default=0) == 0:
+                continue
+            how, difference, error, p = worse_by(h, b, figure, high, margin)
             tests.append(
                 Test(
                     cell,
-                    f"mean: {figure}",
+                    f"mean: {figure} ({'more' if high else 'less'} by over {margin:g}, {how})",
                     f"{mean(xb):.3f}",
-                    f"{mean(xh):.3f} ({difference:+.3f} +-{2.576 * error:.3f})",
+                    f"{mean(xh):.3f} ({difference:+.3f} +-{1.96 * error:.3f})",
                     p,
                 )
             )
         for requirement in requirements_of(cell):
+            # A requirement the base meets and the head misses, when the head also has more
+            # violating runs than chance gives (5 %): a share near the bound passes its test on
+            # one draw and fails it on the next, and that alone is not the head's doing.
             met_b, met_h = met(requirement, b), met(requirement, h)
+            kb, kh = beyond(b, requirement.figure, requirement.limit), beyond(h, requirement.figure, requirement.limit)
             tests.append(
                 Test(
                     cell,
                     f"requirement: {requirement.name}",
-                    "met" if met_b else "missed",
-                    "met" if met_h else "missed",
+                    f"{'met' if met_b else 'missed'} ({kb}/{len(b)})",
+                    f"{'met' if met_h else 'missed'} ({kh}/{len(h)})",
                     None,
-                    broken=met_b and not met_h,
+                    broken=met_b and not met_h and fisher_greater(kh, len(h), kb, len(b)) < 0.05,
                 )
             )
     with_p = [t for t in tests if t.p is not None]

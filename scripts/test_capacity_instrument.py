@@ -144,15 +144,44 @@ class Compare(unittest.TestCase):
     def test_two_draws_of_one_tree_hold_the_rule(self):
         tests, level = ci.compare(ensemble(1, 1000, violators=0.08), ensemble(2, 1000, violators=0.08))
         self.assertEqual([], [t.what for t in tests if t.broken])
-        # Fourteen tests with a p-value in a cap cell: the family's 1 % over them.
+        # Fourteen tests with a p-value in a cap cell (these runs have no rate under the cap):
+        # the family's 1 % over them.
         self.assertEqual(14, sum(1 for t in tests if t.p is not None))
         self.assertAlmostEqual(0.01 / 14, level)
 
-    def test_a_picture_a_quarter_second_older_breaks_it(self):
-        tests, _ = ci.compare(ensemble(1, 1000), ensemble(2, 1000, shift=0.25))
+    def test_a_picture_half_a_second_older_breaks_it(self):
+        tests, _ = ci.compare(ensemble(1, 1000), ensemble(2, 1000, shift=0.5))
         broken = [t.what for t in tests if t.broken]
-        self.assertIn("mean: max_age", broken)
-        self.assertIn("mean: stale1", broken)
+        self.assertIn("mean: max_age (more by over 0.1, paired)", broken)
+        self.assertIn("mean: stale1 (more by over 0.1, paired)", broken)
+
+    def test_a_difference_inside_the_margin_does_not_break_it_however_well_measured(self):
+        # The same seeds, every picture 0.05 s older: measured exactly, and under the margin.
+        base = ensemble(1, 1000)
+        head = [run(r.seed, max_age=r.figures["max_age"] + 0.05) for r in base]
+        how, difference, error, p = ci.worse_by(head, base, "max_age", True, 0.1)
+        self.assertEqual("paired", how)
+        self.assertAlmostEqual(0.05, difference)
+        self.assertLess(error, 1e-9)
+        self.assertEqual(1.0, p)
+        # 0.15 s older is over it.
+        head = [run(r.seed, max_age=r.figures["max_age"] + 0.15) for r in base]
+        self.assertEqual(0.0, ci.worse_by(head, base, "max_age", True, 0.1)[3])
+
+    def test_a_lower_rate_under_the_cap_breaks_it(self):
+        base = [run(i, under=200.0 + i % 7) for i in range(1, 201)]
+        head = [run(i, under=180.0 + i % 5) for i in range(1, 201)]
+        tests, _ = ci.compare(base, head)
+        self.assertIn("mean: under (less by over 10, paired)", [t.what for t in tests if t.broken])
+        tests, _ = ci.compare(head, base)
+        self.assertEqual([], [t.what for t in tests if t.broken])
+
+    def test_other_seeds_are_compared_without_pairing(self):
+        base = ensemble(1, 300)
+        head = [run(r.seed + 1000, max_age=r.figures["max_age"] + 1.0) for r in ensemble(2, 300)]
+        how, difference, _, p = ci.worse_by(head, base, "max_age", True, 0.1)
+        self.assertEqual("welch", how)
+        self.assertLess(p, 1e-6)
 
     def test_a_better_head_is_not_a_breach(self):
         tests, _ = ci.compare(ensemble(1, 1000, violators=0.08), ensemble(2, 1000, shift=-2.0, violators=0.0))
@@ -176,6 +205,11 @@ class Compare(unittest.TestCase):
         tests, _ = ci.compare(base, head)
         broken = [t.what for t in tests if t.broken]
         self.assertIn("requirement: freeze", broken)
+        # A share at the bound that passes on one draw and fails on the next is not a breach.
+        base = [run(i, freeze=3.0 if i <= 20 else 1.0) for i in range(1, 301)]
+        head = [run(i, freeze=3.0 if i <= 23 else 1.0) for i in range(1, 301)]
+        tests, _ = ci.compare(base, head)
+        self.assertEqual([], [t.what for t in tests if t.broken])
         # One both miss is not the head's breach.
         tests, _ = ci.compare(head, head)
         self.assertEqual([], [t.what for t in tests if t.broken])
@@ -190,7 +224,7 @@ class Compare(unittest.TestCase):
         tests, level = ci.compare(ensemble(1, 1000), ensemble(2, 1000, shift=0.5))
         text = ci.compare_text(tests, level, "master", "head")
         self.assertIn("RULE BROKEN", text)
-        self.assertIn(f"- {CELL}: mean: max_age", text)
+        self.assertIn(f"- {CELL}: mean: max_age (more by over 0.1, paired)", text)
         tests, level = ci.compare(ensemble(1, 1000), ensemble(1, 1000))
         self.assertIn("RULE HOLDS", ci.compare_text(tests, level, "master", "head"))
 
@@ -244,8 +278,8 @@ class Clean(unittest.TestCase):
         old = [ci.Run(CELL, i, 0, {"max_age": 8.0, "freeze": 1.0}) for i in range(1, 51)]
         tests, _ = ci.compare(old, old)
         whats = [t.what for t in tests]
-        self.assertIn("mean: max_age", whats)
-        self.assertNotIn("mean: stale1", whats)
+        self.assertIn("mean: max_age (more by over 0.1, paired)", whats)
+        self.assertFalse([w for w in whats if w.startswith("mean: stale1")])
         self.assertNotIn("share: a peer left Connected (disc > 0)", whats)
 
 
