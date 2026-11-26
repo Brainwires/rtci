@@ -15,7 +15,7 @@ use rtci::stun::addr::MappedAddress;
 use rtci::stun::attributes::{
     ATTR_ALTERNATE_SERVER, ATTR_MESSAGE_INTEGRITY, ATTR_NONCE, ATTR_REALM,
 };
-use rtci::stun::error_code::{CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute};
+use rtci::stun::error_code::{CODE_BAD_REQUEST, CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute};
 use rtci::stun::fingerprint::FINGERPRINT;
 use rtci::stun::integrity::MessageIntegrity;
 use rtci::stun::message::{
@@ -54,11 +54,19 @@ struct Harness {
     connects: Vec<SocketAddr>,
     /// How a server answers a signed Allocate: an error code and an ALTERNATE-SERVER.
     refuse: HashMap<SocketAddr, (u16, Option<SocketAddr>)>,
+    /// Answer the first (unsigned) Allocate with an unsigned 400 instead of the 401.
+    unsigned_400: bool,
+    /// Every connection the engine closed or reset, in order.
+    closed: Vec<StreamId>,
     events: Vec<RTCPeerConnectionEvent>,
 }
 
 impl Harness {
     fn new(refuse: &[(SocketAddr, u16, Option<SocketAddr>)]) -> Result<Self> {
+        Self::with(refuse, false)
+    }
+
+    fn with(refuse: &[(SocketAddr, u16, Option<SocketAddr>)], unsigned_400: bool) -> Result<Self> {
         common::install_crypto_provider();
         let now = Instant::now();
         let mut pc = RTCPeerConnectionBuilder::new()
@@ -96,6 +104,8 @@ impl Harness {
             remotes: HashMap::new(),
             connects: vec![],
             refuse: refuse.iter().map(|(s, c, alt)| (*s, (*c, *alt))).collect(),
+            unsigned_400,
+            closed: vec![],
             events: vec![],
         };
         h.negotiate()?;
@@ -147,6 +157,19 @@ impl Harness {
     fn answer(&self, server: SocketAddr, request: &Message) -> Result<Option<Vec<u8>>> {
         if request.typ.class != CLASS_REQUEST {
             return Ok(None);
+        }
+        if !request.contains(ATTR_MESSAGE_INTEGRITY) && self.unsigned_400 {
+            return self
+                .reply(
+                    request,
+                    CLASS_ERROR_RESPONSE,
+                    vec![Box::new(ErrorCodeAttribute {
+                        code: CODE_BAD_REQUEST,
+                        reason: b"Bad Request".to_vec(),
+                    })],
+                    false,
+                )
+                .map(Some);
         }
         if !request.contains(ATTR_MESSAGE_INTEGRITY) {
             return self
@@ -217,6 +240,9 @@ impl Harness {
             }
             for c in commands {
                 moved = true;
+                if let StreamCommand::Close { id } | StreamCommand::Reset { id } = c {
+                    self.closed.push(id);
+                }
                 if let StreamCommand::Connect { id, remote, .. } = c {
                     self.remotes.insert(id, remote);
                     self.connects.push(remote);
@@ -343,5 +369,37 @@ fn a_server_answering_508_is_not_used_for_a_minute_even_by_a_new_resolution() ->
     h.advance(Duration::from_secs(55))?;
     h.restart()?;
     assert_eq!(h.connects_to(SERVER), 2, "used again after the minute");
+    Ok(())
+}
+
+/// RFC 8489 section 9.2.5: an unsigned 400 is "discarded, as if it were never received ... the
+/// 400 response will never reach the application, resulting in a timeout." A server that
+/// answers the first Allocate with one has not refused it: its connection stays while the
+/// Allocate is outstanding (over TCP, Ti = 39.5 s, RFC 8489 section 6.2.2), and when the
+/// Allocate times out the server has failed as a refusing one does (RFC 5928 section 3): the
+/// connection is closed and the link fails.
+#[test]
+fn an_unsigned_400_to_the_first_allocate_fails_the_server_when_the_allocate_times_out() -> Result<()>
+{
+    let mut h = Harness::with(&[], true)?;
+    assert_eq!(h.connects_to(SERVER), 1);
+    let stream = *h
+        .remotes
+        .keys()
+        .next()
+        .expect("the connection to the server");
+    assert!(h.closed.is_empty(), "closed at the 400: {:?}", h.closed);
+    h.advance(Duration::from_secs(30))?;
+    assert!(
+        !h.closed.contains(&stream),
+        "closed before the Allocate timed out"
+    );
+    h.advance(Duration::from_secs(20))?;
+    assert!(
+        h.closed.contains(&stream),
+        "the Allocate timed out and the connection stays: {:?}",
+        h.closed
+    );
+    assert!(h.relayed().is_empty());
     Ok(())
 }

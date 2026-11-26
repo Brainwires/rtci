@@ -1418,8 +1418,7 @@ fn test_an_unsigned_400_to_a_signed_request_is_never_received() -> Result<()> {
             "{transport:?}: the 400 ended the Allocate"
         );
 
-        let (requests, events) =
-            drive_until(&server, &mut client, now + Duration::from_secs(120))?;
+        let (requests, events) = drive_until(&server, &mut client, now + Duration::from_secs(120))?;
         assert!(
             requests
                 .iter()

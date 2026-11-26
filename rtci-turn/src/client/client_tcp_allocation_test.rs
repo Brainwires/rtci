@@ -685,7 +685,9 @@ fn test_an_unsigned_400_to_a_connection_bind_is_never_received() -> Result<()> {
     let (bind, _) = next_bind(&mut connection);
     connection.handle_read(chunk(now, &unsigned_400(&bind)?))?;
     assert_eq!(connection.poll_event(), None, "the 400 was acted on");
-    let deadline = connection.poll_timeout().expect("the bind is still waited for");
+    let deadline = connection
+        .poll_timeout()
+        .expect("the bind is still waited for");
     assert_eq!(deadline, now + CONNECTION_BIND_TIMEOUT);
     connection.handle_timeout(deadline)?;
     assert_eq!(
