@@ -366,6 +366,45 @@ receiver-window credit advertised in every SACK, which tells the peer to slow do
 how you apply back-pressure**; resume when the application catches up. Media is never throttled this way: RTP arrives
 over SRTP and is subject to none of SCTP's flow control.
 
+## Porting from webrtc-rs `rtc` / older forks
+
+Behaviour that differs from webrtc-rs `rtc` (and from this fork before the `rtci` names) and
+that ported code trips over first:
+
+- **`add_remote_candidate` needs `sdp_mid` or `sdp_mline_index`.** A non-empty candidate with
+  neither is refused with `Error::TypeError` (W3C webrtc-pc `addIceCandidate`). If your
+  signalling carries bare `candidate:` lines, set `sdp_mline_index` (under BUNDLE the index of
+  the group's tagged m= section, usually 0: the transport's candidates name it) or `sdp_mid`.
+- **The bare builder has no congestion control.** `RTCPeerConnectionBuilder::new()` without
+  `with_interceptor_registry` runs the RTCP session and key-frame requests only: no NACK, no
+  transport-wide feedback, no GCC, no pacer, no circuit breaker. Build the registry with
+  `register_default_interceptors_with_handles` (or `register_default_interceptors_with_options`)
+  and keep its `DefaultInterceptorHandles`: the encoder's target is
+  `handles.congestion_control.target_bitrate()`, per encoding `RTCRtpSender::target_bitrates()`.
+  `GccInterceptorBuilder` / `GccHandle` are for a chain assembled by hand.
+- **The target before feedback is a seed.** Until the first congestion feedback,
+  `CongestionControlHandle::target_bitrate()` returns the estimator's start (300 kbit/s by
+  default), never zero, and `stats().delay_based_bitrate` / `loss_based_bitrate` are already
+  `Some`; `stats().packet_loss` is `None` until feedback was folded in.
+- **Data channel messages to browsers are capped at 16 KiB under the `Rfc` profile.** Toward
+  a peer that does not announce interleaving (I-DATA, RFC 8260; no browser does) `send` of a
+  larger message returns `Error::ErrMessageTooLargeWithoutInterleaving` (RFC 8831 section 6.6,
+  a SHOULD). `with_sctp_message_size_limit_without_interleaving(false)` lifts it; see "Read
+  this first" in FORK.md.
+- **After `close()`, keep draining `poll_write`.** `close()` queues the last datagrams (DTLS
+  `close_notify`, a TURN Refresh of lifetime 0 that releases the allocation); call
+  `poll_write` until it returns `None` and send them. Dropping the connection sends nothing.
+- **The engine gathers server-reflexive and relay candidates itself by default.**
+  `ReflexiveGathering::Engine` and `RelayGathering::Engine` are the defaults: with `stun:` /
+  `turn:` servers configured the engine sends the Binding and Allocate requests through
+  `poll_write` from the UDP host candidates you add. Code that ran its own STUN / TURN
+  client sets `SettingEngineBuilder::with_server_reflexive_gathering(ReflexiveGathering::
+  Application)` and `with_relay_gathering(RelayGathering::Application)`, or the engine
+  gathers too.
+- **Two ways to restart ICE.** `RTCOfferOptions { ice_restart: true, .. }` restarts ICE in the
+  one offer `create_offer` is called with; `restart_ice()` (W3C `restartIce`) marks the
+  restart until an offer carries it and fires negotiation-needed. Both stage the same restart.
+
 ## Features
 
 - **ICE** (Interactive Connectivity Establishment) - NAT traversal with STUN/TURN, plus mDNS candidates

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **README: "Porting from webrtc-rs `rtc` / older forks"** (`conf/docs-3-porting-section`;
+  docs only): `add_remote_candidate` needs `sdp_mid` or `sdp_mline_index` (W3C TypeError;
+  the m-line index under BUNDLE for bare candidate lines); the bare builder has no GCC or
+  pacer (`register_default_interceptors_with_handles`); `target_bitrate()` before feedback is
+  the start value; the `Rfc` profile's 16 KiB message cap toward peers without interleaving;
+  keep draining `poll_write` after `close()`; the engine gathers srflx and relay candidates by
+  default (`ReflexiveGathering` / `RelayGathering`); `RTCOfferOptions::ice_restart` against
+  `restart_ice()`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
