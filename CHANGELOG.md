@@ -94,6 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8830 track settings; the default and `Chrome` keep it off. Test
   `tests/jsep_msid.rs::the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid`.
 
+### Fixed
+
+- **A renegotiation that changes only a section's msid appdata no longer resets its receiver**
+  (`conf/jsep-82-msid-appdata-keeps-learned-ssrcs`; RFC 9429 section 5.8.2: `a=msid` is stored
+  "ignoring any "appdata" field"). The receiver compared the appdata to decide whether the
+  description named the track it already had; a new appdata alone (a remote sender that renamed
+  its track) made it take the description afresh and forget the SSRCs and codecs it had learned
+  from RTP, so a simulcast sender that had stopped sending the RID header extension was no longer
+  routed. The appdata now counts only under `with_msid_appdata_change_renews_track(true)` (RFC
+  8830 section 3's model). Audit row RFC9429-5.8.2-22 `partial` -> `tested`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

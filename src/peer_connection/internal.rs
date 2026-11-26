@@ -3025,6 +3025,7 @@ impl RTCPeerConnection {
         } else {
             vec![]
         };
+        let appdata_names_the_track = self.setting_engine.msid_appdata_change_renews_track;
 
         for incoming_track in incoming_tracks.into_iter() {
             if let Some(transceiver) = self.rtp_transceivers.iter_mut().find(|transceiver| {
@@ -3038,7 +3039,7 @@ impl RTCPeerConnection {
                 // The MediaStreams the track is in, one per `a=msid` line (RFC 8830 section 2).
                 receiver.set_streams(incoming_track.stream_ids.clone());
 
-                if is_same_remote_track(receiver, &incoming_track) {
+                if is_same_remote_track(receiver, &incoming_track, appdata_names_the_track) {
                     // Keep SSRCs and codecs learned from RTP; the sender may no longer attach
                     // the MID/RID header extension needed to learn them again.
                     continue;
@@ -5073,14 +5074,21 @@ impl RTCPeerConnection {
     }
 }
 
+/// Whether `incoming_track` describes the track `receiver` already has, so that what RTP
+/// taught the receiver (SSRCs bound by RID, their codecs) is kept. The msid-appdata counts
+/// only when `appdata_names_the_track` (`with_msid_appdata_change_renews_track`, RFC 8830
+/// section 3's model); by default it is ignored, as RFC 9429 section 5.8.2 reads `a=msid`
+/// ("ignoring any "appdata" field").
 fn is_same_remote_track(
     receiver: &RTCRtpReceiverInternal,
     incoming_track: &sdp::TrackDetails,
+    appdata_names_the_track: bool,
 ) -> bool {
     let track = receiver.track();
     // A description without msid-appdata leaves the track id to this side: any id it gave
     // the track is the same track.
-    if (!incoming_track.track_id.is_empty()
+    if (appdata_names_the_track
+        && !incoming_track.track_id.is_empty()
         && receiver.remote_track_id() != incoming_track.track_id)
         || track.track_id().is_empty()
         || track.stream_id() != &incoming_track.stream_id

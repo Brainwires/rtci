@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5062 of 5088 (99.5 %).
-- Tested as the default (`tested`): 5030 of 5088 (98.9 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 26: 16 untested, 7 partial, 3 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5063 of 5088 (99.5 %).
+- Tested as the default (`tested`): 5031 of 5088 (98.9 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 25: 16 untested, 6 partial, 3 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 16 | 2 |
-| C | partly implemented | 7 | 1 |
+| C | partly implemented | 6 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 58 | 28 |
+| all | | 57 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 25 rows, 23 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 24 rows, 22 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -38,7 +38,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
-| jsep | 5 | 1 | 0 | 0 | 0 | 6 | 6 | 0 | 0 |
+| jsep | 5 | 0 | 0 | 0 | 0 | 5 | 5 | 0 | 0 |
 | jsep (running) | 2 | 1 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -96,7 +96,6 @@ Sorted by class, then owner, size and ID.
 | RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |
 | RFC5576-6.1-4 | `rfc5576.md` | cname appears at most once per ssrc-id in a media stream | untested | B | A test counting cname lines per ssrc-id in a generated description (audit-2 sweep) | S | sdp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
-| RFC9429-5.8.2-22 | `rfc9429.md` | a=msid lines are parsed and stored, ignoring appdata | partial | C | is_same_remote_track compares the msid appdata by default, so a re-description that changes only the appdata drops the SSRCs and codecs learned from RTP: compare it only under with_msid_appdata_change_renews_track, with a test (sctp7 audit; track id and events already ignore it) | S | jsep |
 | RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
 | RFC9260-3.1-1 | `rfc9260.md` | Source port 0 is not used | partial | C | TransportConfig::with_sctp_port(0) refused (or never sent), with a test that no packet leaves with source port 0; the receive check is tested (audit-4 sweep) | S | sctp |
