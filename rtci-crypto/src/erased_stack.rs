@@ -465,6 +465,54 @@ mod imp {
             }
         }
 
+        /// A signal that arrives while the work runs is handled on the private stack (the
+        /// thread has no alternate signal stack of this module's making) and the work goes on.
+        #[test]
+        fn a_signal_is_delivered_while_the_work_runs_on_the_private_stack() {
+            use std::sync::atomic::AtomicUsize;
+            static HANDLER_FRAME: AtomicUsize = AtomicUsize::new(0);
+            extern "C" fn handler(_signal: libc::c_int) {
+                let here = 0u8;
+                HANDLER_FRAME.store(&raw const here as usize, Ordering::SeqCst);
+            }
+            let stack = PrivateStack::new().expect("a stack");
+            // SAFETY: a handler that only stores an address is installed for SIGUSR2, which
+            // nothing else in this test binary uses, and the previous action is put back.
+            let after = unsafe {
+                let mut action = std::mem::zeroed::<libc::sigaction>();
+                action.sa_sigaction = handler as extern "C" fn(libc::c_int) as usize;
+                let mut previous = std::mem::zeroed::<libc::sigaction>();
+                assert_eq!(0, libc::sigaction(libc::SIGUSR2, &action, &mut previous));
+                let after = run_on(&stack, || {
+                    leave_a_mark();
+                    libc::pthread_kill(libc::pthread_self(), libc::SIGUSR2);
+                    leave_a_mark()
+                })
+                .expect("no panic");
+                libc::sigaction(libc::SIGUSR2, &previous, std::ptr::null_mut());
+                after
+            };
+            let handled_at = HANDLER_FRAME.load(Ordering::SeqCst);
+            assert!(
+                holds(&stack, handled_at),
+                "the handler ran at {handled_at:#x}"
+            );
+            assert!(holds(&stack, after));
+            assert_eq!(
+                0,
+                not_zero(&stack),
+                "the signal frame is erased with the rest"
+            );
+        }
+
+        /// The unwind information of the switch lets a backtrace taken inside the work be
+        /// walked without harm.
+        #[test]
+        fn a_backtrace_can_be_taken_inside_the_work() {
+            let frames = run(|| std::backtrace::Backtrace::force_capture().to_string());
+            assert!(!frames.is_empty());
+        }
+
         #[test]
         fn deep_work_fits() {
             #[inline(never)]
