@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Each payload type of a description carries its own registered fmtp line**
+  (`conf/jsep-83-h264-fmtp-per-payload-type`; RFC 6184 section 8.2.2, RFC 3264 sections 5.1
+  and 6.1, W3C webrtc 5.4). Formats were matched to the registered ones by their
+  configuration alone (H.264 profile and `packetization-mode`, VP9 `profile-id`, AV1
+  `profile`, H.265 profile and tier), and the first registered format of a configuration
+  stood for every other one: in 0.2.0 an offer gave the default H.264 High payload types 118
+  to 121 (levels 4.0, 4.1, 4.2, 5.1) the `profile-level-id=640032` line of payload type 123
+  (Level 5.0), an answer between two rtci peers did the same, the answering side numbered all
+  the offered High formats 123 internally, and `setCodecPreferences` with the High entries of
+  `getCapabilities` offered one of them. The same held for registered AV1 formats differing in
+  `level-idx` / `tier`, H.265 formats differing in `level-id` and VP9 formats differing in a
+  receiver limit. A format is now matched, among the registered formats of its configuration,
+  to the one with the same parameters and payload type, then the same parameters, then the
+  same payload type, then the first (`codec_parameters_search`); the answer's level rules
+  (RFC 6184 section 8.2.2, RFC 7798 section 7.2.2) are unchanged. ENGINE BEHAVIOUR CHANGE, NOT
+  breaking (no API change): an answer to a browser whose H.264 payload type number is one of
+  the registered High numbers states that registered format's level, not Level 5.0. RTX, RED
+  and FEC keep their own lines (they name payload types) and were not affected.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

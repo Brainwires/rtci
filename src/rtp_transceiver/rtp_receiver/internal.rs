@@ -11,7 +11,7 @@ use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_receive_fec_format,
+    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_search, find_receive_fec_format,
     find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
@@ -612,8 +612,10 @@ impl RTCRtpReceiverInternal {
             {
                 continue;
             }
+            // The engine's format that is this preference (its parameters), not the first of
+            // its configuration: each H.264 level of a profile is a format of its own.
             let (c, match_type) =
-                codec_parameters_fuzzy_search(&codec.rtp_codec, &media_engine_codecs);
+                codec_parameters_search(&codec.rtp_codec, None, &media_engine_codecs);
             if match_type != CodecMatch::None
                 && !filtered_codecs
                     .iter()
@@ -1124,7 +1126,7 @@ impl RTCRtpReceiverInternal {
                 continue;
             }
             // The stream's codec is the negotiated format from here on, with its feedback.
-            let (negotiated, match_type) = codec_parameters_fuzzy_search(&coding.codec, &codecs);
+            let (negotiated, match_type) = codec_parameters_search(&coding.codec, None, &codecs);
             coding.codec = if match_type == CodecMatch::None {
                 Default::default()
             } else {
@@ -1300,7 +1302,7 @@ impl RTCRtpReceiverInternal {
 
         for coding in self.track().codings() {
             let (codec, match_type) =
-                codec_parameters_fuzzy_search(&coding.codec, &parameters.rtp_parameters.codecs);
+                codec_parameters_search(&coding.codec, None, &parameters.rtp_parameters.codecs);
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
                 && match_type != CodecMatch::None
             {

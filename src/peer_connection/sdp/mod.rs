@@ -334,8 +334,8 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_fec_mime_type,
-    repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, codec_parameters_search,
+    is_fec_mime_type, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
@@ -1564,7 +1564,11 @@ impl RTCPeerConnection {
 
             // An answer has only feedback the offer has for the format (RFC 4585 section 4.2).
             let feedbacks = match &media_section.offered_codecs {
-                Some(offered) => match codec_parameters_fuzzy_search(&codec.rtp_codec, offered) {
+                Some(offered) => match codec_parameters_search(
+                    &codec.rtp_codec,
+                    Some(codec.payload_type),
+                    offered,
+                ) {
                     (offered, CodecMatch::Exact | CodecMatch::Partial) => {
                         rtcp_feedback_intersection(
                             &codec.rtp_codec.rtcp_feedback,
