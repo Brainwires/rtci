@@ -319,6 +319,78 @@
     }));
   }
 
+  // The payload types of the sections a description accepts (port not 0, RFC 3264 section 6).
+  function sdpPayloadTypes(sdp) {
+    const pts = new Set();
+    for (const m of (sdp || "").matchAll(/^m=\S+ (\d+) \S+((?: \d+)*)\r?$/gm)) {
+      if (m[1] !== "0") m[2].trim().split(/\s+/).filter(Boolean).forEach((pt) => pts.add(Number(pt)));
+    }
+    return pts;
+  }
+
+  // What the Rust side received on a payload type the answer `answerSdp` does not have
+  // (interop-peer's `wireRtp.received`, counted from the SRTP header before the engine looks
+  // at it): an offerer sends only formats of the answer (RFC 3264 section 6.1, RFC 8829 section
+  // 5.3.1) and the engine ignores the rest (RFC 3550 section 5.1). [{ payloadType, packets }].
+  function unnegotiatedReceived(report, answerSdp) {
+    const answered = sdpPayloadTypes(answerSdp);
+    return Object.entries(report?.wireRtp?.received || {})
+      .filter(([pt]) => !answered.has(Number(pt)))
+      .map(([pt, c]) => ({ payloadType: Number(pt), packets: c.packets }));
+  }
+
+  // The `kind` section's format lines (m=, a=rtpmap, a=fmtp) of a description.
+  function codecLines(sdp, kind) {
+    const section = (sdp || "").split(/\r?\n(?=m=)/).find((m) => m.startsWith(`m=${kind} `)) || "";
+    return section.split(/\r?\n/).filter((l) => /^(m=|a=rtpmap:|a=fmtp:)/.test(l));
+  }
+
+  // How this side sends `kind`, at one moment: the sender's negotiated codecs
+  // (RTCRtpSendParameters.codecs) and what its outbound-rtp says it sends with (codecId ->
+  // RTCCodecStats payloadType / mimeType / sdpFmtpLine, encoderImplementation), and every
+  // codec stats entry the browser reports.
+  async function codecView(pc, kind = "video") {
+    const view = { t: Math.round(performance.now()) };
+    const sender = pc.getSenders().find((x) => x.track && x.track.kind === kind);
+    try {
+      const p = sender.getParameters();
+      view.senderCodecs = (p.codecs || []).map((c) => `${c.payloadType} ${c.mimeType} ${c.sdpFmtpLine || ""}`.trim());
+      view.encodingCodecs = (p.encodings || []).map((e) => (e.codec ? e.codec.mimeType : null));
+    } catch (e) {
+      view.senderCodecs = String(e);
+    }
+    const stats = await pc.getStats();
+    const codecs = new Map();
+    stats.forEach((x) => {
+      if (x.type === "codec") codecs.set(x.id, x);
+    });
+    stats.forEach((x) => {
+      if (x.type === "outbound-rtp" && x.kind === kind) {
+        const c = codecs.get(x.codecId);
+        view.sending = {
+          ssrc: x.ssrc,
+          packetsSent: x.packetsSent,
+          encoderImplementation: x.encoderImplementation,
+          codec: c ? `${c.payloadType} ${c.mimeType} ${c.sdpFmtpLine || ""}`.trim() : x.codecId || null,
+        };
+      }
+    });
+    view.codecStats = [...codecs.values()].map((c) => `${c.payloadType} ${c.mimeType} ${c.sdpFmtpLine || ""}`.trim());
+    return view;
+  }
+
+  // The browser's own `kind` format table: the format lines of an offer made without codec
+  // preferences (what each payload type number means to it).
+  async function defaultCodecLines(kind = "video") {
+    const pc = new RTCPeerConnection();
+    try {
+      pc.addTransceiver(kind);
+      return codecLines((await pc.createOffer()).sdp, kind);
+    } finally {
+      pc.close();
+    }
+  }
+
   async function transport(pc) {
     const stats = await pc.getStats();
     let t = null;
@@ -370,6 +442,7 @@
 
   window.Interop = {
     open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
-    selectedPair, wrongFingerprint, mlines, transportLines,
+    selectedPair, wrongFingerprint, mlines, transportLines, sdpPayloadTypes, unnegotiatedReceived, codecLines,
+    codecView, defaultCodecLines,
   };
 })();

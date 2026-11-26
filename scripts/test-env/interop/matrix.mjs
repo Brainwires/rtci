@@ -25,6 +25,11 @@ const walk = (suite, file) => {
         else Object.assign(cell, { status: "na-uncited", detail: why || "skipped without a reason" });
       } else if (res.status === "passed" && (t.status === "expected" || t.status === undefined)) {
         cell.status = "pass";
+        // A cell that passed on its second attempt after a known browser defect
+        // (common.mjs unlessUnnegotiatedPayloadType) says so in its cell.
+        const notes = [...(t.annotations || []), ...(res.annotations || [])];
+        const defect = notes.find((a) => a.type === "known-browser-defect");
+        if (defect) cell.detail = defect.description;
       } else if (t.status === "expected" && res.status === "failed") {
         // test.fail(): an expected failure, a known gap with its verdict ("engine-gap: <reason>
         // [<citation>]"). Once it passes, Playwright reports it unexpected, and the gate fails
@@ -73,7 +78,9 @@ if (process.argv[3]) {
 // cells (peers.spec.mjs) a column per peer.
 const text = (c) =>
   (c.status === "pass"
-    ? "pass"
+    ? c.detail
+      ? `pass after a retry (${c.detail})`
+      : "pass"
     : (c.status.startsWith("na-") && c.status !== "na-uncited") || c.status === "xfail"
       ? `${c.status} (${c.reason})`
       : `${c.status.toUpperCase()}: ${c.detail || ""}`

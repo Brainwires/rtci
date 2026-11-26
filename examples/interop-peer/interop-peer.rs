@@ -19,6 +19,9 @@
 //!   `wireRtp` counts the RTP packets and octets by payload type as they crossed the wire in
 //!   each direction (`received`, `sent`), read from the SRTP header, which is in the clear:
 //!   what the browser actually sent (Opus or RED, RFC 2198) before the engine took RED apart.
+//!   `unnegotiatedPayloadTypeRtp` counts the packets the engine ignored for a payload type
+//!   their m= section did not negotiate (`RTCPeerConnection::unnegotiated_payload_type_rtp_packets`,
+//!   RFC 3550 section 5.1).
 //! - `{"type":"switch-codec","codec":"PCMU"|"PCMA"|"OPUS"}`: the streamed audio track goes on
 //!   with a 440 Hz tone in G.711 (8 kHz) or back to the Opus fixture (48 kHz), on the payload
 //!   type the answer gave that format: a codec of another clock rate mid-stream (RFC 7160).
@@ -1165,6 +1168,7 @@ impl Session {
                     "rollbacks": self.rollbacks,
                     "rtpBeforeAnswer": self.rtp_before_answer,
                     "discardedRtp": self.pc.discarded_rtp_packets(),
+                    "unnegotiatedPayloadTypeRtp": self.pc.unnegotiated_payload_type_rtp_packets(),
                     "transportsAtRolledBackOffer": self.transports_at_rolled_back_offer,
                     "transportsAfterRollback": self.transports_after_rollback,
                     "local_sdp": answer,

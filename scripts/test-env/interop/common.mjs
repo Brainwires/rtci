@@ -1,7 +1,7 @@
 // Shared by the spec files: the page every test runs in, the signalling address, the media
 // fixtures, and per-session netem (a tc filter that sends one session's packets through the
 // lossy band interop/run.sh sets up on open-a's eth0).
-import { test } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
@@ -40,8 +40,43 @@ export function recordDescriptions() {
   });
 }
 
+const ARTIFACTS = process.env.RTC_TESTENV_ARTIFACTS_DIR || "/artifacts";
+const slugOf = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 90);
+
+// Writes `descriptions` (a session's `descriptions`: [direction, type, sdp], every description
+// it sent, received or applied, in order) to ARTIFACTS/failed-cell-sdp/ as
+// `<project>--<test title>--<tag>--<n>-<direction>-<type>.sdp`.
+function saveDescriptions(descriptions, tag) {
+  const info = test.info();
+  const dir = `${ARTIFACTS}/failed-cell-sdp`;
+  try {
+    mkdirSync(dir, { recursive: true });
+    (descriptions || []).forEach(([direction, type, sdp], i) =>
+      writeFileSync(`${dir}/${info.project.name}--${slugOf(info.title)}--${tag}--${i + 1}-${direction}-${type}.sdp`, sdp),
+    );
+  } catch (e) {
+    console.log(`[${info.project.name}] could not save the descriptions: ${e}`);
+  }
+}
+
+// A failed cell keeps the offer and answer of its session (`window.S`, where the test has one)
+// in the uploaded artifacts.
+function saveFailedDescriptions() {
+  test.afterEach(async ({ page }, info) => {
+    if (info.status === info.expectedStatus) return;
+    let descriptions = null;
+    try {
+      descriptions = await page.evaluate(() => window.S?.descriptions || null);
+    } catch {
+      return;
+    }
+    if (descriptions?.length) saveDescriptions(descriptions, "failed");
+  });
+}
+
 export function setupPage() {
   recordDescriptions();
+  saveFailedDescriptions();
   test.beforeEach(async ({ page }) => {
     page.on("console", (m) => {
       if (m.type() === "error") console.log(`[${test.info().project.name}] console: ${m.text()}`);
@@ -107,4 +142,81 @@ export function netemDrops() {
   const out = execFileSync("tc", ["-s", "qdisc", "show", "dev", "eth0"]).toString();
   const m = out.match(/qdisc netem 40:[\s\S]*?dropped (\d+)/);
   return m ? Number(m[1]) : 0;
+}
+
+// A browser that sends its media on a payload type the answer does not have.
+//
+// An offerer sends only formats of the answer (RFC 3264 section 6.1; RFC 8829 section 5.3.1),
+// and the engine ignores a packet whose payload type its m= section did not negotiate (RFC 3550
+// section 5.1), counted by `RTCPeerConnection::unnegotiated_payload_type_rtp_packets`. A
+// browser that switches its sender to such a payload type mid-call (WebKit, seen 6 times in 240
+// loss-recovery runs in the test image: about 35 VP8 packets on 96, then everything on 98) leaves
+// a cell measuring Rust's handling of its media nothing to measure, and the cell's own checks
+// would fail as "span 0". `run` is one attempt of the cell, with `r.wrongPt`
+// (Interop.unnegotiatedReceived), `r.views` (Interop.codecView samples), `r.defaults`
+// (Interop.defaultCodecLines, taken when wrongPt is not empty), `r.descriptions` and `r.report`;
+// `again(page)` runs the cell once more.
+//
+// Every attempt logs its payload types. With none unnegotiated `run` is returned for the
+// cell's own checks. Otherwise the case is logged with both descriptions' format lines, saved
+// to the artifacts, and: for WebKit, a known browser defect, recorded as a `known-browser-defect`
+// annotation and the cell run ONCE more, whose attempt goes through the same check; for any
+// other browser, and for WebKit's second attempt, the cell fails here naming the payload type,
+// not as a loss-recovery failure.
+export async function unlessUnnegotiatedPayloadType(page, run, again) {
+  const info = test.info();
+  const browser = info.project.name;
+  const describe = (run, attempt) => {
+    const r = run.r;
+    return {
+      attempt,
+      wrongPt: r.wrongPt,
+      engineIgnored: r.report?.unnegotiatedPayloadTypeRtp,
+      wire: r.report?.wireRtp?.received,
+      offerVideo: run.codecLines.offer,
+      answerVideo: run.codecLines.answer,
+      browserTable: r.defaults,
+      sending: (r.views || []).map((v) => ({ t: v.t, sending: v.sending, senderCodecs: v.senderCodecs, encodingCodecs: v.encodingCodecs })),
+      codecStats: r.views?.[r.views.length - 1]?.codecStats,
+    };
+  };
+  const check = async (run, attempt) => {
+    run.codecLines = await page.evaluate(
+      (ds) => {
+        const last = (direction) => ((ds || []).filter((x) => x[0] === direction).pop() || [])[2];
+        return { offer: Interop.codecLines(last("sent"), "video"), answer: Interop.codecLines(last("received"), "video") };
+      },
+      run.r.descriptions,
+    );
+    console.log(
+      `[${browser}] payload types, attempt ${attempt}: answer ${JSON.stringify(run.codecLines.answer)}; ` +
+        `received ${JSON.stringify(run.r.report?.wireRtp?.received)}; the engine ignored ${run.r.report?.unnegotiatedPayloadTypeRtp} ` +
+        `for an unnegotiated payload type; the browser sending ${JSON.stringify((run.r.views || []).map((v) => v.sending?.codec))}`,
+    );
+    if (!run.r.wrongPt?.length) return null;
+    const d = describe(run, attempt);
+    console.log(`[${browser}] UNNEGOTIATED PAYLOAD TYPE ${JSON.stringify(d)}`);
+    saveDescriptions(run.r.descriptions, `unnegotiated-pt-attempt-${attempt}`);
+    const pts = run.r.wrongPt.map((w) => `${w.payloadType} (${w.packets} packets)`).join(", ");
+    return (
+      `the browser sent media on payload type ${pts}, which the answer does not have ` +
+      `(RFC 3264 section 6.1); the engine ignored ${d.engineIgnored} packets for it (RFC 3550 section 5.1); ` +
+      `answer: ${JSON.stringify(d.answerVideo)}; the browser's own table: ${JSON.stringify(d.browserTable)}; ` +
+      `sending: ${JSON.stringify(d.sending.map((s) => s.sending?.codec))}`
+    );
+  };
+  let message = await check(run, 1);
+  if (!message) return run;
+  if (browser === "webkit") {
+    info.annotations.push({
+      type: "known-browser-defect",
+      description: `WebKit switched its sender to a payload type the answer does not have; the cell ran again. ${message}`,
+    });
+    await page.evaluate(() => window.S?.pc.getSenders().forEach((x) => x.track && x.track.stop()));
+    run = await again(page);
+    message = await check(run, 2);
+    if (!message) return run;
+  }
+  expect(run.r.wrongPt, message).toEqual([]);
+  return run;
 }

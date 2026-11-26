@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`**: how many RTP packets of a
+  received stream the engine ignored because their payload type is not one the stream's m=
+  section negotiated (`conf/test-3-webkit-unnegotiated-pt-named`; RFC 3550 section 5.1, "A
+  receiver MUST ignore packets with payload types that it does not understand"). The drop itself is
+  unchanged (since 1999001f, 2026-11-22; a `debug!` line only until now); a peer that switches its sender to a
+  format the answer did not keep now shows up as a count instead of media that stopped for no
+  visible reason. Not a W3C member: webrtc-stats has none for it (`packetsDiscarded` is the
+  jitter buffer's late or early packets, RFC 7002 section 3.2), and it is not counted in
+  `discarded_rtp_packets` (media no section could take, RFC 8830 section 3.1). Engine
+  behaviour change no; API addition only.
+
+### Testing
+
+- test-env interop: the two browser loss-recovery cells ("loss recovery: NACK and RTX repair a
+  browser's video under netem" and "... the browser's SSRCs unsignalled ...") check the payload
+  types Rust received against the answer before their loss checks
+  (`common.mjs unlessUnnegotiatedPayloadType`). A browser that sent media on a payload type the
+  answer does not have (RFC 3264 section 6.1) fails the cell with that payload type, its packet
+  count, the engine's `unnegotiatedPayloadTypeRtp` count and both descriptions' video format
+  lines, instead of an unexplained "span 0". For WebKit, which was seen switching its VP8
+  sender to payload type 98 mid-call in 6 of 240 runs, it is recorded as a
+  `known-browser-defect` annotation and the cell runs once more; the second attempt is checked
+  in full (a second switch fails the cell, named). Every attempt logs the answer's video
+  payload types, what was received per payload type and what the browser says it sends with
+  (`Interop.codecView`: RTCRtpSendParameters.codecs, outbound-rtp codecId). The interop peer's
+  report carries `unnegotiatedPayloadTypeRtp`; a failed cell's descriptions are saved under
+  `failed-cell-sdp/` in the artifacts; the matrix and gate show a pass after such a retry.
+  "chrome profile: audio and video both ways" logs the same payload types and names such a
+  switch as its failure (no retry there).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

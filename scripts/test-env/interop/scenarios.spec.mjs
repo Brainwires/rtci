@@ -7,7 +7,9 @@
 // Every skip goes through na.mjs with its kind and citation (gate.mjs fails an uncited one).
 import { test, expect } from "@playwright/test";
 import { naBrowser, naEnv } from "./na.mjs";
-import { WS, TURN, setupPage, rustUdpPort, impair, netemDrops, impairFromRust, netemDropsFromRust } from "./common.mjs";
+import {
+  WS, TURN, setupPage, rustUdpPort, impair, netemDrops, impairFromRust, netemDropsFromRust, unlessUnnegotiatedPayloadType,
+} from "./common.mjs";
 
 setupPage();
 
@@ -55,7 +57,11 @@ test("cryptex: header extensions encrypted both ways", async ({ page }) => {
 
 // ---- loss recovery with a browser sender (NACK + RTX, RFC 4585 / RFC 4588) ----
 
-test("loss recovery: NACK and RTX repair a browser's video under netem", async ({ page }) => {
+// One attempt of the cell below: the call, 12 s under netem, and what both sides counted.
+// The video's payload types are sampled with the other figures (Interop.codecView), and
+// `wrongPt` is what Rust received on a payload type the answer does not have
+// (common.mjs unlessUnnegotiatedPayloadType).
+async function lossRecoveryAttempt(page) {
   await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "reflect", video: "VP8" });
     window.S = s;
@@ -96,16 +102,24 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
           totalFreezesDuration: x.totalFreezesDuration,
         };
       const inbound = [pick(await Interop.inbound(S.pc, "video"))];
+      const views = [await Interop.codecView(S.pc)];
       await Interop.sleep(6000);
       inbound.push(pick(await Interop.inbound(S.pc, "video")));
+      views.push(await Interop.codecView(S.pc));
       await Interop.sleep(6000);
       inbound.push(pick(await Interop.inbound(S.pc, "video")));
+      views.push(await Interop.codecView(S.pc));
       let out = null;
       (await S.pc.getStats()).forEach((x) => {
         if (x.type === "outbound-rtp" && x.kind === "video") out = x;
       });
       const report = await S.report();
-      return { out, inbound, report, rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx };
+      const wrongPt = Interop.unnegotiatedReceived(report, S.pc.remoteDescription.sdp);
+      const defaults = wrongPt.length ? await Interop.defaultCodecLines("video") : null;
+      return {
+        out, inbound, report, views, wrongPt, defaults, descriptions: S.descriptions,
+        rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx,
+      };
     });
   } finally {
     restore();
@@ -114,6 +128,13 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   const drops = netemDrops() - dropsBefore;
   const dropsToBrowser = netemDropsFromRust() - dropsToBrowserBefore;
   await page.evaluate(() => S.close());
+  return { r, drops, dropsToBrowser };
+}
+
+test("loss recovery: NACK and RTX repair a browser's video under netem", async ({ page }) => {
+  // Room for the second attempt of a WebKit payload type switch.
+  test.setTimeout(120_000);
+  const { r, drops, dropsToBrowser } = await unlessUnnegotiatedPayloadType(page, await lossRecoveryAttempt(page), lossRecoveryAttempt);
   expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
   expect(dropsToBrowser, "netem dropped nothing on the way to the browser: the filter did not apply").toBeGreaterThan(0);
   expect(r.rtx, "the Rust answer negotiates no RTX for the video").toBe(true);
@@ -1309,7 +1330,8 @@ test("a codec of another clock rate mid-stream, the browser offering, an SSRC pe
 // only by the RTX payload type's apt in that single-stream section; RTX that arrives before
 // any original (a browser's early padding probes) is dropped. NACK and RTX must still repair
 // what netem drops.
-test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by its payload type", async ({ page }) => {
+// One attempt of the cell below (see lossRecoveryAttempt).
+async function unsignalledLossRecoveryAttempt(page) {
   await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "reflect", video: "VP8" });
     window.S = s;
@@ -1325,20 +1347,35 @@ test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by i
   let r;
   try {
     r = await page.evaluate(async () => {
-      await Interop.sleep(12000);
+      const views = [await Interop.codecView(S.pc)];
+      await Interop.sleep(6000);
+      views.push(await Interop.codecView(S.pc));
+      await Interop.sleep(6000);
+      views.push(await Interop.codecView(S.pc));
       let out = null;
       (await S.pc.getStats()).forEach((x) => {
         if (x.type === "outbound-rtp" && x.kind === "video") out = x;
       });
       const report = await S.report();
       const frames = (await Interop.inbound(S.pc, "video"))?.framesDecoded || 0;
-      return { out, report, frames, rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx };
+      const wrongPt = Interop.unnegotiatedReceived(report, S.pc.remoteDescription.sdp);
+      const defaults = wrongPt.length ? await Interop.defaultCodecLines("video") : null;
+      return {
+        out, report, frames, views, wrongPt, defaults, descriptions: S.descriptions,
+        rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx,
+      };
     });
   } finally {
     restore();
   }
   const drops = netemDrops() - dropsBefore;
   await page.evaluate(() => S.close());
+  return { r, drops };
+}
+
+test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by its payload type", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { r, drops } = await unlessUnnegotiatedPayloadType(page, await unsignalledLossRecoveryAttempt(page), unsignalledLossRecoveryAttempt);
   expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
   expect(r.rtx, "the Rust answer negotiates no RTX for the video").toBe(true);
   expect(r.report.errors).toEqual([]);
