@@ -230,6 +230,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC9429-5.7-8 (MAY, `missing`): section 5.7 lets a provisional answer be rolled back, the engine
   refuses it as W3C webrtc-pc "set a session description" requires (InvalidStateError in
   have-local-pranswer / have-remote-pranswer); no setting implements the RFC form.
+- **A renegotiation that changes only a section's msid appdata no longer resets its receiver**
+  (`conf/jsep-82-msid-appdata-keeps-learned-ssrcs`; RFC 9429 section 5.8.2: `a=msid` is stored
+  "ignoring any "appdata" field"). The receiver compared the appdata to decide whether the
+  description named the track it already had; a new appdata alone (a remote sender that renamed
+  its track) made it take the description afresh and forget the SSRCs and codecs it had learned
+  from RTP, so a simulcast sender that had stopped sending the RID header extension was no longer
+  routed. The appdata now counts only under `with_msid_appdata_change_renews_track(true)` (RFC
+  8830 section 3's model). Audit row RFC9429-5.8.2-22 `partial` -> `tested`.
+- **SCTP: an ABORT with bytes that are no error cause is discarded** (`conf/sctp-25-must-sweep3-rows`;
+  RFC 9260 section 3.3.7, "If an endpoint receives an ABORT chunk with a format error [...], it
+  MUST silently discard it"). An ABORT whose value held one to three bytes, too few for an
+  error cause, was read as an ABORT without causes and ended the association. Its packet is now
+  dropped and the association goes on. Audit row RFC9260-3.3.7-5 `tested`.
+- **SCTP: port 0 is refused when an association is started** (RFC 9260 section 3.1, "The
+  Source Port Number 0 MUST NOT be used", likewise the destination port). `Endpoint::connect`
+  returns the new `ConnectError::ZeroSctpPort` (the enum is `#[non_exhaustive]`: additive) for
+  a `TransportConfig` whose `with_sctp_port` or `with_remote_sctp_port` is 0; it used to send
+  the INIT and everything after it with that port. The setters are unchanged; the peer
+  connection never configures 0 (`a=sctp-port:0` means no association, RFC 8841 section 9.3).
+  Audit rows RFC9260-3.1-1 / 3.1-2 `partial` -> `tested`.
+- Tests for RFC9260-3.2-8 (a Chunk Length below 4 is no chunk) and RFC9260-3.3.2.1.5-2 (a Host
+  Name type in Supported Address Types is ignored), both `untested` -> `tested`, each checked by
+  a mutation (`mut/sctp-25-1`). Open MUST rows 27 -> 22.
+- **A DTLS 1.3 client ignores the ServerHello's legacy_version**
+  (`conf/dtls-29-server-hello-legacy-version-ignored`; RFC 8446 section 4.2.1: with
+  "supported_versions" present, "clients MUST ignore the ServerHello.legacy_version value and
+  MUST use only the "supported_versions" extension to determine the selected version"). A
+  ServerHello or HelloRetryRequest selecting DTLS 1.3 whose legacy_version was not {254, 253}
+  was refused with illegal_parameter; it is now taken by its supported_versions (RFC 9147 section
+  5.4's {254, 253} binds the server, which this one still sends). Found by the audit sweep
+  (audit row RFC8446-4.2.1-12, which was `tested` while its test asserted the refusal). New test
+  `rfc8446_conformance_test.rs::a_server_hello_or_retry_request_with_another_legacy_version_is_taken`;
+  the legacy_version case of the wrong-fixed-fields test is removed. Not breaking.
 
 ### Documentation
 
@@ -513,35 +546,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cluster is ever carried after the video starts (no padding; 460 to 490 kbit/s six seconds
   later, the controller's 8 % a second). Its three tests fail until `probe-3`, which also
   shortens the audio-first start-up (1.07 s against 0.37 s when the video sends first).
-
-### Fixed
-
-- **A renegotiation that changes only a section's msid appdata no longer resets its receiver**
-  (`conf/jsep-82-msid-appdata-keeps-learned-ssrcs`; RFC 9429 section 5.8.2: `a=msid` is stored
-  "ignoring any "appdata" field"). The receiver compared the appdata to decide whether the
-  description named the track it already had; a new appdata alone (a remote sender that renamed
-  its track) made it take the description afresh and forget the SSRCs and codecs it had learned
-  from RTP, so a simulcast sender that had stopped sending the RID header extension was no longer
-  routed. The appdata now counts only under `with_msid_appdata_change_renews_track(true)` (RFC
-  8830 section 3's model). Audit row RFC9429-5.8.2-22 `partial` -> `tested`.
-
-### Fixed
-
-- **SCTP: an ABORT with bytes that are no error cause is discarded** (`conf/sctp-25-must-sweep3-rows`;
-  RFC 9260 section 3.3.7, "If an endpoint receives an ABORT chunk with a format error [...], it
-  MUST silently discard it"). An ABORT whose value held one to three bytes, too few for an
-  error cause, was read as an ABORT without causes and ended the association. Its packet is now
-  dropped and the association goes on. Audit row RFC9260-3.3.7-5 `tested`.
-- **SCTP: port 0 is refused when an association is started** (RFC 9260 section 3.1, "The
-  Source Port Number 0 MUST NOT be used", likewise the destination port). `Endpoint::connect`
-  returns the new `ConnectError::ZeroSctpPort` (the enum is `#[non_exhaustive]`: additive) for
-  a `TransportConfig` whose `with_sctp_port` or `with_remote_sctp_port` is 0; it used to send
-  the INIT and everything after it with that port. The setters are unchanged; the peer
-  connection never configures 0 (`a=sctp-port:0` means no association, RFC 8841 section 9.3).
-  Audit rows RFC9260-3.1-1 / 3.1-2 `partial` -> `tested`.
-- Tests for RFC9260-3.2-8 (a Chunk Length below 4 is no chunk) and RFC9260-3.3.2.1.5-2 (a Host
-  Name type in Supported Address Types is ignored), both `untested` -> `tested`, each checked by
-  a mutation (`mut/sctp-25-1`). Open MUST rows 27 -> 22.
 
 ## [0.2.0] - 2026-11-26
 

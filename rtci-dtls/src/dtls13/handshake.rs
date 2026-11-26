@@ -18,6 +18,7 @@
 //!                            <--------                  [ACK]
 //! ```
 
+use super::DTLS1_3_WIRE_VERSION;
 use super::codec::*;
 use super::conn::*;
 use super::hello::*;
@@ -29,7 +30,6 @@ use super::psk::{
     pre_shared_key_data,
 };
 use super::suite::Suite13;
-use super::{DTLS1_2_WIRE_VERSION, DTLS1_3_WIRE_VERSION};
 use crate::cipher_suite::CipherSuiteId;
 use crate::config::{ClientAuthType, HandshakeConfig};
 use crate::crypto::{verify_client_cert, verify_server_cert};
@@ -422,10 +422,11 @@ impl Conn13 {
 
     fn on_server_hello(&mut self, body: &[u8]) -> std::result::Result<(), Refusal> {
         let hello = ServerHello::parse(body).map_err(decode_error)?;
-        // RFC 8446 section 4.1.3, RFC 9147 sections 5 and 5.4.
-        if hello.selected_version() != Some(DTLS1_3_WIRE_VERSION)
-            || hello.legacy_version != DTLS1_2_WIRE_VERSION
-        {
+        // RFC 8446 section 4.2.1: with "supported_versions" present, "clients MUST ignore the
+        // ServerHello.legacy_version value and MUST use only the "supported_versions"
+        // extension to determine the selected version" (RFC 9147 section 5.4's {254, 253}
+        // binds the server that sends it).
+        if hello.selected_version() != Some(DTLS1_3_WIRE_VERSION) {
             return Err(illegal(Error::ErrUnsupportedProtocolVersion));
         }
         if !hello.legacy_session_id_echo.is_empty() || hello.legacy_compression_method != 0 {
