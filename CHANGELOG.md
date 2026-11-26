@@ -149,6 +149,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/jsep_msid.rs::the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid`.
 ### Fixed
 
+- **A completed DTLS 1.2 association answers the peer's repeated last flight for 240 s, not
+  seven times** (`conf/dtls-32-final-flight-answered-for-2-msl`; RFC 6347 section 4.2.4: "for at
+  least twice the default MSL defined for [TCP], when in the FINISHED state, the node that
+  transmits the last flight [...] MUST respond to a retransmit of the peer's last flight with a
+  retransmit of the last flight"). An authenticated repeat of the peer's Finished was answered
+  at most `DEFAULT_MAXIMUM_RETRANSMIT_NUMBER` (7) times and then never, however soon it came,
+  so a peer whose eighth retransmission came within the four minutes could be left without the
+  flight it needed. Each repeat is now answered, once, for 240 s after the handshake, and none
+  after (the same 240 s DTLS 1.3 keeps its handshake keys for, RFC 9147 section 5.8.1, whose
+  server answers each repeat with an ACK, now shown by a test). The bound against
+  amplification stays one answer per datagram carrying an authenticated repeat, which the
+  replay window admits once; plaintext handshake records draw none. Audit rows
+  RFC6347-4.2.4-5 `partial` -> `tested`, RFC9147-5.8.1-2 `untested` -> `tested`. Test
+  `endpoint.rs::authenticated_finished_repeats_are_answered_for_twice_the_msl` (it replaces
+  `authenticated_finished_repeats_still_obey_the_retry_budget`, which asserted the cut-off) and
+  `reliability_test.rs::the_clients_last_flight_is_acknowledged_for_twice_the_msl`. Behaviour
+  change, not breaking.
+
 - **A DTLS 1.3 client ignores the ServerHello's legacy_version**
   (`conf/dtls-29-server-hello-legacy-version-ignored`; RFC 8446 section 4.2.1: with
   "supported_versions" present, "clients MUST ignore the ServerHello.legacy_version value and

@@ -339,9 +339,8 @@ impl Endpoint {
             // `current_retransmit_timer` on the completed path, so `handle_timeout` cannot fire
             // for it either. `handshake_timeout`'s Finished branch regenerates the flight — with
             // fresh record sequence numbers, since a verbatim replay would be dropped by the
-            // peer's replay window (4.1.2.6) — under the existing retransmission budget.
-            // Clear `handshake_rx` first so
-            // that retransmission re-sends the buffered flight instead of re-parsing the whole
+            // peer's replay window (4.1.2.6) — once per repeat, for FINAL_FLIGHT_ANSWER_PERIOD
+            // (240 s) after the handshake. Clear `handshake_rx` first so that retransmission re-sends the buffered flight instead of re-parsing the whole
             // transcript in `finish()`.
             conn.handshake_rx = None;
             conn.handshake_timeout(now)?;
