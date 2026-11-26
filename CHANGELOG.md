@@ -217,6 +217,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/probe_start_order_rtc2rtc.rs` video-added bounds tightened from 3 s / 4 s to
   0.35 s / 0.5 s after the renegotiation (measured 0.14-0.24 s to 1 Mbit/s and 0.29-0.34 s to
   the maximum in every chain and seed).
+- **A later offer keeps the `a=rid` line an answer tightened** (`conf/jsep-81-offered-rid-lines-kept`;
+  RFC 9429 section 5.2.2: "For RtpTransceivers that are still present, the "a=rid" lines MUST stay
+  the same"). After an answer that tightened a rid restriction (RFC 8851 section 6.4 step 3,
+  e.g. `a=rid:f recv max-width=960` to an offered 1280) the encoding took the tighter value and the
+  next offer wrote `a=rid:f send max-width=960`. The sender now keeps what its offer said for that
+  rid and later offers write it again; it still sends under the answer's restriction
+  (`getParameters` and `send_restrictions` give the tighter one, as before). Restrictions the
+  application gives through `setParameters` are offered from then on. Test
+  `jsep_simulcast.rs::a_subsequent_offer_keeps_the_rid_line_an_answer_tightened`; audit row
+  RFC9429-5.2.2-15 (stays `tested`, the violation recorded in its note). Also a new audit row
+  RFC9429-5.7-8 (MAY, `missing`): section 5.7 lets a provisional answer be rolled back, the engine
+  refuses it as W3C webrtc-pc "set a session description" requires (InvalidStateError in
+  have-local-pranswer / have-remote-pranswer); no setting implements the RFC form.
 
 ### Documentation
 

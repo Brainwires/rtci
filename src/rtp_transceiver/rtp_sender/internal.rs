@@ -98,6 +98,12 @@ pub(crate) struct RTCRtpSenderInternal {
     /// W3C `[[LastStableRidlessSendEncodings]]`: the lone rid-less encoding a remote offer to
     /// receive simulcast replaced by its proposed encodings, which a rollback restores.
     last_stable_ridless_send_encodings: Option<Vec<RTCRtpEncodingParameters>>,
+    /// The restrictions an offer gave each rid whose restrictions an applied answer then
+    /// tightened (RFC 8851 section 6.4 step 3): the encoding sends under the answer's, and a
+    /// later offer writes these, its `a=rid` line staying the same (RFC 9429 section 5.2.2).
+    /// A rid leaves it when the answer removes its encoding or the application gives it new
+    /// restrictions (`set_parameters`).
+    offered_rid_restrictions: Vec<(String, RTCRtpRidRestrictions)>,
     /// The `RTCDTMFSender` of an audio sender: its slots and playout.
     pub(crate) dtmf: super::dtmf::DtmfState,
     /// Whether the last answer negotiated `a=extmap-allow-mixed` for the media section (RFC
@@ -765,6 +771,14 @@ impl RTCRtpSenderInternal {
             Error::InvalidModificationError
         })?;
 
+        // Restrictions the application changes are its new ones, offered from now on.
+        for (new, old) in parameters.encodings.iter().zip(self.send_encodings.iter()) {
+            let (new, old) = (&new.rtp_coding_parameters, &old.rtp_coding_parameters);
+            if new.rid_restrictions != old.rid_restrictions {
+                self.offered_rid_restrictions
+                    .retain(|(rid, _)| *rid != new.rid);
+            }
+        }
         self.send_encodings = parameters.encodings;
         self.last_returned_parameters = None;
         self.sync_tracks();
@@ -1033,6 +1047,15 @@ impl RTCRtpSenderInternal {
             let coding = &mut encoding.rtp_coding_parameters;
             match restrictions_of(&coding.rid) {
                 Some(restrictions) => {
+                    if *restrictions != coding.rid_restrictions
+                        && !self
+                            .offered_rid_restrictions
+                            .iter()
+                            .any(|(rid, _)| *rid == coding.rid)
+                    {
+                        self.offered_rid_restrictions
+                            .push((coding.rid.clone(), coding.rid_restrictions.clone()));
+                    }
                     coding.rid_restrictions = restrictions.clone();
                     kept.push(encoding);
                 }
@@ -1045,8 +1068,25 @@ impl RTCRtpSenderInternal {
             }
         }
         self.send_encodings = kept;
+        let kept_rids: Vec<String> = self
+            .send_encodings
+            .iter()
+            .map(|encoding| encoding.rtp_coding_parameters.rid.clone())
+            .collect();
+        self.offered_rid_restrictions
+            .retain(|(rid, _)| kept_rids.contains(rid));
         self.last_returned_parameters = None;
         self.sync_tracks();
+    }
+
+    /// The restrictions the offer gave `rid` before an answer tightened them, which a later
+    /// offer writes again (RFC 9429 section 5.2.2: the `a=rid` lines "MUST stay the same").
+    /// `None` when no answer changed them.
+    pub(crate) fn offered_rid_restrictions(&self, rid: &str) -> Option<&RTCRtpRidRestrictions> {
+        self.offered_rid_restrictions
+            .iter()
+            .find(|(id, _)| id == rid)
+            .map(|(_, restrictions)| restrictions)
     }
 
     /// Moves the encoding (media, RTX or FEC flow) that sends from `old` to `new`, after a
