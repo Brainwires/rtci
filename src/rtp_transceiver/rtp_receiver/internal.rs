@@ -290,6 +290,18 @@ impl RTCRtpReceiverInternal {
         self.answered_formats = formats;
     }
 
+    /// Whether `payload_type` is receivable only as a format this endpoint's answer added
+    /// beyond the offer (not negotiated by both descriptions).
+    pub(crate) fn is_answer_added_only(&self, payload_type: PayloadType) -> bool {
+        self.answered_formats
+            .iter()
+            .any(|codec| codec.payload_type == payload_type)
+            && !self
+                .receive_codecs
+                .iter()
+                .any(|codec| codec.payload_type == payload_type)
+    }
+
     /// The local description's formats of this receiver's section, with their parameters.
     pub(crate) fn set_local_fmtp(&mut self, local: Vec<(PayloadType, String)>) {
         self.local_fmtp = local;

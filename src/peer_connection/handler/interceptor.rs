@@ -487,16 +487,21 @@ impl<'a> InterceptorHandler<'a> {
             // payload types that "uniquely identify an 'm=' section". So: the one
             // transceiver that is not stopped and receives this payload type. None, or
             // more than one, and the packet belongs nowhere ("Otherwise, drop the
-            // packet").
+            // packet"). A format a section has only because this endpoint's answer added it
+            // (RFC 9429 section 5.3.1) does not count: the answer may give such a format the
+            // number another section of the offer has for it (RFC 9143 section 9.1.1), and
+            // counting it would take that section's payload type out of the table. A
+            // stream that switches to an added format was bound with its first packet.
             let arrival = self.ctx.arrival_mids.as_deref();
             let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
                 !t.stopped()
                     && arrival
                         .is_none_or(|mids| t.mid().as_ref().is_some_and(|mid| mids.contains(mid)))
                     && t.receiver().as_ref().is_some_and(|receiver| {
-                        receiver
-                            .receivable_codecs()
-                            .any(|codec| codec.payload_type == payload_type)
+                        !receiver.is_answer_added_only(payload_type)
+                            && receiver
+                                .receivable_codecs()
+                                .any(|codec| codec.payload_type == payload_type)
                     })
             });
             match (receiving.next(), receiving.next()) {

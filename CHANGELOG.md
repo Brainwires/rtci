@@ -22,11 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call (6 of 240 loss-recovery runs on one runner; red-2's one unexplained WebKit failure of
   "chrome profile: audio and video both ways" has the same shape). The receiver now takes the
   formats its applied answer added (repair formats are never added) and receives them until
-  the next answer. Engine behaviour change YES: media on an added format reaches the
+  the next answer. They do not enter the RFC 9143 section 9.2 payload type table (the routing
+  of a stream with neither a signalled SSRC nor a MID): the answer may number an added format
+  as another section of the offer does (RFC 9143 section 9.1.1), and that section keeps the
+  payload type to itself; a stream that switches to an added format was bound by its first
+  packet. Engine behaviour change YES: media on an added format reaches the
   application (its packets carry the added payload type; the receiver's W3C parameters still
   list the negotiated codecs only). Not breaking; API unchanged. Tests
   `tests/answer_added_formats_rtc2rtc.rs::a_format_the_answer_added_is_received_when_the_offerer_switches_to_it`,
-  `endpoint.rs::a_format_this_endpoints_answer_added_is_received`.
+  `endpoint.rs::a_format_this_endpoints_answer_added_is_received`,
+  `interceptor_association_test.rs::a_format_only_the_answer_added_leaves_the_payload_type_to_the_section_that_negotiated_it`.
 
 ### Added
 
