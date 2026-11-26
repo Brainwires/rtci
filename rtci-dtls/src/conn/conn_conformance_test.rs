@@ -929,6 +929,46 @@ fn client_refuses_a_server_hello_extension_it_did_not_offer() {
     );
 }
 
+/// RFC 5246 7.4.1.3: cipher_suite is "The single cipher suite selected by the server from
+/// the list in ClientHello.cipher_suites", and a client that gets one it did not offer
+/// aborts with illegal_parameter (RFC 5246 7.4.1.4's rule for what the client did not ask
+/// for; RFC 8446 section 4.1.3 for the same field). This client offers ECDHE-ECDSA
+/// AES-128-GCM only: a ServerHello with a suite this crate implements but the client did not
+/// offer (ECDHE-ECDSA AES-256-CBC-SHA, ECDHE-RSA AES-128-GCM) or with one nobody assigned is
+/// refused; with the offered one it is taken.
+#[test]
+fn client_refuses_a_server_hello_with_a_suite_it_did_not_offer() {
+    let accepted = client_parses_server_hello(
+        builder(),
+        &server_hello_body(ECDSA_GCM, 0, Some(&usual_server_extensions())),
+    );
+    assert_eq!(accepted.ok().as_deref(), Some("Flight 5"));
+    for (suite, what) in [
+        (
+            0xc00a,
+            "ECDHE-ECDSA AES-256-CBC-SHA, implemented, not offered",
+        ),
+        (0xc02f, "ECDHE-RSA AES-128-GCM, implemented, not offered"),
+        (0x4a4a, "an unassigned suite"),
+    ] {
+        assert!(
+            !client(builder())
+                .handshake_config
+                .local_cipher_suites
+                .contains(&CipherSuiteId::from(suite)),
+            "{what}"
+        );
+        assert_fatal(
+            client_parses_server_hello(
+                builder(),
+                &server_hello_body(suite, 0, Some(&usual_server_extensions())),
+            ),
+            AlertDescription::IllegalParameter,
+            what,
+        );
+    }
+}
+
 /// RFC 5246 7.4.1.2 / 7.4.1.3: a ServerHello may end after the compression method, and the
 /// compression method must be one the client offered (only null is).
 #[test]

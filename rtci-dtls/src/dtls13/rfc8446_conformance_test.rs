@@ -1723,3 +1723,288 @@ fn a_default_client_offers_only_forward_secret_suites() -> Result<()> {
     }
     Ok(())
 }
+
+// ----------------------------------------------------------------------------------------
+// Unknown parameters, versions, alerts and closure (audit sweep 4 rows).
+// ----------------------------------------------------------------------------------------
+
+/// Code points this crate does not know: GREASE values (RFC 8701), which no implementation
+/// assigns a meaning to, and a private-use extension.
+const UNKNOWN_EXTENSIONS: [u16; 3] = [0x0a0a, 0x7777, 0xfafa];
+const UNKNOWN_GROUP: u16 = 0x2a2a;
+const UNKNOWN_SCHEME: u16 = 0x3a3a;
+const UNKNOWN_SUITE: u16 = 0x4a4a;
+const UNKNOWN_VERSION: u16 = 0x5a5a;
+
+fn u16s(data: &[u8]) -> Vec<u16> {
+    data.chunks(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect()
+}
+
+/// RFC 8446 sections 4.1.2 ("Servers MUST ignore unrecognized extensions") and 9.3 ("A
+/// server receiving a ClientHello MUST correctly ignore all unrecognized cipher suites,
+/// extensions, and other parameters"), which RFC 9147 section 13 names for DTLS: the
+/// client's own ClientHello with unknown extensions first, in the middle and last, an
+/// unknown suite first, an unknown group first in supported_groups with a key share of its
+/// own first, an unknown signature scheme first. The server answers with a ServerHello (no
+/// alert, no HelloRetryRequest) of a suite, group and version it knows, and none of the
+/// unknown extensions; the same hello without them gets the same choices.
+#[test]
+fn a_client_hello_with_unknown_extensions_suites_groups_and_schemes_is_served() -> Result<()> {
+    let choices = |answer: &[BytesMut]| {
+        assert!(plaintext_alerts(answer).is_empty(), "no alert");
+        let (handshake_type, _, body, _) = first_message(&answer[0]);
+        assert_eq!(handshake_type, messages::SERVER_HELLO);
+        let server_hello = Answer::parse(&body);
+        assert_ne!(
+            server_hello.random,
+            messages::HELLO_RETRY_REQUEST_RANDOM.to_vec(),
+            "a ServerHello, not a HelloRetryRequest"
+        );
+        let types: Vec<u16> = server_hello.extensions.iter().map(|(t, _)| *t).collect();
+        assert!(
+            types
+                .iter()
+                .all(|t| [messages::EXT_SUPPORTED_VERSIONS, messages::EXT_KEY_SHARE].contains(t)),
+            "only extensions this server knows: {types:04x?}"
+        );
+        let group = u16::from_be_bytes(
+            server_hello.get(messages::EXT_KEY_SHARE).unwrap()[..2]
+                .try_into()
+                .unwrap(),
+        );
+        (
+            server_hello.suite,
+            group,
+            server_hello
+                .get(messages::EXT_SUPPORTED_VERSIONS)
+                .unwrap()
+                .to_vec(),
+        )
+    };
+    let plain = choices(&server_answers(no_cookies(), |_| {})?);
+
+    let answer = server_answers(no_cookies(), |hello| {
+        assert!(hello.get(messages::EXT_PRE_SHARED_KEY).is_none());
+        hello.suites.insert(0, UNKNOWN_SUITE);
+        let mut groups = u16s(&hello.get(messages::EXT_SUPPORTED_GROUPS).unwrap()[2..]);
+        groups.insert(0, UNKNOWN_GROUP);
+        hello.set(messages::EXT_SUPPORTED_GROUPS, u16_list(&groups));
+        let mut shares: Vec<(u16, Vec<u8>)> =
+            messages::parse_client_key_shares(hello.get(messages::EXT_KEY_SHARE).unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|(group, key)| (group, key.to_vec()))
+                .collect();
+        shares.insert(0, (UNKNOWN_GROUP, vec![0x42; 40]));
+        hello.set(messages::EXT_KEY_SHARE, client_key_shares(&shares));
+        let mut schemes = u16s(&hello.get(messages::EXT_SIGNATURE_ALGORITHMS).unwrap()[2..]);
+        schemes.insert(0, UNKNOWN_SCHEME);
+        hello.set(messages::EXT_SIGNATURE_ALGORITHMS, u16_list(&schemes));
+        hello.extensions.insert(0, (UNKNOWN_EXTENSIONS[0], vec![]));
+        let middle = hello.extensions.len() / 2;
+        hello
+            .extensions
+            .insert(middle, (UNKNOWN_EXTENSIONS[1], vec![1, 2, 3, 4, 5]));
+        hello.extensions.push((UNKNOWN_EXTENSIONS[2], vec![0]));
+    })?;
+    assert_eq!(choices(&answer), plain);
+    Ok(())
+}
+
+fn supported_versions(versions: &[u16]) -> Vec<u8> {
+    let mut data = vec![];
+    put_vec8(&mut data, |list| {
+        for version in versions {
+            put_u16(list, *version);
+        }
+    });
+    data
+}
+
+/// RFC 8446 section 4.2.1: "Servers MUST only select a version of TLS present in that
+/// extension and MUST ignore any unknown versions that are present in that extension." An
+/// unknown version before and after DTLS 1.3 is ignored (DTLS 1.3 selected); one before
+/// DTLS 1.2 alone is too (a DTLS 1.2 ServerHello); a list of unknown versions only has no
+/// version this server may select, and is refused with protocol_version, not served with
+/// DTLS 1.2 by the legacy_version.
+#[test]
+fn unknown_versions_are_ignored_and_only_a_listed_version_is_selected() -> Result<()> {
+    let with_versions = |versions: Vec<u16>| {
+        server_answers(no_cookies(), move |hello| {
+            assert_eq!(hello.legacy_version, super::DTLS1_2_WIRE_VERSION);
+            hello.set(
+                messages::EXT_SUPPORTED_VERSIONS,
+                supported_versions(&versions),
+            );
+        })
+    };
+    let answer = with_versions(vec![
+        UNKNOWN_VERSION,
+        super::DTLS1_3_WIRE_VERSION,
+        0x0304, // TLS 1.3: no DTLS version
+        super::DTLS1_2_WIRE_VERSION,
+    ])?;
+    assert!(plaintext_alerts(&answer).is_empty());
+    let (_, _, body, _) = first_message(&answer[0]);
+    assert_eq!(
+        ServerHello::parse(&body).unwrap().selected_version(),
+        Some(super::DTLS1_3_WIRE_VERSION)
+    );
+
+    let answer = with_versions(vec![UNKNOWN_VERSION, super::DTLS1_2_WIRE_VERSION])?;
+    assert!(plaintext_alerts(&answer).is_empty());
+    let (handshake_type, _, body, _) = first_message(&answer[0]);
+    assert_eq!(handshake_type, messages::SERVER_HELLO);
+    let server_hello = ServerHello::parse(&body).unwrap();
+    assert_eq!(server_hello.legacy_version, super::DTLS1_2_WIRE_VERSION);
+    assert_eq!(
+        server_hello.selected_version(),
+        None,
+        "a DTLS 1.2 ServerHello"
+    );
+
+    for versions in [vec![UNKNOWN_VERSION], vec![0x0304, UNKNOWN_VERSION]] {
+        let answer = with_versions(versions.clone())?;
+        assert_eq!(
+            plaintext_alerts(&answer),
+            fatal(alert::PROTOCOL_VERSION),
+            "{versions:04x?}"
+        );
+        assert!(
+            answer
+                .iter()
+                .all(|datagram| datagram[0] == CONTENT_TYPE_ALERT),
+            "{versions:04x?}: no ServerHello"
+        );
+    }
+    Ok(())
+}
+
+/// RFC 8446 section 4.1.4: "The value of selected_version in the HelloRetryRequest
+/// "supported_versions" extension MUST be retained in the ServerHello, and a client MUST
+/// abort the handshake with an "illegal_parameter" alert if the value changes." After a
+/// HelloRetryRequest for DTLS 1.3, a ServerHello that selects DTLS 1.2, an unknown version,
+/// or (without the extension) none, is refused with illegal_parameter; the unchanged one is
+/// taken.
+#[test]
+fn a_server_hello_whose_version_differs_from_the_retry_requests_is_refused() -> Result<()> {
+    let changes: [(&str, Option<u16>); 3] = [
+        ("DTLS 1.2", Some(super::DTLS1_2_WIRE_VERSION)),
+        ("an unknown version", Some(UNKNOWN_VERSION)),
+        ("no supported_versions", None),
+    ];
+    for (what, version) in changes {
+        let mut pair = Pair::new(client_builder(), server_builder())?;
+        let (_, retry) = pair.round();
+        let (_, _, retry, _) = first_message(&retry[0]);
+        let retry = Answer::parse(&retry);
+        assert_eq!(retry.random, messages::HELLO_RETRY_REQUEST_RANDOM.to_vec());
+        assert_eq!(
+            retry.get(messages::EXT_SUPPORTED_VERSIONS),
+            Some(&super::DTLS1_3_WIRE_VERSION.to_be_bytes()[..])
+        );
+        let alerts = client_refuses(&mut pair, |answer| {
+            assert_eq!(
+                answer.get(messages::EXT_SUPPORTED_VERSIONS),
+                Some(&super::DTLS1_3_WIRE_VERSION.to_be_bytes()[..]),
+                "the server retains it"
+            );
+            match version {
+                Some(version) => answer.set(
+                    messages::EXT_SUPPORTED_VERSIONS,
+                    version.to_be_bytes().to_vec(),
+                ),
+                None => answer
+                    .extensions
+                    .retain(|(t, _)| *t != messages::EXT_SUPPORTED_VERSIONS),
+            }
+        });
+        assert_eq!(alerts, fatal(alert::ILLEGAL_PARAMETER), "{what}");
+        assert!(pair.client.is_connection_failed(&server_addr()), "{what}");
+    }
+    let mut pair = Pair::new(client_builder(), server_builder())?;
+    pair.round();
+    let up = client_answers(&mut pair, |_| {});
+    assert!(
+        plaintext_alerts(&up).is_empty(),
+        "the version retained is taken"
+    );
+    assert_eq!(
+        pair.client_conn().state,
+        HandshakeState::ClientWaitEncryptedExtensions
+    );
+    Ok(())
+}
+
+/// RFC 8446 section 6: "Unknown Alert types MUST be treated as error alerts." A protected
+/// alert of a description this crate does not know, at level warning and at level fatal,
+/// ends the association like a fatal alert: it is reported as the alert received, and data
+/// that follows it is not read. A known warning-level closure alert is not an error.
+#[test]
+fn an_alert_of_an_unknown_type_is_an_error_alert() -> Result<()> {
+    for (level, description) in [(1u8, 0xfeu8), (2, 0xfe), (1, 200)] {
+        let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+        let unknown = pair
+            .server_conn()
+            .seal_for_fuzzing(CONTENT_TYPE_ALERT, &[level, description])
+            .expect("a record");
+        let after = pair
+            .server_conn()
+            .seal_for_fuzzing(CONTENT_TYPE_APPLICATION_DATA, b"after the alert")
+            .expect("a record");
+        let mut datagram = BytesMut::from(&unknown[..]);
+        datagram.extend_from_slice(&after);
+        pair.to_client.clear();
+        pair.deliver_to_client(vec![datagram]);
+        assert!(
+            pair.client.is_connection_failed(&server_addr()),
+            "level {level}, description {description}"
+        );
+        assert_eq!(
+            pair.client.connection_fatal_alerts(&server_addr()),
+            Some((None, Some(description))),
+            "level {level}, description {description}"
+        );
+        assert!(application_data(&pair.to_client).is_empty());
+    }
+    Ok(())
+}
+
+/// RFC 8446 section 6.1: closure alerts are close_notify and user_canceled; "Any data
+/// received after a closure alert has been received MUST be ignored" (RFC 9147 section 5.10:
+/// after it by epoch and sequence number). A protected user_canceled followed by data, in
+/// the same datagram and in a later one: the data is not read.
+#[test]
+fn data_after_a_user_canceled_is_ignored() -> Result<()> {
+    for together in [false, true] {
+        let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+        let canceled = pair
+            .server_conn()
+            .seal_for_fuzzing(CONTENT_TYPE_ALERT, &[1, alert::USER_CANCELED])
+            .expect("a record");
+        let after = pair
+            .server_conn()
+            .seal_for_fuzzing(CONTENT_TYPE_APPLICATION_DATA, b"after the user_canceled")
+            .expect("a record");
+        pair.to_client.clear();
+        if together {
+            let mut datagram = BytesMut::from(&canceled[..]);
+            datagram.extend_from_slice(&after);
+            pair.deliver_to_client(vec![datagram]);
+        } else {
+            pair.deliver_to_client(vec![BytesMut::from(&canceled[..])]);
+            pair.deliver_to_client(vec![BytesMut::from(&after[..])]);
+        }
+        assert!(
+            application_data(&pair.to_client).is_empty(),
+            "together: {together}"
+        );
+        assert!(
+            !pair.client.is_connection_failed(&server_addr()),
+            "together: {together}: a closure alert, not an error alert"
+        );
+    }
+    Ok(())
+}
