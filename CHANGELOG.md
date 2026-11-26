@@ -42,10 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     derivation rate: 0 key forms in dead stack frames after building, protecting and
     unprotecting RTP and RTCP, re-keying and tearing down, in an optimised build on x86-64
     Linux and AArch64 macOS (asserted in CI), and nothing anywhere else in the process (Linux).
-    In an unoptimised build the same was measured with rustc 1.100 on both; it is printed
-    there, not asserted (see Known limits).
-  No wire format, API signature or default changes. Cost: context set-up pays the stack
-  overwrites; per packet none (SRTCP is faster: no key expansion per packet).
+    In an unoptimised build the same was measured with rustc 1.100 on both (runs 45886842087,
+    45886848334); it is printed there, not asserted (see Known limits).
+  No wire format, API signature or default changes. Cost, against 0.2.0 in one job: SRTP
+  context set-up 1.26 → 2.99 µs with the AES-CM profiles and 1.26 → 2.09 µs with AES-GCM (the
+  stack overwrites, once per context); per packet nothing slower, SRTCP 12 to 15 % faster (no
+  key expansion per packet).
+  Performance: zeroize-3
 
 ### Changed
 

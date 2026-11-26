@@ -151,6 +151,13 @@ keys are mostly hidden under the SRTCP ones in this table.
 | either provider, any build: building and tearing down leave nothing in dead stack frames | the same test and `with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames`, in the ordinary test jobs (Linux, macOS) |
 | HMAC-SHA1 computed in the keyed object is correct and the object is reusable | `rtci-crypto/tests/hmac_sha1_vectors.rs` (RFC 2202 cases 1 to 7), and the SRTP, DTLS and STUN vectors of their crates |
 
+Each part of the fix is held by the first test (mutations): without the overwrite in
+`on_erased_stack`, building leaves 874 key forms (run 45886867130); with `hmac` and `sha1`
+built without `zeroize`, 480 HMAC-SHA1 states are left in freed heap after the teardown
+(45886871614); with the AES-CM cipher object built over stack that was not overwritten first,
+round keys of the master key are in the heap while the contexts live (45886877182: the unused
+bytes of `aes`'s union, carried from the stack). Cost: docs/performance.md, row `zeroize-3`.
+
 **What is not guaranteed**
 
 - **The AWS-LC provider's packet path.** AWS-LC computes each HMAC on a copy of the keyed
@@ -165,7 +172,8 @@ keys are mostly hidden under the SRTCP ones in this table.
   source does, and how much of that survives depends on the compiler (an intermediate state of
   this work left 24 key forms with rustc 1.100 and 96 with rustc 1.99.1 from the same sources).
   The packet path is therefore asserted in optimised builds only; in unoptimised ones the test
-  prints what it finds.
+  prints what it finds, which with rustc 1.100 and the final code is nothing, on x86-64 Linux
+  and AArch64 macOS (runs 45886842087, 45886848334).
 - **CPU registers, and whatever stores them on a stack.** A provider's AES leaves round keys in
   vector registers when it returns. A signal delivered next puts them into the signal frame; on
   Apple systems the lazy set-up of a thread-local saves the vector registers on the caller's

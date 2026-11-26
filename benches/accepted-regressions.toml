@@ -30,15 +30,22 @@ max_ratio = 7.5
 ledger = "zeroize-1"
 note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x5.65 in one job against master (45665836618)"
 
-# zeroize-1's SRTP AEAD context-setup cost, on the job's 20 % line: per-round ratios on train 34's
-# pull-request job (srtp-dtls-interceptor shard, base master 6939a3e8): round 8 1.198 / 1.171,
-# round 9 1.177 / 1.214, round 10 1.185 / 1.182, round 11 1.232 / 1.219 (base 710 -> head 870 ns,
-# flagged). SRTP/Setup/AES-128-CM-HMAC-SHA1-80 stayed at or under 1.087 in every round: no entry.
+# zeroize-3 (conf/zeroize-3-stack-residue-measurement): SRTP context set-up overwrites the stack it
+# built the keys on (crypto::on_erased_stack, and once before each AES-CM cipher object). In one
+# job against master ea78e88f, 3 rounds (run 45886861450): AES-CM setup x2.33 / 2.38 / 2.40
+# (1.26 -> 2.99 us), AES-GCM setup x1.63 / 1.70 / 1.66 (1.26 -> 2.09 us). This entry replaces
+# zeroize-1's for the AES-GCM setup (x1.17-1.23 against the master before 0.2.0, since merged).
+[[accepted]]
+bench = "SRTP/Setup/AES-128-CM-HMAC-SHA1-80/*"
+max_ratio = 2.7
+ledger = "zeroize-3"
+note = "crypto::scrub_stack() after building an SRTP cipher and before each of its three AES-CM cipher objects; x2.33-2.40 per round (run 45886861450)"
+
 [[accepted]]
 bench = "SRTP/Setup/AEAD-AES-128-GCM/*"
-max_ratio = 1.5
-ledger = "zeroize-1"
-note = "crypto::scrub_stack() after building the SRTP AEAD contexts; x1.17-1.23 per round on train 34 rounds 8-11 (round 11: 710 -> 870 ns, run 45768113498)"
+max_ratio = 1.9
+ledger = "zeroize-3"
+note = "crypto::scrub_stack() after building an SRTP cipher and before its header-extension AES-CM cipher object; x1.63-1.70 per round (run 45886861450)"
 
 # The next two are documentation entries: these benches came with perf-1, so master (the pull
 # request's base) has none of them and the pull-request job reports them as new, never compared.
