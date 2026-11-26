@@ -403,3 +403,70 @@ fn an_answer_that_rejects_the_data_section_still_closes_the_channel() -> Result<
     }
     Ok(())
 }
+
+/// What keeps a zero port in an answer a rejection: an answer never carries `a=bundle-only`
+/// (RFC 9143 sections 7.3.2 and 7.3.3, "MUST NOT include an SDP 'bundle-only' attribute"; RFC
+/// 9429 section 5.3.1, "all 'm=' sections in the answer MUST NOT have an 'a=bundle-only'
+/// line"), and one in a remote answer is discarded when it is parsed, inside a BUNDLE group too.
+/// Every reading of a section as rejected (`is_rejected_media`: port zero without
+/// `a=bundle-only`) relies on that for answers. An answer that gives the bundle-only data
+/// section port zero and `a=bundle-only` and keeps it in its group is therefore an answer that
+/// names a rejected section in its BUNDLE group, and is refused (RFC 9143 section 7.3.3); were
+/// the attribute kept, the section would be taken for an accepted bundled one.
+#[test]
+fn a_bundle_only_attribute_in_an_answer_does_not_keep_a_zero_port_section() -> Result<()> {
+    let mut pair = new_pair(Some(RTCBundlePolicy::MaxBundle), None, RTCDtlsRole::Client)?;
+    prepare(&mut pair, Order::MediaThenData)?;
+    let now = pair.now;
+    let offer = pair.offerer.pc.create_offer(None)?;
+    pair.offerer.pc.set_local_description(now, offer.clone())?;
+    pair.answerer.pc.set_remote_description(now, offer)?;
+    let answer = pair.answerer.pc.create_answer(None)?;
+    let mid = data_section(&answer.sdp)
+        .iter()
+        .find_map(|l| l.strip_prefix("a=mid:"))
+        .expect("a=mid")
+        .to_owned();
+    ensure!(
+        answer.sdp.lines().any(|l| l
+            .trim_end()
+            .strip_prefix("a=group:BUNDLE ")
+            .is_some_and(|tags| tags.split(' ').any(|t| t == mid))),
+        "the data section is bundled in the answer:\n{}",
+        answer.sdp
+    );
+    let mut munged = String::new();
+    let mut in_data = false;
+    for line in answer.sdp.split_inclusive('\n') {
+        if line.starts_with("m=") {
+            in_data = line.starts_with("m=application ");
+        }
+        if let Some(rest) = line.strip_prefix("m=application ") {
+            let after_port = rest.split_once(' ').map_or("", |(_, r)| r);
+            munged.push_str(&format!("m=application 0 {after_port}"));
+            continue;
+        }
+        munged.push_str(line);
+        if in_data && line.starts_with("a=mid:") {
+            munged.push_str("a=bundle-only\r\n");
+        }
+    }
+    ensure!(
+        data_section(&munged).contains(&"a=bundle-only") && port(&data_section(&munged)) == "0",
+        "{munged}"
+    );
+    let applied = pair.offerer.pc.set_remote_description(
+        now,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(munged.clone())?,
+    );
+    match applied {
+        Err(rtci::shared::error::Error::ErrAnswerDoesNotMatchOffer(why)) => ensure!(
+            why.contains(&format!("names {mid}, which the answer rejects")),
+            "refused for another reason: {why}"
+        ),
+        other => anyhow::bail!(
+            "an answer's a=bundle-only kept a zero-port section alive: {other:?}\n{munged}"
+        ),
+    }
+    Ok(())
+}

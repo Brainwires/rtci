@@ -275,6 +275,8 @@ pub(crate) fn check_answer_against_offer(
             ));
         }
 
+        // `answered` has no `a=bundle-only` (discarded from answers on parse,
+        // `discard_stray_bundle_only`), so this is its zero port: rejected (RFC 9143 7.3.3).
         if is_rejected_media(answered) {
             continue;
         }
