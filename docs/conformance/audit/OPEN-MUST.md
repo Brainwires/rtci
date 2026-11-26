@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5752; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5089.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5082 of 5089 (99.9 %).
-- Tested as the default (`tested`): 5049 of 5089 (99.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 7: 1 untested, 3 partial, 3 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5083 of 5089 (99.9 %).
+- Tested as the default (`tested`): 5050 of 5089 (99.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 6: 1 untested, 2 partial, 3 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 1 | 0 |
-| C | partly implemented | 3 | 0 |
+| C | partly implemented | 2 | 0 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 7 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 40 | 26 |
+| all | | 39 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 6 rows, 4 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 5 rows, 3 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -37,7 +37,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
-| ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
+| ice | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 1 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
@@ -75,7 +75,6 @@ Sorted by class, then owner, size and ID.
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC8108-5.3.2-5 | `rfc8108.md` | T_rr_interval suppression is not used in the step b calculation | untested | B | a test of `send_regular` step b under `T_rr_interval` > 0 with SSRCs whose T_rr_last differ (one joined after the others' first regular packet), fixed random numbers: tt_avg as reconsideration alone gives it; then a mutation applying the suppression in step b | S | media (RTCP session) |
-| RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)` | S | media (media-25) |
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
@@ -91,7 +90,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-48 rows: 10 of class B, 17 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+49 rows: 10 of class B, 18 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -110,6 +109,7 @@ Sorted by class, then owner, size and ID.
 | RFC6679-7.1-1 | `rfc6679.md` | An SDP-using ECN implementation implements the attribute (6.1), nack ... | C | tested |
 | RFC6679-7.1-3 | `rfc6679.md` | a=rtcp-xr:ecn-sum is also used | C | tested |
 | RFC6679-7.1-4 | `rfc6679.md` | nack ecn is used when the initiation or congestion control needs ... | C | tested |
+| RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | C | tested |
 | RFC7742-6.2-10 | `rfc7742.md` | Parameter sets are signalled in-band; sprop-parameter-sets MUST NOT ... | C | tested |
 | RFC7742-6.2-6 | `rfc7742.md` | profile-level-id is included in the SDP generated | C | tested |
 | RFC7742-6.2-7 | `rfc7742.md` | profile-level-id is interpreted when received | C | tested |

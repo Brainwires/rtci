@@ -2493,11 +2493,9 @@ impl Agent {
         if !self.is_controlling || self.selected_pair.is_some() {
             return None;
         }
-        let pair = self.candidate_pairs.get(self.nominated_pair?)?;
-        let consent = self
-            .remote_candidates
-            .get(pair.remote_index)?
-            .last_consent()?;
+        let pair_index = self.nominated_pair?;
+        let pair = self.candidate_pairs.get(pair_index)?;
+        let consent = self.pair_consent(pair_index)?;
         (pair.valid
             && !pair.removed
             && pair.state != CandidatePairState::Failed
@@ -2771,7 +2769,7 @@ impl Agent {
                 let last_consent = if self.lite {
                     remote.last_authenticated()
                 } else {
-                    remote.last_consent()
+                    self.pair_consent(pair_index)
                 };
                 Some(PreviousGeneration {
                     local_credentials: self.ufrag_pwd.local_credentials.clone(),
@@ -3052,8 +3050,7 @@ impl Agent {
                 // ago: the first consent check goes now, which keeps the period between
                 // checks above the minimum.
                 let interval = self.next_consent_interval();
-                let remote = self.candidate_pairs[pair_index].remote_index;
-                let last_consent = self.remote_candidates[remote].last_consent();
+                let last_consent = self.pair_consent(pair_index);
                 self.next_consent_at = now.map(|now| match last_consent {
                     Some(at) if now.saturating_duration_since(at) >= interval => now,
                     _ => now + interval,
@@ -3186,7 +3183,7 @@ impl Agent {
         // one of our own checks: not by non-STUN datagrams, not by unauthenticated
         // indications, and not by the peer's own requests, which say the peer is there but not
         // that it still wants our traffic.
-        let last_consent = remote.last_consent().unwrap_or(self.start_time);
+        let last_consent = self.pair_consent(pair_index).unwrap_or(self.start_time);
         let since_consent = now.saturating_duration_since(last_consent);
 
         // Disconnected: a consent request has gone unanswered for `disconnected_timeout`.
@@ -3252,8 +3249,7 @@ impl Agent {
         if self.lite {
             return None;
         }
-        let remote = &self.remote_candidates[self.candidate_pairs[pair_index].remote_index];
-        let last_consent = remote.last_consent().unwrap_or(self.start_time);
+        let last_consent = self.pair_consent(pair_index).unwrap_or(self.start_time);
 
         let mut deadline = last_consent + self.consent_expiry();
         if self.keepalive_interval != ZERO_DURATION {

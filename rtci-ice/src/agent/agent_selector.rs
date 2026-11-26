@@ -128,6 +128,23 @@ impl Agent {
             && a.tcp_type() == b.tcp_type()
     }
 
+    /// Whether two pairs send on the same 5-tuple: the same remote candidate, from local
+    /// candidates with the same base (RFC 7675 Section 1).
+    pub(crate) fn same_five_tuple(&self, a: usize, b: usize) -> bool {
+        let (a, b) = (&self.candidate_pairs[a], &self.candidate_pairs[b]);
+        a.remote_index == b.remote_index && self.same_base(a.local_index, b.local_index)
+    }
+
+    /// The last consent on a pair's 5-tuple (RFC 7675 Section 1): the latest success response
+    /// to a Binding request sent on it or on another pair of the same 5-tuple (a valid pair
+    /// whose local candidate is the mapped address shares its checked pair's base).
+    pub(crate) fn pair_consent(&self, pair_index: usize) -> Option<Instant> {
+        (0..self.candidate_pairs.len())
+            .filter(|&other| self.same_five_tuple(pair_index, other))
+            .filter_map(|other| self.candidate_pairs[other].last_consent)
+            .max()
+    }
+
     pub(crate) fn pair_foundation(&self, local_index: usize, remote_index: usize) -> u32 {
         let mut buf = self.local_candidates[local_index].foundation().into_bytes();
         buf.push(b':');
@@ -1138,13 +1155,17 @@ impl Agent {
         }
 
         // Consent (RFC 7675 Section 5.1): a matching, authenticated success response from the
-        // address the request went to.
+        // address the request went to. It is consent on the 5-tuple the request was sent on
+        // (Section 1): the pair's, and that of any other pair with the same local base and
+        // remote candidate (`pair_consent`), not the remote candidate's other pairs.
         if let Some(remote) = self.remote_candidates.get_mut(request.remote_index) {
             remote.last_consent = Some(now);
         }
-        if self.selected_pair.is_some_and(|selected| {
-            self.candidate_pairs[selected].remote_index == request.remote_index
-        }) {
+        self.candidate_pairs[checked].last_consent = Some(now);
+        if self
+            .selected_pair
+            .is_some_and(|selected| self.same_five_tuple(selected, checked))
+        {
             self.consent_unanswered_since = None;
             // Consent is back: the state is looked at now, not at the next consent check.
             if self.connection_state == ConnectionState::Disconnected {
@@ -1684,9 +1705,7 @@ impl Agent {
         let Some(selected) = self.selected_pair else {
             return;
         };
-        let last_consent = self.remote_candidates[self.candidate_pairs[selected].remote_index]
-            .last_consent()
-            .unwrap_or(self.start_time);
+        let last_consent = self.pair_consent(selected).unwrap_or(self.start_time);
         let best = self
             .candidate_pairs
             .iter()

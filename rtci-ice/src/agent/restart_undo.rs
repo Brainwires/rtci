@@ -152,8 +152,14 @@ impl Agent {
                 if remote.last_authenticated.is_none_or(|t| t < last_consent) {
                     remote.last_authenticated = Some(last_consent);
                 }
-            } else if remote.last_consent.is_none_or(|t| t < last_consent) {
-                remote.last_consent = Some(last_consent);
+            } else {
+                if remote.last_consent.is_none_or(|t| t < last_consent) {
+                    remote.last_consent = Some(last_consent);
+                }
+                let pair = &mut self.candidate_pairs[pair_index];
+                if pair.last_consent.is_none_or(|t| t < last_consent) {
+                    pair.last_consent = Some(last_consent);
+                }
             }
             self.next_consent_at = Some(next_consent_at);
         }

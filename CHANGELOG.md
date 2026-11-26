@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ICE consent is kept per 5-tuple, not per remote candidate** (`conf/ice-27-consent-per-5-tuple`;
+  RFC 7675 section 1, "Consent to send applies to a single 5-tuple", and section 5.1, "if a
+  valid STUN binding response has not been received from the remote peer's transport address
+  in 30 seconds, the endpoint MUST cease transmission on that 5-tuple"). The time of the last
+  consent response was kept on the remote candidate, so with two local candidates L1 and L2 and
+  one remote R, a response on (L2, R) (a check cancelled at the nomination and answered late,
+  or one the peer's requests trigger) renewed the consent of the selected (L1, R) although
+  nothing was answered on that 5-tuple, and a dead (L1, R) path was not detected. Each pair
+  now records its own last consent (`CandidatePair::last_consent`); the selected pair's expiry,
+  its Disconnected timer, the first consent check after a selection, the controlling agent's
+  nominating path and the path kept across an ICE restart read the pairs of the same 5-tuple
+  (same local base and remote candidate) only. `Candidate::last_consent` still reports the last
+  response from that remote candidate on any pair. Test:
+  `rtci-ice/src/agent/agent_consent_delay_test.rs::test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

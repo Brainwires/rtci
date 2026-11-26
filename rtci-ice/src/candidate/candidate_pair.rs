@@ -9,7 +9,7 @@
 //! pairs, and that pair carries the media.
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Represent the ICE candidate pair state.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +130,11 @@ pub struct CandidatePair {
     /// measured, then the smoothed round-trip time plus four times its variation, 500 ms at
     /// least. What a consent request's wait is based on (RFC 7675 Section 5.1).
     pub(crate) rto: stun::timer::RtoEstimator,
+    /// When a success response to a Binding request sent on this pair last arrived: consent
+    /// on the pair's 5-tuple (RFC 7675 Section 1, "Consent to send applies to a single
+    /// 5-tuple"). Read through `Agent::pair_consent`, which takes the pairs of the same
+    /// 5-tuple (the same local base and remote candidate) together.
+    pub(crate) last_consent: Option<Instant>,
 }
 
 impl fmt::Debug for CandidatePair {
@@ -204,6 +209,7 @@ impl CandidatePair {
             total_round_trip_time: Duration::ZERO,
             current_round_trip_time: Duration::ZERO,
             rto: stun::timer::RtoEstimator::new(crate::agent::agent_config::MIN_RTO, true),
+            last_consent: None,
         }
     }
 
