@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 664; rows that
   apply: 5093.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5026 of 5093 (98.7 %).
-- Tested as the default (`tested`): 4994 of 5093 (98.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 67: 49 untested, 14 partial, 2 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5027 of 5093 (98.7 %).
+- Tested as the default (`tested`): 4995 of 5093 (98.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 66: 49 untested, 13 partial, 2 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 49 | 0 |
-| C | partly implemented | 15 | 1 |
+| C | partly implemented | 14 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 99 | 26 |
+| all | | 98 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 66 rows, 59 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 65 rows, 58 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -39,7 +39,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | dtls-srtp | 35 | 3 | 0 | 0 | 0 | 38 | 37 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
-| jsep | 4 | 4 | 0 | 0 | 0 | 8 | 6 | 2 | 0 |
+| jsep | 4 | 3 | 0 | 0 | 0 | 7 | 5 | 2 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
@@ -134,7 +134,6 @@ Sorted by class, then owner, size and ID.
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |
 | WEBRTC-5.6.4-9 | `w3c-webrtc-pc.md` | failed and completed need the end-of-remote-candidates indication | partial | C | As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep) | M | ice |
-| RFC9429-5.8.2-22 | `rfc9429.md` | a=msid lines are parsed and stored, ignoring appdata | partial | C | is_same_remote_track compares the msid appdata by default, so a re-description that changes only the appdata drops the SSRCs and codecs learned from RTP: compare it only under with_msid_appdata_change_renews_track, with a test (sctp7 audit; track id and events already ignore it) | S | jsep |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep) | S | jsep |
 | RFC9429-5.2.2-15 | `rfc9429.md` | a=rid lines of present transceivers stay the same | partial | C | W3C webrtc-pc 4.4.1.6 removes the encodings of rids an answer rejected, so the next offer drops their a=rid lines (JSEP: MUST stay the same); the W3C form is the default. Closes as conflict with a setting that keeps offering the rejected rids, and its mutation-checked test (jsep5 follow-up 3) | M | jsep |
 | RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | partial | C | As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3) | M | jsep |
