@@ -257,33 +257,17 @@ fn a_section_whose_offered_formats_the_codec_preferences_exclude_is_rejected() -
 /// RFC 9143 section 9.3.1.2: in an initial BUNDLE offer whose suggested offerer-tagged
 /// section has `a=rtcp-mux-only`, "If the answerer rejects the "m=" section (Section 7.3.3),
 /// the answerer MUST NOT include the attribute". That section (the first mid of the group) is
-/// rejected for a format this endpoint does not support, for a media type it does not know
-/// (`m=text` over RTP), and with its transceiver stopped before the answer: the answer's
-/// rejected section has port zero and no `a=rtcp-mux-only`.
+/// rejected for a format this endpoint does not support and for a media type it does not know
+/// (`m=text` over RTP): the answer's rejected section has port zero and no `a=rtcp-mux-only`.
+/// (A transceiver stopped between the offer and the answer is only "stopping", which W3C
+/// webrtc-pc says "will not affect createAnswer": no rejection, so no case here.)
 #[test]
 fn a_rejected_suggested_offerer_tagged_section_has_no_rtcp_mux_only() -> TestResult {
-    for (case, first, stop) in [
-        (
-            "an unsupported format",
-            "video 9 UDP/TLS/RTP/SAVPF 100",
-            false,
-        ),
-        (
-            "an unknown media type",
-            "text 9 UDP/TLS/RTP/SAVPF 100",
-            false,
-        ),
-        (
-            "its transceiver stopped",
-            "video 9 UDP/TLS/RTP/SAVPF 96",
-            true,
-        ),
+    for (case, first) in [
+        ("an unsupported format", "video 9 UDP/TLS/RTP/SAVPF 100"),
+        ("an unknown media type", "text 9 UDP/TLS/RTP/SAVPF 100"),
     ] {
-        let rtpmap = if first.ends_with(" 96") {
-            "96 VP8/90000"
-        } else {
-            "100 foo/90000"
-        };
+        let rtpmap = "100 foo/90000";
         let offer = crlf(&format!(
             "{SESSION}a=group:BUNDLE 0 1\n\
              m={first}\n{TRANSPORT}a=mid:0\na=sendrecv\na=rtcp-mux-only\na=rtpmap:{rtpmap}\n\
@@ -292,10 +276,6 @@ fn a_rejected_suggested_offerer_tagged_section_has_no_rtcp_mux_only() -> TestRes
         ));
         let mut pc = default_peer()?;
         pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
-        if stop {
-            let id = pc.get_transceivers().next().expect("a transceiver");
-            pc.rtp_transceiver(id).expect("transceiver").stop()?;
-        }
         let answer = pc.create_answer(None)?.sdp;
         let sections = media_sections(&answer);
         assert_eq!(mid_of(&sections[0]), Some("0"), "{case}: {answer}");
