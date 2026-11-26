@@ -318,6 +318,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeated last flight is answered at most seven times, not for 2 MSL). RFC4733-2.3.4-1 set to
   `n/a` (the application chooses the event and its volume). Three citations added. Open MUST rows
   67 -> 89. No engine change.
+- RFC 9260 section 3.3.1 ("This field MUST be sent even in fragmented DATA chunks"), audit row
+  RFC9260-3.3.1-8, which audit sweep 6 downgraded, `untested` -> `tested`
+  (`conf/sctp-26-ppid-in-every-fragment`): `rfc9260_rows_test.rs::every_fragment_of_a_message_carries_its_ppid`
+  reads the PPID of each DATA chunk a fragmented message is sent in (a receiver of this crate
+  takes the first fragment's, so the receive-side test could not show it). Proved by a mutation
+  writing it in the first fragment only. Test only, no engine change.
 
 ### Testing
 

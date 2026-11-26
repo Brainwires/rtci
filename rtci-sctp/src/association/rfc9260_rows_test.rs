@@ -654,3 +654,33 @@ fn an_upper_layer_can_turn_fragmentation_off() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 9260 3.3.1, Payload Protocol Identifier: "This field MUST be sent even in fragmented
+/// DATA chunks (to make sure it is available for agents in the middle of the network)." The
+/// sender's side, read from the DATA chunks it puts on the wire (a receiver of this crate takes
+/// the first fragment's): a message cut into four fragments carries its PPID in each of them,
+/// for a named identifier and for a number with no name.
+#[test]
+fn every_fragment_of_a_message_carries_its_ppid() -> Result<()> {
+    for (stream, ppi) in [
+        (1, PayloadProtocolIdentifier::Binary),
+        (3, PayloadProtocolIdentifier::String),
+    ] {
+        let mut a = create_association(TransportConfig::default());
+        a.set_state(AssociationState::Established);
+        a.cwnd = 1 << 20;
+        a.rwnd = 1 << 20;
+        let now = Instant::now();
+        let fits = a.fragment_size() as usize;
+        let mut s = a.open_stream(stream, ppi)?;
+        s.write_sctp(now, &Bytes::from(vec![7u8; 3 * fits + 1]), ppi)?;
+        let sent = transmitted_data(&a.gather_outbound(now).0);
+        assert_eq!(sent.len(), 4, "{ppi:?}: four fragments");
+        assert!(sent[0].beginning_fragment && !sent[0].ending_fragment);
+        assert!(sent[3].ending_fragment && !sent[3].beginning_fragment);
+        assert!(sent.iter().all(|chunk| !chunk.i_data));
+        let ppids: Vec<u32> = sent.iter().map(|chunk| chunk.payload_protocol_id).collect();
+        assert_eq!(ppids, vec![ppi.number(); 4], "{ppi:?}");
+    }
+    Ok(())
+}
