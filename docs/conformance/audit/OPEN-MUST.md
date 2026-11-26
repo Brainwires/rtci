@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 664; rows that
   apply: 5093.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5062 of 5093 (99.4 %).
-- Tested as the default (`tested`): 5030 of 5093 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 31: 17 untested, 11 partial, 2 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5064 of 5093 (99.4 %).
+- Tested as the default (`tested`): 5032 of 5093 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 29: 16 untested, 10 partial, 2 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 17 | 0 |
-| C | partly implemented | 10 | 1 |
+| B | implemented, lacking a test that fails without it | 16 | 0 |
+| C | partly implemented | 9 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 63 | 26 |
+| all | | 61 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 29 rows, 22 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 27 rows, 21 of size S, 5 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -36,7 +36,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 6 | 1 | 0 | 1 | 0 | 8 | 7 | 1 | 0 |
+| dtls-srtp | 5 | 0 | 0 | 1 | 0 | 6 | 6 | 0 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
 | jsep | 4 | 3 | 0 | 0 | 0 | 7 | 5 | 2 | 0 |
@@ -83,7 +83,6 @@ Sorted by class, then owner, size and ID.
 | RFC9147-4-9 | `rfc9147.md` | Sending implementations MUST NOT mix records from multiple DTLS ... | untested | B | A test with two DTLS 1.3 associations on one endpoint flushing at once: every datagram holds records of one association only (audit-6 sample) | S | dtls-srtp |
 | RFC9147-5-1 | `rfc9147.md` | DTLS servers MUST NOT echo the "legacy_session_id" value from the ... | untested | B | A test handing the DTLS 1.3 server a ClientHello with a non-empty legacy_session_id: the ServerHello echoes none (audit-6 sample) | S | dtls-srtp |
 | RFC9147-5.5-1 | `rfc9147.md` | The ranges MUST NOT overlap. | untested | B | A test that the fragments of a handshake message sent at a small MTU are contiguous and do not overlap (offset of each = end of the previous) (audit-6 sample) | S | dtls-srtp |
-| RFC9147-5.8.1-2 | `rfc9147.md` | In addition, for at least twice the default MSL defined for ... | untested | B | A test whose client Finished retransmission reaches the server just before 240 s after completion and is still acknowledged (audit-7 sweep6) | S | dtls-srtp |
 | WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep) | S | dtls-srtp |
 | WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
 | WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
@@ -96,7 +95,6 @@ Sorted by class, then owner, size and ID.
 | RFC6525-5.2.7-1 | `rfc6525.md` | H1: a response marks its request acknowledged; the timer stops when ... | untested | B | A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep) | S | sctp |
 | WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | B | A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep) | S | sctp |
 | WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep) | S | sctp |
-| RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |
 | WEBRTC-5.6.4-9 | `w3c-webrtc-pc.md` | failed and completed need the end-of-remote-candidates indication | partial | C | As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep) | M | ice |
