@@ -39,7 +39,7 @@ pub mod conformance;
 pub mod fuzzing;
 
 pub use algorithm::*;
-pub use erased_stack::{ERASED_STACK_IS_PRIVATE, on_erased_stack};
+pub use erased_stack::on_erased_stack;
 pub use error::CryptoError;
 pub use hkdf::{hkdf_expand, hkdf_expand_label, hkdf_extract};
 #[cfg(feature = "openssl")]

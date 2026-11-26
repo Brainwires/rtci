@@ -1606,7 +1606,6 @@ dependencies = [
  "ccm 0.5.0",
  "ctr 0.9.2",
  "hmac",
- "libc",
  "md-5 0.10.6",
  "num-bigint",
  "rand 0.10.4",

@@ -41,10 +41,6 @@ ring = { workspace = true, optional = true }
 aws-lc-rs = { workspace = true, optional = true }
 openssl = { version = "0.10.72", optional = true }
 
-# `on_erased_stack` maps its private stack itself (mmap, mprotect, munmap).
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 pem.workspace = true
 # The SHA-2 compression function, to compute the HMAC states ring keeps
