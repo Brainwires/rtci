@@ -358,6 +358,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set. `rtci-interceptor-derive`'s import list omitted `Error` and `sansio`, which the
   generated code names unqualified (its examples stay `ignore`: a procedural macro crate
   cannot use the crate that re-exports it).
+- **README: "Porting from webrtc-rs `rtc` / older forks"** (`conf/docs-3-porting-section`;
+  docs only): `add_remote_candidate` needs `sdp_mid` or `sdp_mline_index` (W3C TypeError;
+  the m-line index under BUNDLE for bare candidate lines); the bare builder has no GCC or
+  pacer (`register_default_interceptors_with_handles`); `target_bitrate()` before feedback is
+  the start value; the `Rfc` profile's 16 KiB message cap toward peers without interleaving;
+  keep draining `poll_write` after `close()`; the engine gathers srflx and relay candidates by
+  default (`ReflexiveGathering` / `RelayGathering`); `RTCOfferOptions::ice_restart` against
+  `restart_ice()`.
 
 ### Testing
 
