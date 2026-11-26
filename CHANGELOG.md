@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtci-interceptor/tests/probe_without_pacer.rs::
   a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing`.
 
+### Changed
+
+- **Two unused dependencies dropped** (train 35): `rtci` no longer depends on `serde_json`
+  (only its own tests and examples use it: now a dev-dependency) and `rtci-srtp` no longer
+  depends on `byteorder` (unused). The 0.2.0 publish dry run warned about both.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
