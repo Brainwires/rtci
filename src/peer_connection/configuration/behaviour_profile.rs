@@ -848,6 +848,18 @@ governed_behaviours! {
         apply_media: |m: &mut MediaEngine, v| m.set_vp8_ignore_partitions(v),
         read: |m: &MediaEngine| m.vp8_ignore_partitions,
     },
+    {
+        id: "h264.literal-pdon",
+        setting: "MediaEngine::set_h264_literal_pdon",
+        clause: "RFC 6184 7.2.2 (MUST; the default departs, docs/conformance.md)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc has no interleaved mode, so nothing of Chrome's to follow and the engine's value stands: modules/rtp_rtcp/source/video_rtp_depacketizer_h264.cc @ a222406d (VideoRtpDepacketizerH264::Parse) reads FU-A and otherwise STAP-A or a single NAL unit, no STAP-B, MTAP, FU-B or DON; rtp_format_h264.cc RTC_CHECKs packetization mode NonInterleaved or SingleNalUnit. This default does not follow RFC 6184 section 7.2: PDON starts at the DON before the earliest one buffered, not at 0 (owner decision 2026-11-26)",
+        evidence: Source,
+        apply_media: |m: &mut MediaEngine, v| m.set_h264_literal_pdon(v),
+        read: |m: &MediaEngine| m.h264_literal_pdon,
+    },
     // ---- interceptors ----
     {
         id: "rtcp.t-rr-interval",

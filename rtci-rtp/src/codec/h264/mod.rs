@@ -742,6 +742,13 @@ struct BufferedNalUnit {
 /// NAL units stay in the buffer until it holds `sprop-interleaving-depth + 1` VCL NAL units,
 /// or, when `sprop-max-don-diff` is given, until a NAL unit is more than that many DONs behind
 /// the latest one. They leave in ascending DON distance from the last one passed on.
+///
+/// **This default does not follow RFC 6184 section 7.2.** The RFC initialises PDON to 0, so a
+/// NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 = 65536, the largest there
+/// is, and a stream numbered from DON 0 has its first NAL unit passed on last. Until a NAL
+/// unit has been passed on, this buffer takes PDON as the DON just before the earliest one it
+/// holds (owner decision, 2026-11-26; no erratum to RFC 6184 changes section 7.2 as of that
+/// date). [`with_literal_pdon(true)`](Self::with_literal_pdon) is the RFC's form.
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct H264DeinterleavingBuffer {
     /// N of section 7.2.2: `sprop-interleaving-depth` plus one.
@@ -786,9 +793,10 @@ impl H264DeinterleavingBuffer {
     /// RFC 6184 section 7.2.2 as written: "Let PDON be a variable that is initialized to 0 at
     /// the beginning of the RTP session". A NAL unit whose DON is 0 then has the largest DON
     /// distance, so a stream numbered from DON 0 (or whose first DONs wrap through 0) has those
-    /// NAL units passed on after the others. Default off: until a NAL unit has been passed on,
-    /// PDON is the DON just before the earliest one buffered, which gives the RFC's order for
-    /// every other stream and decoding order for those.
+    /// NAL units passed on after the others. Default off, which does not follow RFC 6184
+    /// section 7.2: until a NAL unit has been passed on, PDON is the DON just before the
+    /// earliest one buffered, which gives the RFC's order for every other stream and decoding
+    /// order for those.
     pub fn with_literal_pdon(mut self, literal: bool) -> Self {
         self.literal_pdon = literal;
         self

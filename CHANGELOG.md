@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
+  owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
+  initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
+  65536, the largest possible, and a stream numbered from DON 0 would have its first NAL unit
+  delivered last. The H.264 de-interleaving buffer instead takes PDON, until a NAL unit has been
+  passed on, as the DON just before the earliest one it holds. No erratum to RFC 6184 touches
+  section 7.2 as of 2026-11-26. Stated in the rustdoc of `H264DeinterleavingBuffer`,
+  `RTCRtpCodec::h264_depacketizer` and the new setting, in the README, and in a new
+  `docs/conformance.md` list, "Standing departures from a MUST", which also lists the RTP
+  circuit breaker's packet size (RFC 8083 section 3, audit row RFC8083-3-3, verdict unchanged).
+
+### Features
+
+- `MediaEngine::set_h264_literal_pdon(bool)` (default `false`; behaviour profile row
+  `h264.literal-pdon`, which `StrictRfc` sets to `true`), read by the new
+  `MediaEngine::h264_depacketizer(&codec)` and `RTCRtpReceiver::h264_depacketizer(&codec)`: with
+  `true` the H.264 depacketizer's de-interleaving buffer starts PDON at 0 as RFC 6184 section
+  7.2.2 is written (`H264DeinterleavingBuffer::with_literal_pdon`). Before, no profile reached
+  that form. `RTCRtpCodec::h264_depacketizer` is unchanged. Test
+  `tests/h264_deinterleaving_profile.rs`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
