@@ -29,23 +29,22 @@ pub const ERASED_STACK_IS_PRIVATE: bool = cfg!(all(
 
 /// Runs `work` and erases the stack it ran on.
 ///
-/// Where [`ERASED_STACK_IS_PRIVATE`] is true: `work` runs on a private stack of 256 KiB that
-/// the calling thread keeps for this purpose (mapped on first use, with an inaccessible guard
-/// below it, unmapped when the thread ends), and when `work` has returned or panicked every
-/// byte of that stack is overwritten with zeros before this returns or resumes the panic.
-/// Nothing `work` or anything it called left in a stack frame survives, at any depth. A call
-/// made while the thread is already inside one runs on the same private stack, and the outer
-/// call's overwrite covers it. What it does not cover: the value `work` returns (it is moved
-/// to the caller's stack: return pointers to key material, not key material), registers, and
-/// what `work` wrote elsewhere (the heap: use [`SecretVec`](crate::SecretVec) and zeroizing
-/// types there).
+/// Where [`ERASED_STACK_IS_PRIVATE`] is true: `work` runs on a private stack of 256 KiB with
+/// an inaccessible guard below it (taken from a small pool of the process, mapped when none
+/// is free), and when `work` has returned or panicked every byte of that stack is overwritten
+/// with zeros before this returns or resumes the panic. Nothing `work` or anything it called
+/// left in a stack frame survives, at any depth. A call made from inside `work` gets a stack
+/// of its own. What it does not cover: the value `work` returns (it is moved to the caller's
+/// stack: return pointers to key material, not key material), registers (a provider's AES
+/// leaves round keys in vector registers, and whatever later saves registers to a stack, a
+/// signal frame for one, puts them there), and what `work` wrote elsewhere (the heap: use
+/// [`SecretVec`](crate::SecretVec) and zeroizing types there).
 ///
 /// `work` runs with 256 KiB of stack however much the calling thread has: it is for building
 /// keyed objects and deriving keys, not for arbitrary code. Running off it is a fault on the
 /// guard, not memory corruption.
 ///
-/// Elsewhere, and when the private stack cannot be had (the mapping fails, or the thread is
-/// being torn down): `work` runs in a frame of its own on the caller's stack and
+/// Elsewhere, and when no private stack can be had (the mapping fails): `work` runs in a frame of its own on the caller's stack and
 /// [`scrub_stack`](crate::scrub_stack) overwrites the 32 KiB below the caller's frame
 /// afterwards, which reaches what a release build's key handling uses and nothing deeper.
 pub fn on_erased_stack<R>(work: impl FnOnce() -> R) -> R {
@@ -81,11 +80,10 @@ mod imp {
     not(miri)
 ))]
 mod imp {
-    use std::cell::{Cell, OnceCell};
     use std::ffi::c_void;
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
     use std::ptr::NonNull;
-    use std::sync::atomic::{Ordering, compiler_fence};
+    use std::sync::atomic::{AtomicPtr, Ordering, compiler_fence};
 
     /// The private stack. Building an SRTP context uses 42 KiB of stack in an unoptimised
     /// build and a few in an optimised one (`rtci-srtp/tests/key_residue.rs` prints it); a
@@ -149,9 +147,9 @@ mod imp {
             // SAFETY: the `STACK_SIZE` bytes from `low` are this mapping's, readable and
             // writable, and nothing runs on them: the work has returned to the caller's stack.
             unsafe { std::ptr::write_bytes(self.low(), 0, STACK_SIZE) };
-            // The stack is used again by the next call and its memory is reachable through
-            // the thread-local, so the fill is no dead store; the fence says so to a compiler
-            // that inlines this into a thread's last use of it.
+            // The stack is used again by a later call and its memory stays reachable through
+            // the pool, so the fill is no dead store; the fence says so to a compiler that
+            // inlines this next to the unmapping of a stack the pool has no room for.
             std::hint::black_box(self.low());
             compiler_fence(Ordering::SeqCst);
         }
@@ -160,7 +158,7 @@ mod imp {
     impl Drop for PrivateStack {
         fn drop(&mut self) {
             // SAFETY: the mapping is this value's, made in `new` with this size; nothing runs
-            // on it (it is dropped with the thread's thread-locals, or on a failed start).
+            // on it (a stack is dropped only by the call that held it, after its work).
             unsafe {
                 libc::munmap(
                     self.mapping.as_ptr().cast::<c_void>(),
@@ -170,20 +168,52 @@ mod imp {
         }
     }
 
-    pub(super) struct State {
-        /// Mapped on first use; `None` inside when the mapping failed.
-        pub(super) stack: OnceCell<Option<PrivateStack>>,
-        /// Whether the thread is running work on its private stack right now.
-        busy: Cell<bool>,
+    /// The stacks not in use, each erased: a call takes one (or maps one when none is free)
+    /// and puts it back when its work has returned and the stack is overwritten.
+    ///
+    /// A pool of the process rather than a stack per thread, on purpose: reaching a
+    /// thread-local for the first time in a thread goes through the platform's lazy
+    /// thread-local set-up, which on Apple systems saves the vector registers on the caller's
+    /// stack, and after a provider's AES those still hold round keys. That put one AES-GCM
+    /// round key of the ring provider into a dead frame of the calling thread, the very thing
+    /// this module exists to prevent (run 45877045732, macOS arm64, optimised build). Taking
+    /// and giving back a stack is two atomic operations and touches nothing thread-local.
+    static POOL: [AtomicPtr<u8>; POOL_SLOTS] =
+        [const { AtomicPtr::new(std::ptr::null_mut()) }; POOL_SLOTS];
+    /// How many erased stacks are kept for the next call; a call that finds none maps one, and
+    /// one that cannot put its stack back unmaps it. Each concurrent call, and each nested
+    /// one, uses a stack.
+    const POOL_SLOTS: usize = 8;
+
+    fn take() -> Option<PrivateStack> {
+        for slot in &POOL {
+            let mapping = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if let Some(mapping) = NonNull::new(mapping) {
+                return Some(PrivateStack { mapping });
+            }
+        }
+        PrivateStack::new()
     }
 
-    thread_local! {
-        pub(super) static STATE: State = const {
-            State {
-                stack: OnceCell::new(),
-                busy: Cell::new(false),
+    /// Puts an erased stack back.
+    fn give(stack: PrivateStack) {
+        let mapping = stack.mapping.as_ptr();
+        for slot in &POOL {
+            if slot
+                .compare_exchange(
+                    std::ptr::null_mut(),
+                    mapping,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                // The pool owns the mapping now.
+                std::mem::forget(stack);
+                return;
             }
-        };
+        }
+        // No room: `stack` is dropped, which unmaps it.
     }
 
     /// What `trampoline` is handed: the work, and where its outcome goes. It lives in the
@@ -278,57 +308,42 @@ mod imp {
         )
     }
 
-    enum Ran<R> {
-        /// On the private stack, which has been erased.
-        Erased(std::thread::Result<R>),
-        /// The thread is already on its private stack: the work is to run where it is.
-        Nested,
-        /// No private stack to be had.
-        Unavailable,
+    pub(super) fn run<F: FnOnce() -> R, R>(work: F) -> R {
+        match take() {
+            Some(stack) => {
+                let outcome = run_on(&stack, work);
+                give(stack);
+                match outcome {
+                    Ok(value) => value,
+                    Err(panic) => resume_unwind(panic),
+                }
+            }
+            None => super::in_place(work),
+        }
     }
 
-    pub(super) fn run<F: FnOnce() -> R, R>(work: F) -> R {
+    /// Runs `work` on `stack` and overwrites the stack; a panic of the work is returned.
+    fn run_on<F: FnOnce() -> R, R>(stack: &PrivateStack, work: F) -> std::thread::Result<R> {
         let mut call = Call {
             work: Some(work),
             outcome: None,
         };
-        let ran = STATE
-            .try_with(|state| {
-                if state.busy.get() {
-                    return Ran::Nested;
-                }
-                let Some(stack) = state.stack.get_or_init(PrivateStack::new) else {
-                    return Ran::Unavailable;
-                };
-                state.busy.set(true);
-                // SAFETY: `stack.top()` is the page-aligned upper end of `STACK_SIZE` readable
-                // and writable bytes over a guard, used by this thread only and, `busy` says,
-                // not at this moment; `call` lives in this frame for the whole call and
-                // nothing else touches it; `trampoline` catches every panic.
-                unsafe {
-                    call_on_stack(
-                        (&raw mut call).cast::<u8>(),
-                        trampoline::<F, R>,
-                        stack.top(),
-                    );
-                }
-                stack.erase();
-                state.busy.set(false);
-                match call.outcome.take() {
-                    Some(outcome) => Ran::Erased(outcome),
-                    // `trampoline` always sets it; if it ever did not, the work has not run.
-                    None => Ran::Unavailable,
-                }
-            })
-            .unwrap_or(Ran::Unavailable);
-        match (ran, call.work.take()) {
-            (Ran::Erased(Ok(value)), _) => value,
-            (Ran::Erased(Err(panic)), _) => resume_unwind(panic),
-            (Ran::Nested, Some(work)) => work(),
-            (Ran::Unavailable, Some(work)) => super::in_place(work),
-            (Ran::Nested | Ran::Unavailable, None) => {
-                unreachable!("the work was neither run nor left to run")
-            }
+        // SAFETY: `stack.top()` is the page-aligned upper end of `STACK_SIZE` readable and
+        // writable bytes over a guard, which only this call uses (it took the stack out of
+        // the pool, or mapped it); `call` lives in this frame for the whole call and nothing
+        // else touches it; `trampoline` catches every panic.
+        unsafe {
+            call_on_stack(
+                (&raw mut call).cast::<u8>(),
+                trampoline::<F, R>,
+                stack.top(),
+            );
+        }
+        stack.erase();
+        match call.outcome.take() {
+            Some(outcome) => outcome,
+            // `trampoline` always takes the work and sets the outcome.
+            None => unreachable!("the work did not run"),
         }
     }
 
@@ -336,29 +351,22 @@ mod imp {
     mod tests {
         use super::*;
 
-        /// The calling thread's private stack as `(lowest address, bytes that are not zero)`.
-        fn private_stack() -> (usize, usize) {
-            STATE.with(|state| {
-                let stack = state
-                    .stack
-                    .get()
-                    .and_then(Option::as_ref)
-                    .expect("the private stack is mapped");
-                // SAFETY: the stack is mapped and nothing runs on it.
-                let bytes = unsafe { std::slice::from_raw_parts(stack.low(), STACK_SIZE) };
-                (
-                    stack.low() as usize,
-                    bytes.iter().filter(|&&b| b != 0).count(),
-                )
-            })
+        /// How many bytes of `stack` are not zero.
+        fn not_zero(stack: &PrivateStack) -> usize {
+            // SAFETY: the stack is mapped and nothing runs on it.
+            let bytes = unsafe { std::slice::from_raw_parts(stack.low(), STACK_SIZE) };
+            bytes.iter().filter(|&&b| b != 0).count()
         }
 
-        /// Fills a local of `len` bytes with a mark and returns its address.
+        fn holds(stack: &PrivateStack, address: usize) -> bool {
+            (stack.low() as usize..stack.low() as usize + STACK_SIZE).contains(&address)
+        }
+
+        /// Fills a local with a mark and returns its address.
         #[inline(never)]
-        fn leave_a_mark(len: usize) -> usize {
+        fn leave_a_mark() -> usize {
             let mut area = [0u8; 4096];
-            let len = len.min(area.len());
-            for byte in &mut area[..len] {
+            for byte in &mut area {
                 // SAFETY: a valid, aligned, exclusive reference.
                 unsafe { std::ptr::write_volatile(byte, 0xd7) };
             }
@@ -368,69 +376,93 @@ mod imp {
 
         #[test]
         fn the_work_runs_on_the_private_stack_and_nothing_it_wrote_there_is_left() {
+            let stack = PrivateStack::new().expect("a stack");
             let here = 0u8;
             let caller = std::hint::black_box(&here) as *const u8 as usize;
-            let (mark, value) = on_erased_stack_for_tests(|| (leave_a_mark(4096), 41 + 1));
+            let (mark, value) = run_on(&stack, || (leave_a_mark(), 41 + 1)).expect("no panic");
             assert_eq!(42, value);
-            let (low, not_zero) = private_stack();
             assert!(
-                (low..low + STACK_SIZE).contains(&mark),
-                "the work's frames were at {mark:#x}, outside the private stack at {low:#x}"
+                holds(&stack, mark),
+                "the work's frames were at {mark:#x}, outside the private stack"
             );
-            assert!(
-                !(low..low + STACK_SIZE).contains(&caller),
-                "the caller is on the private stack"
-            );
+            assert!(!holds(&stack, caller), "the caller is on the private stack");
             assert_eq!(
-                0, not_zero,
+                0,
+                not_zero(&stack),
                 "bytes of the private stack that are not zero after the work"
             );
         }
 
-        fn on_erased_stack_for_tests<R>(work: impl FnOnce() -> R) -> R {
-            run(work)
+        #[test]
+        fn a_panic_comes_back_after_the_stack_is_erased_and_the_stack_works_again() {
+            let stack = PrivateStack::new().expect("a stack");
+            let panic = run_on(&stack, || {
+                leave_a_mark();
+                panic!("from the work");
+            })
+            .expect_err("the panic comes back");
+            assert_eq!(Some(&"from the work"), panic.downcast_ref::<&str>());
+            assert_eq!(0, not_zero(&stack), "not erased after a panic");
+            assert_eq!(7, run_on(&stack, || 7).expect("no panic"));
         }
 
         #[test]
-        fn a_panic_is_resumed_on_the_callers_stack_after_the_private_one_is_erased() {
-            let caught = catch_unwind(|| {
-                run(|| {
-                    leave_a_mark(4096);
-                    panic!("from the work");
-                })
-            });
-            let message = caught.expect_err("the panic comes out");
-            assert_eq!(Some(&"from the work"), message.downcast_ref::<&str>());
-            assert_eq!(0, private_stack().1, "not erased after a panic");
-            // And the stack is usable again.
-            assert_eq!(7, run(|| 7));
+        fn a_panic_of_the_work_is_resumed_in_the_caller() {
+            let caught = catch_unwind(|| run(|| -> u8 { panic!("resumed") }));
+            let panic = caught.expect_err("the panic comes out");
+            assert_eq!(Some(&"resumed"), panic.downcast_ref::<&str>());
         }
 
         #[test]
-        fn a_call_from_inside_runs_on_the_same_stack_and_the_outer_one_erases_it() {
+        fn a_call_from_inside_gets_a_stack_of_its_own() {
             let (outer, inner) = run(|| {
-                let outer = leave_a_mark(64);
-                let inner = run(|| leave_a_mark(4096));
+                let outer = leave_a_mark();
+                let inner = run(leave_a_mark);
                 (outer, inner)
             });
-            let (low, not_zero) = private_stack();
-            assert!((low..low + STACK_SIZE).contains(&outer));
-            assert!((low..low + STACK_SIZE).contains(&inner));
-            assert_eq!(0, not_zero);
+            assert!(
+                outer.abs_diff(inner) >= STACK_SIZE,
+                "the inner work ran {} bytes from the outer one: on the same stack",
+                outer.abs_diff(inner)
+            );
         }
 
+        /// Stacks are shared between threads one after the other, never at once: what a
+        /// thread writes into a frame is still there after it let every other thread run.
         #[test]
-        fn each_thread_has_a_private_stack_of_its_own() {
-            run(|| leave_a_mark(16));
-            let here = private_stack().0;
-            let there = std::thread::spawn(|| {
-                run(|| leave_a_mark(16));
-                private_stack()
-            })
-            .join()
-            .expect("the thread ends");
-            assert_ne!(here, there.0);
-            assert_eq!(0, there.1);
+        fn no_two_threads_run_on_one_stack_at_once() {
+            let threads: Vec<_> = (1..=6u8)
+                .map(|id| {
+                    std::thread::spawn(move || {
+                        for _ in 0..300 {
+                            run(|| {
+                                let mut frame = [0u8; 512];
+                                for byte in &mut frame {
+                                    // SAFETY: a valid, aligned, exclusive reference.
+                                    unsafe { std::ptr::write_volatile(byte, id) };
+                                }
+                                std::thread::yield_now();
+                                let frame = std::hint::black_box(&frame);
+                                assert!(frame.iter().all(|&b| b == id), "thread {id}");
+                            });
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().expect("no thread saw another's bytes");
+            }
+        }
+
+        /// A stack that goes back to the pool is all zeros, whoever takes it next.
+        #[test]
+        fn a_stack_taken_from_the_pool_is_erased() {
+            for _ in 0..4 {
+                run(leave_a_mark);
+                let stack = take().expect("a stack");
+                assert_eq!(0, not_zero(&stack));
+                give(stack);
+            }
         }
 
         #[test]
@@ -443,7 +475,6 @@ mod imp {
             }
             // About 200 KiB of the 256.
             assert_eq!(180, run(|| deep(180)));
-            assert_eq!(0, private_stack().1);
         }
     }
 }
