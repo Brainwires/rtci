@@ -278,6 +278,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `untested`, a half of the clause or the refused case without a test (webrtc-pc 7, RFC 8446 10,
   RFC 7728 4, RFC 3611 3 reserved-field rows, RFC 5246 1). Citations corrected for about 15
   rows, five stale notes fixed. Open MUST rows 27 -> 57. No engine change on this branch.
+- Tests for the RFC 7728 and RFC 3611 MUST rows audit sweep 4 left `untested`
+  (`conf/rtcp-2-xr-pause-must-rows`; tests and audit only, no engine change): PAUSED and REFUSED
+  carry the Target SSRC of the stream they are about (RFC7728-7-3), PAUSE-RESUME entries of a
+  reserved type are ignored on reception and never written (7-5), a RESUME with another PauseID
+  is refused while pausing or paused (8.3-5), one with the current or a past PauseID to a
+  playing stream is ignored (8.3-6), in `PauseResumeInterceptor`; the reserved bits of the
+  Packet Receipt Times and Statistics Summary blocks and the reserved octets of the VoIP Metrics
+  block are read set and ignored, and written zero (RFC3611-4.3-5, 4.6-5, 4.7-3). Open MUST rows
+  57 -> 50.
 
 ### Testing
 

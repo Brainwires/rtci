@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5046 of 5088 (99.2 %).
-- Tested as the default (`tested`): 5014 of 5088 (98.5 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 42: 28 untested, 10 partial, 2 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5053 of 5088 (99.3 %).
+- Tested as the default (`tested`): 5021 of 5088 (98.7 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 35: 21 untested, 10 partial, 2 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 28 | 0 |
+| B | implemented, lacking a test that fails without it | 21 | 0 |
 | C | partly implemented | 11 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 74 | 26 |
+| all | | 67 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 41 rows, 37 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 34 rows, 30 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -42,7 +42,6 @@ become `setting` only if such a cell is named, or close when the default changes
 | jsep | 2 | 2 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| rtp | 7 | 0 | 0 | 0 | 0 | 7 | 7 | 0 | 0 |
 | sctp | 5 | 2 | 0 | 0 | 0 | 7 | 7 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 | turn | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -95,13 +94,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
 | WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
 | WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
-| RFC3611-4.3-5 | `rfc3611.md` | rsvd bits zero when sent, ignored when received | untested | B | A test reading a Packet Receipt Times block with its rsvd bits set (ignored) (audit-5 sweep) | S | rtp |
-| RFC3611-4.6-5 | `rfc3611.md` | rsvd bits zero when sent, ignored when received | untested | B | A test reading a Statistics Summary block with its rsvd bits set (ignored) (audit-5 sweep) | S | rtp |
-| RFC3611-4.7-3 | `rfc3611.md` | Reserved octet (header) zero / ignored | untested | B | A test reading a VoIP Metrics block with its reserved octet set (ignored) (audit-5 sweep) | S | rtp |
-| RFC7728-7-3 | `rfc7728.md` | PAUSED targets the paused SSRC; REFUSED the target of the refused ... | untested | B | A test that a PAUSED and a REFUSED carry the target SSRC of the paused stream / refused request (audit-5 sweep) | S | rtp |
-| RFC7728-7-5 | `rfc7728.md` | Reserved types are ignored on reception and never sent | untested | B | A test that the interceptor takes no action on a received reserved-type entry (audit-5 sweep) | S | rtp |
-| RFC7728-8.3-5 | `rfc7728.md` | A RESUME that cannot be honoured, or with another PauseID while ... | untested | B | A test that a RESUME with another PauseID to a paused or pausing stream is refused (audit-5 sweep) | S | rtp |
-| RFC7728-8.3-6 | `rfc7728.md` | A RESUME with the current or a past PauseID to a playing stream is ... | untested | B | A test that a RESUME with the current PauseID to a playing stream is ignored (audit-5 sweep) | S | rtp |
 | RFC9260-3.2-8 | `rfc9260.md` | Chunk Length smaller than 4 or past the packet end is rejected | untested | B | A test that a chunk whose Chunk Length is below 4 refuses the packet (past the end is tested by a_partial_chunk_at_the_end_of_a_packet_is_dropped_alone) (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.2.1.5-2 | `rfc9260.md` | Supported Address Types is accepted; a Host Name entry in it is ... | untested | B | A test of an INIT whose Supported Address Types lists the Host Name type (11): answered with an INIT ACK, the entry ignored (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |

@@ -56,12 +56,12 @@ WebRTC uses); every row names the code and the test that proves it. From
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5088 | 5046 (99.2 %) | 5014 (98.5 %) |
+| MUST | 5088 | 5053 (99.3 %) | 5021 (98.7 %) |
 | SHOULD | 986 | 920 (93.3 %) | 914 (92.7 %) |
 | MAY | 604 | 501 (82.9 %) | 500 (82.8 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. 42 MUST rows are open (28 untested,
+browser or a deployed peer cannot interoperate with it by default. 35 MUST rows are open (21 untested,
 10 partial, 2 missing, 2 violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by the
 owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a MUST"),
