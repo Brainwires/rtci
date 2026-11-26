@@ -173,6 +173,7 @@ fn after_a_hello_retry_request_there_is_no_early_data() -> Result<()> {
     assert!(early_data(&pair.to_server).is_empty());
     assert_eq!(accepted(&pair), (Some(false), None));
     assert!(pair.server_conn().resumed);
+    not_resent(&mut pair, b"too early");
     Ok(())
 }
 
@@ -204,7 +205,22 @@ fn a_ticket_age_out_of_the_window_rules_out_early_data() -> Result<()> {
     assert!(early_data(&pair.to_server).is_empty());
     assert_eq!(accepted(&pair), (Some(false), Some(false)));
     assert!(pair.server_conn().resumed);
+    not_resent(&mut pair, b"stale");
     Ok(())
+}
+
+/// RFC 8446 section 4.2.10: "A TLS implementation MUST NOT automatically resend early data
+/// unless the negotiated connection selects the same ALPN protocol." This one never resends
+/// it: 0-RTT data the server did not take does not reach it as application data, neither
+/// during the handshake nor once the client writes again.
+fn not_resent(pair: &mut Pair, early: &[u8]) {
+    assert!(
+        application_data(&pair.to_server)
+            .iter()
+            .all(|data| data != early),
+        "the rejected early data was sent again"
+    );
+    assert_eq!(pair.client_sends(b"after"), vec![b"after".to_vec()]);
 }
 
 /// RFC 8446 section 4.6.1: more 0-RTT data than the ticket allows ends the handshake with

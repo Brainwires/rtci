@@ -1267,3 +1267,118 @@ fn a_new_session_ticket_with_unknown_extensions_is_kept_and_resumes() -> Result<
     assert_eq!(resumed(&second), (true, true));
     Ok(())
 }
+
+/// RFC 8446 section 4.6.1: "On resumption, if reporting an SNI value to the calling
+/// application, implementations MUST use the value sent in the resumption ClientHello rather
+/// than the value sent in the previous session." Two names: a ticket from a handshake with
+/// localhost, offered by a client configured with another name. The server reports the name
+/// of that ClientHello, never the ticket's ("if a server implementation declines all PSK
+/// identities with different SNI values, these two values are always the same": this one
+/// declines it and runs a full handshake).
+#[test]
+fn the_server_name_reported_on_resumption_is_the_resumption_client_hellos() -> Result<()> {
+    const OTHER: &str = "other.example";
+    let store = store();
+    let server = ticket_server(1)?;
+    let mut first = Pair::with(resuming_client(&store)?, server.clone())?.complete();
+    assert_eq!(first.server_conn().server_name, NAME);
+    let ticket = store.take(NAME).expect("a ticket");
+    store.put(OTHER, ticket);
+    let other_name = Arc::new(
+        client_builder()
+            .with_server_name(OTHER.to_owned())
+            .with_session_store(Some(store.clone()))
+            .build(true, None)?,
+    );
+    let mut second = Pair::with(other_name, server)?.complete();
+    assert!(
+        second
+            .client_conn()
+            .offered_extensions
+            .contains(&EXT_PRE_SHARED_KEY),
+        "the ticket of {NAME} is offered under {OTHER}"
+    );
+    assert_eq!(second.server_conn().server_name, OTHER);
+    Ok(())
+}
+
+/// RFC 8446 section 4.6.1: "Servers MUST NOT use any value greater than 604800 seconds (7
+/// days)." The server's side alone: a server configured for thirty days writes 604800 in the
+/// ticket_lifetime of the NewSessionTicket it sends, read from the message on its way out,
+/// before any client caps it.
+#[test]
+fn a_server_writes_no_ticket_lifetime_over_seven_days() -> Result<()> {
+    let store = store();
+    let server = Arc::new(
+        server_builder()
+            .with_session_tickets(2)
+            .with_session_ticket_lifetime(Duration::from_secs(30 * 24 * 3600))
+            .build(false, None)?,
+    );
+    let mut pair = Pair::with(resuming_client(&store)?, server)?;
+    for _ in 0..16 {
+        pair.round();
+        if pair.server_complete {
+            break;
+        }
+    }
+    assert!(pair.server_complete);
+    let lifetimes: Vec<u32> = pair
+        .server_conn()
+        .post_handshake
+        .iter()
+        .filter(|flight| flight.kind == super::conn::FlightKind::NewSessionTicket)
+        .flat_map(|flight| flight.messages.iter())
+        .map(|message| {
+            parse_new_session_ticket(&message.body)
+                .expect("a NewSessionTicket")
+                .lifetime
+        })
+        .collect();
+    assert_eq!(
+        lifetimes,
+        vec![MAX_TICKET_LIFETIME.as_secs() as u32; 2],
+        "two tickets, each of seven days"
+    );
+    Ok(())
+}
+
+/// RFC 8446 section 4.6.1: "Clients MUST NOT cache tickets for longer than 7 days,
+/// regardless of the ticket_lifetime". The client's side alone: a NewSessionTicket of thirty
+/// days handed to it (no server of this crate sends one) is kept for seven, and is not
+/// offered once they are over; within them it is.
+#[test]
+fn a_client_keeps_no_ticket_beyond_seven_days() -> Result<()> {
+    let store = store();
+    let client = resuming_client(&store)?;
+    let server = ticket_server(0)?;
+    let now = Instant::now();
+    let mut pair = pair_at(client.clone(), server.clone(), now)?.complete();
+    assert_eq!(store.len(NAME), 0, "this server issues none");
+    let body = new_session_ticket(30 * 24 * 3600, 7, &[0], &[1, 2, 3], None);
+    pair.client_conn()
+        .on_post_handshake_message(super::messages::NEW_SESSION_TICKET, &body)
+        .map_err(|refusal| refusal.error)?;
+    let session = store.take(NAME).expect("the ticket is kept");
+    assert!(session.is_valid_at(now + MAX_TICKET_LIFETIME - Duration::from_secs(1)));
+    assert!(!session.is_valid_at(now + MAX_TICKET_LIFETIME));
+    assert!(!session.is_valid_at(now + Duration::from_secs(29 * 24 * 3600)));
+
+    for (after, offered) in [
+        (MAX_TICKET_LIFETIME - Duration::from_secs(3600), true),
+        (MAX_TICKET_LIFETIME + Duration::from_secs(1), false),
+    ] {
+        drain(&store);
+        store.put(NAME, session.clone());
+        let mut later = pair_at(client.clone(), server.clone(), now + after)?;
+        assert_eq!(
+            later
+                .client_conn()
+                .offered_extensions
+                .contains(&EXT_PRE_SHARED_KEY),
+            offered,
+            "{after:?} after it came"
+        );
+    }
+    Ok(())
+}

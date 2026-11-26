@@ -2040,3 +2040,474 @@ fn data_after_a_user_canceled_is_ignored() -> Result<()> {
     }
     Ok(())
 }
+
+// ----------------------------------------------------------------------------------------
+// Rows audit sweep 6 found without a test of their own (dtlsrows2).
+// ----------------------------------------------------------------------------------------
+
+/// RFC 8446 sections 4.1.3 and 4.2.1 (RFC 9147 section 5.4: {254, 253} in DTLS): a server
+/// that negotiates DTLS 1.3 writes legacy_version {254, 253} in its ServerHello and its
+/// HelloRetryRequest, bytes 25 and 26 of the datagram, and says the version in
+/// supported_versions. Section 4.1.3: its random "MUST be generated independently of the
+/// ClientHello.random": the same ClientHello to two servers gets two different randoms,
+/// neither the client's.
+#[test]
+fn the_server_hello_has_its_own_random_and_legacy_version_fefd() -> Result<()> {
+    let mut pair = Pair::new(client_builder(), no_cookies())?;
+    let client_hello = take(&mut pair.client);
+    assert_eq!(client_hello.len(), 1, "one datagram");
+    let (handshake_type, _, client_body, _) = first_message(&client_hello[0]);
+    assert_eq!(handshake_type, messages::CLIENT_HELLO);
+    let client_random = client_body[2..34].to_vec();
+    let mut randoms = vec![];
+    for cookie_exchange in [false, false, true] {
+        let mut server = Endpoint::new(
+            server_addr(),
+            TransportProtocol::UDP,
+            Some(std::sync::Arc::new(
+                server_builder()
+                    .with_cookie_exchange(cookie_exchange)
+                    .build(false, None)?,
+            )),
+        );
+        server.read(pair.now, client_addr(), None, client_hello[0].clone())?;
+        let answer = take(&mut server);
+        let (handshake_type, _, body, _) = first_message(&answer[0]);
+        assert_eq!(handshake_type, messages::SERVER_HELLO);
+        assert_eq!(
+            answer[0][25..27],
+            [0xfe, 0xfd],
+            "cookies: {cookie_exchange}"
+        );
+        assert_eq!(body[..2], [0xfe, 0xfd], "cookies: {cookie_exchange}");
+        assert_eq!(
+            Answer::parse(&body).get(messages::EXT_SUPPORTED_VERSIONS),
+            Some(&[0xfe, 0xfc][..]),
+            "cookies: {cookie_exchange}"
+        );
+        if !cookie_exchange {
+            randoms.push(body[2..34].to_vec());
+        }
+    }
+    assert_ne!(randoms[0], randoms[1]);
+    assert!(randoms.iter().all(|random| *random != client_random));
+    Ok(())
+}
+
+/// The cookie a ClientHello carries, in the legacy_cookie field (DTLS 1.2) or the cookie
+/// extension (DTLS 1.3), if any.
+fn cookie_of(datagram: &[u8]) -> Option<Vec<u8>> {
+    let (handshake_type, _, body, _) = first_message(datagram);
+    assert_eq!(handshake_type, messages::CLIENT_HELLO);
+    let at = 35 + usize::from(body[34]);
+    let legacy = &body[at + 1..at + 1 + usize::from(body[at])];
+    if !legacy.is_empty() {
+        return Some(legacy.to_vec());
+    }
+    Hello::parse(&body)
+        .get(messages::EXT_COOKIE)
+        .map(<[u8]>::to_vec)
+}
+
+/// RFC 8446 section 4.2.2: "Clients MUST NOT use cookies in their initial ClientHello in
+/// subsequent connections." A client that went through the cookie exchange (a
+/// HelloRetryRequest in DTLS 1.3, a HelloVerifyRequest in DTLS 1.2) connects again from the
+/// same endpoint and configuration: its first ClientHello carries no cookie, and the new
+/// connection runs the exchange again.
+#[test]
+fn a_later_connection_starts_without_the_cookie_of_an_earlier_one() -> Result<()> {
+    for version in [
+        crate::config::DtlsVersion::Dtls1_3,
+        crate::config::DtlsVersion::Dtls1_2,
+    ] {
+        let client = std::sync::Arc::new(
+            client_builder()
+                .with_protocol_versions(version, version)
+                .build(true, None)?,
+        );
+        let server = std::sync::Arc::new(
+            server_builder()
+                .with_protocol_versions(version, version)
+                .build(false, None)?,
+        );
+        let mut pair = Pair::with(client.clone(), server)?;
+        let (first, _) = pair.round();
+        let (second, _) = pair.round();
+        assert_eq!(cookie_of(&first[0]), None, "{version:?}");
+        assert!(
+            cookie_of(&second[0]).is_some(),
+            "{version:?}: the cookie exchange ran"
+        );
+        pair.run();
+        assert!(pair.client_complete && pair.server_complete, "{version:?}");
+
+        let now = pair.now;
+        let _ = pair.client.stop(now, server_addr());
+        let _ = pair.server.stop(now, client_addr());
+        let _ = take(&mut pair.client);
+        let _ = take(&mut pair.server);
+        pair.client
+            .connect(now, server_addr(), client.clone(), None)?;
+        let (again, _) = pair.round();
+        assert_eq!(
+            cookie_of(&again[0]),
+            None,
+            "{version:?}: no cookie in the next connection's first ClientHello"
+        );
+        let (answer, _) = pair.round();
+        assert!(
+            cookie_of(&answer[0]).is_some(),
+            "{version:?}: the new connection has a cookie of its own"
+        );
+    }
+    Ok(())
+}
+
+/// RFC 8446 section 4.2.7: "Clients MUST NOT act upon any information found in
+/// "supported_groups" prior to successful completion of the handshake". EncryptedExtensions
+/// with a supported_groups the client did not ask for (groups it did not offer, one it does
+/// not know) is taken as one without it: the handshake goes on in the same state.
+#[test]
+fn supported_groups_in_encrypted_extensions_change_nothing() -> Result<()> {
+    let mut plain = client_after_server_hello(client_builder())?;
+    taken(plain.client_conn().on_handshake_message(
+        messages::ENCRYPTED_EXTENSIONS,
+        &encrypted_extensions(&[]),
+        EPOCH_HANDSHAKE,
+    ))?;
+    let mut pair = client_after_server_hello(client_builder())?;
+    taken(pair.client_conn().on_handshake_message(
+        messages::ENCRYPTED_EXTENSIONS,
+        &encrypted_extensions(&[(
+            messages::EXT_SUPPORTED_GROUPS,
+            u16_list(&[0x7777, SECP521R1]),
+        )]),
+        EPOCH_HANDSHAKE,
+    ))?;
+    assert_eq!(pair.client_conn().state, plain.client_conn().state);
+    Ok(())
+}
+
+/// RFC 8446 sections 5 and 5.4: an authenticated record of a content type that is not known
+/// ("an unexpected record type") and one that is nothing but padding ("does not find a
+/// non-zero octet in the cleartext") end the connection with unexpected_message: sent by the
+/// receiver, and read by its peer.
+#[test]
+fn an_unknown_or_all_padding_protected_record_is_an_unexpected_message() -> Result<()> {
+    for (content_type, content) in [(99u8, b"x".to_vec()), (0, vec![])] {
+        let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+        let record = pair
+            .server_conn()
+            .seal_for_fuzzing(content_type, &content)
+            .expect("a record");
+        pair.deliver_to_client(vec![BytesMut::from(&record[..])]);
+        assert!(
+            pair.client.is_connection_failed(&server_addr()),
+            "type {content_type}"
+        );
+        assert_eq!(
+            pair.client.connection_fatal_alerts(&server_addr()),
+            Some((Some(alert::UNEXPECTED_MESSAGE), None)),
+            "type {content_type}"
+        );
+        let alert = take(&mut pair.client);
+        pair.deliver_to_server(alert);
+        assert_eq!(
+            pair.server.connection_fatal_alerts(&client_addr()),
+            Some((None, Some(alert::UNEXPECTED_MESSAGE))),
+            "type {content_type}"
+        );
+    }
+    Ok(())
+}
+
+/// A pair whose client and server both offer connection ids, the client asking for an empty
+/// one and the server for five bytes (RFC 9147 section 9).
+fn pair_with_connection_ids() -> Result<Pair> {
+    Ok(Pair::new(
+        client_builder().with_connection_id(Some(0)),
+        no_cookies().with_connection_id(Some(5)),
+    )?
+    .complete())
+}
+
+/// The post-handshake messages a DTLS 1.3 association refuses, each with the alert its RFC
+/// names, as `on_post_handshake_message` gives it and as it goes through the record layer:
+/// the receiver sends it, its peer reads it. RFC 8446 section 4.1.2 (a ClientHello after a
+/// DTLS 1.3 handshake: unexpected_message), 4.6.2 (a CertificateRequest to a client that did
+/// not send post_handshake_auth: unexpected_message), 4.6.3 (a KeyUpdate other than 0 or 1:
+/// illegal_parameter), RFC 9147 section 9 (NewConnectionId and RequestConnectionId without
+/// connection ids, or towards an empty one: unexpected_message).
+#[test]
+fn post_handshake_messages_out_of_place_draw_the_alert_their_rfc_names() -> Result<()> {
+    let alert_of =
+        |result: std::result::Result<(), messages::Refusal>| result.err().map(|r| r.alert);
+    let new_connection_id = || messages::new_connection_id(&[vec![1, 2]], messages::CID_SPARE);
+    // (a pair with connection ids, the message goes to the client, type, body, alert)
+    let mut cases: Vec<(bool, bool, u8, Vec<u8>, u8)> = vec![
+        (
+            false,
+            false,
+            messages::CERTIFICATE_REQUEST,
+            messages::certificate_request(&[1], &[0x0403]),
+            alert::UNEXPECTED_MESSAGE,
+        ),
+        (
+            false,
+            false,
+            messages::NEW_CONNECTION_ID,
+            new_connection_id(),
+            alert::UNEXPECTED_MESSAGE,
+        ),
+        (
+            false,
+            true,
+            messages::REQUEST_CONNECTION_ID,
+            messages::request_connection_id(1),
+            alert::UNEXPECTED_MESSAGE,
+        ),
+        (
+            false,
+            false,
+            messages::REQUEST_CONNECTION_ID,
+            messages::request_connection_id(1),
+            alert::UNEXPECTED_MESSAGE,
+        ),
+        // The client has an empty connection id: it is sent no RequestConnectionId, and it
+        // has none to hand the server in a NewConnectionId.
+        (
+            true,
+            true,
+            messages::REQUEST_CONNECTION_ID,
+            messages::request_connection_id(1),
+            alert::UNEXPECTED_MESSAGE,
+        ),
+        (
+            true,
+            false,
+            messages::NEW_CONNECTION_ID,
+            new_connection_id(),
+            alert::UNEXPECTED_MESSAGE,
+        ),
+    ];
+    for value in [2u8, 0x80, 0xff] {
+        cases.push((
+            false,
+            true,
+            messages::KEY_UPDATE,
+            vec![value],
+            alert::ILLEGAL_PARAMETER,
+        ));
+        cases.push((
+            false,
+            false,
+            messages::KEY_UPDATE,
+            vec![value],
+            alert::ILLEGAL_PARAMETER,
+        ));
+    }
+    // Every case is run, and every mismatch reported.
+    let mut mismatches = vec![];
+    for (connection_ids, to_client, handshake_type, mut body, expected) in cases {
+        let case = format!(
+            "type {handshake_type} {body:?} to the client: {to_client}, connection ids: {connection_ids}"
+        );
+        let new_pair = || -> Result<Pair> {
+            if connection_ids {
+                pair_with_connection_ids()
+            } else {
+                Ok(Pair::new(client_builder(), no_cookies())?.complete())
+            }
+        };
+        let mut pair = new_pair()?;
+        let receiver = if to_client {
+            pair.client_conn()
+        } else {
+            pair.server_conn()
+        };
+        let refused = alert_of(receiver.on_post_handshake_message(handshake_type, &body));
+        if refused != Some(expected) {
+            mismatches.push(format!("{case}: refused with {refused:?}"));
+        }
+
+        let mut pair = new_pair()?;
+        let sender = if to_client {
+            pair.server_conn()
+        } else {
+            pair.client_conn()
+        };
+        sender.send_post_handshake(
+            FlightKind::NewConnectionId,
+            handshake_type,
+            std::mem::take(&mut body),
+        )?;
+        let now = pair.now;
+        let _ = pair.client.handle_timeout(server_addr(), now);
+        let _ = pair.server.handle_timeout(client_addr(), now);
+        pair.run();
+        let (receiver, sender) = if to_client {
+            (
+                pair.client.connection_fatal_alerts(&server_addr()),
+                pair.server.connection_fatal_alerts(&client_addr()),
+            )
+        } else {
+            (
+                pair.server.connection_fatal_alerts(&client_addr()),
+                pair.client.connection_fatal_alerts(&server_addr()),
+            )
+        };
+        if (receiver, sender) != (Some((Some(expected), None)), Some((None, Some(expected)))) {
+            mismatches.push(format!(
+                "{case}: on the wire, receiver {receiver:?}, sender {sender:?}"
+            ));
+        }
+    }
+
+    // RFC 8446 section 4.1.2: a ClientHello after the handshake, protected, to the server
+    // that negotiated DTLS 1.3. (A plaintext one is a new client's, RFC 9147 section 5.11.)
+    let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+    let hello = pair.client_conn().client_hello.clone();
+    assert!(!hello.is_empty());
+    let refused = alert_of(
+        pair.server_conn()
+            .on_post_handshake_message(messages::CLIENT_HELLO, &hello),
+    );
+    if refused != Some(alert::UNEXPECTED_MESSAGE) {
+        mismatches.push(format!("ClientHello: refused with {refused:?}"));
+    }
+    let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+    let hello = pair.client_conn().client_hello.clone();
+    pair.client_conn().send_post_handshake(
+        FlightKind::NewConnectionId,
+        messages::CLIENT_HELLO,
+        hello,
+    )?;
+    let now = pair.now;
+    let _ = pair.client.handle_timeout(server_addr(), now);
+    pair.run();
+    let alerts = (
+        pair.server.connection_fatal_alerts(&client_addr()),
+        pair.client.connection_fatal_alerts(&server_addr()),
+    );
+    if alerts
+        != (
+            Some((Some(alert::UNEXPECTED_MESSAGE), None)),
+            Some((None, Some(alert::UNEXPECTED_MESSAGE))),
+        )
+    {
+        mismatches.push(format!("ClientHello: on the wire, {alerts:?}"));
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    Ok(())
+}
+
+/// RFC 9147 section 4: "Plaintext records MUST NOT be sent with sequence numbers that would
+/// exceed 2^48-1". A client whose plaintext counter is at 2^48-1 retransmits its ClientHello
+/// with that sequence number, and then sends no plaintext record again.
+#[test]
+fn a_plaintext_record_never_takes_a_sequence_number_past_2_48_minus_1() -> Result<()> {
+    let mut pair = Pair::new(client_builder(), no_cookies())?;
+    let first = take(&mut pair.client);
+    assert_eq!(first_message(&first[0]).3, 0);
+    pair.client_conn()
+        .set_plaintext_send_sequence(MAX_SEQUENCE_NUMBER);
+    let at = pair
+        .client
+        .poll_timeout(&server_addr())
+        .expect("the retransmission timer");
+    let _ = pair.client.handle_timeout(server_addr(), at);
+    let again = take(&mut pair.client);
+    assert_eq!(again.len(), 1);
+    assert_eq!(first_message(&again[0]).3, MAX_SEQUENCE_NUMBER);
+    assert_eq!(
+        pair.client_conn().plaintext_send_sequence(),
+        MAX_SEQUENCE_NUMBER + 1
+    );
+    // The next retransmission would take 2^48: nothing goes out.
+    if let Some(at) = pair.client.poll_timeout(&server_addr()) {
+        let _ = pair.client.handle_timeout(server_addr(), at);
+    }
+    assert!(take(&mut pair.client).is_empty());
+    assert_eq!(
+        pair.client_conn().plaintext_send_sequence(),
+        MAX_SEQUENCE_NUMBER + 1
+    );
+    Ok(())
+}
+
+/// RFC 9147 section 4.5.1: "The window MUST NOT be updated due to a received record until
+/// that record has been deprotected successfully." A forgery far ahead of the records in
+/// flight (the sequence number of a genuine record a thousand ahead, its tag altered) is
+/// discarded, and the genuine records below it, then the genuine one it copied, are all
+/// delivered.
+#[test]
+fn a_forged_record_far_ahead_does_not_move_the_window() -> Result<()> {
+    let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+    let held: Vec<Vec<u8>> = (0..5u8)
+        .map(|index| {
+            pair.client_conn()
+                .seal_for_fuzzing(CONTENT_TYPE_APPLICATION_DATA, &[index])
+                .expect("a record")
+        })
+        .collect();
+    for _ in 0..995 {
+        pair.client_conn()
+            .seal_for_fuzzing(CONTENT_TYPE_APPLICATION_DATA, b"burnt")
+            .expect("a record");
+    }
+    let far = pair
+        .client_conn()
+        .seal_for_fuzzing(CONTENT_TYPE_APPLICATION_DATA, b"far ahead")
+        .expect("a record");
+    let mut forged = far.clone();
+    let last = forged.len() - 1;
+    forged[last] ^= 1;
+    pair.to_server.clear();
+    pair.deliver_to_server(vec![BytesMut::from(&forged[..])]);
+    assert!(application_data(&pair.to_server).is_empty());
+    assert!(!pair.server.is_connection_failed(&client_addr()));
+    pair.deliver_to_server(
+        held.iter()
+            .map(|record| BytesMut::from(&record[..]))
+            .collect(),
+    );
+    assert_eq!(
+        application_data(&pair.to_server),
+        (0..5u8).map(|index| vec![index]).collect::<Vec<_>>(),
+        "the records below the forgery are still in the window"
+    );
+    pair.to_server.clear();
+    pair.deliver_to_server(vec![BytesMut::from(&far[..])]);
+    assert_eq!(
+        application_data(&pair.to_server),
+        vec![b"far ahead".to_vec()]
+    );
+    Ok(())
+}
+
+/// RFC 9147 section 8: a sender never moves past epoch 2^48-1, and "In order to allow this
+/// value to be changed later, receiving implementations MUST NOT enforce this rule." A peer
+/// at epoch 2^48-1 that sends a KeyUpdate all the same (breaking the sender's rule, which the
+/// receiver must not check) has it taken: the receiver acknowledges it, keeps the
+/// association, and reads the records of epoch 2^48 that follow.
+#[test]
+fn a_receiver_takes_a_key_update_past_the_last_epoch() -> Result<()> {
+    let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+    pair.client_conn().set_send_epoch_for_test(MAX_SEND_EPOCH);
+    pair.server_conn().set_read_epoch_for_test(MAX_SEND_EPOCH);
+    assert_eq!(pair.client_sends(b"last"), vec![b"last".to_vec()]);
+    pair.client_conn()
+        .send_post_handshake(FlightKind::KeyUpdate, messages::KEY_UPDATE, vec![0])?;
+    let now = pair.now;
+    let _ = pair.client.handle_timeout(server_addr(), now);
+    pair.run();
+    assert!(!pair.server.is_connection_failed(&client_addr()));
+    assert_eq!(
+        pair.server.connection_fatal_alerts(&client_addr()),
+        Some((None, None))
+    );
+    assert!(pair.server_conn().has_read_epoch(MAX_SEND_EPOCH + 1));
+    assert!(!pair.client_conn().key_update_outstanding(), "acknowledged");
+    assert_eq!(pair.client_sends(b"past"), vec![b"past".to_vec()]);
+    Ok(())
+}

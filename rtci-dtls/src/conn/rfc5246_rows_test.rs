@@ -432,3 +432,58 @@ fn a_message_larger_than_the_mtu_is_sent_whole() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 8422 section 5.1 (RFC5246-8422-5.1-1): "A client that proposes ECC cipher suites in
+/// its ClientHello message SHOULD send these extensions" became, with section 5.1.1's
+/// "Implementations of this document MUST support the uncompressed format", the rule the
+/// audit row states: a client offering ECDHE suites sends supported_groups (a non-empty
+/// list of groups) and ec_point_formats (with uncompressed, 0). The ClientHello the engine
+/// writes, DTLS 1.2 only and offering both versions, read from the wire.
+#[test]
+fn a_client_offering_ecc_suites_sends_supported_groups_and_point_formats() -> Result<()> {
+    for client in [dtls12(client_builder()), client_builder()] {
+        let mut pair = Pair::new(
+            client.with_cipher_suites(vec![
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+                CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+            ]),
+            server_builder(),
+        )?;
+        let hello = take(&mut pair.client);
+        let datagram = &hello[0];
+        assert_eq!((datagram[0], datagram[13]), (22, 1), "a ClientHello");
+        let length = usize::from(datagram[14]) << 16
+            | usize::from(datagram[15]) << 8
+            | usize::from(datagram[16]);
+        let body = &datagram[25..25 + length];
+        let session_end = 35 + usize::from(body[34]);
+        let cookie_end = session_end + 1 + usize::from(body[session_end]);
+        let suites_len = usize::from(u16::from_be_bytes([body[cookie_end], body[cookie_end + 1]]));
+        let suites: Vec<u16> = body[cookie_end + 2..cookie_end + 2 + suites_len]
+            .chunks(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        assert!(
+            suites.contains(&0xc02b),
+            "an ECDHE_ECDSA suite is offered: {suites:x?}"
+        );
+        let compression_at = cookie_end + 2 + suites_len;
+        let extensions = crate::conn::conn_conformance_test::extensions_after(
+            body,
+            compression_at + 1 + usize::from(body[compression_at]),
+        );
+        let find = |typ: u16| {
+            extensions
+                .iter()
+                .find(|(t, _)| *t == typ)
+                .map(|(_, data)| data.clone())
+        };
+        let groups = find(10).expect("supported_groups");
+        let listed = usize::from(u16::from_be_bytes([groups[0], groups[1]]));
+        assert!(listed >= 2 && listed == groups.len() - 2, "{groups:?}");
+        let formats = find(11).expect("ec_point_formats");
+        assert_eq!(usize::from(formats[0]), formats.len() - 1, "{formats:?}");
+        assert!(formats[1..].contains(&0), "uncompressed: {formats:?}");
+    }
+    Ok(())
+}

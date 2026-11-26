@@ -108,6 +108,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
   clause "a can" and left the setting out of every profile; it is now governed.
+- The DTLS rows audit sweep 6 downgraded, closed with tests (`conf/dtls-31-sweep6-must-rows`),
+  each proved by a mutation of the engine: RFC 9147 sections 4 (no plaintext record past
+  sequence 2^48-1), 4.5.1 (a forgery far ahead does not move the replay window), 8 (a receiver
+  takes a KeyUpdate past epoch 2^48-1) and 9 (unexpected_message for connection id messages out
+  of place); RFC 8446 sections 4.1.2, 4.6.2, 4.6.3 (the protected alert of a ClientHello, a
+  CertificateRequest and a KeyUpdate out of place, through `on_post_handshake_message` and on
+  the wire), 4.1.3 (the ServerHello random is the server's own; legacy_version {254, 253} in the
+  ServerHello and HelloRetryRequest the server writes, no longer covered by the client's check
+  since `conf/dtls-29`), 4.2.2 (no cookie in a later connection's first ClientHello), 4.2.7
+  (supported_groups in EncryptedExtensions changes nothing), 4.2.10 (rejected 0-RTT data is not
+  resent), 4.6.1 (the resumption ClientHello's server name is reported; the server's and the
+  client's seven-day ticket caps each shown alone), 5 and 5.4 (unexpected_message for an
+  authenticated record of unknown type or all padding); RFC 5246 section 7.3 (a session id holds
+  nothing of its handshake). RFC5246-8422-5.1-1 is level SHOULD, not MUST (RFC 8422 section 5.1:
+  a client proposing ECC suites "SHOULD include these extensions"), now tested. "Standing
+  departures from a MUST" lists RFC 6347 section 4.2.1, whose MUST (the HelloVerifyRequest
+  version equals the ServerHello's) contradicts the SHOULD before it (DTLS 1.0 regardless): the
+  default keeps the SHOULD, as OpenSSL does, and `StrictRfc` does not change it; and RFC 8446
+  section 4.2.3, which `ConfigBuilder::with_insecure_hashes(true)` lets an application break by
+  listing an MD5 scheme (an opt-in). Tests only, no engine change.
 
 ### Features
 
