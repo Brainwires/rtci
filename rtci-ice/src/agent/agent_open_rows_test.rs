@@ -719,6 +719,53 @@ fn test_local_candidates_are_refused_after_the_nomination() {
     assert!(a.add_local_candidate(udp("192.168.0.21", 1000, 0)).unwrap());
 }
 
+/// `withdraw_local_candidate`: a local candidate a restart kept (the relayed candidate of an
+/// allocation whose credentials the configuration no longer has) loses its pairs in the new
+/// session, is not paired with a remote candidate that arrives later, is not signalled, and
+/// the next restart drops it; the other local candidate is untouched.
+#[test]
+fn test_a_withdrawn_local_candidate_is_neither_paired_nor_signalled() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(a.add_local_candidate(udp("192.168.0.20", 1000, 0)).unwrap());
+    assert!(a.add_local_candidate(udp("192.168.0.22", 1000, 0)).unwrap());
+    let withdrawn = addr("192.168.0.20:1000");
+    let paired = |a: &Agent| {
+        a.get_candidate_pairs()
+            .iter()
+            .filter(|(l, _)| l.addr() == withdrawn)
+            .count()
+    };
+    assert!(paired(&a) > 0);
+    assert!(a.withdraw_local_candidate(now, withdrawn, shared::TransportProtocol::UDP));
+    assert_eq!(paired(&a), 0, "its pairs are removed");
+    assert!(
+        !a.withdraw_local_candidate(now, withdrawn, shared::TransportProtocol::UDP),
+        "once"
+    );
+    a.add_remote_candidate(udp("10.0.0.9", 7000, 0)).unwrap();
+    assert_eq!(paired(&a), 0, "not paired with a later remote candidate");
+    assert!(
+        a.get_candidate_pairs()
+            .iter()
+            .any(|(l, _)| l.addr() == addr("192.168.0.22:1000")),
+        "the other candidate is paired"
+    );
+    assert!(
+        !a.get_local_candidates_to_signal()
+            .iter()
+            .any(|c| c.addr() == withdrawn),
+        "not signalled"
+    );
+    a.restart(now, String::new(), String::new(), true).unwrap();
+    assert!(
+        !a.get_local_candidates()
+            .iter()
+            .any(|c| c.addr() == withdrawn),
+        "the next restart drops it"
+    );
+}
+
 /// The same rule binds the session the nomination was made in, not the one a staged restart
 /// begins: a candidate gathered while the restart is staged is taken, but not paired with the
 /// current session's remote candidates, and the restart keeps it even when it discards the

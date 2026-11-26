@@ -2055,7 +2055,7 @@ impl Agent {
     pub fn get_local_candidates_to_signal(&self) -> Vec<Candidate> {
         self.local_candidates
             .iter()
-            .filter(|c| c.candidate_type() != CandidateType::PeerReflexive)
+            .filter(|c| c.candidate_type() != CandidateType::PeerReflexive && !c.withdrawn)
             .cloned()
             .collect()
     }
@@ -2227,6 +2227,40 @@ impl Agent {
         let index = self
             .listed_pair(local, remote)
             .ok_or(Error::NotFoundError)?;
+        self.remove_pair_at(now, index);
+        Ok(())
+    }
+
+    /// Withdraws the local candidate whose transport address is `addr` (of `protocol`) from
+    /// the current ICE session: its pairs are removed as [`Self::remove_candidate_pair`]
+    /// removes one, it is never paired again (a check that reaches it forms no pair) and not
+    /// signalled again; the next restart drops it. For a relayed candidate whose allocation
+    /// this session must not use (its server left the configuration), kept by a restart that
+    /// keeps the local candidates. The previous media path of a restart is not a pair of the
+    /// session and is not affected. Returns whether such a candidate was there.
+    pub fn withdraw_local_candidate(
+        &mut self,
+        now: Instant,
+        addr: SocketAddr,
+        protocol: TransportProtocol,
+    ) -> bool {
+        let Some(local_index) = self.local_candidates.iter().position(|c| {
+            !c.withdrawn && c.addr() == addr && c.network_type().to_protocol() == protocol
+        }) else {
+            return false;
+        };
+        self.local_candidates[local_index].withdrawn = true;
+        for index in 0..self.candidate_pairs.len() {
+            let pair = &self.candidate_pairs[index];
+            if pair.local_index == local_index && !pair.removed {
+                self.remove_pair_at(now, index);
+            }
+        }
+        true
+    }
+
+    /// Removes the pair `index` (`remove_candidate_pair`).
+    fn remove_pair_at(&mut self, now: Instant, index: usize) {
         self.clock = self.clock.max(now);
         let pair = self.candidate_pairs[index];
         self.cancel_pair_checks(pair.local_index, pair.remote_index);
@@ -2262,7 +2296,6 @@ impl Agent {
                 }
             }
         }
-        Ok(())
     }
 
     /// Whether this agent is the controlling one, which decides nomination.
@@ -2828,6 +2861,8 @@ impl Agent {
         if !keep_local_candidates {
             self.local_candidates.retain(|c| c.restart_generation);
         }
+        // A candidate withdrawn from the previous session is not the new one's.
+        self.local_candidates.retain(|c| !c.withdrawn);
         self.delete_all_candidates(true);
         for c in &mut self.local_candidates {
             c.restart_generation = false;

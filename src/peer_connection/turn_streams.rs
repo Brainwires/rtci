@@ -666,6 +666,28 @@ impl RTCPeerConnection {
                     "{}: kept while its relayed candidate carries the data",
                     link.url
                 );
+                // Its relayed candidate stays the previous path's only: a restart that keeps
+                // the local candidates kept it, and the new session must not pair (and so
+                // nominate) it, or the allocation of the credentials just replaced would
+                // carry the new session too and never be released.
+                if let Some(relay) = link.relay {
+                    let now = self.pipeline_context.now;
+                    let targets: Vec<(SocketAddr, TransportProtocol)> = if link.relay_tcp {
+                        vec![
+                            (relay, TransportProtocol::TCP),
+                            (SocketAddr::new(relay.ip(), 9), TransportProtocol::TCP),
+                        ]
+                    } else {
+                        vec![(relay, TransportProtocol::UDP)]
+                    };
+                    self.with_transport(link.transport, |pc| {
+                        for (addr, protocol) in targets {
+                            pc.ice_transport_mut()
+                                .agent
+                                .withdraw_local_candidate(now, addr, protocol);
+                        }
+                    });
+                }
                 link.retiring = true;
                 self.streams.turn.links.push(link);
             } else {
