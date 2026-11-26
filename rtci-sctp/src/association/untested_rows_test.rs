@@ -406,3 +406,151 @@ fn a_limited_retransmission_stream_still_reaches_the_association_limit() -> Resu
     assert!(a.is_ended());
     Ok(())
 }
+
+// ---- Rows the third audit sweep found untested (2026-11-26) ---------------------------------
+
+/// Hands `raw` to `a` as a datagram from its peer, as the endpoint would: a packet whose first
+/// chunk header does not decode goes to no association. Whether it got there.
+fn deliver(a: &mut Association, now: Instant, raw: Bytes) -> bool {
+    if crate::packet::PartialDecode::unmarshal(&raw).is_err() {
+        return false;
+    }
+    inject(a, now, raw);
+    true
+}
+
+/// Whether `a` closed: ended, or an `AssociationClosed` event waiting.
+fn closed(a: &mut Association) -> bool {
+    let mut closed = a.is_ended();
+    while let Some(e) = a.poll() {
+        closed |= matches!(e, Event::AssociationClosed { .. });
+    }
+    closed
+}
+
+/// After a packet the association had to leave alone: it still stands, it sent no ABORT, and
+/// the next DATA from the peer is delivered. Each departure as a line of `failures`.
+fn still_stands(a: &mut Association, now: Instant, case: &str, failures: &mut Vec<String>) {
+    if closed(a) {
+        failures.push(format!("{case}: the association closed"));
+        return;
+    }
+    if !chunks_of_type(&sent_after(a, now, Duration::from_secs(1)), CT_ABORT.0).is_empty() {
+        failures.push(format!("{case}: an ABORT was sent"));
+    }
+    let tsn = a.peer_last_tsn.wrapping_add(1);
+    let raw = packet_to(a, &[data_chunk(tsn, 1, 0, b"after")]);
+    inject(a, now + Duration::from_secs(1), raw);
+    if read_all(a, 1) != vec![Bytes::from_static(b"after")] {
+        failures.push(format!("{case}: the DATA after it was not delivered"));
+    }
+}
+
+/// RFC 9260 3.2: the Chunk Length counts the Type, Flags and Length fields, so "if the Chunk
+/// Value field is zero-length, the Length field will be set to 4". A Chunk Length below 4 is
+/// no chunk: an ABORT whose Chunk Length says 0, 2 or 3, first in its packet or after a PAD
+/// chunk, is not taken as an ABORT (the packet is dropped), and nothing is answered.
+#[test]
+fn a_chunk_length_below_four_is_no_chunk() {
+    let mut failures = vec![];
+    for length in [0u16, 2, 3] {
+        for after_pad in [false, true] {
+            let case = format!("Chunk Length {length}, after a PAD chunk: {after_pad}");
+            let mut link = connected_link(97);
+            let now = link.now;
+            let a = link.server.conn();
+            let _ = sent_datagrams(a, now);
+            let mut abort = raw_chunk(CT_ABORT.0, 0, &[]);
+            abort[2..4].copy_from_slice(&length.to_be_bytes());
+            let mut chunks = vec![];
+            if after_pad {
+                chunks.push(raw_chunk(CT_PAD.0, 0, &[0; 4]));
+            }
+            chunks.push(abort);
+            let raw = packet_to(a, &chunks);
+            deliver(a, now, raw);
+            still_stands(a, now, &case, &mut failures);
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// RFC 9260 3.3.7: "If an endpoint receives an ABORT chunk with a format error [...], it MUST
+/// silently discard it." The value of an ABORT is zero or more error causes (3.3.10), each a
+/// four-byte header and its value: an ABORT holding two bytes that are no cause, one whose
+/// cause says it is longer than the chunk, and one whose cause says it is shorter than its
+/// own header all end nothing and are not answered.
+#[test]
+fn an_abort_with_a_format_error_is_silently_discarded() {
+    let mut overrun = raw_tlv(12, b"why");
+    overrun[2..4].copy_from_slice(&40u16.to_be_bytes());
+    let mut short = raw_tlv(12, b"why");
+    short[2..4].copy_from_slice(&2u16.to_be_bytes());
+    let cases = [
+        ("two bytes that are no error cause", vec![0u8, 12]),
+        ("a cause longer than the chunk", overrun),
+        ("a cause shorter than its header", short),
+    ];
+    let mut failures = vec![];
+    for (case, value) in cases {
+        let mut link = connected_link(98);
+        let now = link.now;
+        let a = link.server.conn();
+        let _ = sent_datagrams(a, now);
+        let raw = packet_to(a, &[raw_chunk(CT_ABORT.0, 0, &value)]);
+        deliver(a, now, raw);
+        still_stands(a, now, case, &mut failures);
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+
+    // The same chunk well formed (one cause, padded or not) still ends the association.
+    for value in [raw_tlv(12, b"why"), raw_tlv(12, b"why!")] {
+        let mut link = connected_link(99);
+        let now = link.now;
+        let a = link.server.conn();
+        let raw = packet_to(a, &[raw_chunk(CT_ABORT.0, 0, &value)]);
+        inject(a, now, raw);
+        assert!(
+            closed(a),
+            "a well-formed ABORT ({} bytes of cause)",
+            value.len()
+        );
+    }
+}
+
+/// RFC 9260 3.3.2.1.5: in Supported Address Types, "the value indicating the Host Name
+/// Address parameter [...] MUST be ignored when receiving this parameter". An INIT listing
+/// type 11 among its address types is answered with an INIT ACK like any other: no ABORT
+/// (that answers a Host Name Address parameter, 3.3.2.1.4), no Unresolvable Address, no
+/// report.
+#[test]
+fn a_host_name_in_supported_address_types_is_ignored() {
+    let mut failures = vec![];
+    for types in [vec![5u16, 11], vec![11], vec![11, 6], vec![5, 6, 11]] {
+        let value: Vec<u8> = types.iter().flat_map(|t| t.to_be_bytes()).collect();
+        let (_, a, sent) = accept_init(&[raw_tlv(12, &value)]);
+        let Some(mut a) = a else {
+            failures.push(format!("{types:?}: no association"));
+            continue;
+        };
+        if closed(&mut a) {
+            failures.push(format!("{types:?}: the association closed"));
+        }
+        if !chunks_of_type(&sent, CT_ABORT.0).is_empty() {
+            failures.push(format!("{types:?}: answered with an ABORT"));
+        }
+        let init_acks = chunks_of_type(&sent, CT_INIT_ACK.0);
+        match init_acks.as_slice() {
+            [init_ack] => {
+                if tlvs(&init_ack[20..])
+                    .iter()
+                    .any(|(typ, _)| *typ == PARAM_UNRECOGNIZED_PARAMETER)
+                {
+                    failures.push(format!("{types:?}: reported as unrecognized"));
+                }
+            }
+            _ => failures.push(format!("{types:?}: {} INIT ACKs", init_acks.len())),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
