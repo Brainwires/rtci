@@ -1454,7 +1454,8 @@ fn an_sdes_cname_other_than_the_declared_one_leaves_the_ssrc_undeclared() -> Res
 
 /// RFC 5576 section 6.1, the stream already flowing: the sender's RTCP is held until its
 /// media has opened the track by the declared SSRC (with the declared RTX pairing), then the
-/// SDES contradicting the declaration arrives. The application is told; the stream is not
+/// SDES contradicting the declaration arrives (for the media SSRC, and its RTX SSRC when the
+/// sender describes that too). The application is told; the stream is not
 /// unbound, re-routed or ended: it keeps its track and its coding, and the media that follows
 /// is received as before.
 #[test]
@@ -1468,7 +1469,19 @@ fn a_flowing_stream_whose_sdes_contradicts_its_declared_cname_keeps_flowing() ->
 
     world.hold_sender_rtcp = false;
     world.run_until_cname_heard(ssrc)?;
-    assert_eq!(world.peers[1].cname_mismatches, vec![ssrc]);
+    // The sender's first compound packet after the media describes its RTX SSRC as well
+    // (declared too, with the same contradicted CNAME): each is reported once.
+    let mismatches = world.peers[1].cname_mismatches.clone();
+    let declared = [Some(ssrc), rtx_ssrc];
+    assert!(mismatches.contains(&ssrc), "{mismatches:?}");
+    assert!(
+        mismatches.len() <= 2
+            && (mismatches.len() < 2 || mismatches[0] != mismatches[1])
+            && mismatches
+                .iter()
+                .all(|reported| declared.contains(&Some(*reported))),
+        "only the declared SSRCs, once each: {mismatches:?}"
+    );
 
     world.send_media(sender, FIRST_SEQ + 30, 30)?;
     for seq in FIRST_SEQ..FIRST_SEQ + 60 {
