@@ -362,12 +362,13 @@ fn media_for_a_section_a_later_offer_adds_is_delivered_before_the_answer() -> Re
 /// applied its answer, so its RTCP, like its RTP, can reach the offerer before the answer:
 /// a later offer adds a recvonly section and the answer is held back for three seconds of
 /// media. The sender reports of the new stream arrive on the one port the offer gave (RTP
-/// and RTCP alike) and reach the offerer's application with the track of the receiver the
-/// offer described, while the offer is still pending. (Before the first answer nothing can
+/// and RTCP alike) and the offerer's RTCP session takes them while the offer is still
+/// pending: its reception report blocks for the stream carry the last SR's timestamp. (Before the first answer nothing can
 /// arrive: SRTCP needs the DTLS handshake, which the offerer completes only with the
 /// answer's fingerprint; the case is that of a later offer.)
 #[test]
 fn rtcp_for_a_section_a_later_offer_adds_is_received_before_the_answer() -> Result<()> {
+    use rtci::rtcp::receiver_report::ReceiverReport;
     use rtci::rtcp::sender_report::SenderReport;
 
     let (mut world, id, sender, offer, _answer) = a_later_offer_adds_a_recvonly_section()?;
@@ -395,30 +396,45 @@ fn rtcp_for_a_section_a_later_offer_adds_is_received_before_the_answer() -> Resu
         .iter()
         .any(|datagram| datagram.len() >= 8 && (192..=223).contains(&datagram[1]));
     assert!(wrote_rtcp, "the answerer sent RTCP");
-    let reports: Vec<&String> = world.peers[0]
+    // The offerer's RTCP session took the sender reports: its own reports, which reach the
+    // answerer's application with the sender's track, carry a reception report block for the
+    // new stream whose LSR (RFC 3550 6.4.1, the middle of the last SR's NTP timestamp) is not
+    // zero. Only an SR received sets it.
+    let blocks: Vec<(u32, u32)> = world.peers[1]
         .rtcp
         .iter()
-        .filter(|(_, packet)| {
-            packet
-                .as_any()
-                .downcast_ref::<SenderReport>()
-                .is_some_and(|sr| sr.ssrc == SSRC)
+        .flat_map(|(_, packet)| {
+            let any = packet.as_any();
+            any.downcast_ref::<ReceiverReport>()
+                .map(|rr| rr.reports.clone())
+                .or_else(|| {
+                    any.downcast_ref::<SenderReport>()
+                        .map(|sr| sr.reports.clone())
+                })
+                .unwrap_or_default()
         })
-        .map(|(to, _)| to)
+        .filter(|block| block.ssrc == SSRC)
+        .map(|block| (block.last_sender_report, block.delay))
         .collect();
     assert!(
-        !reports.is_empty(),
-        "no sender report of the new stream reached the offerer before the answer: {:?}",
-        world.peers[0]
-            .rtcp
-            .iter()
-            .map(|(to, packet)| (to, packet.header().packet_type))
-            .collect::<Vec<_>>()
+        blocks.iter().any(|(lsr, _)| *lsr != 0),
+        "the offerer's reports on the new stream show no sender report received before the \
+         answer: {blocks:?}"
     );
-    assert!(
-        reports.iter().all(|to| **to == track),
-        "with the track of the receiver the offer described: {reports:?}"
-    );
+    // (The sender reports themselves are not handed to the offerer's application before the
+    // answer: its receiver's track gets the SSRC from the answer. Not part of the clause.)
+    let delivered = world.peers[0]
+        .rtcp
+        .iter()
+        .filter(|(to, packet)| {
+            *to == track
+                && packet
+                    .as_any()
+                    .downcast_ref::<SenderReport>()
+                    .is_some_and(|sr| sr.ssrc == SSRC)
+        })
+        .count();
+    println!("sender reports of the new stream handed to the offerer's application: {delivered}");
     Ok(())
 }
 

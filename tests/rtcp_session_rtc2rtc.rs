@@ -2030,6 +2030,8 @@ fn with_reduced_size_negotiated_only_feedback_leaves_reduced_size() -> Result<()
     let (answerer, answerer_tap) = Peer::tapped("10.0.0.2:5000", false)?;
     let (mut world, sender) = World::connected_peers([offerer, answerer])?;
     let (ssrc, _, _) = world.sender_stream(sender);
+    // The track opens with its first packet.
+    world.send_media(sender, FIRST_SEQ - 25, 25)?;
     let receiver = *world.peers[1].opened.first().expect("the track opened");
     assert!(
         world.peers[0]
