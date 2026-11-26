@@ -19,7 +19,7 @@ use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtci::peer_connection::state::RTCPeerConnectionState;
 use rtci::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
+    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtci::sansio::Protocol;
@@ -46,6 +46,13 @@ struct TcpPeerRunner {
 
 impl TcpPeerRunner {
     async fn new() -> Result<Self> {
+        Self::with_end_of_candidates(false).await
+    }
+
+    /// Each side with its one candidate; with `end_of_candidates`, each also ends its
+    /// gathering after it (the end-of-gathering sentinel), so that its descriptions carry
+    /// `a=end-of-candidates` (RFC 8838 section 14).
+    async fn with_end_of_candidates(end_of_candidates: bool) -> Result<Self> {
         // Create TCP listener for the passive (answer) side
         let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
         let passive_local_addr = tcp_listener.local_addr()?;
@@ -79,6 +86,9 @@ impl TcpPeerRunner {
         }
         .new_candidate_host()?;
         offer_pc.add_local_candidate(RTCIceCandidate::from(&offer_candidate).to_json()?)?;
+        if end_of_candidates {
+            offer_pc.add_local_candidate(RTCIceCandidateInit::default())?;
+        }
 
         // Configure answer peer with TCP passive candidate
         let answer_setting_engine = SettingEngineBuilder::new()
@@ -109,6 +119,9 @@ impl TcpPeerRunner {
         }
         .new_candidate_host()?;
         answer_pc.add_local_candidate(RTCIceCandidate::from(&answer_candidate).to_json()?)?;
+        if end_of_candidates {
+            answer_pc.add_local_candidate(RTCIceCandidateInit::default())?;
+        }
 
         Ok(Self {
             offer_pc,
@@ -127,15 +140,31 @@ impl TcpPeerRunner {
 /// - Data channel messages are exchanged over TCP
 #[tokio::test]
 async fn test_ice_tcp_active_passive_connection() -> Result<()> {
+    active_passive_connection(false).await
+}
+
+/// The same when both sides end their gathering and signal `a=end-of-candidates`: the
+/// passive side's only remote candidate is the active one, which it pairs with nothing (it
+/// dials; RFC 6544 section 6.2 prunes the pair), so its checklist is empty when both sides
+/// are done. It is not failed for that: the connection the active side opens carries its
+/// check, which gives the peer-reflexive candidate and the pair (RFC 6544 section 7.2, RFC
+/// 8445 section 7.3.1.3), and the two connect over it.
+#[tokio::test]
+async fn test_ice_tcp_passive_side_connects_when_the_peer_signals_only_active_and_end_of_candidates()
+-> Result<()> {
+    active_passive_connection(true).await
+}
+
+async fn active_passive_connection(end_of_candidates: bool) -> Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init()
         .ok();
 
-    log::info!("Starting ICE TCP active/passive test");
+    log::info!("Starting ICE TCP active/passive test (end-of-candidates: {end_of_candidates})");
 
-    let mut runner = TcpPeerRunner::new().await?;
+    let mut runner = TcpPeerRunner::with_end_of_candidates(end_of_candidates).await?;
 
     // Create data channel on offer side
     let dc_label = "tcp-test-channel";
@@ -147,6 +176,13 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
     runner
         .offer_pc
         .set_local_description(Instant::now(), offer.clone())?;
+    assert!(offer.sdp.contains("tcptype active"), "{}", offer.sdp);
+    assert_eq!(
+        offer.sdp.contains("a=end-of-candidates"),
+        end_of_candidates,
+        "{}",
+        offer.sdp
+    );
     runner
         .answer_pc
         .set_remote_description(Instant::now(), offer)?;
@@ -155,6 +191,12 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
     runner
         .answer_pc
         .set_local_description(Instant::now(), answer.clone())?;
+    assert_eq!(
+        answer.sdp.contains("a=end-of-candidates"),
+        end_of_candidates,
+        "{}",
+        answer.sdp
+    );
     runner
         .offer_pc
         .set_remote_description(Instant::now(), answer)?;
@@ -162,6 +204,7 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
     // Track state
     let mut offer_connected = false;
     let mut answer_connected = false;
+    let mut answer_failed = false;
     let mut offer_dc_id = None;
     let mut answer_dc_open = false;
     let messages_to_send = 3;
@@ -248,6 +291,9 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
                     if state == RTCPeerConnectionState::Connected {
                         answer_connected = true;
                     }
+                    if state == RTCPeerConnectionState::Failed {
+                        answer_failed = true;
+                    }
                 }
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
                     log::info!("[Answer] Data channel opened: {}", channel_id);
@@ -291,6 +337,9 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
         // Check if test is complete
         if answer_messages_received >= messages_to_send {
             log::info!("All messages received!");
+            break;
+        }
+        if answer_failed {
             break;
         }
 
@@ -389,6 +438,7 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
     }
 
     // Verify test results
+    assert!(!answer_failed, "the passive side must not fail");
     assert!(offer_connected, "Offer peer should be connected");
     assert!(answer_connected, "Answer peer should be connected");
     assert!(answer_dc_open, "Answer should have opened data channel");

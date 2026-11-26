@@ -2093,6 +2093,15 @@ impl Agent {
     /// pair has failed and none is valid, but only once no pair can be added any more: local
     /// gathering is complete and the peer has signalled end-of-candidates. Until then a
     /// checking agent fails by its timeout only.
+    ///
+    /// A pair can also be added by a check from the peer (Section 7.3.1.3: a peer-reflexive
+    /// remote candidate and its pair), signalled candidates or not. While the peer has
+    /// signalled a candidate the agent does not pair but whose checks can reach it (a
+    /// `tcptype active` candidate dialling a local passive one, RFC 6544 Section 7.2; a `.local`
+    /// name not resolved, mDNS draft Section 5.3), the agent expects such a pair: the
+    /// checklist stays Running (RFC 8838 Section 8: "MUST keep each checklist in the Running
+    /// state as long as it expects candidate pairs to be incrementally added") and the
+    /// agent's timeout ends it if none comes.
     pub(crate) fn update_checklist_failure(&mut self, now: Instant) {
         if self.connection_state != ConnectionState::Checking
             || self.selected_pair.is_some()
@@ -2101,6 +2110,7 @@ impl Agent {
             || !self.mdns_queries.is_empty()
             || !self.early_requests.is_empty()
             || !self.triggered_queue.is_empty()
+            || self.pair_may_come_from_a_peer_check()
         {
             return;
         }

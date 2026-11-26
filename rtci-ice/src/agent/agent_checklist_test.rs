@@ -1241,6 +1241,279 @@ fn test_checklist_fails_when_all_pairs_failed_and_no_candidate_is_to_come() {
     assert_eq!(a.state(), ConnectionState::Failed);
 }
 
+// --- A pair still to come from the peer's check (RFC 8445 7.3.1.3, RFC 8838 8) ---
+
+/// The local passive TCP candidate of the scenarios below.
+const LISTENER: &str = "192.168.0.2:7000";
+/// A `<uuid>.local` name, as browsers signal their host candidates.
+const PEER_MDNS_NAME: &str = "9b36eaac-bb2e-49bb-bb78-21c41c499900.local";
+
+/// The peer's only candidates in the scenarios below: what it signals, and where its check
+/// comes from.
+#[derive(Clone, Copy, Debug)]
+enum OnlyCandidate {
+    /// A `tcptype active` host candidate (port 9, RFC 6544 Section 4.5); the agent has a
+    /// passive one. The peer's check arrives on the connection it opens to it.
+    ActiveTcp,
+    /// A UDP host candidate behind a `<uuid>.local` name, the agent's mDNS resolution off.
+    MdnsResolutionOff,
+    /// The same with resolution on but unanswered: the query times out after a second.
+    MdnsQueryTimesOut,
+}
+
+fn tcp_candidate(address: SocketAddr, tcp_type: TcpType) -> Candidate {
+    CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "tcp".to_owned(),
+            address: address.ip().to_string(),
+            port: address.port(),
+            component: 1,
+            ..Default::default()
+        },
+        tcp_type,
+    }
+    .new_candidate_host()
+    .unwrap()
+}
+
+/// A controlled agent, checking, with the agent's timeouts at their defaults (5 s
+/// disconnected + 25 s failed): the peer has signalled `only` and end-of-candidates, local
+/// gathering is complete.
+fn agent_whose_peer_signalled(start: Instant, only: OnlyCandidate) -> Agent {
+    let mdns_mode = match only {
+        OnlyCandidate::MdnsResolutionOff => crate::mdns::MulticastDnsMode::Disabled,
+        _ => crate::mdns::MulticastDnsMode::QueryOnly,
+    };
+    let cfg = AgentConfig {
+        multicast_dns_mode: mdns_mode,
+        multicast_dns_query_timeout: Some(Duration::from_secs(1)),
+        multicast_dns_first_query_delay: Some(false),
+        ..config(false)
+    };
+    let mut a = Agent::new(start, Arc::new(cfg), provider()).unwrap();
+    let remote = match only {
+        OnlyCandidate::ActiveTcp => {
+            a.add_local_candidate(tcp_candidate(addr(LISTENER), TcpType::Passive))
+                .unwrap();
+            tcp_candidate(addr("192.168.0.3:9"), TcpType::Active)
+        }
+        OnlyCandidate::MdnsResolutionOff | OnlyCandidate::MdnsQueryTimesOut => {
+            a.add_local_candidate(host(addr(LOCAL))).unwrap();
+            CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "udp".to_owned(),
+                    address: PEER_MDNS_NAME.to_owned(),
+                    port: 2000,
+                    component: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .new_candidate_host()
+            .unwrap()
+        }
+    };
+    assert!(
+        !a.add_remote_candidate(remote).unwrap(),
+        "{only:?}: not paired"
+    );
+    a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    a
+}
+
+/// The peer's check (controlling, nominating) arriving at `at` from `from`, our triggered
+/// check back and the peer's answer to it: over the TCP connection on `LISTENER`, or as UDP
+/// datagrams on `LOCAL`.
+fn peer_checks(a: &mut Agent, at: Instant, only: OnlyCandidate, from: SocketAddr) {
+    let (local, protocol) = match only {
+        OnlyCandidate::ActiveTcp => (addr(LISTENER), TransportProtocol::TCP),
+        _ => (addr(LOCAL), TransportProtocol::UDP),
+    };
+    let read = |a: &mut Agent, m: &Message| {
+        a.handle_read(TaggedBytesMut {
+            now: at,
+            transport: TransportContext {
+                local_addr: local,
+                peer_addr: from,
+                ecn: None,
+                transport_protocol: protocol,
+            },
+            message: BytesMut::from(&m.raw[..]),
+        })
+        .unwrap();
+    };
+    let request = peer_request(
+        a,
+        vec![
+            Box::new(AttrControlling(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(UseCandidateAttr::new()),
+        ],
+    );
+    read(a, &request);
+    a.handle_timeout(at).unwrap();
+    let check = std::iter::from_fn(|| a.poll_write())
+        .filter(|t| t.transport.peer_addr == from)
+        .map(|t| {
+            let mut m = Message {
+                raw: t.message.to_vec(),
+                ..Message::default()
+            };
+            m.decode().unwrap();
+            m
+        })
+        .find(|m| m.typ == BINDING_REQUEST)
+        .expect("a triggered check back to the peer");
+    read(
+        a,
+        &peer_response(BINDING_SUCCESS, check.transaction_id, local, None),
+    );
+    a.handle_timeout(at).unwrap();
+}
+
+/// RFC 8445 Section 7.3.1.3 (a check from an unknown source gives a peer-reflexive remote
+/// candidate, and Section 7.3.1.4 its pair) with RFC 8838 Section 8 ("a Trickle ICE agent
+/// MUST keep each checklist in the Running state as long as it expects candidate pairs to be
+/// incrementally added to the checklist"): a peer whose only candidates reach the agent by
+/// its own checks does not fail the empty checklist when both sides have signalled
+/// end-of-candidates. A `tcptype active` candidate dials the agent's passive one (RFC 6544
+/// Section 7.2: "STUN requests received on a passive TCP candidate will typically produce a
+/// remote peer reflexive candidate"); a `.local` name the agent does not resolve still sends
+/// checks (draft-ietf-mmusic-mdns-ice-candidates Section 5.3: "Through the process of
+/// learning peer-reflexive candidates [...] allowing ICE to succeed even though the legacy
+/// endpoint cannot resolve the mDNS names"). The peer's check then forms the pair and the
+/// agent connects over it.
+#[test]
+fn a_peer_reached_only_by_its_own_checks_keeps_the_empty_checklist_running_and_connects() {
+    for (only, from) in [
+        (OnlyCandidate::ActiveTcp, "192.168.0.3:40001"),
+        (OnlyCandidate::MdnsResolutionOff, REMOTE_A),
+        (OnlyCandidate::MdnsQueryTimesOut, REMOTE_A),
+    ] {
+        let start = Instant::now();
+        let mut a = agent_whose_peer_signalled(start, only);
+        // Three seconds of nothing (the query, when there is one, timed out at one).
+        silent(&mut a, start, Duration::ZERO, Duration::from_secs(3));
+        assert!(a.candidate_pairs.is_empty(), "{only:?}");
+        assert!(a.mdns_queries.is_empty(), "{only:?}");
+        assert_eq!(a.state(), ConnectionState::Checking, "{only:?}");
+        assert_eq!(a.checklist_state(), ChecklistState::Running, "{only:?}");
+
+        // The peer's check.
+        let from = addr(from);
+        peer_checks(&mut a, start + Duration::from_secs(3), only, from);
+        assert_eq!(
+            a.media_path().map(|p| p.peer_addr),
+            Some(from),
+            "{only:?}: selected over the pair the check formed"
+        );
+        assert_eq!(
+            a.remote_candidates[a.candidate_pairs[0].remote_index].candidate_type(),
+            CandidateType::PeerReflexive,
+            "{only:?}"
+        );
+        let reached = states(&mut a);
+        assert!(
+            !reached.contains(&ConnectionState::Failed)
+                && reached
+                    .iter()
+                    .any(|s| matches!(s, ConnectionState::Connected | ConnectionState::Completed)),
+            "{only:?}: {reached:?}"
+        );
+    }
+}
+
+/// The agent's timeouts still end a checklist nobody fills: when the peer of the scenarios
+/// above never sends its check, the agent fails `disconnected_timeout + failed_timeout` (5 +
+/// 25 s) after checking began, at its next look at the state (every 200 ms while checking),
+/// and not before.
+#[test]
+fn a_peer_reached_only_by_its_own_checks_that_never_checks_fails_by_the_timeout() {
+    for only in [
+        OnlyCandidate::ActiveTcp,
+        OnlyCandidate::MdnsResolutionOff,
+        OnlyCandidate::MdnsQueryTimesOut,
+    ] {
+        let start = Instant::now();
+        let mut a = agent_whose_peer_signalled(start, only);
+        silent(&mut a, start, Duration::ZERO, Duration::from_secs(40));
+        let failed_at: Vec<Duration> = std::iter::from_fn(|| a.poll_event())
+            .filter(|e| {
+                matches!(
+                    e.event,
+                    Event::ConnectionStateChange(ConnectionState::Failed)
+                )
+            })
+            .map(|e| e.now.duration_since(start))
+            .collect();
+        assert_eq!(failed_at.len(), 1, "{only:?}: {failed_at:?}");
+        assert!(
+            failed_at[0] > Duration::from_secs(30)
+                && failed_at[0] <= Duration::from_secs(30) + 200 * MS,
+            "{only:?}: failed at {:?}",
+            failed_at[0]
+        );
+        assert_eq!(a.state(), ConnectionState::Failed);
+    }
+}
+
+/// RFC 8838 Section 8 with RFC 8445 Section 7.2.5.4: an empty checklist still fails as soon
+/// as both sides have signalled end-of-candidates when no check of the peer can form a pair:
+/// the peer signalled nothing (`test_checklist_fails_when_all_pairs_failed_and_no_candidate_is_to_come`),
+/// or its `tcptype active` candidate has no passive candidate of the agent to dial (RFC 6544
+/// Section 6.2: "tcp-active" pairs with "tcp-passive" only): the agent's candidates are UDP,
+/// active TCP, simultaneous-open, or of the other address family.
+#[test]
+fn an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_at_once() {
+    for local in [
+        host(addr(LOCAL)),
+        tcp_candidate(addr("192.168.0.2:9"), TcpType::Active),
+        tcp_candidate(addr(LISTENER), TcpType::SimultaneousOpen),
+        tcp_candidate(addr("[fd00::2]:7000"), TcpType::Passive),
+    ] {
+        let start = Instant::now();
+        let mut a = Agent::new(start, Arc::new(config(false)), provider()).unwrap();
+        let described = format!("{} {}", local.network_type(), local.tcp_type());
+        a.add_local_candidate(local).unwrap();
+        a.add_remote_candidate(tcp_candidate(addr("192.168.0.3:9"), TcpType::Active))
+            .unwrap();
+        a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+            .unwrap();
+        a.set_local_gathering_complete();
+        a.set_remote_end_of_candidates();
+        silent(&mut a, start, Duration::ZERO, 10 * MS);
+        assert_eq!(a.state(), ConnectionState::Failed, "local {described}");
+    }
+}
+
+/// RFC 8838 Section 14 with Section 15: what the peer signalled of a generation is that
+/// generation's. After an ICE restart, a new peer that signals nothing but end-of-candidates
+/// fails the empty checklist at once, although the generation before had an active TCP
+/// candidate that dialled the agent.
+#[test]
+fn an_ice_restart_forgets_the_candidates_that_could_only_dial_us() {
+    let start = Instant::now();
+    let mut a = agent_whose_peer_signalled(start, OnlyCandidate::ActiveTcp);
+    silent(&mut a, start, Duration::ZERO, Duration::from_secs(1));
+    assert_eq!(a.state(), ConnectionState::Checking);
+    a.restart(start, String::new(), String::new(), true)
+        .unwrap();
+    a.set_remote_credentials(REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    silent(
+        &mut a,
+        start,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    );
+    assert_eq!(a.state(), ConnectionState::Failed);
+}
+
 /// RFC 8838 Section 14: "After an agent has received an end-of-candidates indication, it MUST
 /// ignore any newly received candidates". Section 13: no local candidate follows the local
 /// indication either. An ICE restart starts over.
