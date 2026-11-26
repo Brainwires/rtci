@@ -1190,10 +1190,13 @@ fn test_completed_needs_a_nominated_pair_and_both_ends_of_candidates() {
     assert_eq!(states(&mut a), vec![ConnectionState::Completed]);
 }
 
-/// Section 7.2.5.4 with RFC 8838 Sections 8 and 14: when every pair has failed and none is
-/// valid the checklist is Failed, at once, provided no candidate is to come any more (local
-/// gathering complete, end-of-candidates received). While candidates may still come it keeps
-/// Running.
+/// Section 7.2.5.4 with RFC 8838 Sections 8 and 14 and RFC 8863 Section 4: when every pair
+/// has failed and none is valid the checklist is Failed, provided no candidate is to come any
+/// more (local gathering complete, end-of-candidates received) and the PAC timer has expired:
+/// 39.5 s after checking began (the transaction timeout with the defaults), not the 30 s of
+/// the agent's own timeout. While candidates may still come it keeps Running, and so it does
+/// while the timer runs (RFC 8863 Section 3.3: pairs that fail at once, here by error
+/// responses; Section 3.1: no pair at all), a peer's check may still make a pair.
 #[test]
 fn test_checklist_fails_when_all_pairs_failed_and_no_candidate_is_to_come() {
     let start = Instant::now();
@@ -1212,31 +1215,142 @@ fn test_checklist_fails_when_all_pairs_failed_and_no_candidate_is_to_come() {
     assert_eq!(a.state(), ConnectionState::Checking);
     assert_eq!(a.checklist_state(), ChecklistState::Running);
 
-    // The same once both sides are done: Failed 5 seconds in, not after the 30 second timer.
+    // The same once both sides are done: Running while the PAC timer runs, Failed as it
+    // expires.
     a.set_local_gathering_complete();
     a.set_remote_end_of_candidates();
-    run_with(
-        &mut a,
-        start,
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        refuse,
-    );
+    run_with(&mut a, start, Duration::from_secs(5), PAC - MS, refuse);
+    assert_eq!(a.state(), ConnectionState::Checking);
+    assert_eq!(a.checklist_state(), ChecklistState::Running);
+    run_with(&mut a, start, PAC - MS, PAC + LOOK, refuse);
     assert_eq!(a.state(), ConnectionState::Failed);
     assert_eq!(a.checklist_state(), ChecklistState::Failed);
     assert!(a.poll_timeout().is_none());
 
-    // No pair at all and nothing to come: Failed at once.
+    // No pair at all and nothing to come: Failed as the PAC timer expires, not before.
     let mut a = started_agent(start, config(false), &[]);
     a.set_local_gathering_complete();
     silent(&mut a, start, Duration::ZERO, Duration::from_secs(1));
     assert_eq!(a.state(), ConnectionState::Checking);
     a.set_remote_end_of_candidates();
+    silent(&mut a, start, Duration::from_secs(1), PAC - MS);
+    assert_eq!(a.state(), ConnectionState::Checking);
+    silent(&mut a, start, PAC - MS, PAC + LOOK);
+    assert_eq!(a.state(), ConnectionState::Failed);
+}
+
+/// RFC 8863 Section 4: the PAC timer, "equal to the agent's connectivity check transaction
+/// timeout, including all retransmissions": 39.5 s with the default RTO (500 ms) and Rc (7).
+const PAC: Duration = Duration::from_millis(39_500);
+
+/// How long after a deadline a checking agent with no selected pair looks at its state at
+/// the latest (its check interval, 200 ms).
+const LOOK: Duration = Duration::from_millis(200);
+
+/// RFC 8863 Sections 3.1 and 5 with RFC 8445 Sections 7.3.1.3 and 7.3.1.4: the peer
+/// signalled end-of-candidates and no candidate at all (it may have none it wants to signal;
+/// it has ours), so the agent's checklist is empty; the peer's check arrives a few seconds
+/// later, from an address the agent has never heard of: a peer-reflexive remote candidate,
+/// its pair, the triggered check, and the agent connects over it. Before the PAC timer the
+/// agent failed the empty checklist the moment both sides had signalled end-of-candidates,
+/// and the check came to a failed agent.
+#[test]
+fn an_empty_checklist_after_end_of_candidates_waits_for_the_peers_check_and_connects() {
+    for checked_at in [Duration::from_secs(3), PAC - Duration::from_secs(1)] {
+        let start = Instant::now();
+        let mut a = Agent::new(start, Arc::new(config(false)), provider()).unwrap();
+        a.add_local_candidate(host(addr(LOCAL))).unwrap();
+        a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+            .unwrap();
+        a.set_local_gathering_complete();
+        a.set_remote_end_of_candidates();
+        silent(&mut a, start, Duration::ZERO, checked_at);
+        assert!(a.candidate_pairs.is_empty(), "{checked_at:?}");
+        assert!(a.remote_candidates.is_empty(), "{checked_at:?}");
+        assert_eq!(a.state(), ConnectionState::Checking, "{checked_at:?}");
+        assert_eq!(
+            a.checklist_state(),
+            ChecklistState::Running,
+            "{checked_at:?}"
+        );
+
+        let from = addr(REMOTE_A);
+        peer_checks(
+            &mut a,
+            start + checked_at,
+            OnlyCandidate::MdnsResolutionOff,
+            from,
+        );
+        assert_eq!(
+            a.media_path().map(|p| p.peer_addr),
+            Some(from),
+            "{checked_at:?}: selected over the pair the check formed"
+        );
+        assert_eq!(
+            a.remote_candidates[a.candidate_pairs[0].remote_index].candidate_type(),
+            CandidateType::PeerReflexive,
+            "{checked_at:?}"
+        );
+        let reached = states(&mut a);
+        assert!(
+            !reached.contains(&ConnectionState::Failed)
+                && reached
+                    .iter()
+                    .any(|s| matches!(s, ConnectionState::Connected | ConnectionState::Completed)),
+            "{checked_at:?}: {reached:?}"
+        );
+    }
+}
+
+/// RFC 8863 Section 4: "When the timer period eventually elapses, the ICE agent MUST resume
+/// typical ICE processing, including setting the state of any checklists to Failed if they
+/// have no pairs left to check": the empty checklist of the test above, with no check from
+/// the peer, fails once, as the timer expires; and a lite agent, which runs no ICE processing
+/// of its own, has no PAC timer.
+#[test]
+fn an_empty_checklist_that_no_check_fills_fails_when_the_pac_timer_expires() {
+    let start = Instant::now();
+    let mut a = Agent::new(start, Arc::new(config(false)), provider()).unwrap();
+    a.add_local_candidate(host(addr(LOCAL))).unwrap();
+    a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    silent(&mut a, start, Duration::ZERO, PAC + Duration::from_secs(5));
+    let failed_at: Vec<Duration> = std::iter::from_fn(|| a.poll_event())
+        .filter(|e| {
+            matches!(
+                e.event,
+                Event::ConnectionStateChange(ConnectionState::Failed)
+            )
+        })
+        .map(|e| e.now.duration_since(start))
+        .collect();
+    assert_eq!(failed_at.len(), 1, "{failed_at:?}");
+    assert!(
+        failed_at[0] >= PAC && failed_at[0] <= PAC + LOOK,
+        "failed at {:?}",
+        failed_at[0]
+    );
+
+    // Rc of one request: the transaction, and the timer, last 16 RTO (8 s).
+    let cfg = AgentConfig {
+        max_binding_requests: Some(1),
+        ..config(false)
+    };
+    let mut a = Agent::new(start, Arc::new(cfg), provider()).unwrap();
+    a.add_local_candidate(host(addr(LOCAL))).unwrap();
+    a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    silent(&mut a, start, Duration::ZERO, Duration::from_secs(8) - MS);
+    assert_eq!(a.state(), ConnectionState::Checking);
     silent(
         &mut a,
         start,
-        Duration::from_secs(1),
-        Duration::from_secs(1),
+        Duration::from_secs(8) - MS,
+        Duration::from_secs(8) + LOOK,
     );
     assert_eq!(a.state(), ConnectionState::Failed);
 }
@@ -1280,6 +1394,15 @@ fn tcp_candidate(address: SocketAddr, tcp_type: TcpType) -> Candidate {
 /// disconnected + 25 s failed): the peer has signalled `only` and end-of-candidates, local
 /// gathering is complete.
 fn agent_whose_peer_signalled(start: Instant, only: OnlyCandidate) -> Agent {
+    agent_whose_peer_signalled_with(start, only, None)
+}
+
+/// [`agent_whose_peer_signalled`] with `failed_timeout` in place of the default 25 s.
+fn agent_whose_peer_signalled_with(
+    start: Instant,
+    only: OnlyCandidate,
+    failed_timeout: Option<Duration>,
+) -> Agent {
     let mdns_mode = match only {
         OnlyCandidate::MdnsResolutionOff => crate::mdns::MulticastDnsMode::Disabled,
         _ => crate::mdns::MulticastDnsMode::QueryOnly,
@@ -1288,6 +1411,7 @@ fn agent_whose_peer_signalled(start: Instant, only: OnlyCandidate) -> Agent {
         multicast_dns_mode: mdns_mode,
         multicast_dns_query_timeout: Some(Duration::from_secs(1)),
         multicast_dns_first_query_delay: Some(false),
+        failed_timeout: failed_timeout.or(config(false).failed_timeout),
         ..config(false)
     };
     let mut a = Agent::new(start, Arc::new(cfg), provider()).unwrap();
@@ -1427,47 +1551,61 @@ fn a_peer_reached_only_by_its_own_checks_keeps_the_empty_checklist_running_and_c
 }
 
 /// The agent's timeouts still end a checklist nobody fills: when the peer of the scenarios
-/// above never sends its check, the agent fails `disconnected_timeout + failed_timeout` (5 +
-/// 25 s) after checking began, at its next look at the state (every 200 ms while checking),
-/// and not before.
+/// above never sends its check, the agent fails once `disconnected_timeout + failed_timeout`
+/// after checking began has passed and the PAC timer has expired (RFC 8863 Section 4: 39.5 s),
+/// at its next look at the state (every 200 ms while checking), and not before: with the
+/// default 5 + 25 s at the PAC timer, with 5 + 60 s at 65 s (past the PAC timer the
+/// checklist still keeps Running: a pair is still expected from the peer's check, RFC 8838
+/// Section 8).
 #[test]
 fn a_peer_reached_only_by_its_own_checks_that_never_checks_fails_by_the_timeout() {
-    for only in [
-        OnlyCandidate::ActiveTcp,
-        OnlyCandidate::MdnsResolutionOff,
-        OnlyCandidate::MdnsQueryTimesOut,
+    for (failed_timeout, expected) in [
+        (None, PAC),
+        (Some(Duration::from_secs(60)), Duration::from_secs(65)),
     ] {
-        let start = Instant::now();
-        let mut a = agent_whose_peer_signalled(start, only);
-        silent(&mut a, start, Duration::ZERO, Duration::from_secs(40));
-        let failed_at: Vec<Duration> = std::iter::from_fn(|| a.poll_event())
-            .filter(|e| {
-                matches!(
-                    e.event,
-                    Event::ConnectionStateChange(ConnectionState::Failed)
-                )
-            })
-            .map(|e| e.now.duration_since(start))
-            .collect();
-        assert_eq!(failed_at.len(), 1, "{only:?}: {failed_at:?}");
-        assert!(
-            failed_at[0] > Duration::from_secs(30)
-                && failed_at[0] <= Duration::from_secs(30) + 200 * MS,
-            "{only:?}: failed at {:?}",
-            failed_at[0]
-        );
-        assert_eq!(a.state(), ConnectionState::Failed);
+        for only in [
+            OnlyCandidate::ActiveTcp,
+            OnlyCandidate::MdnsResolutionOff,
+            OnlyCandidate::MdnsQueryTimesOut,
+        ] {
+            let start = Instant::now();
+            let mut a = agent_whose_peer_signalled_with(start, only, failed_timeout);
+            silent(&mut a, start, Duration::ZERO, Duration::from_secs(70));
+            let failed_at: Vec<Duration> = std::iter::from_fn(|| a.poll_event())
+                .filter(|e| {
+                    matches!(
+                        e.event,
+                        Event::ConnectionStateChange(ConnectionState::Failed)
+                    )
+                })
+                .map(|e| e.now.duration_since(start))
+                .collect();
+            assert_eq!(
+                failed_at.len(),
+                1,
+                "{only:?} {failed_timeout:?}: {failed_at:?}"
+            );
+            assert!(
+                failed_at[0] >= expected && failed_at[0] <= expected + LOOK,
+                "{only:?} {failed_timeout:?}: failed at {:?}",
+                failed_at[0]
+            );
+            assert_eq!(a.state(), ConnectionState::Failed);
+        }
     }
 }
 
-/// RFC 8838 Section 8 with RFC 8445 Section 7.2.5.4: an empty checklist still fails as soon
-/// as both sides have signalled end-of-candidates when no check of the peer can form a pair:
-/// the peer signalled nothing (`test_checklist_fails_when_all_pairs_failed_and_no_candidate_is_to_come`),
-/// or its `tcptype active` candidate has no passive candidate of the agent to dial (RFC 6544
-/// Section 6.2: "tcp-active" pairs with "tcp-passive" only): the agent's candidates are UDP,
-/// active TCP, simultaneous-open, or of the other address family.
+/// RFC 8838 Section 8 with RFC 8445 Section 7.2.5.4: an empty checklist fails once both
+/// sides have signalled end-of-candidates and the PAC timer has expired (RFC 8863 Section 4),
+/// without waiting for the checking timeout, when the only candidate the peer signalled cannot
+/// form a pair by its own check: its `tcptype active` candidate has no passive candidate of
+/// the agent to dial (RFC 6544 Section 6.2: "tcp-active" pairs with "tcp-passive" only): the
+/// agent's candidates are UDP, active TCP, simultaneous-open, or of the other address family.
+/// The peer may still check one of the agent's other candidates from an address of its own
+/// (RFC 8863 Section 3.2), so until the timer expires the checklist keeps Running.
 #[test]
-fn an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_at_once() {
+fn an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_with_the_pac_timer()
+ {
     for local in [
         host(addr(LOCAL)),
         tcp_candidate(addr("192.168.0.2:9"), TcpType::Active),
@@ -1484,19 +1622,28 @@ fn an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklis
             .unwrap();
         a.set_local_gathering_complete();
         a.set_remote_end_of_candidates();
-        silent(&mut a, start, Duration::ZERO, 10 * MS);
+        silent(&mut a, start, Duration::ZERO, PAC - MS);
+        assert_eq!(a.state(), ConnectionState::Checking, "local {described}");
+        silent(&mut a, start, PAC - MS, PAC + LOOK);
         assert_eq!(a.state(), ConnectionState::Failed, "local {described}");
     }
 }
 
 /// RFC 8838 Section 14 with Section 15: what the peer signalled of a generation is that
 /// generation's. After an ICE restart, a new peer that signals nothing but end-of-candidates
-/// fails the empty checklist at once, although the generation before had an active TCP
-/// candidate that dialled the agent.
+/// fails the empty checklist when the PAC timer the restart started expires (RFC 8863 Section
+/// 4), without waiting for the checking timeout as the generation before, which had an active
+/// TCP candidate that dialled the agent, would have.
 #[test]
 fn an_ice_restart_forgets_the_candidates_that_could_only_dial_us() {
     let start = Instant::now();
-    let mut a = agent_whose_peer_signalled(start, OnlyCandidate::ActiveTcp);
+    // A checking timeout (5 + 60 s) past the PAC timer: a checklist the previous generation's
+    // candidate kept Running would fail only by it.
+    let mut a = agent_whose_peer_signalled_with(
+        start,
+        OnlyCandidate::ActiveTcp,
+        Some(Duration::from_secs(60)),
+    );
     silent(&mut a, start, Duration::ZERO, Duration::from_secs(1));
     assert_eq!(a.state(), ConnectionState::Checking);
     a.restart(start, String::new(), String::new(), true)
@@ -1505,12 +1652,9 @@ fn an_ice_restart_forgets_the_candidates_that_could_only_dial_us() {
         .unwrap();
     a.set_local_gathering_complete();
     a.set_remote_end_of_candidates();
-    silent(
-        &mut a,
-        start,
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-    );
+    silent(&mut a, start, Duration::from_secs(1), PAC - MS);
+    assert_eq!(a.state(), ConnectionState::Checking);
+    silent(&mut a, start, PAC - MS, PAC + LOOK);
     assert_eq!(a.state(), ConnectionState::Failed);
 }
 
