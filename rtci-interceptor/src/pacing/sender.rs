@@ -459,6 +459,10 @@ pub struct PacerInterceptor {
     /// The flows the circuit breaker has ceased ([`CircuitBreakerNotice`]): their packets do
     /// not leave, and are not charged to the budget.
     ceased: HashSet<u32>,
+    /// The streams that may not send ([`StreamsNotSending`]): their packets are dropped.
+    not_sending: HashSet<u32>,
+    /// Packets dropped because their stream may not send.
+    not_sending_dropped: u64,
     /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
     immediate_release: bool,
     /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
@@ -518,6 +522,8 @@ impl PacerInterceptor {
             video: HashSet::new(),
             audio: HashSet::new(),
             ceased: HashSet::new(),
+            not_sending: HashSet::new(),
+            not_sending_dropped: 0,
             immediate_release: true,
             probe: None,
             forced: 0,
@@ -554,6 +560,12 @@ impl PacerInterceptor {
     /// [`PacerInterceptor`]), or refused because the padding queue was full.
     pub fn padding_discarded(&self) -> u64 {
         self.padding_discarded
+    }
+
+    /// How many packets were dropped because their stream may not send
+    /// ([`StreamsNotSending`]): held when its direction changed, or written after.
+    pub fn not_sending_dropped(&self) -> u64 {
+        self.not_sending_dropped
     }
 
     /// How many packets left over the budget, overdue or to make room in a full queue
@@ -1049,6 +1061,68 @@ impl PacerInterceptor {
         }
     }
 
+    /// Whether `packet` is RTP of a stream that may not send ([`StreamsNotSending`]).
+    fn is_not_sending(&self, packet: &TaggedPacket) -> bool {
+        matches!(&packet.message.packet, Packet::Rtp(rtp) if self.not_sending.contains(&rtp.header.ssrc))
+    }
+
+    /// Counts a packet of a stream that may not send as dropped (a retransmission for
+    /// [`RetransmissionsLeft`] too).
+    fn drop_not_sending(&mut self, packet: &TaggedPacket) {
+        if packet.message.has(&Attribute::Retransmission) && !Self::is_padding(packet) {
+            self.retransmission_dropped(packet);
+        }
+        self.not_sending_dropped += 1;
+    }
+
+    /// The streams `ssrcs` may not send from `now` on (replacing those that could not
+    /// before): everything of them that waits here (queued media and retransmissions,
+    /// padding, and what was released for the next interceptor but has not gone to it) is
+    /// dropped, without a key-frame request or a [`PacerDiscard`]: nothing is asked of a
+    /// source that is not to send.
+    fn stop_streams(&mut self, now: Instant, ssrcs: &[u32]) {
+        self.not_sending = ssrcs.iter().copied().collect();
+        if self.not_sending.is_empty() {
+            return;
+        }
+        let mut kept = VecDeque::with_capacity(self.queue.len());
+        for packet in std::mem::take(&mut self.queue) {
+            if self.is_not_sending(&packet) {
+                self.queued_bits = (self.queued_bits - Self::bits_of(&packet)).max(0.0);
+                self.drop_not_sending(&packet);
+            } else {
+                kept.push_back(packet);
+            }
+        }
+        self.queue = kept;
+        if self.queue.is_empty() {
+            self.queued_bits = 0.0;
+        }
+        let mut padding = VecDeque::with_capacity(self.padding.len());
+        for (cluster, packet) in std::mem::take(&mut self.padding) {
+            if self.is_not_sending(&packet) {
+                self.padding_discarded += 1;
+                self.not_sending_dropped += 1;
+            } else {
+                padding.push_back((cluster, packet));
+            }
+        }
+        self.padding = padding;
+        let mut released = VecDeque::with_capacity(self.released.len());
+        for packet in std::mem::take(&mut self.released) {
+            if self.is_not_sending(&packet) {
+                self.drop_not_sending(&packet);
+            } else {
+                released.push_back(packet);
+            }
+        }
+        self.released = released;
+        for ssrc in ssrcs {
+            self.discarded_frame.remove(ssrc);
+        }
+        self.follow_queue(now);
+    }
+
     /// Whether `packet` is new media (not a retransmission) of the stream `ssrc`.
     fn is_new_media_of(packet: &TaggedPacket, ssrc: u32) -> bool {
         matches!(&packet.message.packet, Packet::Rtp(rtp) if rtp.header.ssrc == ssrc)
@@ -1189,6 +1263,38 @@ pub struct PacerDiscard {
 pub struct PacerFlush {
     /// The media SSRCs of the video streams flushed (every bound stream that is not audio).
     pub ssrcs: Vec<u32>,
+}
+
+/// The local streams that may not send media now: the SSRCs (media, RTX and FEC) of the
+/// senders whose negotiated direction does not send (`recvonly`, `inactive`). RFC 8866
+/// section 6.7.4: "No media is sent over an inactive media stream", and section 6.7.1: a
+/// receive-only stream is in "receive-only mode"; RFC 3264 section 5.1. W3C webrtc-pc 4.4.1.6:
+/// an answer sets `[[CurrentDirection]]`, and a sender sends only while it is "sendrecv" or
+/// "sendonly". RTCP is not affected (RFC 8866 section 6.7: it "MUST still" be sent).
+///
+/// The peer connection writes it into the chain each time an answer is applied, as an
+/// [`Attribute::Custom`] on an empty RTCP packet ([`StreamsNotSending::into_packet`]); each
+/// replaces the one before. The [`PacerInterceptor`] drops what it holds of those streams at
+/// that instant (media, retransmissions, padding) and every packet of them written later; the
+/// [`NackResponderInterceptor`](crate::NackResponderInterceptor) forgets what it sent of them,
+/// answers no NACK for them and pads no probe on their RTX streams. Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StreamsNotSending {
+    /// The SSRCs of the streams, their RTX and FEC streams included.
+    pub ssrcs: Vec<u32>,
+}
+
+impl StreamsNotSending {
+    /// The packet that carries this into the chain when written at `now`.
+    pub fn into_packet(self, now: Instant) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(self))),
+        }
+    }
 }
 
 /// A collapse is a target at most this share of the highest in force since the queued media
@@ -1337,8 +1443,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
         let now = msg.now;
         let rtp = matches!(msg.message.packet, Packet::Rtp(_));
+        let not_sending = msg.message.custom::<StreamsNotSending>().is_some();
         self.enqueue(msg)?;
-        if rtp {
+        if rtp || not_sending {
             self.tell_application_ward(now);
         }
         Ok(())
@@ -1371,10 +1478,23 @@ impl PacerInterceptor {
         // the branch had no possible producer. If an application-set target is ever wanted it comes
         // back with its own `RTCEvent` variant, and a test.
 
+        // The streams that may not send from now on: what waits of them goes.
+        if let Some(notice) = msg.message.custom::<StreamsNotSending>() {
+            let ssrcs = notice.ssrcs.clone();
+            self.stop_streams(msg.now, &ssrcs);
+        }
+
         // RTCP is control traffic and mostly time-sensitive — feedback is only useful while it is
         // fresh — so it is not paced.
         if matches!(msg.message.packet, Packet::Rtcp(_)) {
             self.write_queue.push_back(msg);
+            return Ok(());
+        }
+
+        // A stream that may not send (`StreamsNotSending`): written after its direction
+        // changed (a retransmission, padding, FEC), it does not leave.
+        if self.is_not_sending(&msg) {
+            self.drop_not_sending(&msg);
             return Ok(());
         }
 
