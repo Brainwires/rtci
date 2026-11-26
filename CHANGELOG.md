@@ -300,6 +300,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `authenticated_finished_repeats_still_obey_the_retry_budget`, which asserted the cut-off) and
   `reliability_test.rs::the_clients_last_flight_is_acknowledged_for_twice_the_msl`. Behaviour
   change, not breaking.
+- **The DTLS client's first flight leaves in the instant ICE selects the pair**
+  (`conf/dtls-28-first-flight-at-once`; RFC 8842 section 5.3, RFC 6347 section 4.2.4, RFC 9147
+  section 5.8; reported from code reading by a consumer, deno_webrtc). The ClientHello the
+  selected-pair event starts was left in the DTLS endpoint (on purpose: it goes out once every
+  handler has seen the event), but `poll_timeout` named only the endpoint's retransmission
+  timer, so the flight waited for whatever woke the connection next (about 185 ms from ICE
+  connected in the consumer's measurement; up to the retransmission timer on a quiet link).
+  `poll_timeout` now names the instant the handshake started, and the `handle_timeout` it
+  brings at once hands the flight out. No API change. Test
+  `tests/dtls_first_flight_rtc2rtc.rs::the_client_hello_leaves_in_the_instant_the_pair_is_selected`
+  (either side the DTLS client, driven as the README's loop drives a connection).
 
 ### Documentation
 
