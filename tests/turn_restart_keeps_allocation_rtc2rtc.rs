@@ -29,6 +29,7 @@ use rtci::peer_connection::transport::{
 use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtci::sansio::Protocol;
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
 use rtci::stun::message::METHOD_ALLOCATE;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -41,6 +42,8 @@ use turn_server::{Auth, TurnServer};
 /// Virtual time a message gets to arrive: far below the ICE timeouts, so one that arrives did
 /// not wait for a new pair.
 const STEP: Duration = Duration::from_secs(3);
+/// Virtual time each signalling step is given before data is sent (the engine's timers run).
+const SETTLE: Duration = Duration::from_millis(500);
 const A_HOST: &str = "10.0.0.1:4000";
 const A_HOST_2: &str = "10.0.0.1:4001";
 const B_HOST: &str = "10.0.0.2:5000";
@@ -148,6 +151,45 @@ impl World {
 
     /// Runs everything until `done`, or fails after `STEP` of virtual time.
     fn run(&mut self, what: &str, done: impl Fn(&World) -> bool) -> Result<()> {
+        self.run_for(what, STEP, done)
+    }
+
+    /// Lets `d` of virtual time pass with everything running (the timers fire: the engine
+    /// starts its TURN links for a new generation on one, for instance).
+    fn idle(&mut self, d: Duration) {
+        let _ = self.run_for("idle", d, |_| false);
+    }
+
+    /// What the server and A hold, for a failure message.
+    fn state(&mut self) -> String {
+        let allocations: Vec<_> = self
+            .server
+            .allocations
+            .iter()
+            .map(|(t, al)| (t.0, al.username.clone(), al.relayed))
+            .collect();
+        let now = self.now;
+        let pairs: Vec<_> = self.peers[0]
+            .pc
+            .get_stats(now, StatsSelector::None)
+            .candidate_pairs()
+            .filter(|p| p.nominated)
+            .map(|p| (p.local_candidate_id.clone(), p.remote_candidate_id.clone()))
+            .collect();
+        format!(
+            "allocations {allocations:?}; rejections {:?}; deleted {:?}; A's nominated pairs {pairs:?}; lost {:?}",
+            self.server.rejections,
+            self.server.deleted,
+            self.lost.iter().rev().take(4).collect::<Vec<_>>()
+        )
+    }
+
+    fn run_for(
+        &mut self,
+        what: &str,
+        limit: Duration,
+        done: impl Fn(&World) -> bool,
+    ) -> Result<()> {
         let start = self.now;
         loop {
             let mut moved = false;
@@ -226,10 +268,10 @@ impl World {
             if moved {
                 continue;
             }
-            if self.now.duration_since(start) >= STEP {
+            if self.now.duration_since(start) >= limit {
                 bail!(
-                    "{what}: not done after {STEP:?} of virtual time (lost datagrams: {:?})",
-                    self.lost.iter().rev().take(4).collect::<Vec<_>>()
+                    "{what}: not done after {limit:?} of virtual time ({})",
+                    self.state()
                 );
             }
             let next = self
@@ -344,27 +386,36 @@ fn a_restart_with_new_turn_credentials_keeps_the_previous_allocation_until_it_se
         .pc
         .set_local_description(now, offer.clone())?;
     assert_ne!(world.peers[0].ufrag(), ufrag, "the offer restarts ICE");
+    world.idle(SETTLE);
     world.ping_pong("the offerer applied its restart offer")?;
     assert!(
         world.server.deleted.is_empty(),
-        "the allocation in use is not deleted by the restart offer: {:?}",
-        world.server.deleted
+        "the allocation in use is not deleted by the restart offer: {}",
+        world.state()
     );
 
     let now = world.now;
     world.peers[1].pc.set_remote_description(now, offer)?;
+    world.idle(SETTLE);
     world.ping_pong("the answerer applied the restart offer")?;
     let answer = world.peers[1].pc.create_answer(None)?;
     let now = world.now;
     world.peers[1]
         .pc
         .set_local_description(now, answer.clone())?;
+    world.idle(SETTLE);
     world.ping_pong("the answerer applied its answer")?;
     let now = world.now;
     world.peers[0].pc.set_remote_description(now, answer)?;
+    world.idle(SETTLE);
     world.ping_pong("the offerer applied the answer")?;
 
+    // The new generation's candidates: what each trickles, and B's host candidate again (B
+    // keeps it across the restart, so it announces nothing: the application re-sends it for
+    // the new generation, as `ice_restart_keeps_path_rtc2rtc.rs` does).
     world.trickle = true;
+    let b_host = Peer::host(a(B_HOST))?;
+    world.peers[0].pc.add_remote_candidate(b_host)?;
     world.ping_pong("the new candidates were signalled")?;
     // The new generation's checks and nomination, then the retirement of the previous path.
     for round in 0..20 {
@@ -375,7 +426,12 @@ fn a_restart_with_new_turn_credentials_keeps_the_previous_allocation_until_it_se
         }
     }
     let second = world.last_relay().expect("data relayed");
-    assert_ne!(second, first, "data runs through the new allocation");
+    assert_ne!(
+        second,
+        first,
+        "data runs through the new allocation: {}",
+        world.state()
+    );
     let (client, _, relayed, at) = world
         .server
         .deleted
