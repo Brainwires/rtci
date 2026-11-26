@@ -106,4 +106,4 @@ RFC5576-6.1-4	B	S	sdp	A test counting cname lines per ssrc-id in a generated des
 RFC5761-5.1.1-6	B	S	rtp	A test: RTCP sent to the offerer on the RTP port before the answer is applied is received (audit-2 sweep)
 RFC8859-4.3-2	B	S	jsep (running)	A named test that every m= line sharing a 5-tuple muxes RTCP (audit-2 sweep)
 RFC8830-2-3	B	S	jsep (running)	A test that a generated description's msid lines share one appdata (audit-2 sweep)
-RFC8834-10-5	B	S	rtp	A test that a received header extension that was not signalled is ignored (unknown RTCP is tested under RFC3550-6.1-12) (audit-2 sweep)
+RFC8834-10-5	C	S	rtp	The encoded-transform frame metadata audio level (`rtp_receiver/mod.rs` `extension_payloads`) and the interceptors' remote stream bindings read header extensions by the session-wide mapping, not the receiving section's negotiation (must7-3 restricted the synchronization / contributing sources and frame records)

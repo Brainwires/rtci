@@ -2000,8 +2000,21 @@ impl<'a> InterceptorHandler<'a> {
         else {
             return;
         };
+        // RFC 8834 section 10: header extensions that are not signalled are ignored. The media
+        // engine maps each id it ever negotiated, in any section, and keeps a mapping that a
+        // later description left out; what the receiving section negotiated
+        // (`[[NegotiatedHeaderExtensions]]`, set when an answer is applied) decides whether an
+        // element is read. Before the section's first answer it has no such list and the
+        // engine's mapping is used.
+        let negotiated = self.rtp_transceivers[id].negotiated_header_extensions();
+        let signalled = |uri: &str| {
+            negotiated.is_empty()
+                || negotiated
+                    .iter()
+                    .any(|extension| extension.uri == uri && extension.direction.has_recv())
+        };
         let extension = |uri: &str| {
-            if !header.extension {
+            if !header.extension || !signalled(uri) {
                 return None;
             }
             let (extension_id, audio, _) =
@@ -2027,8 +2040,7 @@ impl<'a> InterceptorHandler<'a> {
                     .ok()
                 });
         // webrtc-extensions 8: the absolute capture time, audio or video.
-        let capture = header
-            .extension
+        let capture = (header.extension && signalled(rtp::extension::ABS_CAPTURE_TIME_URI))
             .then(|| {
                 let (extension_id, audio, video) =
                     self.media_engine
@@ -2049,20 +2061,20 @@ impl<'a> InterceptorHandler<'a> {
             });
         // The AV1 RTP specification's Dependency Descriptor (appendix A), on video: what
         // places the frame in the stream's frame numbering (webrtc-encoded-transform 4.2).
-        let dependency_descriptor = header
-            .extension
-            .then(|| {
-                let (extension_id, _, video) =
-                    self.media_engine
-                        .get_header_extension_id(RTCRtpHeaderExtensionCapability {
-                            uri: rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI
-                                .to_owned(),
-                        });
-                (video && extension_id != 0)
-                    .then(|| header.get_extension(extension_id as u8))
-                    .flatten()
-            })
-            .flatten();
+        let dependency_descriptor = (header.extension
+            && signalled(rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI))
+        .then(|| {
+            let (extension_id, _, video) =
+                self.media_engine
+                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                        uri: rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI
+                            .to_owned(),
+                    });
+            (video && extension_id != 0)
+                .then(|| header.get_extension(extension_id as u8))
+                .flatten()
+        })
+        .flatten();
         // The format's clock rate: the engine's, or, for a format only this endpoint's
         // pending offer lists for the section, the offer's.
         let clock_rate = self
