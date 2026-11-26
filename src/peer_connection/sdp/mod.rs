@@ -168,7 +168,7 @@ mod rejected_mline_tests {
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
-            bundle_only_rtcp_mux_and_session_fingerprint: false,
+            bundle_only_browser_form: false,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -2367,7 +2367,7 @@ fn reject_written_section(media: &mut MediaDescription) -> bool {
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
 /// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
 ///
-/// With `rtcp_mux` (`SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`)
+/// With `rtcp_mux` (`SettingEngineBuilder::with_bundle_only_sections_in_browser_form`)
 /// an RTP section keeps one BUNDLE attribute, `a=rtcp-mux`, against RFC 9143 sections 7.1.3 and
 /// 9.3.1.1: Chromium, WebKit and Firefox refuse an offer whose bundle-only RTP section lacks it.
 fn make_bundle_only(media: &mut MediaDescription, rtcp_mux: bool) {
@@ -2713,10 +2713,11 @@ pub(crate) struct PopulateSdpParams {
     /// `SettingEngineBuilder::with_bundle_attributes_repeated(false)`: the form of RFC 9143
     /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
-    /// `SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`:
-    /// an initial offer's bundle-only RTP sections say `a=rtcp-mux`, and when it has a
-    /// bundle-only section its fingerprints are at session level too.
-    pub(crate) bundle_only_rtcp_mux_and_session_fingerprint: bool,
+    /// `SettingEngineBuilder::with_bundle_only_sections_in_browser_form`:
+    /// an initial offer's bundle-only RTP sections say `a=rtcp-mux`, every bundle-only section
+    /// says its group's ICE credentials, and when it has a bundle-only section its fingerprints
+    /// are at session level too.
+    pub(crate) bundle_only_browser_form: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -3053,10 +3054,7 @@ impl RTCPeerConnection {
                             && group.is_some()
                             && let Some(desc) = d.media_descriptions.last_mut()
                         {
-                            make_bundle_only(
-                                desc,
-                                params.bundle_only_rtcp_mux_and_session_fingerprint,
-                            );
+                            make_bundle_only(desc, params.bundle_only_browser_form);
                             any_bundle_only = true;
                         } else {
                             with_transport.push(media_type);
@@ -3114,7 +3112,7 @@ impl RTCPeerConnection {
         // see one: Chromium and WebKit otherwise answer a bundle-only data section with port
         // zero, and Firefox does not apply the offer.
         if !params.media_description_fingerprint
-            || (params.bundle_only_rtcp_mux_and_session_fingerprint && any_bundle_only)
+            || (params.bundle_only_browser_form && any_bundle_only)
         {
             for fingerprint in dtls_fingerprints {
                 d = d.with_fingerprint(
@@ -3330,6 +3328,50 @@ impl RTCPeerConnection {
                 .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
         }
         make_msid_pairs_unique(&mut d);
+
+        // `SettingEngineBuilder::with_bundle_only_sections_in_browser_form`: each bundle-only
+        // section says its group's ICE credentials (the tagged section's), against RFC 9429
+        // section 5.2.1 ("Bundle-only "m=" sections MUST NOT contain any ICE credentials") and
+        // RFC 9143 section 7.1.3. Firefox compares each m= section's credentials in a later
+        // remote description with the ones of the current one (JsepSessionImpl
+        // IceCredentialsDiffer) and takes the credentials a later answer repeats in a section
+        // that had none for an ICE restart; it also refuses a later description without them
+        // in every section ("no ice-ufrag attribute at level 1"), so the tagged-only form of
+        // RFC 9143 7.1.3 for later descriptions does not help (test-env run 45908363443).
+        if params.bundle_only_browser_form && any_bundle_only {
+            let credentials: Vec<Option<(String, String)>> = d
+                .media_descriptions
+                .iter()
+                .map(|media| {
+                    if !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
+                        return None;
+                    }
+                    let tagged = tagged_section(&d, media)?;
+                    Some((
+                        tagged.attribute("ice-ufrag")??.to_owned(),
+                        tagged.attribute("ice-pwd")??.to_owned(),
+                    ))
+                })
+                .collect();
+            for (media, credentials) in d.media_descriptions.iter_mut().zip(credentials) {
+                let Some((ufrag, pwd)) = credentials else {
+                    continue;
+                };
+                let at = media
+                    .attributes
+                    .iter()
+                    .position(|a| a.key == ATTR_KEY_BUNDLE_ONLY)
+                    .unwrap_or(media.attributes.len());
+                media.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new("ice-pwd".to_owned(), Some(pwd)),
+                );
+                media.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new("ice-ufrag".to_owned(), Some(ufrag)),
+                );
+            }
+        }
 
         Ok(d)
     }

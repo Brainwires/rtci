@@ -901,9 +901,7 @@ impl RTCPeerConnection {
             bundle_attributes_in_tagged_section_only: self
                 .setting_engine
                 .bundle_attributes_tagged_only,
-            bundle_only_rtcp_mux_and_session_fingerprint: self
-                .setting_engine
-                .rtcp_mux_and_session_fingerprint_for_bundle_only_sections,
+            bundle_only_browser_form: self.setting_engine.bundle_only_sections_in_browser_form,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: self.offers_sctp_over_tcp(&candidates),
@@ -1422,7 +1420,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .bundle_attributes_tagged_only,
             // Only an initial offer has bundle-only sections (RFC 9429 section 5.2.2).
-            bundle_only_rtcp_mux_and_session_fingerprint: false,
+            bundle_only_browser_form: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             offered_tag_rtcp_mux_only: !include_unmatched

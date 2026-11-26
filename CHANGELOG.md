@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`, on in
-  the `Chrome` profile: an initial offer with bundle-only sections in the form browsers accept**
+- **`SettingEngineBuilder::with_bundle_only_sections_in_browser_form`, on in the `Chrome`
+  profile: an initial offer with bundle-only sections in the form browsers accept**
   (`conf/bundle-4-browser-form-of-bundle-only-sections`; RFC 9143 sections 7.1.3 and 9.3.1.1,
   RFC 8122 section 5, RFC 9429 section 5.2.1). The default writes bundle-only m= sections in the
   RFC 9143 form: no IDENTICAL or TRANSPORT attribute, so no `a=rtcp-mux`. Chromium, WebKit and
@@ -24,8 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute", RFC 8122 5; RFC 9429 5.2.1 "or these values MUST be session-level attributes"):
   with `a=rtcp-mux` alone Chromium and WebKit answered the bundle-only data section with port
   zero, no fingerprint applying to it, and Firefox's page crashed (run 45902077847); with both all
-  three apply the offer, open the channel and carry media (run 45903674595). Later offers and
-  answers are unchanged. The default, `Rfc` and `StrictRfc` keep the RFC form. Test:
+  three apply the offer, open the channel and carry media (run 45903674595). Each bundle-only
+  section also says its group's ICE credentials (the tagged section's), against RFC 9429 5.2.1
+  ("Bundle-only "m=" sections MUST NOT contain any ICE credentials"): without them Firefox takes
+  the credentials the engine's answer to its next offer repeats in those sections for an ICE
+  restart and refuses the answer (run 45905096237); writing later descriptions with the
+  credentials in the tagged section only (RFC 9143 7.1.3) is refused too, "no ice-ufrag attribute
+  at level 1" (run 45908363443). Later offers and answers are unchanged. The default, `Rfc` and `StrictRfc` keep the RFC form. Test:
   `tests/jsep_bundle_only_browser_form.rs`.
 
 ### Fixed
@@ -87,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interop peer takes `?bundle_policy=<name>` (`RTCConfigurationBuilder::with_bundle_policy`),
   `request-offer`'s `"data_channel": "before" | "after"` with `"tracks"`, and reports
   `dcReceived` (messages received on every channel). Rust's offers in these cells use the
-  `Chrome` profile (`with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`, above); a
+  `Chrome` profile (`with_bundle_only_sections_in_browser_form`, above); a
   seventh cell offers in the default profile's RFC 9143 form and records each browser's refusal
   as na-browser with the browser's own error text, failing on any other outcome than a refusal
   for the missing `a=rtcp-mux` or a full pass. `scripts/test-env/hosted-cell.sh` makes `opus.ogg`

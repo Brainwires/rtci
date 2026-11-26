@@ -1093,7 +1093,8 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
 // streams the fixtures and the browser answers. With `renegotiate` the browser then offers and
 // Rust offers a second channel. `profile` is the interop peer's behaviour profile (`?profile=`):
 // "chrome" writes the bundle-only sections in the form browsers accept
-// (`with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`), null the default, the
+// (`with_bundle_only_sections_in_browser_form`: a=rtcp-mux, the group's ICE credentials, a
+// session-level fingerprint), null the default, the
 // RFC 9143 form, which Chromium, WebKit and Firefox refuse (test-env run 45900172027).
 async function maxBundleRustOffers(page, { dataChannel, renegotiate = false, profile = "chrome" }) {
   return page.evaluate(async ([ws, dataChannel, renegotiate]) => {
@@ -1285,10 +1286,12 @@ function expectMaxBundleRustOffer(r, { browserForm = true } = {}) {
   expect(r.offer.sections.at(-1).sctpPort, ctx).toBeTruthy();
   expect(r.offer.groups.length, ctx).toBe(1);
   expect([...r.offer.groups[0]].sort(), ctx).toEqual(r.offer.sections.map((m) => m.mid).sort());
-  // The browser form (Chrome profile): a=rtcp-mux in the bundle-only RTP sections only, the
-  // fingerprint at session level too; the RFC 9143 7.1.3 form: neither.
+  // The browser form (Chrome profile): a=rtcp-mux in the bundle-only RTP sections, the tagged
+  // section's ICE credentials in every bundle-only section, the fingerprint at session level
+  // too; the RFC 9143 7.1.3 form: none of them.
   for (const m of r.offer.sections.slice(1)) {
     expect(m.rtcpMux, `${m.kind} ${m.mid} a=rtcp-mux: ${ctx}`).toBe(browserForm && m.kind !== "application");
+    expect(m.iceUfrag, `${m.kind} ${m.mid} a=ice-ufrag: ${ctx}`).toBe(browserForm ? r.offer.sections[0].iceUfrag : null);
   }
   expect(r.offer.sessionFingerprint, `session-level a=fingerprint: ${ctx}`).toBe(browserForm);
   expectAcceptsEverySection(r.offer, r.answer, ctx);
@@ -1344,7 +1347,7 @@ test("max-bundle: Rust offers audio, video and a data channel in the RFC 9143 fo
     naBrowser(
       true,
       `this browser refuses an initial offer whose bundle-only RTP section has no a=rtcp-mux (the RFC form): ${said}`,
-      "RFC 9143 7.1.3 (no IDENTICAL / TRANSPORT attribute in a bundle-only m= section) and 9.3.1.1 (a=rtcp-mux \"excluding any bundle-only m= sections\"); observed at run time, first in test-env 45900172027; SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections (Chrome profile) is the form browsers take",
+      "RFC 9143 7.1.3 (no IDENTICAL / TRANSPORT attribute in a bundle-only m= section) and 9.3.1.1 (a=rtcp-mux \"excluding any bundle-only m= sections\"); observed at run time, first in test-env 45900172027; SettingEngineBuilder::with_bundle_only_sections_in_browser_form (Chrome profile) is the form browsers take",
     );
   }
   expectMaxBundleRustOffer(r, { browserForm: false });

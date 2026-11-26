@@ -321,7 +321,8 @@
 
   // The BUNDLE layout of a description: its BUNDLE groups (lists of mids), whether it has
   // a=cryptex (session or media level) and a session-level a=fingerprint and, per m= section,
-  // its kind, port, mid, a=bundle-only, a=rtcp-mux and a=sctp-port (null when absent).
+  // its kind, port, mid, a=bundle-only, a=rtcp-mux, a=ice-ufrag and a=sctp-port (null when
+  // absent).
   function bundleLayout(sdp) {
     const [session, ...media] = sdp.split(/\r?\nm=/);
     return {
@@ -334,6 +335,7 @@
         mid: (m.match(/^a=mid:(\S+)/m) || [, null])[1],
         bundleOnly: /^a=bundle-only\r?$/m.test(m),
         rtcpMux: /^a=rtcp-mux\r?$/m.test(m),
+        iceUfrag: (m.match(/^a=ice-ufrag:(\S+)/m) || [, null])[1],
         sctpPort: (m.match(/^a=sctp-port:(\d+)/m) || [, null])[1],
       })),
     };
