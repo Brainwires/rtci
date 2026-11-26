@@ -1700,15 +1700,17 @@ impl Conn13 {
         };
         debug!("<- alert {description}");
         match *description {
-            alert::CLOSE_NOTIFY => {
-                // The peer has closed; the answer is this side's own close_notify.
+            // RFC 8446 section 6.1: both are closure alerts, and "Any data received after a
+            // closure alert has been received MUST be ignored" (RFC 9147 section 5.10). A
+            // user_canceled ends the reading as a close_notify does (the close_notify that
+            // "SHOULD" follow it is not read any more); the answer is this side's own
+            // close_notify.
+            alert::CLOSE_NOTIFY | alert::USER_CANCELED => {
                 self.closed_by_peer = true;
                 self.closed = true;
                 self.send_alert(alert::CLOSE_NOTIFY);
                 Ok(())
             }
-            // RFC 8446 section 6.1: user_canceled is followed by a close_notify.
-            alert::USER_CANCELED => Ok(()),
             // Section 6.2: every other alert is an error alert, whatever its level says.
             _ => {
                 self.fatal_alert_received = Some(*description);
