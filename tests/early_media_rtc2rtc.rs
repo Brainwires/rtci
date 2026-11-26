@@ -356,6 +356,72 @@ fn media_for_a_section_a_later_offer_adds_is_delivered_before_the_answer() -> Re
     Ok(())
 }
 
+/// RFC 5761 section 5.1.1: with `a=rtcp-mux` in its offer the offerer has asked the answerer
+/// to "send both RTP and RTCP to port" of the m= line, and section 5.1.1 has the receiver
+/// "prepared to receive RTCP packets on the RTP port". The answerer sends as soon as it has
+/// applied its answer, so its RTCP, like its RTP, can reach the offerer before the answer:
+/// a later offer adds a recvonly section and the answer is held back for three seconds of
+/// media. The sender reports of the new stream arrive on the one port the offer gave (RTP
+/// and RTCP alike) and reach the offerer's application with the track of the receiver the
+/// offer described, while the offer is still pending. (Before the first answer nothing can
+/// arrive: SRTCP needs the DTLS handshake, which the offerer completes only with the
+/// answer's fingerprint; the case is that of a later offer.)
+#[test]
+fn rtcp_for_a_section_a_later_offer_adds_is_received_before_the_answer() -> Result<()> {
+    use rtci::rtcp::sender_report::SenderReport;
+
+    let (mut world, id, sender, offer, _answer) = a_later_offer_adds_a_recvonly_section()?;
+    assert!(
+        offer
+            .split("\r\n")
+            .skip_while(|line| !line.starts_with("m=video"))
+            .any(|line| line == "a=rtcp-mux"),
+        "the new section offers rtcp-mux: {offer}"
+    );
+    let vp8 = payload_type(&offer, "VP8/90000");
+    let track = receiver_track(&mut world, 0, id);
+    let rtcp_before = world.peers[1].written.len();
+
+    // Three seconds of media: several RTCP report intervals.
+    send(&mut world, 1, sender, vp8, SSRC, 100, 150)?;
+    assert_eq!(
+        world.peers[0].pc.signaling_state(),
+        RTCSignalingState::HaveLocalOffer,
+        "the answer has not been applied"
+    );
+    // RTCP to the offerer went where its RTP goes: the offerer has one address, and every
+    // datagram the answerer wrote went to it.
+    let wrote_rtcp = world.peers[1].written[rtcp_before..]
+        .iter()
+        .any(|datagram| datagram.len() >= 8 && (192..=223).contains(&datagram[1]));
+    assert!(wrote_rtcp, "the answerer sent RTCP");
+    let reports: Vec<&String> = world.peers[0]
+        .rtcp
+        .iter()
+        .filter(|(_, packet)| {
+            packet
+                .as_any()
+                .downcast_ref::<SenderReport>()
+                .is_some_and(|sr| sr.ssrc == SSRC)
+        })
+        .map(|(to, _)| to)
+        .collect();
+    assert!(
+        !reports.is_empty(),
+        "no sender report of the new stream reached the offerer before the answer: {:?}",
+        world.peers[0]
+            .rtcp
+            .iter()
+            .map(|(to, packet)| (to, packet.header().packet_type))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        reports.iter().all(|to| **to == track),
+        "with the track of the receiver the offer described: {reports:?}"
+    );
+    Ok(())
+}
+
 /// RFC 3264 section 5.1: the offerer "MUST be prepared to send and receive media for any
 /// sendrecv streams in the offer ... (of course, it cannot actually send until the peer
 /// provides an answer ...)". A later offer adds a sendrecv section; the peer's media for it

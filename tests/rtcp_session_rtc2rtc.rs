@@ -1987,3 +1987,133 @@ fn every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_with
     }
     Ok(())
 }
+
+/// Whether `packets` form a full compound packet (RFC 3550 6.1): an SR or RR first and an
+/// SDES with a CNAME for the leading SSRC.
+fn full_compound(packets: &[Box<dyn rtci::rtcp::Packet>]) -> bool {
+    use rtci::rtcp::source_description::{SdesType, SourceDescription};
+    let Some(first) = packets.first().map(|packet| packet.as_any()) else {
+        return false;
+    };
+    let leader = match (
+        first.downcast_ref::<SenderReport>(),
+        first.downcast_ref::<ReceiverReport>(),
+    ) {
+        (Some(sr), _) => sr.ssrc,
+        (_, Some(rr)) => rr.ssrc,
+        _ => return false,
+    };
+    packets
+        .iter()
+        .filter_map(|packet| packet.as_any().downcast_ref::<SourceDescription>())
+        .flat_map(|sdes| &sdes.chunks)
+        .any(|chunk| {
+            chunk.source == leader
+                && chunk
+                    .items
+                    .iter()
+                    .any(|item| item.sdes_type == SdesType::SdesCname && !item.text.is_empty())
+        })
+}
+
+/// RFC 5506 4.1 (reduced-size RTCP "MUST NOT be used for Regular (scheduled) RTCP report
+/// purposes") and 4.2.3 ("all Regular RTCP MUST be full compound RTCP"), between two
+/// connections that negotiated `a=rtcp-rsize`: of what each RTCP session writes, every
+/// datagram that is not full compound (an SR or RR first, the SDES CNAME with it) holds
+/// feedback messages only, and every report is in a full compound packet. Reduced-size is in
+/// use: the receiver's congestion feedback and its key frame requests leave that way.
+#[test]
+fn with_reduced_size_negotiated_only_feedback_leaves_reduced_size() -> Result<()> {
+    use rtci::rtcp::header::PacketType;
+
+    let (offerer, offerer_tap) = Peer::tapped("10.0.0.1:5000", false)?;
+    let (answerer, answerer_tap) = Peer::tapped("10.0.0.2:5000", false)?;
+    let (mut world, sender) = World::connected_peers([offerer, answerer])?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    assert!(
+        world.peers[0]
+            .pc
+            .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+            .expect("transceiver")
+            .rtcp_reduced_size(),
+        "the offerer negotiated reduced-size RTCP"
+    );
+    assert!(
+        world.peers[1]
+            .pc
+            .rtp_transceiver(RTCRtpTransceiverId::from(receiver))
+            .expect("transceiver")
+            .rtcp_reduced_size(),
+        "the answerer negotiated reduced-size RTCP"
+    );
+
+    // Ten seconds of media; the receiving application asks for a key frame twice a second.
+    for round in 0..20u16 {
+        world.send_media(sender, FIRST_SEQ + round * 25, 25)?;
+        let now = world.now;
+        world.peers[1]
+            .pc
+            .rtp_receiver(receiver)
+            .expect("receiver")
+            .write_rtcp(
+                now,
+                vec![Box::new(PictureLossIndication {
+                    sender_ssrc: 0,
+                    media_ssrc: ssrc,
+                })],
+            )?;
+        world.pump()?;
+    }
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+
+    for (name, tap) in [("offerer", &offerer_tap), ("answerer", &answerer_tap)] {
+        let tap = tap.lock().expect("tap");
+        let datagrams: Vec<&Vec<Box<dyn rtci::rtcp::Packet>>> = tap
+            .iter()
+            .filter_map(|left| match left {
+                Left::Rtcp(packets) => Some(packets),
+                Left::Rtp(_) => None,
+            })
+            .collect();
+        let mut reports = 0;
+        for packets in &datagrams {
+            let is_report = |packet: &Box<dyn rtci::rtcp::Packet>| {
+                matches!(
+                    packet.header().packet_type,
+                    PacketType::SenderReport | PacketType::ReceiverReport
+                )
+            };
+            if packets.iter().any(is_report) {
+                reports += 1;
+            }
+            if full_compound(packets) {
+                continue;
+            }
+            assert!(
+                packets.iter().all(|packet| matches!(
+                    packet.header().packet_type,
+                    PacketType::TransportSpecificFeedback | PacketType::PayloadSpecificFeedback
+                )),
+                "the {name} sent a datagram that is neither full compound nor feedback only: \
+                 {packets:?}"
+            );
+        }
+        assert!(
+            reports >= 5,
+            "the {name} sent {reports} report packets in twelve seconds"
+        );
+        if name == "answerer" {
+            let reduced = datagrams
+                .iter()
+                .filter(|packets| !full_compound(packets))
+                .count();
+            assert!(
+                reduced > 0,
+                "the receiver sent no reduced-size feedback: the test would not reach the rule"
+            );
+        }
+    }
+    Ok(())
+}
