@@ -179,5 +179,4 @@ RFC8446-5-5	B	S	dtls-srtp	A conn-level test: an authenticated record of an unkno
 RFC8446-5.4-5	B	S	dtls-srtp	A conn-level test: an authenticated all-padding record ends the association with unexpected_message (audit-7 sweep6)
 RFC5246-7.3-5	B	S	dtls-srtp	A test that session ids of two sessions differ and share no bytes with the master secret, as the_server_random_is_made_independently_of_the_clients does for the random (audit-7 sweep6)
 RFC5246-8422-5.1-1	B	S	dtls-srtp	Assert supported_groups and ec_point_formats in the engine client ClientHello offering ECC suites (audit-7 sweep6)
-RFC9260-3.3.1-8	B	S	sctp	A test reading the PPID of every DATA chunk of a fragmented message (audit-7 sweep6)
 RFC3264-8.1-1	B	S	jsep	A renegotiation test asserting the existing m= section keeps its index and the new one is appended (audit-7 sweep6)

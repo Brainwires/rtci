@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 664; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4998 of 5087 (98.3 %).
-- Tested as the default (`tested`): 4966 of 5087 (97.6 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 89: 73 untested, 11 partial, 3 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4999 of 5087 (98.3 %).
+- Tested as the default (`tested`): 4967 of 5087 (97.6 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 88: 72 untested, 11 partial, 3 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 73 | 2 |
+| B | implemented, lacking a test that fails without it | 72 | 2 |
 | C | partly implemented | 13 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 121 | 28 |
+| all | | 120 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 88 rows, 83 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 87 rows, 82 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -44,7 +44,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 13 | 0 | 0 | 0 | 0 | 13 | 13 | 0 | 0 |
-| sctp | 7 | 2 | 0 | 0 | 0 | 9 | 9 | 0 | 0 |
+| sctp | 6 | 2 | 0 | 0 | 0 | 8 | 8 | 0 | 0 |
 | sdp | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
 | turn | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -148,7 +148,6 @@ Sorted by class, then owner, size and ID.
 | RFC8834-4.1-24 | `rfc8834.md` | Ignore unknown RTP header extensions | untested | B | As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep) | S | rtp |
 | RFC6525-5.2.7-1 | `rfc6525.md` | H1: a response marks its request acknowledged; the timer stops when ... | untested | B | A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep) | S | sctp |
 | RFC9260-3.2-8 | `rfc9260.md` | Chunk Length smaller than 4 or past the packet end is rejected | untested | B | A test that a chunk whose Chunk Length is below 4 refuses the packet (past the end is tested by a_partial_chunk_at_the_end_of_a_packet_is_dropped_alone) (audit-4 sweep) | S | sctp |
-| RFC9260-3.3.1-8 | `rfc9260.md` | PPID is sent in every fragment | untested | B | A test reading the PPID of every DATA chunk of a fragmented message (audit-7 sweep6) | S | sctp |
 | RFC9260-3.3.2.1.5-2 | `rfc9260.md` | Supported Address Types is accepted; a Host Name entry in it is ... | untested | B | A test of an INIT whose Supported Address Types lists the Host Name type (11): answered with an INIT ACK, the entry ignored (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |
 | WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | B | A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep) | S | sctp |

@@ -108,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
   clause "a can" and left the setting out of every profile; it is now governed.
+- RFC 9260 section 3.3.1 ("This field MUST be sent even in fragmented DATA chunks"), audit row
+  RFC9260-3.3.1-8, which audit sweep 6 downgraded, `untested` -> `tested`
+  (`conf/sctp-26-ppid-in-every-fragment`): `rfc9260_rows_test.rs::every_fragment_of_a_message_carries_its_ppid`
+  reads the PPID of each DATA chunk a fragmented message is sent in (a receiver of this crate
+  takes the first fragment's, so the receive-side test could not show it). Proved by a mutation
+  writing it in the first fragment only. Test only, no engine change.
 
 ### Features
 
