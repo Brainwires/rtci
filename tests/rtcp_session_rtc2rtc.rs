@@ -2079,13 +2079,12 @@ fn with_reduced_size_negotiated_only_feedback_leaves_reduced_size() -> Result<()
             .collect();
         let mut reports = 0;
         for packets in &datagrams {
-            let is_report = |packet: &Box<dyn rtci::rtcp::Packet>| {
+            if packets.iter().any(|packet| {
                 matches!(
                     packet.header().packet_type,
                     PacketType::SenderReport | PacketType::ReceiverReport
                 )
-            };
-            if packets.iter().any(is_report) {
+            }) {
                 reports += 1;
             }
             if full_compound(packets) {
