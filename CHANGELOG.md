@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+
+- **A forwarder routes SFrame-encrypted frames by the Dependency Descriptor alone** (RFC 9605
+  sections 4.4.3 and 6.1;
+  `tests/encoded_frame_metadata_rtc2rtc.rs::a_forwarder_routes_sframe_frames_by_the_dependency_descriptor_alone`;
+  `conf/sframe-1-forwarder-routes-by-the-dependency-descriptor`; test and audit only, no engine
+  change). Thirteen L1T3 frames, each one SFrame ciphertext split by the opaque payloader, cross
+  a connection with the descriptor on every packet; the receiving peer, holding no key, reads the
+  headers only and its `DecodeTargetSelector` forwards the T0 frames whole for a T0 receiver and
+  every frame for a T2 one; the end receiver decrypts what it forwards. RFC9605-X-6 `tested` (was
+  `missing`, open-must class C).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

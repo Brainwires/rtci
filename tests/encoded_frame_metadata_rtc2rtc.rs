@@ -1440,3 +1440,166 @@ fn the_remote_capture_time_holds_across_clock_rate_changes_on_one_ssrc() -> Resu
     );
     Ok(())
 }
+
+/// RFC 9605 sections 4.4.3 and 6.1 (the engine row RFC9605-X-6): with SFrame applied per
+/// frame the payload is opaque to a forwarder, and "the necessary media metadata will be
+/// moved out of the encoded frame buffer to be sent in some channel visible to the SFU (e.g.,
+/// an RTP header extension)", so that the SFU can "select which ones should be forwarded".
+/// The sender's application encrypts each of 13 L1T3 frames (a key frame, then T2, T1, T2,
+/// T0 three times) into one SFrame ciphertext, splits it with the format-agnostic payloader
+/// into two packets, and gives each packet the Dependency Descriptor. The second peer, as a
+/// forwarder that holds no key, reads only the headers: a `DecodeTargetSelector` for T0
+/// forwards the four T0 frames, one for T2 all 13, each frame whole; what it forwards is
+/// the ciphertext as sent, which the end receiver reassembles and decrypts.
+#[test]
+fn a_forwarder_routes_sframe_frames_by_the_dependency_descriptor_alone() -> Result<()> {
+    use rtci::rtp::codec::dependency_descriptor::{
+        DecodeTargetSelector, DependencyDescriptorReader,
+    };
+    use rtci::rtp::codec::opaque::{OpaqueDepacketizer, OpaquePayloader};
+    use rtci::rtp::packetizer::{Depacketizer, Payloader};
+    use rtci::sframe::{CipherSuite, SFrameContext};
+
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    let (ssrc, pt, dd_id) = sender_stream(&mut world, sender, DEPENDENCY_DESCRIPTOR_URI);
+    let structure = l1t3();
+    let mut writer = DependencyDescriptorWriter::new(structure.clone(), 7)?;
+    let key = [9u8; 16];
+    let mut encryptor = SFrameContext::with_default_provider(CipherSuite::Aes128GcmSha256_128)?;
+    encryptor.add_send_key(4, &key)?;
+
+    // The templates of the 13 frames, and the plaintext of frame n.
+    let mut templates = vec![0usize];
+    for _ in 0..3 {
+        templates.extend([3, 2, 4, 1]);
+    }
+    let plaintext = |n: usize| -> Vec<u8> {
+        (0..1500usize)
+            .map(|i| ((i * 7 + n * 13) % 251) as u8)
+            .collect()
+    };
+    let mut sent_payloads: Vec<Bytes> = vec![];
+    let mut seq = 500u16;
+    for (n, &template) in templates.iter().enumerate() {
+        let frame = writer.next_frame(&structure.templates[template], n == 0)?;
+        let ciphertext: Bytes = encryptor.encrypt(4, b"", &plaintext(n))?.into();
+        let payloads = OpaquePayloader.payload(1000, &ciphertext)?;
+        assert_eq!(payloads.len(), 2);
+        let now = world.now;
+        for (i, payload) in payloads.iter().enumerate() {
+            let last = i + 1 == payloads.len();
+            let mut header = Header {
+                version: 2,
+                payload_type: pt,
+                sequence_number: seq,
+                timestamp: 3000 * n as u32,
+                ssrc,
+                marker: last,
+                ..Default::default()
+            };
+            header.set_extension_upgrading(dd_id, frame.packet(i == 0, last)?)?;
+            seq = seq.wrapping_add(1);
+            sent_payloads.push(payload.clone());
+            world.peers[0]
+                .pc
+                .rtp_sender(sender)
+                .expect("sender")
+                .write_rtp(
+                    now,
+                    rtci::rtp::Packet {
+                        header,
+                        payload: payload.clone(),
+                    },
+                )?;
+        }
+        world.pump()?;
+        let next = world.now + Duration::from_millis(33);
+        world.run_until(next)?;
+    }
+
+    let mut received: Vec<rtci::rtp::Packet> = world.peers[1]
+        .read_rtp
+        .iter()
+        .filter(|p| p.header.ssrc == ssrc)
+        .cloned()
+        .collect();
+    received.sort_by_key(|p| p.header.sequence_number);
+    received.dedup_by_key(|p| p.header.sequence_number);
+    assert_eq!(received.len(), sent_payloads.len());
+    for (packet, sent) in received.iter().zip(&sent_payloads) {
+        assert_eq!(
+            &packet.payload, sent,
+            "the ciphertext arrives as it was sent"
+        );
+    }
+
+    // The forwarder: headers only, no key. Returns the frames (by RTP timestamp) whose
+    // packets it forwards, and the forwarded packets' payloads.
+    let forward = |target: (u8, u8)| -> Result<(Vec<u32>, Vec<Bytes>)> {
+        let mut reader = DependencyDescriptorReader::new();
+        let mut selector = DecodeTargetSelector::new(target.0, target.1);
+        let mut frames: Vec<u32> = vec![];
+        let mut payloads = vec![];
+        for packet in &received {
+            let element = packet
+                .header
+                .get_extension(dd_id)
+                .expect("every packet carries the descriptor");
+            let descriptor = reader
+                .read(&element)?
+                .expect("the structure came with the key frame");
+            if selector.forward(&descriptor, &reader) {
+                if frames.last() != Some(&packet.header.timestamp) {
+                    frames.push(packet.header.timestamp);
+                }
+                payloads.push(packet.payload.clone());
+            }
+        }
+        Ok((frames, payloads))
+    };
+    // The end receiver, with the key (each pass a receiver of its own: the replay window).
+    let decrypt = |payloads: &[Bytes]| -> Result<Vec<Vec<u8>>> {
+        let mut decryptor = SFrameContext::with_default_provider(CipherSuite::Aes128GcmSha256_128)?;
+        decryptor.add_recv_key(4, &key)?;
+        let mut depacketizer = OpaqueDepacketizer::default();
+        let mut frames = vec![];
+        for payload in payloads {
+            let unit = depacketizer.depacketize(payload)?;
+            if !unit.is_empty() {
+                frames.push(decryptor.decrypt(b"", &unit)?);
+            }
+        }
+        Ok(frames)
+    };
+
+    let base_layer: Vec<usize> = (0..templates.len())
+        .filter(|&n| structure.templates[templates[n]].temporal_id == 0)
+        .collect();
+    assert_eq!(base_layer, vec![0, 4, 8, 12]);
+    let (frames, payloads) = forward((0, 0))?;
+    assert_eq!(
+        frames,
+        base_layer
+            .iter()
+            .map(|&n| 3000 * n as u32)
+            .collect::<Vec<_>>(),
+        "a receiver of T0 is sent the T0 frames"
+    );
+    assert_eq!(payloads.len(), 2 * base_layer.len(), "each frame whole");
+    assert_eq!(
+        decrypt(&payloads)?,
+        base_layer.iter().map(|&n| plaintext(n)).collect::<Vec<_>>()
+    );
+
+    let (frames, payloads) = forward((0, 2))?;
+    assert_eq!(
+        frames.len(),
+        templates.len(),
+        "a receiver of T2 is sent every frame"
+    );
+    assert_eq!(
+        decrypt(&payloads)?,
+        (0..templates.len()).map(plaintext).collect::<Vec<_>>()
+    );
+    Ok(())
+}
