@@ -2408,20 +2408,29 @@ fn test_an_unresolved_remote_mdns_name_is_dropped_quietly_and_the_agent_goes_on(
     );
     assert_eq!(agent.mdns_queries.len(), 1, "the default mode queries");
 
+    // The driver runs the agent at once (`add_remote_candidate` only schedules the query; the
+    // query starts, and its timeout runs, from this `handle_timeout`), then at each deadline.
     let mut events = vec![];
+    let mut queried = false;
     let until = base + Duration::from_secs(3);
     let mut now = base;
-    while now < until {
+    loop {
+        agent.handle_timeout(now)?;
+        while let Some(t) = agent.poll_write() {
+            queried |= t.transport.peer_addr.port() == mdns::MDNS_PORT;
+        }
+        while let Some(e) = agent.poll_event() {
+            events.push(e.event);
+        }
+        if now >= until {
+            break;
+        }
         now = agent
             .poll_timeout()
             .filter(|t| *t > now && *t <= until)
             .unwrap_or(until);
-        agent.handle_timeout(now)?;
-        while agent.poll_write().is_some() {}
-        while let Some(e) = agent.poll_event() {
-            events.push(e.event);
-        }
     }
+    assert!(queried, "the query went out");
     assert!(agent.mdns_queries.is_empty(), "the query ended");
     assert!(agent.remote_candidates.is_empty(), "no remote candidate");
     assert!(agent.candidate_pairs.is_empty(), "no pair");
