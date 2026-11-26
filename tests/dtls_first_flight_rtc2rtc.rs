@@ -1,7 +1,9 @@
 //! The DTLS client's first flight leaves in the instant ICE selects the pair it goes on, between
-//! two `rtci` peer connections in virtual time, driven the way the README's event loop drives
-//! one: `poll_write`, then `poll_event`, then `poll_read`, then `poll_timeout` /
-//! `handle_timeout`.
+//! two `rtci` peer connections in virtual time, under two drivers that follow the sans-I/O
+//! contract: the README's event loop (`poll_write`, `poll_event`, `poll_read`, then
+//! `poll_timeout`, and `handle_timeout` when it is due), and the stream driver's
+//! (`examples/stream-driver`, `PeerDriver::step`: after every wake, the datagrams read and then
+//! `handle_timeout`, before the writes and events are drained).
 //!
 //! RFC 8842 section 5 has the `active` endpoint start the handshake once ICE has a path, and
 //! RFC 6347 section 4.2.4 / RFC 9147 section 5.8 give the client's flight a retransmission
@@ -10,7 +12,11 @@
 //! in `poll_event`, after its `poll_write`; the flight it produced there was left in the DTLS
 //! endpoint, and `poll_timeout` named only the endpoint's retransmission timer, so the flight
 //! left with whatever woke the connection next (a consumer measured about 185 ms from ICE
-//! connected to the ClientHello).
+//! connected to the ClientHello). Under the README's loop it left at once only because the
+//! ICE agent asks for an immediate look at its state when it concludes (`conclude`), and the
+//! `handle_timeout` that brings drains the DTLS endpoint too; a driver that calls
+//! `handle_timeout` after the read, before it drains the selected-pair event, uses that wake up
+//! before the flight exists.
 
 use anyhow::{Result, bail};
 use rtci::peer_connection::RTCPeerConnection;
@@ -60,7 +66,17 @@ struct Peer {
     client_hello_at: Option<Instant>,
 }
 
+/// How the driver orders its calls.
+#[derive(Clone, Copy, Debug)]
+enum Driver {
+    /// The README's loop: `handle_timeout` only when `poll_timeout` is due.
+    Readme,
+    /// The stream driver's step: `handle_timeout` after every wake, right after the reads.
+    StreamDriver,
+}
+
 struct World {
+    driver: Driver,
     peers: [Peer; 2],
     now: Instant,
     /// Datagrams on their way: when they arrive, the index of the peer they go to, their
@@ -69,7 +85,7 @@ struct World {
 }
 
 impl World {
-    fn new(answering_role: RTCDtlsRole) -> Result<Self> {
+    fn new(answering_role: RTCDtlsRole, driver: Driver) -> Result<Self> {
         let now = Instant::now();
         let peer = |addr: &str| -> Result<Peer> {
             Ok(Peer {
@@ -86,6 +102,7 @@ impl World {
             })
         };
         let mut world = Self {
+            driver,
             peers: [peer("10.0.0.1:5000")?, peer("10.0.0.2:5000")?],
             now,
             in_flight: Vec::new(),
@@ -189,8 +206,9 @@ impl World {
                     message,
                 });
             }
+            let every_wake = matches!(self.driver, Driver::StreamDriver);
             for (peer, timeout) in self.peers.iter_mut().zip(timeouts) {
-                if timeout.is_some_and(|at| at <= now) {
+                if every_wake || timeout.is_some_and(|at| at <= now) {
                     peer.pc.handle_timeout(now)?;
                 }
             }
@@ -200,12 +218,19 @@ impl World {
 }
 
 /// The ClientHello leaves in the instant the DTLS client's application learns of the selected
-/// pair: no wait, whichever side is the DTLS client (the controlled answerer by default, RFC
-/// 8842 section 5.3's `active` answer; the controlling offerer when the answer is `passive`).
+/// pair: no wait, under either driver, whichever side is the DTLS client (the controlled
+/// answerer by default, RFC 8842 section 5.3's `active` answer; the controlling offerer when
+/// the answer is `passive`).
 #[test]
 fn the_client_hello_leaves_in_the_instant_the_pair_is_selected() -> Result<()> {
-    for (answering_role, client) in [(RTCDtlsRole::Client, 1usize), (RTCDtlsRole::Server, 0)] {
-        let mut world = World::new(answering_role)?;
+    for (driver, answering_role, client) in [
+        (Driver::Readme, RTCDtlsRole::Client, 1usize),
+        (Driver::Readme, RTCDtlsRole::Server, 0),
+        (Driver::StreamDriver, RTCDtlsRole::Client, 1),
+        (Driver::StreamDriver, RTCDtlsRole::Server, 0),
+    ] {
+        let answering_role = (driver, answering_role);
+        let mut world = World::new(answering_role.1, driver)?;
         world.run(Duration::from_secs(10))?;
         let peer = &world.peers[client];
         let other = &world.peers[1 - client];
