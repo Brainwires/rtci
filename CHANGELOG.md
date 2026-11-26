@@ -9,12 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`RTCPeerConnection::rotate_ice_servers(now, ice_servers)`** (fork convenience): new STUN /
+  TURN servers now (`set_configuration` + an ICE restart, W3C "set the configuration" and RFC
+  9429 section 4.1.18), for rotating TURN credentials on a long session without a new
+  connection: one offer / answer round; the DTLS association and the data channels stay; the
+  allocation in use relays until the restart has its pair and is then deleted
+  (`OnTurnAllocationReleased` names the local address now free). A host candidate the
+  application adds on a second UDP socket before applying the restart offer gives the new
+  allocation its own 5-tuple (RFC 8656 section 2.2) and no gap; with one socket the old one is
+  released first and `OnTurnAllocationReplacedInPlace { url, local_address }` says so. Tested
+  end to end against an in-memory server that checks REST username expiry on every request.
+  turn-7.
+- **`rtci_turn::rest::rest_username_expiry(username, separator)`**: when a TURN REST API
+  username (draft-uberti-behave-turn-rest-00, coturn `use-auth-secret`) expires; a pure helper
+  the engine never uses. turn-7.
+- **`OnTurnRequestRejected` for every finally refused TURN request** of the engine's links
+  (Allocate with any code, Refresh, CreatePermission, ChannelBind): the warning an application
+  gets when, say, a REST credential has expired. turn-7.
+
 - **`RTCPeerConnectionEvent::OnTurnAllocationReleased { url, local_address, relayed_address }`
   and `OnTurnRequestRejected { url, relay, method, error_code }`** (fork events, not W3C): an
   engine TURN allocation over UDP has been let go (the local address is free), and a TURN request
   was finally refused (for now: a 437 to an Allocate). turn-6.
 
 ### Fixed
+
+- **`icecandidateerror` for the servers the engine gathers from itself** (W3C webrtc-pc 4.8.3):
+  a TURN Allocate refused with a code, a TURN or STUN server no address of which answered (701,
+  once per URL), a STUN error response. Nothing was raised before. turn-7.
+- **`set_configuration` with new STUN / TURN servers or a new ICE candidate policy after a local
+  description sets the 'needs-ice-restart' bit** (RFC 9429 section 4.1.18): the next
+  `create_offer` restarts ICE and `negotiationneeded` fires, as in libwebrtc. Before, the new
+  list waited for a restart the application had to ask for. turn-7.
 
 - **`close()` releases the engine's TURN allocations reliably** (RFC 8656 section 8, RFC 8489
   section 6.2.1). It sent one Refresh of LIFETIME 0 per established UDP allocation and never

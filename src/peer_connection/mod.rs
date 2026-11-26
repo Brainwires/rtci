@@ -4219,6 +4219,35 @@ impl RTCPeerConnection {
         configuration
             .set_the_configuration(Some(&self.configuration), self.local_description_was_set)?;
 
+        // RFC 9429 section 4.1.18: "Any changes to the STUN/TURN servers to use affect the
+        // next gathering phase. If an ICE gathering phase has already started or completed,
+        // the 'needs-ice-restart' bit mentioned in Section 3.5.1 will be set" (the same for a
+        // change of the ICE candidate policy). The bit is W3C's
+        // [[LocalIceCredentialsToReplace]] (what restartIce sets): the next createOffer
+        // restarts ICE, and the negotiation-needed flag is updated. A gathering phase has
+        // started once a local description was applied.
+        let servers_changed = {
+            let urls = |servers: &[crate::peer_connection::transport::RTCIceServer]| -> Result<Vec<ice::url::Url>> {
+                let mut urls = vec![];
+                for server in servers {
+                    urls.extend(server.urls()?);
+                }
+                Ok(urls)
+            };
+            let (old, new) = (
+                urls(&self.configuration.ice_servers)?,
+                urls(&configuration.ice_servers)?,
+            );
+            old.len() != new.len()
+                || old
+                    .iter()
+                    .zip(&new)
+                    .any(|(a, b)| !crate::peer_connection::servers_in_force::same_url(a, b))
+        };
+        let needs_ice_restart = self.local_description_was_set
+            && (servers_changed
+                || configuration.ice_transport_policy != self.configuration.ice_transport_policy);
+
         // Every check passed: the configuration is stored, and the ICE agent's transport
         // setting follows; candidates already added stay, and the new setting applies from
         // the next gathering (RFC 9429, Section 4.1.18).
@@ -4258,7 +4287,40 @@ impl RTCPeerConnection {
         self.streams.srflx.set_servers(&urls);
         self.streams.turn.set_servers(&urls);
         self.configuration.ice_servers = configuration.ice_servers;
+        if needs_ice_restart {
+            self.restart_ice();
+        }
 
+        Ok(())
+    }
+
+    /// New STUN / TURN servers for the connection, in use from now: `set_configuration` with
+    /// `ice_servers` in place of the configuration's list, and an ICE restart (W3C
+    /// "set the configuration": "If a script wants this to happen immediately, it should do
+    /// an ICE restart"; RFC 9429 section 4.1.18). The next `create_offer` restarts ICE; the
+    /// application then runs one offer / answer exchange. A fork convenience (FORK.md), for
+    /// rotating TURN credentials on a long session: a TURN server with new credentials is a
+    /// new allocation (RFC 8656 section 5), and the engine keeps the allocation in use
+    /// relaying until the restart has its own pair (RFC 8445 section 9), then releases it
+    /// (`OnTurnAllocationReleased`). A second allocation needs another 5-tuple (RFC 8656
+    /// section 2.2): an application that adds a UDP host candidate on a second local address
+    /// before applying the restart offer (or the answer to one) gets the new allocation from
+    /// there and no gap; with one socket the old allocation is released first
+    /// (`OnTurnAllocationReplacedInPlace`). The DTLS association and the data channels stay.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_configuration`].
+    pub fn rotate_ice_servers(
+        &mut self,
+        now: Instant,
+        ice_servers: Vec<crate::peer_connection::transport::RTCIceServer>,
+    ) -> Result<()> {
+        self.pipeline_context.observe(now);
+        let mut configuration = self.configuration.clone();
+        configuration.ice_servers = ice_servers;
+        self.set_configuration(configuration)?;
+        self.restart_ice();
         Ok(())
     }
 

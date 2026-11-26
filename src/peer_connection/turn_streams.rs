@@ -911,6 +911,17 @@ impl RTCPeerConnection {
                         self.streams.turn.links[index].url
                     );
                     self.streams.turn.links[index].state = LinkState::Failed;
+                    // W3C webrtc-pc 4.8.3: "If no host candidate can reach the server,
+                    // errorCode will be set to the value 701".
+                    let l = &self.streams.turn.links[index];
+                    let (transport, url) = (l.transport, l.url_string());
+                    self.report_engine_gathering_error(
+                        transport,
+                        None,
+                        url,
+                        crate::peer_connection::event::ICE_SERVER_UNREACHABLE,
+                        "no address of the server answered".to_owned(),
+                    );
                 }
             }
         }
@@ -1179,15 +1190,21 @@ impl RTCPeerConnection {
         let base = link.link_local;
         let code = err.code();
         let (url, carrier, transport) = (link.url_string(), link.carrier, link.transport);
-        if let Some(ErrorCode(437)) = code {
+        if let Some(ErrorCode(c)) = code {
             self.pipeline_context.event_outs.push_back(
                 crate::peer_connection::event::RTCPeerConnectionEvent::OnTurnRequestRejected {
-                    url,
+                    url: url.clone(),
                     relay: None,
                     method: "Allocate",
-                    error_code: 437,
+                    error_code: c,
                 },
             );
+            // W3C webrtc-pc 4.8.3: gathering from the server failed with its error code.
+            let reason = match &err {
+                turn::client::RequestError::Rejected(r) => r.reason.clone(),
+                other => format!("{other:?}"),
+            };
+            self.report_engine_gathering_error(transport, base, url, c, reason);
         }
         // RFC 8656 section 7.4, 437: "The client SHOULD pick another client transport address
         // and retry the Allocate request [...] The client SHOULD try three different client
@@ -1378,6 +1395,7 @@ impl RTCPeerConnection {
         let mut peers_ready = vec![];
         let mut failed_peers = vec![];
         let mut refused = vec![];
+        let mut rejected = vec![];
         for index in 0..self.streams.turn.links.len() {
             let link = &mut self.streams.turn.links[index];
             let id = match link.state {
@@ -1385,6 +1403,7 @@ impl RTCPeerConnection {
                 LinkState::OpenDtls | LinkState::OpenUdp => None,
                 _ => continue,
             };
+            let link_url = link.url_string();
             let Some(client) = link.client.as_mut() else {
                 continue;
             };
@@ -1401,14 +1420,36 @@ impl RTCPeerConnection {
                     }
                     turn::client::Event::AllocationLost(_, err) => {
                         debug!("TURN allocation on {} lost: {err:?}", link.url);
+                        rejected.push((link_url.clone(), link.relay, "Refresh", err.code()));
                         link.state = LinkState::Failed;
                         link.relay = None;
+                    }
+                    turn::client::Event::RefreshError(relay, err) => {
+                        debug!("TURN Refresh on {} refused: {err:?}", link.url);
+                        rejected.push((link_url.clone(), Some(relay), "Refresh", err.code()));
+                    }
+                    turn::client::Event::PermissionLost(relay, _, err) => {
+                        rejected.push((
+                            link_url.clone(),
+                            Some(relay),
+                            "CreatePermission",
+                            err.code(),
+                        ));
+                    }
+                    turn::client::Event::ChannelBindError(relay, _, err) => {
+                        rejected.push((link_url.clone(), Some(relay), "ChannelBind", err.code()));
                     }
                     turn::client::Event::CreatePermissionResponse(_, peer) => {
                         granted.push(peer.ip());
                     }
                     turn::client::Event::CreatePermissionError(_, err) => {
                         debug!("TURN permission refused: {err:?}");
+                        rejected.push((
+                            link_url.clone(),
+                            link.relay,
+                            "CreatePermission",
+                            err.code(),
+                        ));
                     }
                     turn::client::Event::DataIndicationOrChannelData(_, peer, data) => {
                         if let Some(relay) = link.relay {
@@ -1472,6 +1513,20 @@ impl RTCPeerConnection {
         }
         for (index, peer) in failed_peers {
             self.turn_tcp_connect_failed(now, index, peer);
+        }
+        // A request the server finally refused (the client retried a 401 / 438 already):
+        // the application hears of it, a REST credential that expired, say.
+        for (url, relay, method, code) in rejected {
+            if let Some(code) = code {
+                self.pipeline_context.event_outs.push_back(
+                    crate::peer_connection::event::RTCPeerConnectionEvent::OnTurnRequestRejected {
+                        url,
+                        relay,
+                        method,
+                        error_code: code.0,
+                    },
+                );
+            }
         }
         for (index, err) in refused {
             self.turn_allocate_refused(now, index, err);
@@ -1796,6 +1851,30 @@ impl RTCPeerConnection {
         self.release_retired_turn_links();
     }
 
+    /// Raises `icecandidateerror` (W3C webrtc-pc 4.8.3) for a server the engine gathers from
+    /// itself: `base`, the local address it used (left out when no candidate exposes it),
+    /// the server's URL, its STUN error code or 701.
+    pub(crate) fn report_engine_gathering_error(
+        &mut self,
+        transport: TransportId,
+        base: Option<SocketAddr>,
+        url: String,
+        error_code: u16,
+        error_text: String,
+    ) {
+        let error = crate::peer_connection::event::RTCPeerConnectionIceErrorEvent {
+            address: base.map(|b| b.ip().to_string()).unwrap_or_default(),
+            port: base.map_or(0, |b| b.port()),
+            url,
+            error_code,
+            error_text,
+            ice_transport: Some(self.ice_transport_of(transport).id),
+        };
+        if let Err(err) = self.report_ice_candidate_error(error) {
+            debug!("icecandidateerror not raised: {err}");
+        }
+    }
+
     /// Whether the relayed candidate of `link` is the local end of the path the agent of its
     /// transport sends data on, or still takes data on (the path an ICE restart replaced, for
     /// `RETIRED_MEDIA_PATH_GRACE` after the restart selected its pair).
@@ -1913,7 +1992,14 @@ impl RTCPeerConnection {
                     "{}: its 5-tuple ({base} to {server}) is needed by a new allocation: released first",
                     l.url
                 );
+                let url = l.url_string();
                 self.release_turn_link_in_place(i);
+                self.pipeline_context.event_outs.push_back(
+                    crate::peer_connection::event::RTCPeerConnectionEvent::OnTurnAllocationReplacedInPlace {
+                        url,
+                        local_address: base,
+                    },
+                );
             }
         }
         Some(base)
