@@ -86,7 +86,7 @@ fn aes_256_ctr_suites_encrypt_and_decrypt_the_registry_vectors() {
 
 #[test]
 fn cipher_suites_have_their_registry_values_and_names() {
-    // RFC 9605 section 8.1 (0x0001 to 0x0005) and the registry's 0x0006 to 0x0008.
+    // RFC 9605 section 8.1 (0x0001 to 0x0005) and RFC 10079 section 4.2 (0x0006 to 0x0008).
     let registry = [
         (0x0001, "AES_128_CTR_HMAC_SHA256_80"),
         (0x0002, "AES_128_CTR_HMAC_SHA256_64"),
@@ -112,6 +112,37 @@ fn cipher_suites_have_their_registry_values_and_names() {
         assert_eq!(CipherSuite::from_id(id), None);
     }
     assert!("aes_128_gcm_sha256_128".parse::<CipherSuite>().is_err());
+}
+
+/// RFC 10079 section 4.1, Tables 1 and 2: the registry's columns `Nh`, `Nka` (none for the GCM
+/// suites), `Nk`, `Nn` and `Nt` for every suite.
+#[test]
+fn cipher_suites_have_the_registry_columns_of_rfc10079() {
+    let registry: [(u16, usize, Option<usize>, usize, usize, usize); 8] = [
+        (0x0001, 32, Some(16), 48, 12, 10),
+        (0x0002, 32, Some(16), 48, 12, 8),
+        (0x0003, 32, Some(16), 48, 12, 4),
+        (0x0004, 32, None, 16, 12, 16),
+        (0x0005, 64, None, 32, 12, 16),
+        (0x0006, 64, Some(32), 96, 12, 10),
+        (0x0007, 64, Some(32), 96, 12, 8),
+        (0x0008, 64, Some(32), 96, 12, 4),
+    ];
+    assert_eq!(registry.len(), CipherSuite::ALL.len());
+    for (id, nh, nka, nk, nn, nt) in registry {
+        let suite = CipherSuite::from_id(id).unwrap();
+        assert_eq!(
+            (
+                suite.hash_len(),
+                suite.aes_ctr_key_len(),
+                suite.key_len(),
+                suite.nonce_len(),
+                suite.tag_len()
+            ),
+            (nh, nka, nk, nn, nt),
+            "{suite}"
+        );
+    }
 }
 
 #[test]

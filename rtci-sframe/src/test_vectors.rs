@@ -1,5 +1,6 @@
-//! Test vectors: RFC 9605 Appendix C.2 and C.3, and Appendix A.2 of draft-barnes-sframe-iana-256
-//! for the three AES-256-CTR suites.
+//! Test vectors: RFC 9605 Appendix C.2 and C.3, and RFC 10079 Appendix A.2 for the three
+//! AES-256-CTR suites. (RFC 10079 Appendix A.1 announces vectors of the AEAD on its own; the RFC
+//! and the JSON file it cites give none.)
 
 use crate::CipherSuite;
 
@@ -130,7 +131,8 @@ pub(crate) const RFC9605_C3: &[SFrameVector] = &[
     },
 ];
 
-/// draft-barnes-sframe-iana-256 Appendix A.2: the same inputs under the AES-256-CTR suites.
+/// RFC 10079 Appendix A.2: the same inputs under the AES-256-CTR suites (byte for byte the
+/// vectors of draft-barnes-sframe-iana-256 that were here before the RFC).
 pub(crate) const AES_256_CTR: &[SFrameVector] = &[
     SFrameVector {
         suite: CipherSuite::Aes256CtrHmacSha512_80,

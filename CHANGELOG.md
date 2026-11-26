@@ -381,6 +381,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `failed-cell-sdp/` in the artifacts; the matrix and gate show a pass after such a
   retry. "chrome profile: audio and video both ways" logs the same payload types and names such
   a switch as its failure (no retry there).
+- **RFC 10079, the updated SFrame cipher suites registry, is audited and its registry columns
+  tested** (`docs/conformance/audit/rfc10079.md`; `conf/sframe-3-rfc10079-cipher-suite-registry`;
+  test, documentation and audit only, no code change). `rtci-sframe` already had the AES-256-CTR
+  with HMAC-SHA512 suites 0x0006 to 0x0008 from the RFC's draft; their vectors are byte for byte
+  those of RFC 10079 Appendix A.2 (the RFC's Appendix A.1 gives no AEAD-only vectors). New test
+  `rtci-sframe/src/context_test.rs::cipher_suites_have_the_registry_columns_of_rfc10079` (`Nh`,
+  `Nka`, `Nk`, `Nn`, `Nt` of Tables 1 and 2 for all eight suites); the crate's references move
+  from draft-barnes-sframe-iana-256 to RFC 10079.
 
 ## [0.2.0] - 2026-11-26
 

@@ -6,10 +6,10 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## Arithmetic
 
-- MUST rows: 5751; `n/a` (the clause does not bind this engine): 664; rows that
-  apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5022 of 5087 (98.7 %).
-- Tested as the default (`tested`): 4990 of 5087 (98.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- MUST rows: 5757; `n/a` (the clause does not bind this engine): 664; rows that
+  apply: 5093.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5028 of 5093 (98.7 %).
+- Tested as the default (`tested`): 4996 of 5093 (98.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
 - Open (not tested in any form): 65: 49 untested, 12 partial, 2 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
