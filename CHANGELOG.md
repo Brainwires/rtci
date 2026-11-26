@@ -204,6 +204,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Test references corrected where a better test exists (RFC5888-9.2-3, RFC8834-4.1-5 / 4.8-4,
   seven RFC9335 rows named in prose) and two stale notes (RFC7798-4.4.3-1, RFC8261-6.1-4). Open
   MUST rows 8 -> 15. No engine change.
+- Second audit sweep (`conf/audit-3-tested-must-sweep-2`): the rows the first sweep let stand on a
+  test name, the "by construction" rows, and a sample of receive-side `tested` MUST rows of RFC
+  3264, 9429, 9143, 8445, 8839, 6347, 9147, 3711, 3550, 4585, 4588, 5764, 7714, 8888, 8831, 8832,
+  each test body read against the RFC sentence (about 108 rows). Five rows `tested` ->
+  `untested`: RFC9429-5.2.2-15 / 5.2.2-16 (a=rid and a=simulcast of a subsequent offer stay the
+  same: the cited test checks the receiver's SSRC binding) and RFC9429-5.5-1 / 5.5-2 / 5.5-3
+  (setLocalDescription's type checked against the signaling state: no test refuses a local
+  description in a wrong state). Citations corrected, verdict kept, for 19 rows, five of which
+  cited tests that no longer exist (TWCC-3.1-6, RFC2198-5-4, RFC8866-5.13-5, RFC8888-3.1-17,
+  RFC9628-6.1.1-4) and one whose test was hollow for the clause (RFC7587-7-4). No violation
+  found. Open MUST rows 15 -> 20. No engine change.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
