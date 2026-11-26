@@ -131,17 +131,19 @@ fn the_first_target_and_the_pacers_first_budget_are_the_configured_start() {
     }
 }
 
-/// The start-up probes are a multiple of the configured start (three and six times): a
-/// start of 2 Mbit/s probes with clusters of 11 250 and 22 500 octets, where 300 kbit/s
-/// probes with the smallest clusters (6 000 octets each), so probing runs from the start
-/// given, not from the default.
+/// The start-up probes are a multiple of the configured start (the first cluster, at three
+/// times the start, leaves within the first second): from a 2 Mbit/s start its cluster holds
+/// 6 Mbit/s for 15 ms, 11 250 octets, where from 300 kbit/s it is the smallest cluster (6 000
+/// octets), so probing runs from the start given, not from the default. (CI 45882447829:
+/// 11 700 octets of probe packets against 6 440, headers included; with the start ignored,
+/// 6 750 against 6 440.)
 #[test]
 fn the_start_up_probes_follow_the_configured_start() {
     let (_, _, default_probes) = first_second(&options(GCC_INITIAL_BITRATE, true));
     let (_, _, higher_probes) = first_second(&options(2_000_000.0, true));
     assert!(default_probes > 0, "the default start probes");
     assert!(
-        higher_probes >= 2 * default_probes,
+        higher_probes as f64 >= 1.5 * default_probes as f64,
         "probes from a 2 Mbit/s start: {higher_probes} octets, from 300 kbit/s: {default_probes}"
     );
 }
