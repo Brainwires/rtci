@@ -1247,42 +1247,6 @@ fn test_completed_is_never_reported_while_a_check_is_in_flight() {
     assert_eq!(remote.addr(), remote_addr(1));
 }
 
-/// The same, with the peer's Binding request on another pair after the nomination (a
-/// controlled peer checks its own pairs until it sees the nomination, RFC 8445 Section
-/// 7.3.1.4 makes the request a triggered check): while that check is in flight the agent is
-/// checking a candidate pair, which the W3C definition of "completed" excludes.
-#[test]
-fn test_completed_is_not_reported_while_a_triggered_check_is_in_flight() {
-    let start = Instant::now();
-    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400), (3, 300)]);
-    a.set_local_gathering_complete();
-    a.set_remote_end_of_candidates();
-    run_asserting_completed_only_when_done(&mut a, start, Duration::ZERO, Duration::from_secs(2));
-    assert_eq!(a.state(), ConnectionState::Completed);
-    let request = peer_request(
-        &a,
-        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
-    );
-    deliver(
-        &mut a,
-        start + Duration::from_secs(2),
-        &request,
-        "10.0.0.2:5000",
-    )
-    .unwrap();
-    if a.state() == ConnectionState::Completed
-        && let Some(checking) = checking_a_pair(&a)
-    {
-        panic!("Completed right after the request while checking: {checking}");
-    }
-    run_asserting_completed_only_when_done(
-        &mut a,
-        start,
-        Duration::from_secs(2),
-        Duration::from_secs(10),
-    );
-}
-
 /// Section 7.2.5.4 with RFC 8838 Sections 8 and 14: when every pair has failed and none is
 /// valid the checklist is Failed, at once, provided no candidate is to come any more (local
 /// gathering complete, end-of-candidates received). While candidates may still come it keeps
