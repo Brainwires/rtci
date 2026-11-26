@@ -134,6 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enabled), where the RFC says it "MUST result in an error". Audit row RFC9429-5.11-6 `tested` ->
   `partial` (it rounded up: no error was ever raised); listed under "Standing departures from a
   MUST". Open MUST rows 7 -> 8.
+- Audit sweep of `tested` MUST rows whose test does not exercise the clause
+  (`conf/audit-2-tested-must-sweep`): seven rows `tested` -> `untested`, the behaviour
+  implemented but no test showing it: RFC5506-4.1-1 and 4.2.3-1 (regular reports compound under
+  reduced-size RTCP), RFC5576-6.1-4 (one cname per ssrc-id), RFC5761-5.1.1-6 (RTCP on the RTP port
+  before the answer), RFC8859-4.3-2 (RTCP mux on every m= line of a 5-tuple), RFC8830-2-3 (one
+  msid-appdata per media description), RFC8834-10-5 (an unsignalled header extension ignored).
+  Test references corrected where a better test exists (RFC5888-9.2-3, RFC8834-4.1-5 / 4.8-4,
+  seven RFC9335 rows named in prose) and two stale notes (RFC7798-4.4.3-1, RFC8261-6.1-4). Open
+  MUST rows 8 -> 15. No engine change.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
