@@ -377,7 +377,9 @@ impl TransportConfig {
     }
 
     /// Sets this endpoint's SCTP port, the source port of what it sends (RFC 8841 5: its own
-    /// `a=sctp-port`). Defaults to 5000.
+    /// `a=sctp-port`). Defaults to 5000. Port 0 MUST NOT be used (RFC 9260 section 3.1):
+    /// [`Endpoint::connect`](crate::Endpoint::connect) refuses a configuration with it
+    /// (`ConnectError::ZeroSctpPort`), and an accepting endpoint answers on the INIT's ports.
     pub fn with_sctp_port(mut self, value: u16) -> Self {
         self.sctp_port = value;
         self
@@ -385,7 +387,8 @@ impl TransportConfig {
 
     /// Sets the peer's SCTP port, the destination port of the INIT this endpoint sends when it
     /// initiates (RFC 8841 5: the remote `a=sctp-port`). Defaults to 5000. An endpoint that
-    /// accepts an association answers on the ports of the INIT it received.
+    /// accepts an association answers on the ports of the INIT it received. Port 0 is refused
+    /// by [`Endpoint::connect`](crate::Endpoint::connect) (RFC 9260 section 3.1).
     pub fn with_remote_sctp_port(mut self, value: u16) -> Self {
         self.remote_sctp_port = value;
         self

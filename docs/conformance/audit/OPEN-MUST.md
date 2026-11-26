@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 664; rows that
   apply: 5093.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5027 of 5093 (98.7 %).
-- Tested as the default (`tested`): 4995 of 5093 (98.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 66: 49 untested, 13 partial, 2 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5032 of 5093 (98.8 %).
+- Tested as the default (`tested`): 5000 of 5093 (98.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 61: 46 untested, 11 partial, 2 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 49 | 0 |
-| C | partly implemented | 14 | 1 |
+| B | implemented, lacking a test that fails without it | 46 | 0 |
+| C | partly implemented | 12 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 98 | 26 |
+| all | | 93 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 65 rows, 58 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 60 rows, 53 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -43,7 +43,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
-| sctp | 6 | 2 | 0 | 0 | 0 | 8 | 8 | 0 | 0 |
+| sctp | 3 | 0 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 | turn | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 
@@ -123,9 +123,6 @@ Sorted by class, then owner, size and ID.
 | RFC5576-9-1 | `rfc5576.md` | The sender is prepared for receivers that ignore its source ... | untested | B | An rtc2rtc test whose answerer is handed the offer with every a=ssrc / a=ssrc-group line removed: media and RTX still bound (MID, RID, RRID) (audit-6 sweep) | S | rtp |
 | RFC8834-4.1-24 | `rfc8834.md` | Ignore unknown RTP header extensions | untested | B | As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep) | S | rtp |
 | RFC6525-5.2.7-1 | `rfc6525.md` | H1: a response marks its request acknowledged; the timer stops when ... | untested | B | A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep) | S | sctp |
-| RFC9260-3.2-8 | `rfc9260.md` | Chunk Length smaller than 4 or past the packet end is rejected | untested | B | A test that a chunk whose Chunk Length is below 4 refuses the packet (past the end is tested by a_partial_chunk_at_the_end_of_a_packet_is_dropped_alone) (audit-4 sweep) | S | sctp |
-| RFC9260-3.3.2.1.5-2 | `rfc9260.md` | Supported Address Types is accepted; a Host Name entry in it is ... | untested | B | A test of an INIT whose Supported Address Types lists the Host Name type (11): answered with an INIT ACK, the entry ignored (audit-4 sweep) | S | sctp |
-| RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |
 | WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | B | A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep) | S | sctp |
 | WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep) | S | sctp |
 | RFC6347-4.2.1-8 | `rfc6347.md` | Server uses the same version in HelloVerifyRequest as in ServerHello | partial | C | Coordinator decision between RFC 6347 4.2.1 MUST (same version as the ServerHello) and its SHOULD (1.0); with the MUST as default, a test that the HVR and the ServerHello carry the same version (audit-7 sweep6) | S | dtls-srtp |
@@ -139,8 +136,6 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | partial | C | As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3) | M | jsep |
 | RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
-| RFC9260-3.1-1 | `rfc9260.md` | Source port 0 is not used | partial | C | TransportConfig::with_sctp_port(0) refused (or never sent), with a test that no packet leaves with source port 0; the receive check is tested (audit-4 sweep) | S | sctp |
-| RFC9260-3.1-2 | `rfc9260.md` | Destination port 0 is not used | partial | C | TransportConfig::with_remote_sctp_port(0) refused (or never sent), with a test that no packet leaves with destination port 0 (audit-4 sweep) | S | sctp |
 | RFC8489-9.2.5-14 | `rfc8489.md` | A 400 without an integrity attribute is discarded as never received | violated | C | Discard an unsigned 400 to the anonymous first request too (rtci-turn credential.rs check_response, no session) so it retransmits and times out; tests with a 400 for the anonymous and the signed request (audit-5 sweep) | S | turn |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |

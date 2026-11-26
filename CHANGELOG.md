@@ -525,6 +525,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routed. The appdata now counts only under `with_msid_appdata_change_renews_track(true)` (RFC
   8830 section 3's model). Audit row RFC9429-5.8.2-22 `partial` -> `tested`.
 
+### Fixed
+
+- **SCTP: an ABORT with bytes that are no error cause is discarded** (`conf/sctp-25-must-sweep3-rows`;
+  RFC 9260 section 3.3.7, "If an endpoint receives an ABORT chunk with a format error [...], it
+  MUST silently discard it"). An ABORT whose value held one to three bytes, too few for an
+  error cause, was read as an ABORT without causes and ended the association. Its packet is now
+  dropped and the association goes on. Audit row RFC9260-3.3.7-5 `tested`.
+- **SCTP: port 0 is refused when an association is started** (RFC 9260 section 3.1, "The
+  Source Port Number 0 MUST NOT be used", likewise the destination port). `Endpoint::connect`
+  returns the new `ConnectError::ZeroSctpPort` (the enum is `#[non_exhaustive]`: additive) for
+  a `TransportConfig` whose `with_sctp_port` or `with_remote_sctp_port` is 0; it used to send
+  the INIT and everything after it with that port. The setters are unchanged; the peer
+  connection never configures 0 (`a=sctp-port:0` means no association, RFC 8841 section 9.3).
+  Audit rows RFC9260-3.1-1 / 3.1-2 `partial` -> `tested`.
+- Tests for RFC9260-3.2-8 (a Chunk Length below 4 is no chunk) and RFC9260-3.3.2.1.5-2 (a Host
+  Name type in Supported Address Types is ignored), both `untested` -> `tested`, each checked by
+  a mutation (`mut/sctp-25-1`). Open MUST rows 27 -> 22.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
