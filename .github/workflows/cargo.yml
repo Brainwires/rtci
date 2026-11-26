@@ -289,8 +289,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: No SRTP key is left in a dead stack frame
         run: cargo test --release --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
-      - name: The erased stack and the HMAC-SHA1 that keeps its state in the heap
-        run: cargo test --release --package rtci-crypto --lib --verbose -- erased_stack hmac_sha1
+      - name: HMAC-SHA1 computed in the keyed object, in an optimised build (RFC 2202, object reuse)
+        run: cargo test --release --package rtci-crypto --features crypto-aws-lc-rs --test hmac_sha1_vectors --verbose
 
   crypto_backend_baseline:
     timeout-minutes: 45

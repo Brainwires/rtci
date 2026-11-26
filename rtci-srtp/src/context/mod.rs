@@ -854,8 +854,8 @@ fn new_cipher(
     // Deriving the session keys and building their ciphers and MACs puts the master key, the
     // session keys, their AES schedules, GHASH keys and HMAC states into the stack frames of
     // the functions that do it, this crate's and the provider's. RFC 7714 section 13.1: "All
-    // keys MUST be properly erased when no longer needed". So all of it runs on a stack that
-    // is overwritten whole afterwards; what comes back is a box.
+    // keys MUST be properly erased when no longer needed". So all of it runs in frames below
+    // one that overwrites the stack under it afterwards; what comes back is a box.
     crypto::on_erased_stack(|| {
         build_cipher(profile, master_key, master_salt, crypto, rate, provider)
     })

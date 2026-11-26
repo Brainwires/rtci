@@ -18,8 +18,9 @@
 /// [`scrub_stack`](crate::scrub_stack) then overwrites the 32 KiB below this function's frame:
 /// what `work` and its callees left in their frames within that reach is gone. Building an
 /// SRTP context uses about 3 KiB of stack in an optimised build and up to 42 KiB in an
-/// unoptimised one (`rtci-srtp/tests/key_residue.rs` prints it and finds nothing left after
-/// either on x86-64 Linux); a provider that goes deeper than 32 KiB leaves what lies below.
+/// unoptimised one (`rtci-srtp/tests/key_residue.rs` prints it, and finds nothing left after
+/// either on x86-64 Linux and AArch64 macOS); a provider that goes deeper than 32 KiB leaves
+/// what lies below.
 /// What it does not cover: the value `work` returns (return pointers to key material, not key
 /// material), registers, and what `work` wrote elsewhere (the heap: use
 /// [`SecretVec`](crate::SecretVec) and zeroizing types there).

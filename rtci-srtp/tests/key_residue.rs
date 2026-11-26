@@ -636,8 +636,8 @@ mod residue_tests {
 
     /// What every test here requires of a measurement: nothing outside dead stack frames after
     /// the teardown, no master key schedule in the heap while the contexts are alive (Linux:
-    /// both need the process search), and nothing in dead stack frames after the steps that
-    /// run on the engine's erased stack whatever the build: building the contexts, and tearing
+    /// both need the process search), and nothing in dead stack frames after the steps whose
+    /// stack the engine overwrites, whatever the build: building the contexts, and tearing
     /// them down.
     fn check(inventory: &Inventory) {
         assert!(

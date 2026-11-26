@@ -276,8 +276,8 @@ fn aws_lc_leaves_no_key_in_freed_rust_memory() {
 
 /// With the ring provider no key is left in freed memory, for every profile: the keys the
 /// crate holds, the HMAC-SHA1 states of the AES-CM and NULL profiles' authentication keys
-/// (`rtci-crypto`'s HMAC-SHA1 over RustCrypto `sha1` for the ring provider, zeroized when a
-/// context is dropped; left in freed memory in 0.1.0) and ring's own AES-GCM key objects
+/// (RustCrypto `hmac` and `sha1`, which `rtci-crypto` uses for the ring provider, with their
+/// `zeroize` features: overwritten when a context is dropped; left in freed memory in 0.1.0) and ring's own AES-GCM key objects
 /// (`ring::aead::LessSafeKey`: the session key and every AES round key), which `rtci-crypto`
 /// keeps in an allocation of its own and overwrites after ring has dropped them (left in freed
 /// memory in 0.1.0, a known limit of that provider). Each is found live first: the needles are
