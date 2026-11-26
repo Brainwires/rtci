@@ -48,6 +48,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cc::probe::tests::a_cluster_that_left_no_packet_is_asked_for_again_at_once`;
   `tests/probe_start_order_rtc2rtc.rs` audio-first bounds tightened from 1.5 s / 2 s to
   0.5 s / 1 s.
+- **Probing: a media stream that starts mid-call is probed for**
+  (`conf/probe-4-a-new-media-flow-starts-the-probing`). A call that began with audio alone
+  spent its two start-up clusters on the audio, which shows nothing of the path (with a pacer
+  the cluster is the audio packets it releases, one every 20 ms; without one the audio has no
+  RTX stream to pad on). When video was added by renegotiation nothing asked for a cluster
+  again: a sender that follows its target is not application limited, and no other rule
+  applies to it. The video climbed at 8 % a second in every chain, the paced one too (460 to
+  490 kbit/s six seconds after it started). RFC 8836 section 2, requirement 4 asks that the
+  algorithm adapt "as quickly as possible to initial network conditions at the start of a
+  flow"; draft-ietf-rmcat-gcc-02 has no probing. Now the first packet of a media stream (not a
+  repair stream: RTX, FEC) that starts after the start-up sequence is over owes the sequence
+  again, at three and six times the target then, going on while the path carries what is
+  asked (`ProbeController::on_new_flow`, new). A stream that starts while the sequence is
+  still owed or under way (sources of one call starting milliseconds apart) changes nothing,
+  nor does a stream bound again under an SSRC that has sent. libwebrtc probes on a growth of
+  the allocated maximum instead (`ProbeController::OnMaxTotalAllocatedBitrate`); the effect
+  for an added video is the same. Tests: `rtci-interceptor/tests/probe_new_flow.rs`,
+  `cc::probe::tests::a_flow_that_starts_later_starts_the_probing_again`;
+  `tests/probe_start_order_rtc2rtc.rs` video-added bounds tightened from 3 s / 4 s to
+  1 s / 2 s.
 
 ### Testing
 
