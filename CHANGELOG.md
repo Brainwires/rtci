@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- webrtc-pc rows of audit sweep 4 (`conf/w3c-1-must-rows-sweep4`): tests for WEBRTC-4.4.1.4-7
+  (a local description of a type the signaling state does not take), 4.4.2-46 (the pranswer
+  branch of [[LastCreatedAnswer]]), 4.8.3-2 (the url of `icecandidateerror`), 5.5-3 (a DTLS
+  transport fails once), 6.1.2-3 (a received SCTP SHUTDOWN closes the transport), 6.2.8-1 (a
+  message on a closing channel is discarded), each `untested` -> `tested`, mutation-checked.
+  WEBRTC-5.6.4-2 / 5.6.4-9 stay `partial` and are listed under "Standing departures from a
+  MUST" in `docs/conformance.md`: ICE "failed" without the end-of-candidates indication, by the
+  timer that bounds checking (RFC 8863 section 5 permits it, W3C does not; Chrome does the
+  same). WEBRTC-5.2-33 `tested` -> `missing`: replaceTrack never refuses a track outside the
+  negotiated envelope, which webrtc-pc defines by examples the engine can see (a track whose
+  codec is not negotiated, an audio track of another channel count). Open MUST rows 57 -> 50.
 - **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
   owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
   initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
@@ -96,6 +107,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `track.msid-removal-ends-track`; RFC 8830 section 3.2.5), as it already did for the other RFC
   8830 track settings; the default and `Chrome` keep it off. Test
   `tests/jsep_msid.rs::the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid`.
+
+### Fixed
+
+- **W3C "validate an ICE server URL": a TURN username or credential that is not an RFC 8265
+  OpaqueString is refused** (`conf/w3c-1-must-rows-sweep4`; webrtc-pc 4.4.1.5, "fail to conform
+  to [RFC8489] section 14.3 and [RFC8265] section 4.1 ... throw an InvalidAccessError"; audit
+  row WEBRTC-4.4.1.5-23). In 0.2.0 the credential was checked for control characters only, so
+  one with a default-ignorable code point (U+00AD SOFT HYPHEN, say) was taken and failed later,
+  when the TURN key was derived; the username was checked for its length only. Both now go
+  through `stun::opaque::opaque_string`: `set_configuration` and the constructor refuse them with
+  `Error::InvalidAccessError`. A host or port of an ICE server url that does not parse is now
+  `Error::ErrInvalidUrl` (W3C SyntaxError, "hostAndPortURL is failure") instead of `Error::Url`.
+- `Error::dom_exception_name` names the errors it returned `None` for, as webrtc-pc does (audit
+  row WEBRTC-4.5.1-1 `partial` -> `tested`): `InvalidModificationError` for
+  `ErrModifyingCertificates`, `ErrModifyingBundlePolicy`, `ErrModifyingRTCPMuxPolicy`,
+  `ErrModifyingICECandidatePoolSize` (set the configuration) and `ErrSDPDoesNotMatchOffer` /
+  `ErrSDPDoesNotMatchAnswer` (setLocalDescription); `InvalidAccessError` for
+  `ErrCertificateExpired` and `ErrNoTurnCredentials`; `SyntaxError` for `ErrNoIceServerUrls`,
+  `ErrSchemeType`, `ErrInvalidUrl`, `ErrStunQuery`, `ErrInvalidQuery`, `ErrProtoType`;
+  `InvalidStateError` for `ErrNoRemoteDescription`; `OperationError` for
+  `ErrIceCandidateMediaSectionNotFound` and `ErrIceCandidateUsernameFragmentMismatch`
+  (addIceCandidate). Test `tests/jsep_w3c_errors.rs::every_refusal_of_the_configuration_and_the_candidates_has_its_w3c_name`.
 
 ## [0.2.0] - 2026-11-26
 
