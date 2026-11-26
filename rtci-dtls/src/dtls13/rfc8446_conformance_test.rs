@@ -675,6 +675,40 @@ fn a_server_hello_or_retry_request_with_wrong_fixed_fields_is_an_illegal_paramet
     Ok(())
 }
 
+/// RFC 8446 section 4.2.1: when the ServerHello carries "supported_versions", "clients MUST
+/// ignore the ServerHello.legacy_version value and MUST use only the "supported_versions"
+/// extension to determine the selected version". A ServerHello, or a HelloRetryRequest,
+/// whose legacy_version is not {254, 253} (RFC 9147 section 5.4 binds the sender) is taken by
+/// its supported_versions: no alert, and the handshake goes on.
+#[test]
+fn a_server_hello_or_retry_request_with_another_legacy_version_is_taken() -> Result<()> {
+    let client =
+        || client_builder().with_cipher_suites(vec![CipherSuiteId::Tls_Aes_128_Gcm_Sha256]);
+    for legacy_version in [0xfeff, 0x0303, 0x0000] {
+        // A ServerHello: the client waits for EncryptedExtensions.
+        let mut pair = Pair::new(client(), no_cookies())?;
+        let sent = client_answers(&mut pair, |answer| answer.legacy_version = legacy_version);
+        assert!(plaintext_alerts(&sent).is_empty(), "{legacy_version:#06x}");
+        assert!(!pair.client.is_connection_failed(&server_addr()));
+        assert_eq!(
+            pair.client_conn().state,
+            HandshakeState::ClientWaitEncryptedExtensions,
+            "{legacy_version:#06x}"
+        );
+        // A HelloRetryRequest: the client answers with its second ClientHello.
+        let mut pair = Pair::new(client(), server_builder())?;
+        let sent = client_answers(&mut pair, |answer| answer.legacy_version = legacy_version);
+        assert!(plaintext_alerts(&sent).is_empty(), "{legacy_version:#06x}");
+        assert!(!pair.client.is_connection_failed(&server_addr()));
+        assert_eq!(
+            first_message(&sent[0]).0,
+            messages::CLIENT_HELLO,
+            "{legacy_version:#06x}"
+        );
+    }
+    Ok(())
+}
+
 /// RFC 8446 section 4.1.4: a HelloRetryRequest that would change nothing in the ClientHello
 /// (no cookie, no group) is an illegal_parameter.
 #[test]
