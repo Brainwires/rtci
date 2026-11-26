@@ -99,8 +99,9 @@ pub struct RTCRtpSFrameEncryptor {
     context: SFrameContext,
     sframe_type: RTCSFrameType,
     key_id: Option<u64>,
-    /// The declared codec and number of spatial layers, when there is more than one.
-    layering: Option<(LayeredCodec, u8)>,
+    /// The declared codec and number of spatial layers, when there is more than one, and
+    /// whether the layers are independent (an "S" mode).
+    layering: Option<(LayeredCodec, u8, bool)>,
 }
 
 impl RTCRtpSFrameEncryptor {
@@ -189,7 +190,7 @@ impl RTCRtpSFrameEncryptor {
                 let codec = LayeredCodec::from_mime_type(mime_type).ok_or_else(|| {
                     Error::TypeError(format!("{mime_type} cannot carry scalability mode {mode}"))
                 })?;
-                Some((codec, mode.spatial_layers()))
+                Some((codec, mode.spatial_layers(), mode.is_simulcast()))
             }
             _ => None,
         };
@@ -200,6 +201,12 @@ impl RTCRtpSFrameEncryptor {
     /// (a VP9 superframe, an AV1 temporal unit): the unit split into its layers, lowest
     /// first, each encrypted on its own. Without a declared mode of several spatial layers
     /// the unit is one layer, encrypted as [`transform`](Self::transform) does.
+    ///
+    /// For an AV1 "S" mode (independent layers, simulcast in one stream) a key picture's
+    /// sequence header is repeated in front of every layer that has none (AV1 RTP section
+    /// 6.1, SHOULD), so that a forwarder can keep any one layer. With inter-layer prediction
+    /// ("L" modes) the base layer's is enough and nothing is added. A VP9 superframe is split
+    /// as it is: in VP9 each layer frame carries its own uncompressed header.
     ///
     /// # Errors
     ///
@@ -235,7 +242,7 @@ impl RTCRtpSFrameEncryptor {
         frame: &[u8],
         layer: &FrameDependencyTemplate,
     ) -> Result<Vec<u8>> {
-        if let Some((codec, spatial_layers)) = self.layering {
+        if let Some((codec, spatial_layers, _)) = self.layering {
             if layer.spatial_id >= spatial_layers {
                 return Err(Error::TypeError(format!(
                     "spatial layer {} of a mode of {spatial_layers}",
@@ -264,7 +271,7 @@ impl RTCRtpSFrameEncryptor {
     /// a payload is one layer.
     fn layers(&self, unit: &[u8]) -> Result<Vec<(u8, Bytes)>> {
         let whole = || vec![(0, Bytes::copy_from_slice(unit))];
-        let Some((codec, spatial_layers)) = self.layering else {
+        let Some((codec, spatial_layers, simulcast)) = self.layering else {
             return Ok(whole());
         };
         if self.sframe_type == RTCSFrameType::PerPacket {
@@ -282,11 +289,17 @@ impl RTCRtpSFrameEncryptor {
                 }
                 (0u8..).zip(frames).collect()
             }
-            LayeredCodec::Av1 => rtp::codec::av1::split_temporal_unit(&unit)
-                .map_err(unreadable)?
-                .into_iter()
-                .map(|layer| (layer.spatial_id, layer.data))
-                .collect(),
+            LayeredCodec::Av1 => {
+                let mut layers = rtp::codec::av1::split_temporal_unit(&unit).map_err(unreadable)?;
+                if simulcast {
+                    rtp::codec::av1::repeat_sequence_header_per_layer(&mut layers)
+                        .map_err(unreadable)?;
+                }
+                layers
+                    .into_iter()
+                    .map(|layer| (layer.spatial_id, layer.data))
+                    .collect()
+            }
         };
         Ok(if layers.is_empty() { whole() } else { layers })
     }
@@ -471,6 +484,29 @@ mod tests {
         per_packet.set_encryption_key(&[5u8; 16], 3)?;
         per_packet.set_scalability("video/VP9", mode("L2T1"))?;
         per_packet.transform(&superframe)?;
+        // AV1 S2T1: the key picture's sequence header leads each layer's plaintext.
+        let sequence_header = av1_obu(1, None, &[0x0a; 6]);
+        let s_unit = [
+            av1_obu(2, None, &[]),
+            sequence_header.clone(),
+            av1_obu(6, Some((0, 0)), &[0xc0; 10]),
+            av1_obu(6, Some((0, 1)), &[0xc1; 10]),
+        ]
+        .concat();
+        let mut s_mode = RTCRtpSFrameEncryptor::new(suite, RTCSFrameType::PerFrame)?;
+        s_mode.set_encryption_key(&[5u8; 16], 4)?;
+        s_mode.set_scalability("video/AV1", mode("S2T1"))?;
+        let mut s_decryptor = RTCRtpSFrameDecryptor::new(suite)?;
+        s_decryptor.add_decryption_key(&[5u8; 16], 4)?;
+        let layers = s_mode.transform_access_unit(&s_unit)?;
+        assert_eq!(layers.len(), 2);
+        let upper = s_decryptor
+            .transform(&layers[1].ciphertext)
+            .expect("layer 1 decrypts");
+        assert!(
+            upper.starts_with(&sequence_header),
+            "an S mode's upper layer starts with the sequence header"
+        );
         // VP8 carries no spatial layers.
         assert!(matches!(
             per_packet.set_scalability("video/VP8", mode("L2T1")),

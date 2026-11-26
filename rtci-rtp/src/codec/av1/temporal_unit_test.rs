@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use super::{Av1LayerData, split_temporal_unit};
+use super::{Av1LayerData, repeat_sequence_header_per_layer, split_temporal_unit};
 
 const TEMPORAL_DELIMITER: u8 = 2;
 const SEQUENCE_HEADER: u8 = 1;
@@ -111,4 +111,32 @@ fn units_that_cannot_be_split_are_refused() {
     short.truncate(s0.len() - 1);
     assert!(split_temporal_unit(&Bytes::from(short)).is_err());
     assert!(split_temporal_unit(&Bytes::from(vec![FRAME << 3 | 0b110])).is_err());
+}
+
+/// An S2T1 key picture: the sequence header leads layer 0 only; repeated, it leads layer 1 too,
+/// and a layer that has its own keeps it. A delta picture (no sequence header) is unchanged.
+#[test]
+fn an_s_mode_repeats_the_sequence_header_in_front_of_each_layer() {
+    let td = obu(TEMPORAL_DELIMITER, None, &[]);
+    let sh = obu(SEQUENCE_HEADER, None, &[0x11; 4]);
+    let s0 = obu(FRAME, Some((0, 0)), &[0xd0; 8]);
+    let s1 = obu(FRAME, Some((0, 1)), &[0xd1; 8]);
+    let unit = Bytes::from([td.clone(), sh.clone(), s0.clone(), s1.clone()].concat());
+    let mut layers = split_temporal_unit(&unit).unwrap();
+    repeat_sequence_header_per_layer(&mut layers).unwrap();
+    assert_eq!(
+        layers,
+        vec![
+            layer(0, 0, &[td.clone(), sh.clone(), s0.clone()]),
+            layer(1, 0, &[sh.clone(), s1.clone()])
+        ]
+    );
+    // Already there: unchanged.
+    let before = layers.clone();
+    repeat_sequence_header_per_layer(&mut layers).unwrap();
+    assert_eq!(layers, before);
+    let delta = Bytes::from([td.clone(), s0.clone(), s1.clone()].concat());
+    let mut layers = split_temporal_unit(&delta).unwrap();
+    repeat_sequence_header_per_layer(&mut layers).unwrap();
+    assert_eq!(layers, vec![layer(0, 0, &[td, s0]), layer(1, 0, &[s1])]);
 }

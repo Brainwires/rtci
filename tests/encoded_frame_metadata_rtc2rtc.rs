@@ -1725,6 +1725,10 @@ fn a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc(
         let next = world.now + Duration::from_millis(33);
         world.run_until(next)?;
     }
+    // Packets may still be queued after the last frame's 33 ms (run 45869567115 read 26 of
+    // the 32 without this): give the sender time to send them all.
+    let drained = world.now + Duration::from_secs(2);
+    world.run_until(drained)?;
 
     let mut received: Vec<rtci::rtp::Packet> = world.peers[1]
         .read_rtp
@@ -1734,10 +1738,26 @@ fn a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc(
         .collect();
     received.sort_by_key(|p| p.header.sequence_number);
     received.dedup_by_key(|p| p.header.sequence_number);
+    let on_wire = {
+        let mut seqs: Vec<u16> = world
+            .wire
+            .iter()
+            .filter(|h| h.ssrc == ssrc)
+            .map(|h| h.sequence_number)
+            .collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        seqs
+    };
     assert_eq!(
         received.len(),
         seq.wrapping_sub(700) as usize,
-        "every packet arrived"
+        "every packet arrived (received {:?}, on the wire {:?})",
+        received
+            .iter()
+            .map(|p| p.header.sequence_number)
+            .collect::<Vec<_>>(),
+        on_wire
     );
 
     // The forwarder (headers only, no key) and the end receiver (the key, and a replay

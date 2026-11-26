@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dependency Descriptor template. A receiver rebuilds the decoder's access unit from the layers it
   was forwarded with `sframe_transform::join_layer_frames`. New in rtci-rtp:
   `codec::vp9::split_superframe` / `join_superframe` (VP9 bitstream specification Annex B) and
-  `codec::av1::split_temporal_unit` (`Av1LayerData`). Temporal layers need no split: a temporal
-  layer is a whole picture. Tests, rtc to rtc
+  `codec::av1::split_temporal_unit` (`Av1LayerData`) and `codec::av1::repeat_sequence_header_per_layer`
+  (for an AV1 "S" mode `transform_access_unit` puts a key picture's sequence header in front of
+  every layer, AV1 RTP section 6.1, so a forwarder can keep any one layer). Temporal layers need
+  no split: a temporal layer is a whole picture. Tests, rtc to rtc
   (`tests/encoded_frame_metadata_rtc2rtc.rs::a_forwarder_drops_spatial_layer_1_of_sframe_encrypted_{vp9,av1}_{l2t1,l2t3}`):
   a forwarder with no key drops spatial layer 1 by the Dependency Descriptor and the receiver
   decrypts exactly the layer-0 access unit of every picture. RFC9605-6.1.3-1 `tested` (was
