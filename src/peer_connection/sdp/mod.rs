@@ -2087,10 +2087,14 @@ impl RTCPeerConnection {
                     let coding = &encoding.rtp_coding_parameters;
                     let (rid, listed) = if is_offer {
                         (
+                            // What the offer that negotiated the stream said, should an
+                            // answer have tightened it (RFC 9429 section 5.2.2).
                             SimulcastRid::from_restrictions(
                                 &coding.rid,
                                 SimulcastDirection::Send,
-                                &coding.rid_restrictions,
+                                sender
+                                    .offered_rid_restrictions(&coding.rid)
+                                    .unwrap_or(&coding.rid_restrictions),
                             ),
                             true,
                         )
