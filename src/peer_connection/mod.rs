@@ -6393,6 +6393,149 @@ mod tests {
         }
     }
 
+    /// RFC 9429 section 5.8.2: the `a=msid` lines of a remote description are stored
+    /// "ignoring any "appdata" field". A renegotiation whose only change is the appdata of a
+    /// section (the remote sender renamed its track) leaves the receiver as it was: the SSRCs
+    /// and codecs it learned from RTP (the RID header extension of the first packets) stay
+    /// bound, and its track keeps its id. Only `with_msid_appdata_change_renews_track` (RFC
+    /// 8830 section 3's model, off by default) makes a new appdata a new track.
+    #[test]
+    fn a_renegotiation_that_changes_only_the_msid_appdata_keeps_what_rtp_taught() {
+        use crate::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
+        use crate::rtp_transceiver::rtp_sender::{
+            RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+            RTCRtpHeaderExtensionCapability,
+        };
+
+        fn simulcast_pc() -> RTCPeerConnection {
+            let mut me = MediaEngine::default();
+            me.register_default_codecs().unwrap();
+            for uri in [
+                ::sdp::extmap::SDES_MID_URI,
+                ::sdp::extmap::SDES_RTP_STREAM_ID_URI,
+                ::sdp::extmap::SDES_REPAIR_RTP_STREAM_ID_URI,
+            ] {
+                me.register_header_extension(
+                    RTCRtpHeaderExtensionCapability {
+                        uri: uri.to_owned(),
+                    },
+                    RtpCodecKind::Video,
+                    None,
+                )
+                .unwrap();
+            }
+            RTCPeerConnectionBuilder::new()
+                .with_media_engine(me)
+                .build(Instant::now())
+                .unwrap()
+        }
+        let vp8 = || RTCRtpCodec {
+            mime_type: MIME_TYPE_VP8.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: String::new(),
+            rtcp_feedback: vec![],
+        };
+        let layers = [("low", 1001u32), ("mid", 1002), ("high", 1003)];
+
+        let mut offerer = simulcast_pc();
+        let mut answerer = simulcast_pc();
+        offerer
+            .add_track(MediaStreamTrack::new(
+                "stream-first".to_owned(),
+                "first".to_owned(),
+                "label-first".to_owned(),
+                RtpCodecKind::Video,
+                layers
+                    .iter()
+                    .map(|(rid, ssrc)| RTCRtpEncodingParameters {
+                        rtp_coding_parameters: RTCRtpCodingParameters {
+                            rid: (*rid).to_owned(),
+                            ssrc: Some(*ssrc),
+                            ..Default::default()
+                        },
+                        codec: vp8(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ))
+            .unwrap();
+        // An offer from `offerer`, its appdata `first` replaced by `appdata`, answered.
+        let negotiate =
+            |offerer: &mut RTCPeerConnection, answerer: &mut RTCPeerConnection, appdata: &str| {
+                let offer = offerer.create_offer(None).unwrap();
+                offerer
+                    .set_local_description(Instant::now(), offer.clone())
+                    .unwrap();
+                assert!(offer.sdp.contains("stream-first first"), "{}", offer.sdp);
+                let renamed = offer
+                    .sdp
+                    .replace("stream-first first", &format!("stream-first {appdata}"));
+                answerer
+                    .set_remote_description(
+                        Instant::now(),
+                        RTCSessionDescription::offer(renamed).unwrap(),
+                    )
+                    .unwrap();
+                let answer = answerer.create_answer(None).unwrap();
+                answerer
+                    .set_local_description(Instant::now(), answer.clone())
+                    .unwrap();
+                offerer
+                    .set_remote_description(Instant::now(), answer)
+                    .unwrap();
+            };
+        let receiver_of = |pc: &mut RTCPeerConnection| {
+            pc.rtp_transceivers[0]
+                .receiver_mut()
+                .as_mut()
+                .expect("a receiver")
+                .clone()
+        };
+
+        negotiate(&mut offerer, &mut answerer, "first");
+        // What `bind_by_rid` records when the first packet of each layer arrives.
+        {
+            let receiver = answerer.rtp_transceivers[0]
+                .receiver_mut()
+                .as_mut()
+                .expect("a receiver");
+            for (rid, ssrc) in layers {
+                receiver
+                    .get_coding_parameter_mut_by_rid(rid)
+                    .expect("coding for rid")
+                    .ssrc = Some(ssrc);
+                receiver
+                    .track_mut()
+                    .set_codec_ssrc_by_rid(vp8(), ssrc, &rid.to_owned());
+            }
+        }
+        let track_id = receiver_of(&mut answerer).track().track_id().clone();
+
+        negotiate(&mut offerer, &mut answerer, "renamed");
+        let receiver = receiver_of(&mut answerer);
+        assert_eq!(&track_id, receiver.track().track_id(), "the same track");
+        let mut lost = vec![];
+        for (rid, ssrc) in layers {
+            let coding = receiver
+                .get_coding_parameters()
+                .iter()
+                .find(|coding| coding.rid == rid);
+            if coding.and_then(|coding| coding.ssrc) != Some(ssrc) {
+                lost.push(format!("rid {rid}: SSRC {ssrc} unbound"));
+            }
+            if receiver
+                .track()
+                .codec(ssrc)
+                .map(|codec| codec.mime_type.as_str())
+                != Some(MIME_TYPE_VP8)
+            {
+                lost.push(format!("rid {rid}: codec of SSRC {ssrc} forgotten"));
+            }
+        }
+        assert!(lost.is_empty(), "a new appdata alone: {lost:#?}");
+    }
+
     // ---- Negotiation edge cases (JSEP RFC 8829, W3C addIceCandidate) ----
 
     fn remote(sdp_type: RTCSdpType, sdp: &str) -> RTCSessionDescription {
