@@ -63,7 +63,11 @@ WebRTC uses); every row names the code and the test that proves it. From
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
 browser or a deployed peer cannot interoperate with it by default. 5 MUST rows are open (0 untested,
 3 partial, 2 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
-is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
+is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Two defaults depart from a MUST by the
+owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a MUST"),
+each with the setting that gives the RFC form (the `StrictRfc` profile sets both): the H.264 de-interleaving order
+(**this default does not follow RFC 6184 section 7.2**: PDON does not start at 0, which would deliver a stream's DON 0
+last) and the RTP circuit breaker's packet size (RFC 8083 section 3). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/rtci/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
 
@@ -417,7 +421,8 @@ I-DATA, a TURN server and others).
 ## Behaviour profiles
 
 The defaults follow the RFCs, MUST and SHOULD alike, except where a named browser or deployed peer cannot
-interoperate with the RFC form. Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
+interoperate with the RFC form, and the standing departures listed in [docs/conformance.md](docs/conformance.md)
+(for example, the H.264 de-interleaving default does not follow RFC 6184 section 7.2). Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
 differently is a setting, and a `BehaviourProfile` sets all of them in one call:
 
 ```rust,no_run
@@ -450,8 +455,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `Chrome`: libwebrtc's choice wherever both do a thing and choose differently (a timer, an order, a form on the wire,
   a lenient or strict acceptance rule). Capabilities the engine has and Chrome lacks stay on (SCTP interleaving,
   RFC 8888 feedback, FlexFEC, ...), so its offers are a superset of Chrome's.
-- `StrictRfc`: the RFC form even where the default is the interoperable one; for conformance testing, it **does not
-  interoperate with browsers**.
+- `StrictRfc`: the RFC form even where the default is the interoperable one or a standing departure; for conformance
+  testing, it **does not interoperate with browsers**.
 - `Performance`: the defaults, with each behaviour where an RFC permits a cheaper form that does the same thing set to
   it (RTCP `T_rr_interval` 1 s, congestion control feedback and reports inside RFC 3550's 5%), each value with its
   measured saving and cost. It never turns a capability off or leaves what the RFCs permit.

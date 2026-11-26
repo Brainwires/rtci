@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round trip 100 ms, 453 ms off against 703 ms on), and no browser issues or offers a ticket.
   Audit row RFC5764-3-4: `partial` to `setting`.
 
+### Features
+
+- `MediaEngine::set_h264_literal_pdon(bool)` (default `false`; behaviour profile row
+  `h264.literal-pdon`, which `StrictRfc` sets to `true`), read by the new
+  `MediaEngine::h264_depacketizer(&codec)` and `RTCRtpReceiver::h264_depacketizer(&codec)`: with
+  `true` the H.264 depacketizer's de-interleaving buffer starts PDON at 0 as RFC 6184 section
+  7.2.2 is written (`H264DeinterleavingBuffer::with_literal_pdon`). Before, no profile reached
+  that form. `RTCRtpCodec::h264_depacketizer` is unchanged. Test
+  `tests/h264_deinterleaving_profile.rs`.
+
 ### Added
 
 - **`RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`**: how many RTP packets of a
@@ -97,6 +107,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/answer_added_formats_rtc2rtc.rs::a_format_the_answer_added_is_received_when_the_offerer_switches_to_it`,
   `endpoint.rs::a_format_this_endpoints_answer_added_is_received`,
   `interceptor_association_test.rs::a_format_only_the_answer_added_leaves_the_payload_type_to_the_section_that_negotiated_it`.
+
+### Documentation
+
+- **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
+  owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
+  initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
+  65536, the largest possible, and a stream numbered from DON 0 would have its first NAL unit
+  delivered last. The H.264 de-interleaving buffer instead takes PDON, until a NAL unit has been
+  passed on, as the DON just before the earliest one it holds. No erratum to RFC 6184 touches
+  section 7.2 as of 2026-11-26. Stated in the rustdoc of `H264DeinterleavingBuffer`,
+  `RTCRtpCodec::h264_depacketizer` and the new setting, in the README, and in a new
+  `docs/conformance.md` list, "Standing departures from a MUST", which also lists the RTP
+  circuit breaker's packet size (RFC 8083 section 3, audit row RFC8083-3-3, verdict unchanged).
 
 ### Testing
 

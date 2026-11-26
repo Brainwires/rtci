@@ -300,6 +300,25 @@ impl RTCRtpReceiver<'_> {
         internal::RTCRtpReceiverInternal::get_capabilities(kind, &self.peer_connection.media_engine)
     }
 
+    /// An H.264 depacketizer for `codec` (one of this receiver's negotiated codecs, whose
+    /// fmtp line is the sender's) built with the connection's de-interleaving settings
+    /// ([`MediaEngine::h264_depacketizer`]): under the `StrictRfc` behaviour profile an
+    /// interleaved stream's PDON starts at 0 as RFC 6184 section 7.2.2 has it; by default it
+    /// does not, a departure from that section ([`MediaEngine::set_h264_literal_pdon`]).
+    ///
+    /// [`MediaEngine::h264_depacketizer`]: crate::peer_connection::configuration::media_engine::MediaEngine::h264_depacketizer
+    /// [`MediaEngine::set_h264_literal_pdon`]: crate::peer_connection::configuration::media_engine::MediaEngine::set_h264_literal_pdon
+    ///
+    /// # Errors
+    ///
+    /// As [`RTCRtpCodec::h264_depacketizer`](crate::rtp_transceiver::rtp_sender::RTCRtpCodec::h264_depacketizer).
+    pub fn h264_depacketizer(
+        &self,
+        codec: &crate::rtp_transceiver::rtp_sender::RTCRtpCodec,
+    ) -> Result<rtp::codec::h264::H264Packet> {
+        self.peer_connection.media_engine.h264_depacketizer(codec)
+    }
+
     /// The jitter buffer target the application asked for (W3C `jitterBufferTarget`): `None`
     /// (null) leaves the delay to the engine.
     ///

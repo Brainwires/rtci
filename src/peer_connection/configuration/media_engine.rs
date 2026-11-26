@@ -556,6 +556,8 @@ pub struct MediaEngine {
     pub(crate) vp9_receiver_limits: bool,
     /// See [`MediaEngine::set_vp8_ignore_partitions`].
     pub(crate) vp8_ignore_partitions: bool,
+    /// See [`MediaEngine::set_h264_literal_pdon`].
+    pub(crate) h264_literal_pdon: bool,
 
     /// The RTCP CNAME of the connection this media engine belongs to (RFC 7022), set when the
     /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
@@ -610,6 +612,7 @@ impl MediaEngine {
             flexfec_with_retransmission: Default::default(),
             vp9_receiver_limits: Default::default(),
             vp8_ignore_partitions: Default::default(),
+            h264_literal_pdon: Default::default(),
             rtcp_cname: Default::default(),
             audio_packet_time: Default::default(),
             offered_header_extensions: Default::default(),
@@ -1348,6 +1351,7 @@ impl MediaEngine {
             flexfec_with_retransmission: self.flexfec_with_retransmission,
             vp9_receiver_limits: self.vp9_receiver_limits,
             vp8_ignore_partitions: self.vp8_ignore_partitions,
+            h264_literal_pdon: self.h264_literal_pdon,
             ..Default::default()
         }
     }
@@ -1398,6 +1402,35 @@ impl MediaEngine {
             return Ok(Box::new(vp8));
         }
         codec.payloader()
+    }
+
+    /// Whether the H.264 depacketizers this media engine builds ([`Self::h264_depacketizer`],
+    /// [`RTCRtpReceiver::h264_depacketizer`](crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver::h264_depacketizer))
+    /// start the de-interleaving buffer's PDON at 0, as RFC 6184 section 7.2.2 has it
+    /// ([`H264DeinterleavingBuffer::with_literal_pdon`](rtp::codec::h264::H264DeinterleavingBuffer::with_literal_pdon)).
+    /// `false` by default; the `StrictRfc` behaviour profile sets it.
+    ///
+    /// **The default does not follow RFC 6184 section 7.2.** Section 7.2.2: "Let PDON be a
+    /// variable that is initialized to 0 at the beginning of the RTP session"; a NAL unit whose
+    /// DON is not larger than PDON is at DON distance 65535 - PDON + DON + 1. With PDON 0 a
+    /// NAL unit whose DON is 0 is at distance 65536, the largest there is, so a stream numbered
+    /// from DON 0 (section 5.5 lets the first DON be any value) has its first NAL unit passed
+    /// on last. By default, until a NAL unit has been passed on, PDON is the DON just before
+    /// the earliest one buffered: the RFC's order for a stream that starts anywhere else, and
+    /// decoding order for one that starts at 0 (owner decision, 2026-11-26; no erratum to RFC
+    /// 6184 changes section 7.2 as of that date). `true` is the RFC's literal form.
+    pub fn set_h264_literal_pdon(&mut self, literal: bool) {
+        self.h264_literal_pdon = literal;
+    }
+
+    /// An H.264 depacketizer for `codec` ([`RTCRtpCodec::h264_depacketizer`]) with this media
+    /// engine's de-interleaving settings: the PDON follows [`Self::set_h264_literal_pdon`].
+    ///
+    /// # Errors
+    ///
+    /// As [`RTCRtpCodec::h264_depacketizer`].
+    pub fn h264_depacketizer(&self, codec: &RTCRtpCodec) -> Result<rtp::codec::h264::H264Packet> {
+        codec.h264_depacketizer_with(self.h264_literal_pdon)
     }
 
     /// Whether the default VP9 formats state this endpoint's receiver limits,
