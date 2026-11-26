@@ -819,3 +819,200 @@ fn an_initially_paused_stream_starts_paused_and_a_resume_plays_it() {
     pair.write_rtp();
     assert_eq!(pair.sent.len(), 2, "bound again: not paused again");
 }
+
+/// Section 7, Target SSRC: "For PAUSED, it MUST be the SSRC being paused ... For REFUSED, it
+/// MUST be the Target SSRC of the PAUSE or RESUME request that cannot change state." The
+/// sender has two streams; the second is paused and a request for it refused: PAUSED and
+/// REFUSED name the second stream, not the first (nor the requester), and the first plays on.
+#[test]
+fn paused_and_refused_target_the_stream_they_are_about() {
+    const OTHER: u32 = 0x0200;
+    let mut pair = Pair::new("pause nowait", "pause nowait");
+    pair.sender.bind_local_stream(&info(OTHER, "pause nowait"));
+    pair.receiver
+        .bind_remote_stream(&info(OTHER, "pause nowait"));
+    pair.receiver_handle.pause(OTHER);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(OTHER), Some(PauseState::Paused));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    let paused = pair.of(true, PauseResumeType::Paused);
+    assert_eq!(paused.len(), 1, "{paused:?}");
+    assert_eq!(paused[0].target_ssrc, OTHER);
+    assert_eq!(
+        pair.receiver_handle.remote_state(OTHER),
+        Some(RemotePauseState::Paused)
+    );
+
+    // A RESUME for the paused stream with another PauseID (section 8.3): refused.
+    let resume = pair.rtcp(RECEIVER, vec![PauseResumeEntry::resume(OTHER, 7)]);
+    pair.sender.handle_read(resume).unwrap();
+    pair.exchange();
+    let refused = pair.of(true, PauseResumeType::Refused);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].target_ssrc, OTHER);
+    assert_eq!(refused[0].pause_id, 0, "the current PauseID");
+    // A PAUSE for the playing first stream with another PauseID: refused, naming it.
+    let pause = pair.rtcp(RECEIVER, vec![PauseResumeEntry::pause(MEDIA, 9)]);
+    pair.sender.handle_read(pause).unwrap();
+    pair.exchange();
+    let refused = pair.of(true, PauseResumeType::Refused);
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert_eq!(refused[1].target_ssrc, MEDIA);
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert_eq!(pair.sender_handle.state(OTHER), Some(PauseState::Paused));
+}
+
+/// Section 7, Type: "4-15: Reserved for future use. FCI fields with these Type values SHALL be
+/// ignored on reception by receivers and MUST NOT be used by senders implementing this
+/// specification." Entries of types 4, 9 and 15 for the stream, alone and around a PAUSE in
+/// one message, at the sender and at the receiver: no state changes, nothing is answered
+/// (no REFUSED), and the PAUSE beside them still acts. Through all of it neither side writes
+/// an entry of a reserved type.
+#[test]
+fn reserved_types_are_ignored_on_reception_and_never_sent() {
+    let reserved = |typ: u8| PauseResumeEntry {
+        typ: PauseResumeType::Reserved(typ),
+        ..PauseResumeEntry::pause(MEDIA, 0)
+    };
+    let mut pair = Pair::new("pause", "pause");
+    pair.write_rtp();
+    let alone = pair.rtcp(RECEIVER, vec![reserved(4), reserved(9), reserved(15)]);
+    pair.sender.handle_read(alone).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert!(pair.messages.is_empty(), "{:?}", pair.messages);
+    pair.write_rtp();
+    assert_eq!(pair.sent.len(), 2, "still playing");
+
+    // Around a PAUSE with the current PauseID: the PAUSE is taken, the rest ignored.
+    let around = pair.rtcp(
+        RECEIVER,
+        vec![reserved(9), PauseResumeEntry::pause(MEDIA, 0), reserved(15)],
+    );
+    pair.sender.handle_read(around).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Pausing));
+    pair.advance(Duration::from_millis(1000));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+    assert!(pair.of(true, PauseResumeType::Refused).is_empty());
+
+    // At the receiver: a reserved type from the sender changes nothing it knows.
+    assert_eq!(
+        pair.receiver_handle.remote_state(MEDIA),
+        Some(RemotePauseState::Paused)
+    );
+    let to_receiver = pair.rtcp(MEDIA, vec![reserved(4), reserved(9)]);
+    pair.receiver.handle_read(to_receiver).unwrap();
+    while pair.receiver.poll_read().is_some() {}
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(
+        pair.receiver_handle.remote_state(MEDIA),
+        Some(RemotePauseState::Paused)
+    );
+    assert_eq!(pair.receiver_handle.remote_pause_id(MEDIA), Some(0));
+
+    pair.receiver_handle.resume(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert!(
+        pair.messages
+            .iter()
+            .all(|(_, entry)| !matches!(entry.typ, PauseResumeType::Reserved(_))),
+        "{:?}",
+        pair.messages
+    );
+}
+
+/// Section 8.3: "if it receives a RESUME request with a PauseID that is not the current
+/// PauseID while in paused or pausing state, the RTP stream sender SHALL schedule a REFUSED
+/// message". In pausing and in paused state, a RESUME with a later and with a past PauseID:
+/// one REFUSED each, with the current PauseID; the state does not change (pausing still
+/// pauses at the end of its hold-off period).
+#[test]
+fn a_resume_with_another_pause_id_is_refused_while_pausing_or_paused() {
+    let mut pair = Pair::new("pause", "pause");
+    let pause = pair.rtcp(RECEIVER, vec![PauseResumeEntry::pause(MEDIA, 0)]);
+    pair.sender.handle_read(pause).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Pausing));
+
+    let mut expected = 0;
+    for (state, other) in [
+        (PauseState::Pausing, 5u16),
+        (PauseState::Pausing, 0xffff),
+        (PauseState::Paused, 3),
+        (PauseState::Paused, 0x8000),
+    ] {
+        if state == PauseState::Paused
+            && pair.sender_handle.state(MEDIA) == Some(PauseState::Pausing)
+        {
+            pair.advance(Duration::from_millis(1000));
+        }
+        assert_eq!(pair.sender_handle.state(MEDIA), Some(state));
+        let resume = pair.rtcp(RECEIVER, vec![PauseResumeEntry::resume(MEDIA, other)]);
+        pair.sender.handle_read(resume).unwrap();
+        pair.exchange();
+        expected += 1;
+        let refused = pair.of(true, PauseResumeType::Refused);
+        assert_eq!(refused.len(), expected, "{state:?}, PauseID {other}");
+        assert_eq!(
+            refused[expected - 1].pause_id,
+            0,
+            "{state:?}, PauseID {other}"
+        );
+        assert_eq!(refused[expected - 1].target_ssrc, MEDIA);
+        assert_eq!(
+            pair.sender_handle.state(MEDIA),
+            Some(state),
+            "PauseID {other}"
+        );
+    }
+    // The current one still plays it.
+    let resume = pair.rtcp(RECEIVER, vec![PauseResumeEntry::resume(MEDIA, 0)]);
+    pair.sender.handle_read(resume).unwrap();
+    pair.exchange();
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert_eq!(pair.of(true, PauseResumeType::Refused).len(), expected);
+}
+
+/// Section 8.3: "If an RTP stream sender in playing state receives a RESUME containing either
+/// the current PauseID or a past PauseID, the received RESUME SHALL be ignored." Playing with
+/// current PauseID 0, then (after a pause and a resume) 1: a RESUME with the current one and
+/// with past ones is ignored: no REFUSED, still playing, and the PauseID is not moved (a PAUSE
+/// with the current one still pauses).
+#[test]
+fn a_resume_with_the_current_or_a_past_pause_id_to_a_playing_stream_is_ignored() {
+    let mut pair = Pair::new("pause nowait", "pause nowait");
+    pair.write_rtp();
+    let resume = pair.rtcp(RECEIVER, vec![PauseResumeEntry::resume(MEDIA, 0)]);
+    pair.sender.handle_read(resume).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert!(pair.messages.is_empty(), "{:?}", pair.messages);
+
+    // PauseID 1 after a pause and a resume.
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    pair.receiver_handle.resume(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    let from_sender = |pair: &Pair| pair.messages.iter().filter(|(sender, _)| *sender).count();
+    let before = from_sender(&pair);
+    for pause_id in [1u16, 0, 0x8001] {
+        let resume = pair.rtcp(RECEIVER, vec![PauseResumeEntry::resume(MEDIA, pause_id)]);
+        pair.sender.handle_read(resume).unwrap();
+        pair.advance(Duration::from_millis(1));
+        assert_eq!(
+            from_sender(&pair),
+            before,
+            "PauseID {pause_id}: nothing answered"
+        );
+        assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    }
+    pair.write_rtp();
+    assert_eq!(pair.sent, vec![1000, 1001]);
+    let pause = pair.rtcp(RECEIVER, vec![PauseResumeEntry::pause(MEDIA, 1)]);
+    pair.sender.handle_read(pause).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+}
