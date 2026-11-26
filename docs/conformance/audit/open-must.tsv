@@ -141,5 +141,7 @@ RFC3611-4.3-5	B	S	rtp	A test reading a Packet Receipt Times block with its rsvd 
 RFC3611-4.6-5	B	S	rtp	A test reading a Statistics Summary block with its rsvd bits set (ignored) (audit-5 sweep)
 RFC3611-4.7-3	B	S	rtp	A test reading a VoIP Metrics block with its reserved octet set (ignored) (audit-5 sweep)
 RFC5246-7.4.1.3-3	B	S	dtls-srtp	A test that a DTLS 1.2 client handed a ServerHello with a suite it did not offer aborts (audit-5 sweep)
-
 WEBRTC-5.2-33	D	M	media	replaceTrack refuses nothing with InvalidModificationError: refuse, while sending, a track whose codings name no codec the sender negotiated, or an audio track whose channel count is not the negotiated codec's (coordinator decision first: it changes replace_track, whose PT rewrite applications may rely on) (w3c-1)
+WEBRTC-5.5-3	B	S	dtls	A test that drives a second DTLS error into a failed transport (the replay of the handshake does not: mutation 45885474628 survived) (w3c-1)
+WEBRTC-6.1.2-3	F	S	sctp	a_received_shutdown_closes_the_sctp_transport exists; run a mutation of the `ended` arm of SctpTransport::state (the `lost` one survived, 45885474628) (w3c-1)
+WEBRTC-6.2.8-1	B	S	sctp	a_message_on_a_closing_channel_is_discarded passes but the is_open guard mutation survived (45885474628): find what drops the message and mutate that, or reach the guard (w3c-1)

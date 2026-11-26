@@ -11,15 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - webrtc-pc rows of audit sweep 4 (`conf/w3c-1-must-rows-sweep4`): tests for WEBRTC-4.4.1.4-7
   (a local description of a type the signaling state does not take), 4.4.2-46 (the pranswer
-  branch of [[LastCreatedAnswer]]), 4.8.3-2 (the url of `icecandidateerror`), 5.5-3 (a DTLS
-  transport fails once), 6.1.2-3 (a received SCTP SHUTDOWN closes the transport), 6.2.8-1 (a
-  message on a closing channel is discarded), each `untested` -> `tested`, mutation-checked.
+  branch of [[LastCreatedAnswer]]), 4.8.3-2 (the url of `icecandidateerror`), each `untested`
+  -> `tested`, mutation-checked. Tests for 5.5-3 (a DTLS transport fails once), 6.1.2-3 (a
+  received SCTP SHUTDOWN closes the transport) and 6.2.8-1 (a message on a closing channel is
+  discarded) pass, but the mutation of each clause's code survived, so those rows stay
+  `untested` (notes say why).
   WEBRTC-5.6.4-2 / 5.6.4-9 stay `partial` and are listed under "Standing departures from a
   MUST" in `docs/conformance.md`: ICE "failed" without the end-of-candidates indication, by the
   timer that bounds checking (RFC 8863 section 5 permits it, W3C does not; Chrome does the
   same). WEBRTC-5.2-33 `tested` -> `missing`: replaceTrack never refuses a track outside the
   negotiated envelope, which webrtc-pc defines by examples the engine can see (a track whose
-  codec is not negotiated, an audio track of another channel count). Open MUST rows 57 -> 50.
+  codec is not negotiated, an audio track of another channel count). Open MUST rows 57 -> 53.
 - **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
   owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
   initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =

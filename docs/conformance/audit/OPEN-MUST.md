@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5038 of 5088 (99.0 %).
-- Tested as the default (`tested`): 5006 of 5088 (98.4 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 50: 36 untested, 8 partial, 4 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5035 of 5088 (99.0 %).
+- Tested as the default (`tested`): 5003 of 5088 (98.3 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 53: 39 untested, 8 partial, 4 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 36 | 2 |
+| B | implemented, lacking a test that fails without it | 38 | 2 |
 | C | partly implemented | 10 | 1 |
 | D | not implemented | 3 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
-| F | stale note: already tested on this tree | 0 | 0 |
-| all | | 82 | 28 |
+| F | stale note: already tested on this tree | 1 | 0 |
+| all | | 85 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 49 rows, 44 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 52 rows, 47 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -36,6 +36,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
+| dtls | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | dtls-srtp | 11 | 1 | 0 | 0 | 0 | 12 | 12 | 0 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 0 | 3 | 1 | 0 | 0 | 4 | 1 | 3 | 0 |
@@ -45,7 +46,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 11 | 0 | 0 | 0 | 0 | 11 | 11 | 0 | 0 |
-| sctp | 3 | 2 | 0 | 0 | 0 | 5 | 5 | 0 | 0 |
+| sctp | 4 | 2 | 0 | 0 | 1 | 7 | 7 | 0 | 0 |
 | sdp | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
 | turn | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -82,6 +83,7 @@ Sorted by class, then owner, size and ID.
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | setting | A | `setting` (measured, rtcpbudget-4): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; capacity instrument `tests/capacity_instrument.rs::measure`, chain `every` against `paced`, 1000 seeds: oldest picture 8.00 -> 8.53 s, target under the cap 209.8 -> 185.8 kbit/s, recovery over 20 s 81 -> 244 calls, 15 gate and 33 star statistics worse (RTCP 122 -> 149 kbit/s open); the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
+| WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that drives a second DTLS error into a failed transport (the replay of the handshake does not: mutation 45885474628 survived) (w3c-1) | S | dtls |
 | RFC5246-7.4.1.3-3 | `rfc5246.md` | Client rejects a ServerHello cipher suite it did not offer | untested | B | A test that a DTLS 1.2 client handed a ServerHello with a suite it did not offer aborts (audit-5 sweep) | S | dtls-srtp |
 | RFC8446-4.1.2-16 | `rfc8446.md` | Servers MUST ignore unrecognized extensions. | untested | B | A test that the DTLS 1.3 server answers a ClientHello carrying an unknown extension (e.g. 0x7777) with a ServerHello (audit-5 sweep) | S | dtls-srtp |
 | RFC8446-4.1.4-12 | `rfc8446.md` | The value of selected_version in the HelloRetryRequest ... | untested | B | A test that a ServerHello whose selected_version differs from the HelloRetryRequest's is refused with illegal_parameter (audit-5 sweep) | S | dtls-srtp |
@@ -117,6 +119,7 @@ Sorted by class, then owner, size and ID.
 | RFC9260-3.2-8 | `rfc9260.md` | Chunk Length smaller than 4 or past the packet end is rejected | untested | B | A test that a chunk whose Chunk Length is below 4 refuses the packet (past the end is tested by a_partial_chunk_at_the_end_of_a_packet_is_dropped_alone) (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.2.1.5-2 | `rfc9260.md` | Supported Address Types is accepted; a Host Name entry in it is ... | untested | B | A test of an INIT whose Supported Address Types lists the Host Name type (11): answered with an INIT ACK, the entry ignored (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |
+| WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | a_message_on_a_closing_channel_is_discarded passes but the is_open guard mutation survived (45885474628): find what drops the message and mutate that, or reach the guard (w3c-1) | S | sctp |
 | RFC5576-6.1-4 | `rfc5576.md` | cname appears at most once per ssrc-id in a media stream | untested | B | A test counting cname lines per ssrc-id in a generated description (audit-2 sweep) | S | sdp |
 | RFC8446-4.2.1-12 | `rfc8446.md` | If this extension is present, clients MUST ignore the ... | violated | C | conf/dtls-29-server-hello-legacy-version-ignored: on_server_hello no longer checks legacy_version; the wrong-fixed-fields test then takes it (audit-5 sweep) | S | dtls-srtp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
@@ -138,6 +141,7 @@ Sorted by class, then owner, size and ID.
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC9429-4.1.9-2 | `rfc9429.md` | Each answer line follows the answer rules of its defining spec | conflict | E | `conflict`: umbrella of 5.3.1-6 | S | jsep (running) |
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | F | a_received_shutdown_closes_the_sctp_transport exists; run a mutation of the `ended` arm of SctpTransport::state (the `lost` one survived, 45885474628) (w3c-1) | S | sctp |
 
 ## Closed since classified
 
