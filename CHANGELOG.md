@@ -1963,8 +1963,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment (rustc 1.99.1, run 45714962513) found, after the contexts were dropped, the
   SRTCP encryption key and its AES round keys, the SRTCP HMAC-SHA1 states and the master key
   (all ten profiles, ring; 120 key forms), in that thread's stack only, none in the heap; the
-  same test found nothing in 40 runs on GitHub's Ubuntu runners with rustc 1.99.1 and 1.100.0,
-  so it depends on the compiler's stack layout (`conf/zeroize-2b-claim-matches-proof`). The
+  same sources fail in 20 of 20 runs inside the test-environment image and in 0 of 40 directly
+  on GitHub's Ubuntu runners (rustc 1.99.1 and 1.100.0): environment-dependent, the reason not
+  identified (`conf/zeroize-2b-claim-matches-proof`). The
   copies stay until later calls on that thread overwrite them, or, after the thread ends,
   until its cached stack is given to another thread. An application can build contexts on a
   long-lived thread or call `crypto::scrub_stack()` from the frame that built them (it reaches

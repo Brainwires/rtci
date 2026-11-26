@@ -77,9 +77,12 @@ What remains with ring:
   (with the AES-GCM profiles also one or two SRTP round keys), 120 key forms, all in that
   thread's stack below its live frame, none in the heap or any other mapping. They are what
   building the contexts left (deriving the SRTCP keys is the last step of building a cipher).
-  It depends on the compiler: the same test with the same sources found nothing in 40 runs on
-  GitHub's Ubuntu runners, 20 with rustc 1.99.1 and 20 with 1.100.0 (runs 45726148580,
-  45726156299). The process-memory tests therefore assert on everything but those dead frames
+  It depends on the environment, for a reason not identified: inside the test-environment image
+  (`scripts/test-env/Dockerfile`, rustc 1.99.1) the same sources failed in 20 of 20 runs
+  (45727898239), directly on GitHub's Ubuntu runners in 0 of 40, with rustc 1.99.1 and with
+  1.100.0 (45726148580, 45726156299). With this branch's tests, inside the image every run
+  reports 114 key forms in those dead frames (45727888207); on GitHub's runners 0, except once
+  146 in 40 test runs with rustc 1.100.0 (45727843950). The process-memory tests therefore assert on everything but those dead frames
   and print what they find there (`STACK RESIDUE`); the ignored test
   `known_limit_with_ring_building_an_srtp_context_leaves_keys_in_dead_stack_frames` (and its
   AWS-LC twin) is the limit as a test. A
