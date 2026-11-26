@@ -46,8 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the video's first packet, 10 ms in) and
   `video_added_to_an_audio_call_is_probed_for_with_its_first_packet`,
   `cc::probe::tests::a_cluster_that_left_no_packet_is_asked_for_again_at_once`;
-  `tests/probe_start_order_rtc2rtc.rs` audio-first bounds tightened from 1.5 s / 2 s to
-  0.5 s / 1 s.
+  `tests/probe_start_order_rtc2rtc.rs`: audio first (every chain) and video first now held to
+  1 Mbit/s within 0.55 s and the maximum within 0.7 s (measured 0.27-0.37 s and 0.47 s in
+  every chain, order and seed; were 1.5 s / 2 s for audio first without a pacer, 1 s / 2 s
+  otherwise).
 
 ### Testing
 

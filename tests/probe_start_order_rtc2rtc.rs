@@ -142,9 +142,11 @@ fn audio_first(chain: Chain) -> Vec<(String, Setup)> {
 /// 1 Mbit/s, 0.47 s to the maximum). Was 1.07 s with probe-1 alone (its result was waited for,
 /// `PROBE_RESULT_TIMEOUT`, 1 s: hosted run 45859028514) and never within the 5 s on 0.2.0
 /// (45859034615: one cluster, no padding, 447 kbit/s at the end).
-const AUDIO_FIRST_1M_BY: Duration = Duration::from_millis(500);
-/// And to the maximum.
-const AUDIO_FIRST_MAX_BY: Duration = Duration::from_secs(1);
+const AUDIO_FIRST_1M_BY: Duration = Duration::from_millis(550);
+/// And to the maximum. Both bounds are about one and a half times what every chain, start
+/// order and seed here measured with the fix (0.27-0.37 s and 0.47 s: hosted runs 45863864444
+/// and 45863858346), and hold the paced and video-first calls too.
+const AUDIO_FIRST_MAX_BY: Duration = Duration::from_millis(700);
 
 /// The default interceptors with the pacer's slot passed through: the first audio packet
 /// asks for the first start-up cluster before the video has sent, and nothing can be padded
@@ -181,8 +183,8 @@ fn audio_before_video_still_probes_with_the_pacer() -> Result<()> {
     check(
         audio_first(Chain::Default),
         open_link_run,
-        Duration::from_secs(1),
-        Duration::from_secs(2),
+        AUDIO_FIRST_1M_BY,
+        AUDIO_FIRST_MAX_BY,
     )
 }
 
@@ -202,12 +204,7 @@ fn video_before_audio_probes_in_every_chain() -> Result<()> {
             runs.push(("video first by 10 ms".to_owned(), setup));
         }
     }
-    check(
-        runs,
-        open_link_run,
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-    )
+    check(runs, open_link_run, AUDIO_FIRST_1M_BY, AUDIO_FIRST_MAX_BY)
 }
 
 /// Three seconds of audio alone, then both cameras on by renegotiation (the caller's, then the
