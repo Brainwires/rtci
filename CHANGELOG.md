@@ -324,6 +324,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads the PPID of each DATA chunk a fragmented message is sent in (a receiver of this crate
   takes the first fragment's, so the receive-side test could not show it). Proved by a mutation
   writing it in the first fragment only. Test only, no engine change.
+- RFC 3264 section 8.1 ("New media streams are created by new additional media descriptions
+  below the existing ones"), audit row RFC3264-8.1-1, which audit sweep 6 downgraded,
+  `untested` -> `tested` (`conf/jsep-84-new-sections-below-the-existing`):
+  `tests/renegotiation_duplicate_mid.rs::a_new_media_description_goes_below_the_existing_ones`
+  asserts the order of the m= sections of a re-offer from each side. Proved by a mutation
+  placing a new section first. Test only, no engine change.
 
 ### Testing
 
