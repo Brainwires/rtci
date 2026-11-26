@@ -36,6 +36,14 @@
 //! [`ReceivedRateBound`]: crate::ReceivedRateBound
 //! [`configure_congestion_control`]: https://docs.rs/rtc
 //!
+//! # In a peer connection: use the default interceptors' handle instead
+//!
+//! The `rtci` peer connection's default interceptors already run this estimator; the
+//! supported way to read their target is `register_default_interceptors_with_handles` and
+//! `DefaultInterceptorHandles::congestion_control` ([`CongestionControlHandle::target_bitrate`]).
+//! [`GccInterceptorBuilder`]'s documentation (this module is not public, so that is where
+//! users read it) says what replacing the default controller with a [`GccInterceptor`] loses.
+//!
 //! # Chain position
 //!
 //! GCC must sit **nearer the wire** than [`TwccSenderInterceptor`] so that `handle_write`
@@ -61,26 +69,14 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use rtci_interceptor::{
-//!     GccInterceptorBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
-//!     TwccSenderBuilder,
-//! };
-//!
-//! let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
-//! let chain = Registry::new()
-//!     .with(Slot::CongestionControl, PassThroughInterceptor::new().with(gcc_builder.build()))
-//!     .with(Slot::TwccSender, TwccSenderBuilder::new().build())
-//!     .build();
-//!
-//! // In the application polling loop:
-//! if let Some(bps) = gcc_handle.target_bitrate_bps() {
-//!     encoder.set_bitrate(bps);
-//! }
-//! ```
+//! [`GccInterceptorBuilder::build`] returns a factory: a closure that takes the inner
+//! interceptor and returns the [`GccInterceptor`] around it. [`Interceptor::with`] applies it
+//! (`inner.with(builder.build())`), and the result goes in a slot like any interceptor. The
+//! compiled example is on [`GccInterceptorBuilder`].
 //!
 //! [`TwccSenderInterceptor`]: crate::TwccSenderInterceptor
 //! [`TwccReceiverInterceptor`]: crate::TwccReceiverInterceptor
+//! [`Interceptor::with`]: crate::Interceptor::with
 
 use crate::cc::estimator::EstimatorStats;
 use crate::cc::interceptor::{
@@ -163,9 +159,55 @@ impl GccHandle {
     }
 }
 
-/// Builder for [`GccInterceptor`].
+/// Builder for [`GccInterceptor`], for a chain assembled by hand.
 ///
-/// Create with [`GccInterceptorBuilder::new`], which returns `(builder, handle)`.
+/// Create with [`GccInterceptorBuilder::new`], which returns `(builder, handle)`;
+/// [`build`](Self::build) returns a factory closure for [`Interceptor::with`].
+///
+/// # In a peer connection: use the default interceptors' handle instead
+///
+/// The `rtci` peer connection's default interceptors already run this estimator ([`Gcc`] in a
+/// [`CongestionControlInterceptor`], one per transport, with the pacer, the circuit breaker
+/// and the behaviour profile's settings). **The supported way to read the target there** is
+/// `rtci`'s `register_default_interceptors_with_handles` (or
+/// `register_default_interceptors_with_options`), which returns `DefaultInterceptorHandles`:
+/// `congestion_control` ([`CongestionControlHandle::target_bitrate`], the first transport's
+/// target; every transport's in `transports`), and per encoding, with the pacer's pause as 0,
+/// `RTCRtpSender::target_bitrates`.
+///
+/// A [`GccInterceptor`] put in [`Slot::CongestionControl`](crate::Slot::CongestionControl)
+/// of that registry replaces the controller registered there (a slot holds one interceptor):
+/// it is then one estimator for every transport, without the circuit breaker link or the
+/// profile's settings (only what this builder sets), and
+/// `DefaultInterceptorHandles::congestion_control` no longer reads a controller in the chain.
+///
+/// # In a chain assembled by hand
+///
+/// Put it in [`Slot::CongestionControl`](crate::Slot::CongestionControl), nearer the wire
+/// than [`Slot::TwccSender`](crate::Slot::TwccSender), around a
+/// [`PassThroughInterceptor`](crate::PassThroughInterceptor) (never a
+/// [`NoopInterceptor`](crate::NoopInterceptor), the chain's RTCP terminus):
+///
+/// ```
+/// use rtci_interceptor::{
+///     GccInterceptorBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
+///     TwccSenderBuilder,
+/// };
+///
+/// let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
+/// let gcc = PassThroughInterceptor::new().with(gcc_builder.with_max_bitrate(1_500_000).build());
+/// let chain = Registry::new()
+///     .with(Slot::CongestionControl, gcc)
+///     .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+///     .build();
+///
+/// // In the application's polling loop: `None` until the first transport-wide feedback.
+/// if let Some(bits_per_second) = gcc_handle.target_bitrate_bps() {
+///     // the encoder's target
+///     # let _ = bits_per_second;
+/// }
+/// # let _ = chain;
+/// ```
 pub struct GccInterceptorBuilder<P> {
     min_bitrate_bps: u32,
     max_bitrate_bps: u32,
@@ -251,7 +293,11 @@ impl<P> GccInterceptorBuilder<P> {
         self
     }
 
-    /// Build the interceptor factory closure.
+    /// The interceptor factory: a closure that takes the inner interceptor `P` (a
+    /// [`PassThroughInterceptor`](crate::PassThroughInterceptor), never a
+    /// [`NoopInterceptor`](crate::NoopInterceptor)) and returns the [`GccInterceptor`] around
+    /// it. Apply it with [`Interceptor::with`]:
+    /// `PassThroughInterceptor::new().with(builder.build())`.
     pub fn build(self) -> impl FnOnce(P) -> GccInterceptor<P> {
         move |inner| {
             let (min, max) = (

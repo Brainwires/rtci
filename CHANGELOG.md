@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **The supported way to read the congestion controller's target, and the GCC builder's
+  factory** (`conf/docs-2-gcc-builder-supported-path`; docs only, no code change). In a peer
+  connection the default interceptors run `Gcc` (one controller per transport, with the
+  pacer): read the target through `register_default_interceptors_with_handles` /
+  `register_default_interceptors_with_options` (`DefaultInterceptorHandles::
+  congestion_control`, `CongestionControlHandle::target_bitrate`; `transports` for every
+  transport), or per encoding from `RTCRtpSender::target_bitrates` (0 while the pacer asks the
+  source to pause). Now stated on `register_default_interceptors` and
+  `register_default_interceptors_with_handles` (with a compiled example), on
+  `GccInterceptorBuilder`, in the rtci-interceptor README, the crate README and FORK.md.
+  `GccInterceptorBuilder` / `GccHandle` are for a chain assembled by hand; the docs no longer
+  suggest a `GccInterceptor` in the default registry's `Slot::CongestionControl` as an
+  equal alternative and say what it loses there: one estimator for every transport instead of
+  one each, no circuit breaker link, none of `DefaultInterceptorOptions`' congestion settings,
+  and `DefaultInterceptorHandles::congestion_control` no longer reads a controller in the
+  chain. `GccInterceptorBuilder::build()` and `AdaptiveJitterBufferBuilder::build()` say they
+  return a factory closure for `Interceptor::with`; their examples were `ignore`d in module
+  documentation that is not public (rustdoc never showed them) and are now compiled doctests
+  on the builders. The crate README said GCC and pacing were opt-in; they are in the default
+  set. `rtci-interceptor-derive`'s import list omitted `Error` and `sansio`, which the
+  generated code names unqualified (its examples stay `ignore`: a procedural macro crate
+  cannot use the crate that re-exports it).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

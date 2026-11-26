@@ -25,23 +25,11 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use rtci_interceptor::{
-//!     AdaptiveJitterBufferBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
-//! };
-//! use std::time::Duration;
-//!
-//! // the inner end is a pass-through: `NoopInterceptor` there would end the
-//! // inbound RTCP of every slot after this one
-//! let jitter = PassThroughInterceptor::new().with(
-//!     AdaptiveJitterBufferBuilder::new()
-//!         .with_min_delay(Duration::from_millis(20))
-//!         .with_max_delay(Duration::from_millis(500))
-//!         .with_initial_delay(Duration::from_millis(50))
-//!         .build(),
-//! );
-//! let chain = Registry::new().with(Slot::JitterBuffer, jitter).build();
-//! ```
+//! [`JitterBufferBuilder::build`] returns a factory closure for
+//! [`Interceptor::with`](crate::Interceptor::with) around a
+//! [`PassThroughInterceptor`](crate::PassThroughInterceptor), in
+//! [`Slot::JitterBuffer`](crate::Slot::JitterBuffer). The compiled example is on the builder
+//! (exported as `AdaptiveJitterBufferBuilder`; this module is not public).
 
 use crate::stream_info::StreamInfo;
 use crate::{Interceptor, Packet, TaggedPacket, interceptor};
@@ -81,7 +69,33 @@ impl JitterBufferControl {
     }
 }
 
-/// Builder for [`JitterBufferInterceptor`].
+/// Builder for [`JitterBufferInterceptor`] (exported as `AdaptiveJitterBufferBuilder` and
+/// `AdaptiveJitterBufferInterceptor`).
+///
+/// [`build`](Self::build) returns a factory: a closure that takes the inner interceptor and
+/// returns the jitter buffer around it. Apply it with
+/// [`Interceptor::with`](crate::Interceptor::with) to a
+/// [`PassThroughInterceptor`](crate::PassThroughInterceptor) (never a
+/// [`NoopInterceptor`](crate::NoopInterceptor): that is the chain's RTCP terminus, and inside
+/// this slot it would end the inbound RTCP of every slot after it), and put the result in
+/// [`Slot::JitterBuffer`](crate::Slot::JitterBuffer), the application-most position:
+///
+/// ```
+/// use rtci_interceptor::{
+///     AdaptiveJitterBufferBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
+/// };
+/// use std::time::Duration;
+///
+/// let jitter = PassThroughInterceptor::new().with(
+///     AdaptiveJitterBufferBuilder::new()
+///         .with_min_delay(Duration::from_millis(20))
+///         .with_max_delay(Duration::from_millis(500))
+///         .with_initial_delay(Duration::from_millis(50))
+///         .build(),
+/// );
+/// let chain = Registry::new().with(Slot::JitterBuffer, jitter).build();
+/// # let _ = chain;
+/// ```
 pub struct JitterBufferBuilder<P> {
     min_delay: Duration,
     max_delay: Duration,
@@ -125,7 +139,9 @@ impl<P> JitterBufferBuilder<P> {
         self
     }
 
-    /// Build the interceptor factory closure.
+    /// The interceptor factory: a closure that takes the inner interceptor `P` and returns
+    /// the [`JitterBufferInterceptor`] around it, for
+    /// [`Interceptor::with`](crate::Interceptor::with).
     pub fn build(self) -> impl FnOnce(P) -> JitterBufferInterceptor<P> {
         move |inner| JitterBufferInterceptor {
             inner,
