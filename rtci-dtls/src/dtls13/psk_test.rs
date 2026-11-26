@@ -1370,7 +1370,8 @@ fn a_client_keeps_no_ticket_beyond_seven_days() -> Result<()> {
     ] {
         drain(&store);
         store.put(NAME, session.clone());
-        let mut later = pair_at(client.clone(), server.clone(), now + after)?;
+        // The offer is read from the association made on the server's answer.
+        let mut later = pair_at(client.clone(), server.clone(), now + after)?.complete();
         assert_eq!(
             later
                 .client_conn()
