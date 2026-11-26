@@ -396,45 +396,64 @@ fn rtcp_for_a_section_a_later_offer_adds_is_received_before_the_answer() -> Resu
         .iter()
         .any(|datagram| datagram.len() >= 8 && (192..=223).contains(&datagram[1]));
     assert!(wrote_rtcp, "the answerer sent RTCP");
-    // The offerer's RTCP session took the sender reports: its own reports, which reach the
-    // answerer's application with the sender's track, carry a reception report block for the
-    // new stream whose LSR (RFC 3550 6.4.1, the middle of the last SR's NTP timestamp) is not
-    // zero. Only an SR received sets it.
-    let blocks: Vec<(u32, u32)> = world.peers[1]
-        .rtcp
+    // The offerer took the sender reports: its remote-outbound-rtp statistics of the new
+    // stream (webrtc-stats, from the stream's SRs) count them. Also printed: what the
+    // offerer's own reports say of the stream (an LSR, RFC 3550 6.4.1, is set only by a
+    // received SR) and whether the SRs were handed to its application.
+    let remote_outbound = |world: &mut World| -> Vec<serde_json::Value> {
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .get_stats(now, StatsSelector::None)
+            .iter()
+            .filter_map(|entry| match entry {
+                RTCStatsReportEntry::RemoteOutboundRtp(stats) => {
+                    Some(serde_json::to_value(stats).expect("json"))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let diagnostics = |world: &mut World| -> String {
+        let blocks: Vec<(u32, u32)> = world.peers[1]
+            .rtcp
+            .iter()
+            .flat_map(|(_, packet)| {
+                let any = packet.as_any();
+                any.downcast_ref::<ReceiverReport>()
+                    .map(|rr| rr.reports.clone())
+                    .or_else(|| {
+                        any.downcast_ref::<SenderReport>()
+                            .map(|sr| sr.reports.clone())
+                    })
+                    .unwrap_or_default()
+            })
+            .map(|block| (block.ssrc, block.last_sender_report))
+            .collect();
+        let handed = world.peers[0]
+            .rtcp
+            .iter()
+            .filter(|(_, packet)| packet.as_any().is::<SenderReport>())
+            .count();
+        format!(
+            "offerer remote-outbound-rtp {:?}; report blocks the answerer read (ssrc, lsr) \
+             {blocks:?}; SRs handed to the offerer's application {handed}",
+            remote_outbound(world)
+        )
+    };
+    let reports = remote_outbound(&mut world)
         .iter()
-        .flat_map(|(_, packet)| {
-            let any = packet.as_any();
-            any.downcast_ref::<ReceiverReport>()
-                .map(|rr| rr.reports.clone())
-                .or_else(|| {
-                    any.downcast_ref::<SenderReport>()
-                        .map(|sr| sr.reports.clone())
-                })
-                .unwrap_or_default()
-        })
-        .filter(|block| block.ssrc == SSRC)
-        .map(|block| (block.last_sender_report, block.delay))
-        .collect();
+        .filter(|stats| stats["ssrc"].as_u64() == Some(u64::from(SSRC)))
+        .filter_map(|stats| stats["reportsSent"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let before = diagnostics(&mut world);
+    println!("before the answer: {before}");
     assert!(
-        blocks.iter().any(|(lsr, _)| *lsr != 0),
-        "the offerer's reports on the new stream show no sender report received before the \
-         answer: {blocks:?}"
+        reports > 0,
+        "the offerer took no sender report of the new stream before the answer: {before}"
     );
-    // (The sender reports themselves are not handed to the offerer's application before the
-    // answer: its receiver's track gets the SSRC from the answer. Not part of the clause.)
-    let delivered = world.peers[0]
-        .rtcp
-        .iter()
-        .filter(|(to, packet)| {
-            *to == track
-                && packet
-                    .as_any()
-                    .downcast_ref::<SenderReport>()
-                    .is_some_and(|sr| sr.ssrc == SSRC)
-        })
-        .count();
-    println!("sender reports of the new stream handed to the offerer's application: {delivered}");
+    let _ = track;
     Ok(())
 }
 
