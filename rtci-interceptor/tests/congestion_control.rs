@@ -118,6 +118,17 @@ fn rtp(now: Instant, sequence_number: u16) -> TaggedPacket {
 
 /// TWCC feedback saying every packet from `base` arrived, one 64 ms reference tick apart.
 fn twcc_feedback(now: Instant, base: u16, count: u16) -> TaggedPacket {
+    twcc_feedback_at(now, base, count, 1, 0)
+}
+
+/// [`twcc_feedback`] with its reference time (64 ms ticks) and feedback packet count.
+fn twcc_feedback_at(
+    now: Instant,
+    base: u16,
+    count: u16,
+    reference_time: u32,
+    fb_pkt_count: u8,
+) -> TaggedPacket {
     use rtcp::transport_feedbacks::transport_layer_cc::{
         PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc,
         TransportLayerCc,
@@ -128,8 +139,8 @@ fn twcc_feedback(now: Instant, base: u16, count: u16) -> TaggedPacket {
         media_ssrc: SSRC,
         base_sequence_number: base,
         packet_status_count: count,
-        reference_time: 1,
-        fb_pkt_count: 0,
+        reference_time,
+        fb_pkt_count,
         packet_chunks: vec![PacketStatusChunk::RunLengthChunk(RunLengthChunk {
             type_tcc: StatusChunkTypeTcc::RunLengthChunk,
             packet_status_symbol: SymbolTypeTcc::PacketReceivedSmallDelta,
@@ -554,9 +565,26 @@ fn the_handle_says_whether_the_target_comes_from_feedback() {
         "the batch was folded in"
     );
 
-    send_and_drain(&mut chain, epoch + Duration::from_millis(210), 3);
+    // A second batch: three new packets (RTP 3 to 5, transport-wide 3 to 5), reported by the
+    // receiver's next feedback (count 1, a later reference time). (The first version of this
+    // test re-sent RTP 0 to 2 and repeated the first feedback's count and reference time, and
+    // that batch reported nothing, CI 45883163416.)
+    let second = epoch + Duration::from_millis(210);
+    for sequence_number in 3..6 {
+        chain
+            .handle_write(rtp(second, sequence_number))
+            .expect("write");
+    }
+    chain.handle_timeout(second).expect("timeout");
+    while chain.poll_write().is_some() {}
     chain
-        .handle_read(twcc_feedback(epoch + Duration::from_millis(300), 3, 3))
+        .handle_read(twcc_feedback_at(
+            epoch + Duration::from_millis(300),
+            3,
+            3,
+            3,
+            1,
+        ))
         .expect("read");
     while chain.poll_read().is_some() {}
     assert_eq!(2, handle.feedback_reports());
