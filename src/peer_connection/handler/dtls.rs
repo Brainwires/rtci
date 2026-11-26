@@ -51,6 +51,13 @@ pub(crate) struct DtlsHandlerContext {
     /// instant (`leader_wait_bound`: `LEADER_WAIT_FLIGHTS` of its initial flight intervals
     /// after the first, the instant it was due at, and at most `LEADER_WAIT_MAX`).
     pub(crate) waiting_for_session: Option<(Instant, Instant)>,
+
+    /// Set when the client's first flight was left in the endpoint on a pair change (see
+    /// `start_client_handshake`), to the instant the handshake started: `poll_timeout` names
+    /// it, so the next `handle_timeout`, at once, hands the flight out (RFC 8842 section 5:
+    /// the `active` endpoint starts the handshake when ICE has a path; RFC 6347 section 4.2.4
+    /// and RFC 9147 section 5.8 time the flight's retransmission, not its first sending).
+    pub(crate) first_flight_due: Option<Instant>,
 }
 
 impl DtlsHandlerContext {
@@ -63,6 +70,7 @@ impl DtlsHandlerContext {
             close_requested: None,
             connect_requested: None,
             waiting_for_session: None,
+            first_flight_due: None,
         }
     }
 }
@@ -189,8 +197,11 @@ impl<'a> DtlsHandler<'a> {
             .ok_or(Error::ErrDtlsTransportNotStarted)?;
         // On a pair change the first flight is left in the endpoint and goes out with the
         // next read or timeout, once every handler has seen the event (the ICE handler counts
-        // a pair's packets from then). Asked for outside an event, it is queued here.
-        if queue_flight {
+        // a pair's packets from then); `poll_timeout` names the instant, so that timeout is
+        // at once. Asked for outside an event, it is queued here.
+        if !queue_flight {
+            self.ctx.first_flight_due = Some(now);
+        } else {
             while let Some(transmit) = dtls_endpoint.poll_transmit() {
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                     now: transmit.now,
@@ -742,6 +753,8 @@ impl<'a>
                 warn!("failed to start the dtls handshake: {}", err);
             }
         }
+        // The first flight left in the endpoint goes out below.
+        self.ctx.first_flight_due = None;
         let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_mut() else {
             return Ok(());
         };
@@ -792,10 +805,10 @@ impl<'a>
             .session_group()
             .and_then(|group| group.leader_deadline(&self.ctx.dtls_transport.resumption_token));
         let waiter = self.ctx.waiting_for_session.map(|(_, deadline)| deadline);
-        let deadline = match (leader, waiter) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let deadline = [leader, waiter, self.ctx.first_flight_due]
+            .into_iter()
+            .flatten()
+            .min();
         if let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_ref() {
             let mut eto = deadline;
 
