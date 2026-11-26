@@ -52,6 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (only its own tests and examples use it: now a dev-dependency) and `rtci-srtp` no longer
   depends on `byteorder` (unused). The 0.2.0 publish dry run warned about both.
 
+### Testing
+
+- **RFC 8108 5.3.2 step b is tested: an aggregated SSRC's transmission time ignores the
+  `T_rr_interval` suppression** (`rtci-interceptor/tests/rtcp_session_timing.rs::an_aggregated_ssrcs_transmission_time_ignores_t_rr_interval_suppression`;
+  `conf/rtcp-1-step-b-ignores-trr-suppression`; test and audit only, no engine change). An SSRC
+  that joins inside another's `T_rr_interval` window sends its first regular packet with the
+  other aggregated; the other's would-be time is its timer after reconsideration alone, so the
+  next regular packet leaves `T_rr_interval` after the aggregated one, not some 0.35 s later as
+  it would with the suppression in step b (mutation checked). RFC8108-5.3.2-5 `tested` (was
+  `untested`, open-must class B).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
