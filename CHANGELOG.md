@@ -116,6 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/answer_added_formats_rtc2rtc.rs::a_format_the_answer_added_is_received_when_the_offerer_switches_to_it`,
   `endpoint.rs::a_format_this_endpoints_answer_added_is_received`,
   `interceptor_association_test.rs::a_format_only_the_answer_added_leaves_the_payload_type_to_the_section_that_negotiated_it`.
+- **A header extension element the receiving section no longer signals is ignored** (RFC 8834
+  section 10: implementations "are REQUIRED to ignore unknown RTCP packets and RTP header
+  extensions"; RFC 8285 section 4.1.2; `conf/must7-3-unsignalled-header-extensions-ignored`).
+  The audio level (RFC 6464, RFC 6465 for CSRCs), the absolute capture time and the Dependency
+  Descriptor that `RTCRtpReceiver::get_synchronization_sources` / `get_contributing_sources`
+  and the frame records report were read by the media engine's map of every extension id ever
+  negotiated, in any section: once negotiated, an extension that a later offer and answer left
+  out was still read from the packets of a peer that kept sending it. Each element is now read
+  only when the receiving transceiver's negotiated header extensions (set when an answer is
+  applied) have its URI in a receiving direction; before a section's first answer the engine's
+  mapping is used as before. Not breaking, API unchanged. Audit row RFC8834-10-5 `untested` ->
+  `partial`: the encoded-transform frame metadata (`RTCRtpReceiver` frame `audio_level`) and the
+  interceptors' stream bindings still take the session-wide mapping.
 
 ### Documentation
 

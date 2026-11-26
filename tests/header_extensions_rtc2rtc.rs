@@ -865,3 +865,162 @@ fn every_video_orientation_is_sent_when_the_peer_indicates_support() -> Result<(
     }
     Ok(())
 }
+
+/// `sdp` without its `a=extmap` lines for the audio level.
+fn without_audio_level(sdp: &str) -> String {
+    sdp.split("\r\n")
+        .filter(|line| !(line.starts_with("a=extmap:") && line.contains(AUDIO_LEVEL)))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// `sdp` with `a=extmap:<id> <audio level>` after the `a=mid` line of its section.
+fn with_audio_level(sdp: &str, id: u8) -> String {
+    sdp.split("\r\n")
+        .flat_map(|line| {
+            let mut lines = vec![line.to_owned()];
+            if line.starts_with("a=mid:") {
+                lines.push(format!("a=extmap:{id} {AUDIO_LEVEL}"));
+            }
+            lines
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// The receiver's synchronization sources: (audio level, voice activity flag).
+fn audio_levels(world: &mut World) -> Vec<(Option<f64>, Option<bool>)> {
+    let transceiver = world.peers[1]
+        .pc
+        .get_transceivers()
+        .next()
+        .expect("transceiver");
+    let receiver = world.peers[1]
+        .pc
+        .rtp_transceiver(transceiver)
+        .and_then(|t| t.receiver())
+        .expect("receiver");
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .get_synchronization_sources()
+        .map(|source| (source.audio_level, source.voice_activity_flag))
+        .collect()
+}
+
+/// RFC 8834 section 10: "The use of any additional RTP header extensions ... MUST be
+/// signaled", and "implementations are REQUIRED to ignore unknown RTCP packets and RTP
+/// header extensions"; RFC 8285 section 4.1.2 has the element's id be "one that has been
+/// negotiated". A sender that puts an audio level element (RFC 6464) under an id the
+/// receiver's section does not signal: the packet is delivered and the element is not read
+/// as an audio level (`audioLevel` and `voiceActivityFlag` stay unset). Twice: the receiver
+/// was never offered the extension (the offer lost its `a=extmap` on the way, the sender
+/// believes the answer has it); and the extension was negotiated, then a later offer leaves
+/// it out and the receiver's answer with it (the sender again believes it is still on).
+#[test]
+fn an_audio_level_element_the_section_does_not_signal_is_ignored() -> Result<()> {
+    use std::cell::Cell;
+    let level: &[u8] = &[0x80 | 0x2A];
+
+    // Never signalled to the receiver.
+    let offered = Cell::new(0u8);
+    let (mut world, sender) = World::connected_edited(
+        RtpCodecKind::Audio,
+        |offer| {
+            offered.set(extmap_id(&offer, AUDIO_LEVEL).expect("the offer has the audio level"));
+            without_audio_level(&offer)
+        },
+        |answer| with_audio_level(&answer, offered.get()),
+    )?;
+    let id = offered.get();
+    assert!(
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .any(|e| e.uri == AUDIO_LEVEL && e.id == u16::from(id)),
+        "the sender sends the audio level"
+    );
+    world.send(sender, 500, &[(id, level)])?;
+    let on_wire = world
+        .media_wire()
+        .last()
+        .map(|h| h.get_extension(id).is_some());
+    assert_eq!(Some(true), on_wire, "the element is on the wire");
+    assert!(
+        world.peers[1]
+            .read_rtp
+            .iter()
+            .any(|h| h.sequence_number == 500),
+        "the packet is delivered"
+    );
+    assert_eq!(
+        vec![(None, None)],
+        audio_levels(&mut world),
+        "never signalled: the element is ignored"
+    );
+
+    // Negotiated, then left out of a later offer and answer.
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let id = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .find(|e| e.uri == AUDIO_LEVEL)
+        .map(|e| u8::try_from(e.id))
+        .expect("the audio level is negotiated")?;
+    world.send(sender, 600, &[(id, level)])?;
+    let negotiated = audio_levels(&mut world);
+    assert_eq!(1, negotiated.len());
+    assert!(
+        negotiated[0].0.is_some(),
+        "negotiated, the level is read: {negotiated:?}"
+    );
+
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1].pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(without_audio_level(&offer.sdp))?,
+    )?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    assert_eq!(
+        None,
+        extmap_id(&answer.sdp, AUDIO_LEVEL),
+        "the receiver's answer leaves it out"
+    );
+    world.peers[0].pc.set_remote_description(
+        now,
+        RTCSessionDescription::answer(with_audio_level(&answer.sdp, id))?,
+    )?;
+    world.pump()?;
+    world.send(sender, 601, &[(id, level)])?;
+    assert!(
+        world.peers[1]
+            .read_rtp
+            .iter()
+            .any(|h| h.sequence_number == 601),
+        "the packet is delivered"
+    );
+    assert_eq!(
+        vec![(None, None)],
+        audio_levels(&mut world),
+        "no longer signalled: the element is ignored"
+    );
+    Ok(())
+}
