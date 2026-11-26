@@ -192,8 +192,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: No hidden tests
-        run: python3 scripts/check-test-inventory.py
+      - name: No hidden tests; every test the clause audit cites exists (and the gate's unit tests)
+        run: python3 scripts/test_check_test_inventory.py && python3 scripts/check-test-inventory.py --check
       - name: Upstream test parity
         run: python3 scripts/check-test-parity.py
       - name: Every fuzz target is built and run
