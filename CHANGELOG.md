@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and SHOULD), whether the connection came before the offer or after it. On the way: a lite
   agent takes one UDP, one passive TCP and one active TCP candidate per address, no
   simultaneous-open one (section 4.4; before, its UDP candidate shut every TCP one on the
-  address out); two lite agents keep each other's active TCP candidates as remote candidates
+  address out, so a lite agent had no TCP candidate and could not connect over TCP even with a
+  full peer; it can now); two lite agents keep each other's active TCP candidates as remote candidates
   (a full agent, or a lite one with a full peer, still drops them and notes that the peer may
   dial); the peer's `a=ice-lite` reaches the agent before the first description's candidate
   lines; and between two lite agents a first non-STUN message on a connection the agent opened

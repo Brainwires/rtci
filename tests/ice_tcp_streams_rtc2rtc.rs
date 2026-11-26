@@ -1612,6 +1612,11 @@ fn two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer() -> R
     peers[0].pc.set_local_description(net.now, offer)?;
     let c = udp_host(&peers[0]);
     peers[0].pc.add_local_candidate(c)?;
+    // The application's end of candidates: gathering completes once the engine's TCP
+    // listeners are bound too.
+    peers[0]
+        .pc
+        .add_local_candidate(RTCIceCandidateInit::default())?;
     run_until(&mut peers, &mut net, Duration::from_secs(5), |_, peers| {
         peers[0].pc.ice_gathering_state() == RTCIceGatheringState::Complete
     })?;
