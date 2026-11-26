@@ -42,6 +42,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no Cryptex: the answer went without `a=cryptex` and the `Require` policy refused the
   offer. Test: `tests/cryptex_require.rs::cryptex_applies_to_bundle_only_rtp_sections_of_a_data_tagged_offer`.
 
+### Testing
+
+- **Browser cells for `max-bundle` with audio, video and a data channel**
+  (`conf/bundle-3-max-bundle-browser-cells`; `scripts/test-env/interop/scenarios.spec.mjs`,
+  `peer.js`, `examples/interop-peer`; test harness only, no engine change; RFC 9429 sections
+  4.1.1, 5.2.1 and 5.3.1, RFC 9143 sections 7.2 and 13, RFC 8841 section 5.1). The two
+  regressions above went out in 0.1.0 and 0.2.0 because the browser matrix had `bundlePolicy`
+  cells only for `max-compat` and `balanced`, and browsers default to `balanced`, so no browser
+  ever sent the engine a bundle-only data section or answered one. Six cells, in Chromium,
+  Firefox and WebKit: the browser offers under `bundlePolicy: "max-bundle"` and Rust answers,
+  Rust offers under `RTCBundlePolicy::MaxBundle` and the browser answers, each with the channel
+  created after the tracks and before them (the data section first in Chromium's offer; that
+  cell negotiates Cryptex as well), and from either initial offer a renegotiation from each side
+  (the browser offers again, then Rust offers a second channel). Each cell asserts the answer
+  accepts every section (a port, no `a=bundle-only`, one group naming every mid, the data
+  section's `a=sctp-port`), the channel opens and carries messages both ways and never closes,
+  the SCTP association is connected on both sides with the same `a=sctp-port` throughout, audio
+  and video flow, and, for Rust's offer, the engine's must-bundle form (the first section with a
+  port, every other port zero and `a=bundle-only`, the data section last). What the browser
+  wrote is recorded as the `max-bundle-offer` / `max-bundle-answer` annotation, and the
+  browsers' descriptions are kept as `browser-sdp/*.sdp` artifacts (`recordDescriptions`). The
+  interop peer takes `?bundle_policy=<name>` (`RTCConfigurationBuilder::with_bundle_policy`),
+  `request-offer`'s `"data_channel": "before" | "after"` with `"tracks"`, and reports
+  `dcReceived` (messages received on every channel).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

@@ -1,8 +1,9 @@
 // Browser <-> rtci interop beyond plain media and data: Cryptex, loss recovery with a
 // browser sender, TURN relay, ICE-TCP, the browser as the answerer, transceiver stop and m-line
 // reuse, direction changes, rollback and glare, large messages, a wrong fingerprint either way,
-// simulcast with RTX, the browser's getStats() against the Rust side's counters, and a
-// transport per section when the browser's offer is not bundled.
+// simulcast with RTX, the browser's getStats() against the Rust side's counters, a
+// transport per section when the browser's offer is not bundled, and max-bundle with audio,
+// video and a data channel from either side.
 //
 // Every skip goes through na.mjs with its kind and citation (gate.mjs fails an uncited one).
 import { test, expect } from "@playwright/test";
@@ -962,6 +963,326 @@ test("balanced, video answered outside the group: a rollback of Rust's offer kee
        "a=group:BUNDLE " + list.split(" ").filter((t) => !video.includes(t)).join(" "));`,
   );
   expectBalancedUnbundled(r);
+});
+
+// ---- bundlePolicy "max-bundle" with audio, video and a data channel (RFC 9429 4.1.1, 5.2.1, 5.3.1; RFC 9143 7.2, 13; W3C webrtc-pc 4.2.5) ----
+
+// Under max-bundle (RFC 9429 4.1.1 must-bundle) an initial offer gives every m= section but the
+// first port zero and `a=bundle-only` (5.2.1). Such a section is bundled, not rejected (RFC 9143
+// 7.2, 13): the answer accepts it with a port and no `a=bundle-only` (RFC 9429 5.3.1). 0.1.0 and
+// 0.2.0 took a bundle-only data section for a rejected one and closed the channel, and missed
+// Cryptex when every RTP section was bundle-only (the data section first); nothing caught it,
+// since browsers default to balanced and no cell asked them for max-bundle (handoff
+// bundleonly.md). Each cell asserts the channel opens and carries messages both ways, the SCTP
+// association is connected on both sides, and audio and video flow. What the browser wrote
+// (section order, ports, bundle-only) is the `max-bundle-offer` / `max-bundle-answer`
+// annotation, not asserted: browsers differ in where they place the data section.
+
+// The browser offers under max-bundle: audio, video (VP8) and a channel, the channel created
+// first when `dataFirst`; Rust reflects the media (`cryptex`: both sides negotiate Cryptex,
+// RFC 9335). With `renegotiate` the browser then offers again and Rust offers a new channel.
+async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false, renegotiate = false } = {}) {
+  return page.evaluate(async ([ws, dataFirst, cryptex, renegotiate]) => {
+    const s = await Interop.open(
+      ws,
+      { media: "reflect", video: "VP8", audio: true, ...(cryptex ? { cryptex: "negotiate" } : {}) },
+      { rtc: { bundlePolicy: "max-bundle", ...(cryptex ? { rtpHeaderEncryptionPolicy: "negotiate" } : {}) } },
+    );
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    const closed = [];
+    const channel = () => {
+      const c = s.pc.createDataChannel("max-bundle", { ordered: true });
+      c.addEventListener("close", () => closed.push("close"));
+      c.addEventListener("error", (e) => closed.push(`error ${e.error?.message || ""}`));
+      return c;
+    };
+    const tracks = () => {
+      s.pc.addTransceiver(Interop.audioStream().getAudioTracks()[0], { direction: "sendrecv" });
+      const video = s.pc.addTransceiver(Interop.canvasStream().getVideoTracks()[0], { direction: "sendrecv" });
+      Interop.prefer(video, "video", "video/VP8");
+    };
+    let dc;
+    if (dataFirst) {
+      dc = channel();
+      tracks();
+    } else {
+      tracks();
+      dc = channel();
+    }
+    await s.negotiate();
+    const offer = Interop.bundleLayout(s.pc.localDescription.sdp);
+    const answer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+    await s.connected();
+    const opened = await Interop.until(() => dc.readyState === "open" || closed.length > 0, 15000, "the channel to open")
+      .then(() => dc.readyState === "open")
+      .catch(() => false);
+    // Messages both ways: the browser's, and Rust's echo of each.
+    const exchange = async (n) => {
+      if (dc.readyState !== "open") return 0;
+      const e = await Interop.echo(dc, n);
+      await e.wait(n, 10000).catch(() => {});
+      return e.got.length;
+    };
+    const media = async (frames, packets) => {
+      const video = await Interop.until(async () => {
+        const v = await Interop.inbound(s.pc, "video");
+        return v && v.framesDecoded > frames && v;
+      }, 25000, `${frames} decoded frames`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+      const audio = await Interop.until(async () => {
+        const a = await Interop.inbound(s.pc, "audio");
+        return a && a.packetsReceived > packets && a;
+      }, 15000, `${packets} audio packets`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
+      return {
+        video: video.error ? video : { framesDecoded: video.framesDecoded, mimeType: video.mimeType },
+        audio: audio.error ? audio : { packetsReceived: audio.packetsReceived },
+      };
+    };
+    const echoed = await exchange(5);
+    const first = await media(15, 50);
+    let later = null;
+    if (renegotiate) {
+      // A subsequent offer from the browser (no section is bundle-only now, RFC 9143 7.5.1).
+      await s.negotiate();
+      const reoffer = Interop.bundleLayout(s.pc.localDescription.sdp);
+      const reanswer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      // Rust offers: its new channel `from-rust` on the same association.
+      const fromRust = new Promise((res) => {
+        s.pc.ondatachannel = (e) => {
+          e.channel.onmessage = (m) => res([e.channel.label, m.data]);
+        };
+      });
+      const offers = s.remoteOffers;
+      s.send({ type: "request-offer" });
+      await Interop.until(() => s.remoteOffers > offers && s.pc.signalingState === "stable", 15000, "Rust's offer").catch(() => {});
+      const rustOffer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      const hello = await Promise.race([fromRust, Interop.sleep(15000).then(() => "timeout")]);
+      later = {
+        reoffer,
+        reanswer,
+        rustOffer,
+        hello,
+        open: dc.readyState === "open",
+        echoed: await exchange(5),
+        media: await media((first.video.framesDecoded || 15) + 15, (first.audio.packetsReceived || 50) + 50),
+      };
+    }
+    const report = await s.report();
+    const sctp = s.pc.sctp ? s.pc.sctp.state : undefined;
+    const closedBefore = [...closed];
+    const ports = (dirs) => [...new Set(s.descriptions.filter(([d]) => dirs.includes(d))
+      .flatMap(([, , sdp]) => Interop.bundleLayout(sdp).sections.map((m) => m.sctpPort).filter(Boolean)))];
+    s.close();
+    return {
+      offer, answer, opened, echoed, closed: closedBefore, first, later, sctp,
+      sctpPorts: { browser: ports(["sent", "local"]), rust: ports(["received"]) },
+      rust: { sctp: report.sctp, cryptex: report.cryptex, rtp: report.rtp, dcReceived: report.dcReceived },
+      errors: report.errors.concat(s.errors),
+      descriptions: Interop.transportLines(s.descriptions),
+    };
+  }, [WS, dataFirst, cryptex, renegotiate]);
+}
+
+// Rust offers under max-bundle (`?bundle_policy=max-bundle`): audio, video and its channel
+// `from-rust`, created before the tracks (`dataChannel` "before") or after them ("after"); it
+// streams the fixtures and the browser answers. With `renegotiate` the browser then offers and
+// Rust offers a second channel.
+async function maxBundleRustOffers(page, { dataChannel, renegotiate = false }) {
+  return page.evaluate(async ([ws, dataChannel, renegotiate]) => {
+    const s = await Interop.open(ws, {});
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    // Every channel Rust opens, with its first message (`hello-from-rust`) and its close events.
+    const channels = [];
+    s.pc.ondatachannel = (e) => {
+      const c = { channel: e.channel, closed: [] };
+      c.hello = new Promise((res) => e.channel.addEventListener("message", (m) => res(m.data), { once: true }));
+      e.channel.addEventListener("close", () => c.closed.push("close"));
+      e.channel.addEventListener("error", (ev) => c.closed.push(`error ${ev.error?.message || ""}`));
+      channels.push(c);
+    };
+    const helloOf = async (i) => {
+      await Interop.until(() => channels.length > i, 15000, `Rust's channel ${i + 1}`).catch(() => {});
+      return channels[i] ? Promise.race([channels[i].hello, Interop.sleep(15000).then(() => "timeout")]) : "no channel";
+    };
+    // The browser's messages on Rust's first channel, counted by Rust (`dcReceived`).
+    const toRust = async (n) => {
+      const c = channels[0];
+      if (!c || c.channel.readyState !== "open") return 0;
+      const before = (await s.report()).dcReceived;
+      for (let i = 0; i < n; i++) c.channel.send(`to-rust-${i}`);
+      return Interop.until(async () => {
+        const got = (await s.report()).dcReceived - before;
+        return got >= n && got;
+      }, 10000, `${n} messages at Rust`).catch(async () => (await s.report()).dcReceived - before);
+    };
+    const media = async (frames, packets) => {
+      const video = await Interop.until(async () => {
+        const v = await Interop.inbound(s.pc, "video");
+        return v && v.framesDecoded > frames && v;
+      }, 25000, `${frames} decoded frames`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+      const audio = await Interop.until(async () => {
+        const a = await Interop.inbound(s.pc, "audio");
+        return a && a.packetsReceived > packets && a;
+      }, 15000, `${packets} audio packets`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
+      return {
+        video: video.error ? video : { framesDecoded: video.framesDecoded, mimeType: video.mimeType },
+        audio: audio.error ? audio : { packetsReceived: audio.packetsReceived },
+      };
+    };
+    s.send({ type: "request-offer", tracks: ["OPUS", "VP8"], data_channel: dataChannel });
+    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer");
+    const offer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+    const answer = Interop.bundleLayout(s.pc.localDescription.sdp);
+    await s.connected();
+    const hello = await helloOf(0);
+    const sent = await toRust(5);
+    const first = await media(15, 50);
+    let later = null;
+    if (renegotiate) {
+      await s.negotiate();
+      const reoffer = Interop.bundleLayout(s.pc.localDescription.sdp);
+      const reanswer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      const offers = s.remoteOffers;
+      s.send({ type: "request-offer" });
+      await Interop.until(() => s.remoteOffers > offers && s.pc.signalingState === "stable", 15000, "Rust's second offer").catch(() => {});
+      const rustOffer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      later = {
+        reoffer,
+        reanswer,
+        rustOffer,
+        hello: await helloOf(1),
+        open: channels[0]?.channel.readyState === "open",
+        sent: await toRust(5),
+        media: await media((first.video.framesDecoded || 15) + 15, (first.audio.packetsReceived || 50) + 50),
+      };
+    }
+    const report = await s.report();
+    const sctp = s.pc.sctp ? s.pc.sctp.state : undefined;
+    const closedBefore = channels[0] ? [...channels[0].closed] : ["no channel"];
+    const ports = (dirs) => [...new Set(s.descriptions.filter(([d]) => dirs.includes(d))
+      .flatMap(([, , sdp]) => Interop.bundleLayout(sdp).sections.map((m) => m.sctpPort).filter(Boolean)))];
+    s.close();
+    return {
+      offer, answer, hello, sent, first, later, sctp,
+      closed: closedBefore,
+      sctpPorts: { browser: ports(["sent", "local"]), rust: ports(["received"]) },
+      rust: { sctp: report.sctp, rtp: report.rtp, dcReceived: report.dcReceived },
+      errors: report.errors.concat(s.errors),
+      descriptions: Interop.transportLines(s.descriptions),
+    };
+  }, [`${WS}/?bundle_policy=max-bundle`, dataChannel, renegotiate]);
+}
+
+// An answer accepts every section of the offer: in order and of the same kinds, each with a
+// port and none `a=bundle-only` (RFC 9429 5.3.1, RFC 9143 7.3.3), one BUNDLE group naming every
+// mid (RFC 9143 7.3), the data section with its `a=sctp-port` (RFC 8841 5.1).
+function expectAcceptsEverySection(offer, answer, ctx) {
+  expect(answer.sections.map((m) => m.kind), ctx).toEqual(offer.sections.map((m) => m.kind));
+  for (const m of answer.sections) {
+    expect(m.port, `${m.kind} ${m.mid} answered with port zero: ${ctx}`).not.toBe(0);
+    expect(m.bundleOnly, `${m.kind} ${m.mid} answered a=bundle-only: ${ctx}`).toBe(false);
+  }
+  expect(answer.groups.length, ctx).toBe(1);
+  expect([...answer.groups[0]].sort(), ctx).toEqual(answer.sections.map((m) => m.mid).sort());
+  const data = answer.sections.find((m) => m.kind === "application");
+  expect(data?.sctpPort, ctx).toBeTruthy();
+}
+
+// What both directions share: the channel never closed, the association is connected on both
+// sides, each side's a=sctp-port is the same in all its descriptions (RFC 8841 5.1, 10.4), audio
+// and video flow, and no side reported an error.
+function expectMaxBundleSession(r, ctx) {
+  expect(r.closed, ctx).toEqual([]);
+  expect(r.rust.sctp?.state, ctx).toBe("connected");
+  if (r.sctp !== undefined) expect(r.sctp, ctx).toBe("connected");
+  expect(r.sctpPorts.browser.length, ctx).toBe(1);
+  expect(r.sctpPorts.rust.length, ctx).toBe(1);
+  expect(r.first.video.error, ctx).toBeUndefined();
+  expect(r.first.video.mimeType.toLowerCase()).toBe("video/vp8");
+  expect(r.first.audio.error, ctx).toBeUndefined();
+  if (r.later) {
+    expectAcceptsEverySection(r.later.reoffer, r.later.reanswer, ctx);
+    // Rust's later offer disables no section: each has a port or is bundle-only (RFC 9143 7.2).
+    for (const m of r.later.rustOffer.sections) {
+      expect(m.port !== 0 || m.bundleOnly, `Rust's later offer disables ${m.kind} ${m.mid}: ${ctx}`).toBe(true);
+    }
+    expect(r.later.open, `the channel is open after the renegotiation: ${ctx}`).toBe(true);
+    expect(r.later.media.video.error, ctx).toBeUndefined();
+    expect(r.later.media.audio.error, ctx).toBeUndefined();
+  }
+  expect(r.errors, ctx).toEqual([]);
+}
+
+function expectMaxBundleBrowserOffer(r) {
+  test.info().annotations.push({ type: "max-bundle-offer", description: JSON.stringify(r.offer) });
+  const ctx = JSON.stringify({ offer: r.offer, answer: r.answer, closed: r.closed, rust: r.rust, sctp: r.sctp, sctpPorts: r.sctpPorts, later: r.later, descriptions: r.descriptions });
+  expect(r.offer.sections.filter((m) => m.kind === "application").length, ctx).toBe(1);
+  expectAcceptsEverySection(r.offer, r.answer, ctx);
+  expect(r.opened, `the channel opened: ${ctx}`).toBe(true);
+  expect(r.echoed, `5 messages each way: ${ctx}`).toBe(5);
+  // Cryptex offered for RTP sections that are all bundle-only when the data section is first
+  // (RFC 9335 4 with RFC 9143 7.2) is answered and negotiated.
+  if (r.offer.cryptex) {
+    expect(r.answer.cryptex, `the offer has a=cryptex, the answer must: ${ctx}`).toBe(true);
+    expect(r.rust.cryptex, ctx).toBe(true);
+  }
+  expectMaxBundleSession(r, ctx);
+  if (r.later) {
+    expect(r.later.hello, ctx).toEqual(["from-rust", "hello-from-rust"]);
+    expect(r.later.echoed, `5 messages each way after the renegotiation: ${ctx}`).toBe(5);
+  }
+}
+
+function expectMaxBundleRustOffer(r) {
+  test.info().annotations.push({ type: "max-bundle-answer", description: JSON.stringify(r.answer) });
+  const ctx = JSON.stringify({ offer: r.offer, answer: r.answer, hello: r.hello, sent: r.sent, closed: r.closed, rust: r.rust, sctp: r.sctp, sctpPorts: r.sctpPorts, later: r.later, descriptions: r.descriptions });
+  // Rust's initial offer under max-bundle (must-bundle by default, RFC 9429 4.1.1): the first
+  // section has a port, every other is port zero and bundle-only (5.2.1), the data section is
+  // last ("Lastly", 5.2.1) and names its sctp-port, one group names every mid.
+  expect(r.offer.sections.map((m) => m.kind).sort(), ctx).toEqual(["application", "audio", "video"]);
+  expect(r.offer.sections[0].port, ctx).not.toBe(0);
+  expect(r.offer.sections[0].bundleOnly, ctx).toBe(false);
+  for (const m of r.offer.sections.slice(1)) {
+    expect([m.port, m.bundleOnly], `${m.kind} ${m.mid}: ${ctx}`).toEqual([0, true]);
+  }
+  expect(r.offer.sections.at(-1).kind, ctx).toBe("application");
+  expect(r.offer.sections.at(-1).sctpPort, ctx).toBeTruthy();
+  expect(r.offer.groups.length, ctx).toBe(1);
+  expect([...r.offer.groups[0]].sort(), ctx).toEqual(r.offer.sections.map((m) => m.mid).sort());
+  expectAcceptsEverySection(r.offer, r.answer, ctx);
+  expect(r.hello, `Rust's message on its channel: ${ctx}`).toBe("hello-from-rust");
+  expect(r.sent, `5 messages from the browser reached Rust: ${ctx}`).toBe(5);
+  expectMaxBundleSession(r, ctx);
+  if (r.later) {
+    expect(r.later.hello, ctx).toBe("hello-from-rust");
+    expect(r.later.sent, `5 messages from the browser after the renegotiation: ${ctx}`).toBe(5);
+  }
+}
+
+test("max-bundle: the browser offers audio, video and a data channel, Rust answers", async ({ page }) => {
+  expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page));
+});
+
+// The data section first: the channel created before the tracks. Cryptex is negotiated too, so
+// the offer is the one 0.2.0 failed on with every RTP section bundle-only (Chromium's
+// recording of it is the fixture of tests/cryptex_require.rs).
+test("max-bundle: the browser offers a data channel created before audio and video, Rust answers", async ({ page }) => {
+  expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page, { dataFirst: true, cryptex: true }));
+});
+
+test("max-bundle: Rust offers audio, video and a data channel, the browser answers", async ({ page }) => {
+  expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "after" }));
+});
+
+test("max-bundle: Rust offers a data channel created before audio and video, the browser answers", async ({ page }) => {
+  expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "before" }));
+});
+
+test("max-bundle: after the browser's offer, a renegotiation from each side keeps the data channel open", async ({ page }) => {
+  expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page, { renegotiate: true }));
+});
+
+test("max-bundle: after Rust's offer, a renegotiation from each side keeps the data channel open", async ({ page }) => {
+  expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "after", renegotiate: true }));
 });
 
 // ---- a wrong DTLS fingerprint (RFC 5763 5, RFC 8122 5) ----
