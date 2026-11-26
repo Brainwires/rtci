@@ -2638,6 +2638,8 @@ pub(crate) fn rtx_fmtp_with_apt(sdp_fmtp_line: &str, apt: PayloadType) -> String
 ///   its configuration is never matched by name alone).
 /// - An RTX format follows its primary (RFC 4588 section 8.6): it takes the number of the
 ///   `reference` RTX format whose `apt` is the primary's number there, and that `apt`.
+///   The primary is a media or FEC format, or a RED format (`rtx` with `apt=<red>`, the
+///   retransmission of media sent in RED).
 /// - A RED format takes the number of a `reference` RED format of its clock rate, and its
 ///   fmtp names the encodings by their numbers in `reference` (RFC 2198 section 5).
 /// - A format `reference` does not have (RFC 3264 section 6.1 lets an answer add formats)
@@ -2731,32 +2733,19 @@ pub(crate) fn number_as_described(
             .map(|(_, local)| *local)
     };
 
-    let mut out: Vec<RTCRtpCodecParameters> = Vec::with_capacity(accepted.len());
+    // Each format with its place in `accepted`: the RTX formats are numbered after the rest
+    // (an RTX format's primary may be a RED format, whose number is only known once the RED
+    // format has been placed), and the order of `accepted` is restored at the end.
+    let mut out: Vec<(usize, RTCRtpCodecParameters)> = Vec::with_capacity(accepted.len());
     let mut repair_taken: Vec<PayloadType> = vec![];
-    for mut codec in accepted {
+    // Remote payload type -> this endpoint's, for the RED formats.
+    let mut red_numbers: Vec<(PayloadType, PayloadType)> = vec![];
+    let mut retransmissions: Vec<(usize, RTCRtpCodecParameters)> = vec![];
+    for (index, mut codec) in accepted.into_iter().enumerate() {
         match family(&codec) {
             "rtx" => {
-                let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).and_then(number_of)
-                else {
-                    continue;
-                };
-                let local = reference
-                    .iter()
-                    .find(|r| {
-                        family(r) == "rtx" && parse_rtx_apt(&r.rtp_codec.sdp_fmtp_line) == Some(apt)
-                    })
-                    .map(|r| r.payload_type)
-                    .or_else(|| {
-                        (!described(codec.payload_type) && !taken.contains(&codec.payload_type))
-                            .then_some(codec.payload_type)
-                    });
-                let Some(local) = local.filter(|local| !repair_taken.contains(local)) else {
-                    continue;
-                };
-                repair_taken.push(local);
-                codec.payload_type = local;
-                codec.rtp_codec.sdp_fmtp_line =
-                    rtx_fmtp_with_apt(&codec.rtp_codec.sdp_fmtp_line, apt);
+                retransmissions.push((index, codec));
+                continue;
             }
             "red" => {
                 let blocks = red_block_payload_types(&codec.rtp_codec.sdp_fmtp_line);
@@ -2797,6 +2786,7 @@ pub(crate) fn number_as_described(
                     continue;
                 };
                 repair_taken.push(local);
+                red_numbers.push((codec.payload_type, local));
                 codec.payload_type = local;
                 if let Some(local_blocks) = local_blocks {
                     codec.rtp_codec.sdp_fmtp_line = local_blocks
@@ -2813,9 +2803,42 @@ pub(crate) fn number_as_described(
                 codec.payload_type = local;
             }
         }
-        out.push(codec);
+        out.push((index, codec));
     }
-    out
+    // RFC 4588 section 8.1: `apt` is "the payload type of the associated original stream",
+    // which is a RED format's when the media is sent in RED (libwebrtc's `rtx` with `apt=<red>`):
+    // the primary's number is a media or FEC format's, or a RED format's.
+    let primary_number = |remote: PayloadType| {
+        number_of(remote).or_else(|| {
+            red_numbers
+                .iter()
+                .find(|(r, _)| *r == remote)
+                .map(|(_, local)| *local)
+        })
+    };
+    for (index, mut codec) in retransmissions {
+        let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).and_then(primary_number)
+        else {
+            continue;
+        };
+        let local = reference
+            .iter()
+            .find(|r| family(r) == "rtx" && parse_rtx_apt(&r.rtp_codec.sdp_fmtp_line) == Some(apt))
+            .map(|r| r.payload_type)
+            .or_else(|| {
+                (!described(codec.payload_type) && !taken.contains(&codec.payload_type))
+                    .then_some(codec.payload_type)
+            });
+        let Some(local) = local.filter(|local| !repair_taken.contains(local)) else {
+            continue;
+        };
+        repair_taken.push(local);
+        codec.payload_type = local;
+        codec.rtp_codec.sdp_fmtp_line = rtx_fmtp_with_apt(&codec.rtp_codec.sdp_fmtp_line, apt);
+        out.push((index, codec));
+    }
+    out.sort_by_key(|(index, _)| *index);
+    out.into_iter().map(|(_, codec)| codec).collect()
 }
 
 /// The parameters of an `a=fmtp` line as a set: keys and values compared without case, and

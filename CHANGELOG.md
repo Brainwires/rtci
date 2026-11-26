@@ -92,7 +92,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session description or the application, `NackResponderBuilder::with_max_packet_age`), a
   packet of the stream is repaired for that long, shorter or longer than 2 s, and past it the
   packet is not retransmitted and nothing else happens, as before (no give-up, no key-frame
-  request); the 2 s are the sender's own judgement where no time was set. Ordinary loss at a steady target is repaired as before and asks for
+  request); the 2 s are the sender's own judgement where no time was set. The `rtx-time` is
+  that of the packet's own retransmission format (RFC 4588 section 8.6: a parameter of each
+  RTX payload type; with red-2 a RED packet goes under the RTX of `red`), and the same value
+  governs all three uses for that packet: the age cut, the 2 s rule and the give-up. So a RED
+  packet whose RTX of `red` announces no `rtx-time` falls under the 2 s rule and gives the
+  stream up, whatever the media format's RTX announces, and the reverse. A NACK entry that
+  would never be answered (a FEC packet in RED on a stream without RTX, a payload type with
+  no RTX format on a stream that has RTX) never gives the stream up by its age: the receiver
+  is not waiting for a picture because of it (conf/red-2r; tests `rtci-interceptor/tests/
+  nack_rtx_red.rs::an_old_red_packet_is_held_to_the_repair_age_when_only_the_media_rtx_announces_a_time`,
+  `a_red_packet_is_repaired_for_the_rtx_time_of_the_rtx_of_red_and_a_plain_packet_is_not`,
+  `an_old_packet_that_is_never_answered_does_not_give_the_stream_up`,
+  `the_backlog_counts_red_packets_at_the_size_of_their_answers`). Ordinary loss at a steady target is repaired as before and asks for
   no key frame. Before, every NACK for a packet still in the 1024-packet buffer was served in
   order: a call without a pacer that met a capacity drop from 2.5 Mbit/s to 300 kbit/s sent
   142 retransmissions (38 dropped again) with its target held at the reserve's floor, now 18
@@ -1640,6 +1652,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/nack_without_rtx_rtc2rtc.rs::a_lost_packet_is_sent_again_as_it_was_and_arrives_when_no_rtx_is_negotiated`,
   `a_packet_sent_again_as_it_was_keeps_its_abs_send_time`,
   `a_packet_sent_again_as_it_was_leaves_as_its_first_transmission_did`.
+- **video sent as RED was never repaired by retransmission** (red-2; the `Chrome` profile's
+  `fec.video-red-ulpfec`). Two defects, either of which made every retransmission of a RED
+  packet useless:
+  - The NACK responder sent every retransmission of a stream under the one RTX payload type
+    of the format the stream was bound with. RFC 4588 section 8.1 ties a retransmission
+    format to one original payload type (`apt`: "the payload type of the associated original
+    stream"), and a receiver restores the payload type from the `apt` of the format the
+    retransmission arrives under: a RED packet (payload type 116) retransmitted under the
+    RTX of VP8 (97, `apt=96`) came back as VP8 with the RED header in front of it (traced
+    call: 87 retransmissions, none usable). The responder now takes the RTX format whose
+    `apt` is the payload type the packet left under, among the formats of the stream's
+    section and the stream's own pair, as libwebrtc does (`rtp_sender.cc`, `BuildRtxPacket`).
+    A packet whose payload type has no RTX format, on a stream that negotiated RTX, is not
+    retransmitted at all (libwebrtc sends nothing either): never as a second copy on the
+    media SSRC. A stream that negotiated no RTX is repaired with the packet again as it was
+    sent, as before. This also holds for a source that switches between the formats of its
+    section (RFC 7160): each packet goes under its own format's RTX.
+  - An offerer dropped `rtx apt=<red>` when it applied the answer: entering the answer's
+    formats under its own payload type numbers counted only media and FEC formats as the
+    primary of an RTX format, so the RTX of a RED format was left out of the negotiated list,
+    and the offerer could neither send nor read a retransmitted RED packet (between two
+    engines only the answerer's direction had the format).
+  - The FEC data of a FEC packet in RED (ULPFEC in a RED packet of its own, in the media's
+    sequence space) is not retransmitted when the packet is asked for: the media's own
+    retransmission answers the loss. Its sequence number is answered, with three octets
+    under the RTX of `red`: the original sequence number and the RED block header. A
+    receiver that puts frames together in sequence-number order cannot tell a lost FEC
+    packet from a lost one-packet frame, and would wait for it and ask for a key frame;
+    restored, the answer is a FEC packet with nothing in it, which reaches the application
+    as any FEC packet does, without a payload. libwebrtc keeps no FEC packet for
+    retransmission (`ulpfec_generator.cc:233`, `set_allow_retransmission(false)`) and
+    ignores a NACK for one (`rtp_sender.cc:348-351`); its receiver finds frames without the
+    number. Without an RTX stream a FEC packet is not sent again.
+
+  Tests `rtci-interceptor/tests/nack_rtx_red.rs`,
+  `in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red`,
+  `an_rtx_format_whose_primary_is_a_red_format_is_numbered_with_it`. Not affected: streams
+  not sent in RED with one media format (the default profile).
+
 - **media** (`conf/red-3-fec-sequence-holes`): `SampleBuilder` gave a sample a duration of
   zero when the packet that follows it had the last sequence number before the wrap (65535):
   the search for the next packet's timestamp ran over a range that does not wrap. It walks
@@ -2057,6 +2108,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured). Until this branch, ring's AEAD, header-protection, HMAC, ECDHE and Ed25519/P-256
   signing key objects were also left in freed memory; they are now erased (Security).
 
+- **the `Chrome` profile shows a stale picture after a capacity collapse** (red-2;
+  docs/capacity-collapse.md, "The Chrome profile keeps its backlog"). Its pacer row is
+  libwebrtc's (`pacer.queue-overflow` `Drain`): the backlog is never flushed, the source is
+  paused and the queued repairs are delivered in order. One direction of a 2.5 Mbit/s call
+  capped at 300 kbit/s, 1000 seeds, with the profile's RED video repaired (red-1, red-3,
+  red-2): oldest picture 5.5 s, older than 2 s for more than half a second in every call
+  (the default: 1.3 s, none); both directions capped 11.5 s against 2.6 s. Not a defect: the
+  profile with that one row set to `Drop` is at 1.46 s, the default with `Drain` at 6.6 s
+  (200 seeds). An application that wants the profile's other rows and a fresh picture sets
+  `DefaultInterceptorOptions::pacer_queue_overflow` to `Drop`. The four-profile table of
+  docs/capacity-instrument.md has the profile's column measured with the repairs.
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
   the entry below): the default chain now meets the picture and freeze requirements in the

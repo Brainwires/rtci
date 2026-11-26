@@ -294,3 +294,98 @@ fn fmtp_parameter_order_and_case_do_not_make_a_new_format() {
         &video(MIME_TYPE_VP8, 98, "profile-id=0").rtp_codec,
     ));
 }
+
+/// RFC 4588 section 8.1: `apt` is "the payload type of the associated original stream". For
+/// media sent in RED (RFC 2198; libwebrtc's `a=rtpmap:116 red/90000` with
+/// `a=fmtp:117 apt=116`) that is the RED format's, and the formats of a remote answer entered
+/// under this endpoint's numbers ([`number_as_described`]) keep the RTX format that names it:
+/// it follows the RED format as any RTX format follows its primary, wherever the answer
+/// lists it. It was dropped (only media and FEC formats counted as a primary), so an offerer
+/// had no format to retransmit a RED packet in, nor to read one.
+#[test]
+fn an_rtx_format_whose_primary_is_a_red_format_is_numbered_with_it() {
+    let format = |payload_type: PayloadType, mime_type: &str, fmtp: &str| RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: mime_type.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: fmtp.to_owned(),
+            rtcp_feedback: vec![],
+        },
+        payload_type,
+    };
+    let numbered = |codecs: Vec<RTCRtpCodecParameters>| -> Vec<(PayloadType, String, String)> {
+        codecs
+            .into_iter()
+            .map(|codec| {
+                (
+                    codec.payload_type,
+                    codec.rtp_codec.mime_type,
+                    codec.rtp_codec.sdp_fmtp_line,
+                )
+            })
+            .collect()
+    };
+    let row = |payload_type: PayloadType, mime_type: &str, fmtp: &str| {
+        (payload_type, mime_type.to_owned(), fmtp.to_owned())
+    };
+    // This endpoint's offer.
+    let offer = [
+        format(96, "video/VP8", ""),
+        format(97, "video/rtx", "apt=96"),
+        format(116, "video/red", ""),
+        format(117, "video/rtx", "apt=116"),
+        format(43, "video/ulpfec", ""),
+    ];
+
+    // An answer in the offer's numbers, the retransmission formats last (as this engine
+    // answers).
+    let answer = vec![
+        format(96, "video/VP8", ""),
+        format(116, "video/red", ""),
+        format(43, "video/ulpfec", ""),
+        format(97, "video/rtx", "apt=96"),
+        format(117, "video/rtx", "apt=116"),
+    ];
+    assert_eq!(
+        vec![
+            row(96, "video/VP8", ""),
+            row(116, "video/red", ""),
+            row(43, "video/ulpfec", ""),
+            row(97, "video/rtx", "apt=96"),
+            row(117, "video/rtx", "apt=116"),
+        ],
+        numbered(number_as_described(answer, &offer))
+    );
+
+    // An answer with numbers of its own (RFC 3264 section 5.1), the RTX of red ahead of red:
+    // each format under this endpoint's number, in the answer's order.
+    let answer = vec![
+        format(100, "video/VP8", ""),
+        format(101, "video/rtx", "apt=100"),
+        format(103, "video/rtx", "apt=102"),
+        format(102, "video/red", ""),
+        format(104, "video/ulpfec", ""),
+    ];
+    assert_eq!(
+        vec![
+            row(96, "video/VP8", ""),
+            row(97, "video/rtx", "apt=96"),
+            row(117, "video/rtx", "apt=116"),
+            row(116, "video/red", ""),
+            row(43, "video/ulpfec", ""),
+        ],
+        numbered(number_as_described(answer, &offer))
+    );
+
+    // An RTX format whose primary the answer does not list goes, as before.
+    let answer = vec![
+        format(96, "video/VP8", ""),
+        format(97, "video/rtx", "apt=96"),
+        format(117, "video/rtx", "apt=116"),
+    ];
+    assert_eq!(
+        vec![row(96, "video/VP8", ""), row(97, "video/rtx", "apt=96")],
+        numbered(number_as_described(answer, &offer))
+    );
+}
