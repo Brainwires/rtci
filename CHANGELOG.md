@@ -122,7 +122,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client's seven-day ticket caps each shown alone), 5 and 5.4 (unexpected_message for an
   authenticated record of unknown type or all padding); RFC 5246 section 7.3 (a session id holds
   nothing of its handshake). RFC5246-8422-5.1-1 is level SHOULD, not MUST (RFC 8422 section 5.1:
-  a client proposing ECC suites "SHOULD include these extensions"), now tested. "Standing
+  a client proposing ECC suites "SHOULD include these extensions"), now tested; the
+  paragraph's MUST NOT, no ECC extensions from a client that proposes no ECC suite, is a new row,
+  RFC5246-8422-5.1-3, tested (a DTLS 1.2 PSK client sends neither). "Standing
   departures from a MUST" lists RFC 6347 section 4.2.1, whose MUST (the HelloVerifyRequest
   version equals the ServerHello's) contradicts the SHOULD before it (DTLS 1.0 regardless): the
   default keeps the SHOULD, as OpenSSL does, and `StrictRfc` does not change it; and RFC 8446
