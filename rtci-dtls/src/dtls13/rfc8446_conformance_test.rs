@@ -1749,7 +1749,7 @@ fn u16s(data: &[u8]) -> Vec<u16> {
 /// unknown suite first, an unknown group first in supported_groups with a key share of its
 /// own first, an unknown signature scheme first. The server answers with a ServerHello (no
 /// alert, no HelloRetryRequest) of a suite, group and version it knows, and none of the
-/// unknown extensions; the same hello without them gets the same choices.
+/// unknown extensions; the same hello without them gets the same choices and extensions.
 #[test]
 fn a_client_hello_with_unknown_extensions_suites_groups_and_schemes_is_served() -> Result<()> {
     let choices = |answer: &[BytesMut]| {
@@ -1763,11 +1763,11 @@ fn a_client_hello_with_unknown_extensions_suites_groups_and_schemes_is_served() 
             "a ServerHello, not a HelloRetryRequest"
         );
         let types: Vec<u16> = server_hello.extensions.iter().map(|(t, _)| *t).collect();
+        // The answers to what this client offered (supported_versions, key_share and
+        // connection_id), none of the unknown ones.
         assert!(
-            types
-                .iter()
-                .all(|t| [messages::EXT_SUPPORTED_VERSIONS, messages::EXT_KEY_SHARE].contains(t)),
-            "only extensions this server knows: {types:04x?}"
+            types.iter().all(|t| !UNKNOWN_EXTENSIONS.contains(t)),
+            "no unknown extension answered: {types:04x?}"
         );
         let group = u16::from_be_bytes(
             server_hello.get(messages::EXT_KEY_SHARE).unwrap()[..2]
@@ -1775,6 +1775,7 @@ fn a_client_hello_with_unknown_extensions_suites_groups_and_schemes_is_served() 
                 .unwrap(),
         );
         (
+            types,
             server_hello.suite,
             group,
             server_hello
