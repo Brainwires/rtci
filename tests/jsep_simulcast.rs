@@ -6,7 +6,9 @@ mod jsep_common;
 
 use std::time::Instant;
 
-use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, vp8};
+use jsep_common::{
+    SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, mid_of, vp8,
+};
 use rtci::media_stream::MediaStreamTrack;
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
@@ -802,4 +804,101 @@ fn a_remote_offer_that_renegotiates_rids_is_an_invalid_access_error() -> TestRes
     assert_eq!(expanded.err(), Some(Error::InvalidAccessError));
     pc.set_remote_description(now, reoffer(3, "a=rid:f recv\na=simulcast:recv f\n")?)?;
     Ok(())
+}
+
+/// The lines starting with `prefix` of each media section of `sdp`, by mid.
+fn section_lines(sdp: &str, prefix: &str) -> Vec<(String, Vec<String>)> {
+    media_sections(sdp)
+        .iter()
+        .map(|section| {
+            (
+                mid_of(section).unwrap_or_default().to_owned(),
+                section
+                    .iter()
+                    .filter(|line| line.starts_with(prefix))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The first offer, and each later offer with when it was made.
+type Offers = (String, Vec<(&'static str, String)>);
+
+/// A simulcast offerer's first offer (f, h, q, applied) and the offers it creates later: while
+/// that offer is pending (have-local-offer), and after a default peer's answer that accepts
+/// every stream has been applied (stable, simulcast negotiated: the sender keeps all three
+/// encodings), each with what it is.
+fn first_and_subsequent_offers() -> Result<Offers, Box<dyn std::error::Error>> {
+    let three = [("f", Some(1280)), ("h", Some(640)), ("q", Some(320))];
+    let (mut offerer, sender) = simulcast_sender(&three)?;
+    let mut answerer = default_peer()?;
+    let now = Instant::now();
+    let first = offerer.create_offer(None)?;
+    offerer.set_local_description(now, first.clone())?;
+    let mut later = vec![];
+    // A subsequent offer made while the first is pending, applied in its turn: it is the last
+    // created one now (RFC 9429 section 5.4), and the one the answerer answers.
+    let pending = offerer.create_offer(None)?;
+    later.push(("have-local-offer", pending.sdp.clone()));
+    offerer.set_local_description(now, pending.clone())?;
+    answerer.set_remote_description(now, pending)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+    assert_eq!(
+        sent_layers(&mut offerer, sender),
+        layers(&three),
+        "negotiated"
+    );
+    later.push(("stable, after the answer", offerer.create_offer(None)?.sdp));
+    Ok((first.sdp, later))
+}
+
+/// Fails listing each later offer whose `prefix` lines differ from the first offer's.
+fn assert_lines_stay_the_same(prefix: &str, expected: &[&str]) -> TestResult {
+    let (first, later) = first_and_subsequent_offers()?;
+    let lines = section_lines(&first, prefix);
+    assert_eq!(
+        lines,
+        vec![(
+            "0".to_owned(),
+            expected.iter().map(|line| (*line).to_owned()).collect()
+        )],
+        "the first offer\n{first}"
+    );
+    let changed: Vec<String> = later
+        .iter()
+        .filter(|(_, sdp)| section_lines(sdp, prefix) != lines)
+        .map(|(when, sdp)| format!("{when}: {:?}\n{sdp}", section_lines(sdp, prefix)))
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "{prefix} lines of the first offer: {lines:?}; later offers that changed them:\n{}",
+        changed.join("\n")
+    );
+    Ok(())
+}
+
+/// RFC 9429 section 5.2.2, subsequent offers (in have-local-offer, and in stable after the
+/// answer: "following the steps mentioned for the "have-local-offer" state"): "For
+/// RtpTransceivers that are still present, the "a=rid" lines MUST stay the same."
+#[test]
+fn the_rid_lines_of_a_subsequent_offer_stay_the_same() -> TestResult {
+    assert_lines_stay_the_same(
+        "a=rid:",
+        &[
+            "a=rid:f send max-width=1280",
+            "a=rid:h send max-width=640",
+            "a=rid:q send max-width=320",
+        ],
+    )
+}
+
+/// RFC 9429 section 5.2.2, subsequent offers: "For RtpTransceivers that are still present, any
+/// "a=simulcast" line MUST stay the same."
+#[test]
+fn the_simulcast_line_of_a_subsequent_offer_stays_the_same() -> TestResult {
+    assert_lines_stay_the_same("a=simulcast:", &["a=simulcast:send f;h;q"])
 }

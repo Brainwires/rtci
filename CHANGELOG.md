@@ -215,6 +215,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cited tests that no longer exist (TWCC-3.1-6, RFC2198-5-4, RFC8866-5.13-5, RFC8888-3.1-17,
   RFC9628-6.1.1-4) and one whose test was hollow for the clause (RFC7587-7-4). No violation
   found. Open MUST rows 15 -> 20. No engine change.
+- The five RFC 9429 rows the second sweep downgraded are tested again
+  (`conf/jsep-80-local-description-states`), each test proven by a mutation to fail when the
+  engine breaks the rule: `jsep_simulcast.rs::the_rid_lines_of_a_subsequent_offer_stay_the_same`
+  and `the_simulcast_line_of_a_subsequent_offer_stays_the_same` (5.2.2-15 / 5.2.2-16: the a=rid
+  and a=simulcast lines of the offer made in have-local-offer and of the one made after an answer
+  that negotiated all three streams equal the first offer's), and in `jsep_w3c_errors.rs` the
+  refusals of setLocalDescription for its state (5.5-1 / 5.5-2 / 5.5-3: a local offer in
+  have-remote-offer, have-local-pranswer, have-remote-pranswer; a local answer or pranswer in
+  stable, have-local-offer, have-remote-pranswer, using the last created description so the
+  section 5.4 check does not refuse it first) and of a remote answer or pranswer in
+  have-remote-offer and have-local-pranswer (5.6-2, which stays `tested`). Each is refused with
+  the state check's InvalidStateError and the signaling state unchanged. No violation found. Open
+  MUST rows 20 -> 15. No engine change.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
