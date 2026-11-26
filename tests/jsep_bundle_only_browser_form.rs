@@ -80,10 +80,19 @@ fn is_rtp(section: &[String]) -> bool {
 /// bundle-only "m=" sections"; section 9.3.1.1: `a=rtcp-mux` "in each bundled "m=" section
 /// (excluding any bundle-only "m=" sections)". The default, and the setting off, write that
 /// form, with the fingerprints in the sections that have a transport only.
+///
+/// With the `chrome-defaults` feature the default is the `Chrome` profile, so the call-free
+/// case is the RFC form only in a build with the RFC default.
 #[test]
 fn by_default_bundle_only_sections_carry_no_bundle_attribute_and_no_session_fingerprint()
 -> TestResult {
-    for browser_form in [None, Some(false)] {
+    let cases: &[Option<bool>] = if BehaviourProfile::compiled_default() == BehaviourProfile::Chrome
+    {
+        &[Some(false)]
+    } else {
+        &[None, Some(false)]
+    };
+    for &browser_form in cases {
         let mut pc = peer(RTCBundlePolicy::MaxBundle, browser_form)?;
         audio_video_data(&mut pc)?;
         let offer = pc.create_offer(None)?.sdp;
@@ -176,6 +185,8 @@ fn with_the_setting_bundle_only_rtp_sections_say_rtcp_mux_and_the_fingerprints_a
 }
 
 /// The `Chrome` behaviour profile turns the setting on; `Rfc` and `StrictRfc` leave it off.
+/// `must-bundle`: `StrictRfc` ignores `max-bundle` (RFC 9429 4.1.1 SHOULD,
+/// `with_max_bundle_as_must_bundle(false)`), so its offer would have no bundle-only section.
 #[test]
 fn the_chrome_profile_writes_the_browser_form() -> TestResult {
     for (profile, on) in [
@@ -184,7 +195,7 @@ fn the_chrome_profile_writes_the_browser_form() -> TestResult {
         (BehaviourProfile::StrictRfc, false),
     ] {
         let mut pc = build(
-            RTCBundlePolicy::MaxBundle,
+            RTCBundlePolicy::MustBundle,
             SettingEngineBuilder::new().with_behaviour_profile(profile),
         )?;
         audio_video_data(&mut pc)?;

@@ -988,6 +988,12 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
       { media: "reflect", video: "VP8", audio: true, ...(cryptex ? { cryptex: "negotiate" } : {}) },
       { rtc: { bundlePolicy: "max-bundle", ...(cryptex ? { rtpHeaderEncryptionPolicy: "negotiate" } : {}) } },
     );
+    // Rust's descriptions as Rust wrote them (the browser's remoteDescription is its own
+    // serialisation: libwebrtc writes the fingerprint and a=rtcp-mux per section whatever it got).
+    const received = (type) => {
+      const d = [...s.descriptions].reverse().find(([dir, t]) => dir === "received" && t === type);
+      return d ? d[2] : "";
+    };
     s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
     const closed = [];
     const channel = () => {
@@ -1011,7 +1017,7 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
     }
     await s.negotiate();
     const offer = Interop.bundleLayout(s.pc.localDescription.sdp);
-    const answer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+    const answer = Interop.bundleLayout(received("answer"));
     await s.connected();
     const opened = await Interop.until(() => dc.readyState === "open" || closed.length > 0, 15000, "the channel to open")
       .then(() => dc.readyState === "open")
@@ -1044,7 +1050,7 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
       // A subsequent offer from the browser (no section is bundle-only now, RFC 9143 7.5.1).
       await s.negotiate();
       const reoffer = Interop.bundleLayout(s.pc.localDescription.sdp);
-      const reanswer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      const reanswer = Interop.bundleLayout(received("answer"));
       // Rust offers: its new channel `from-rust` on the same association.
       const fromRust = new Promise((res) => {
         s.pc.ondatachannel = (e) => {
@@ -1054,7 +1060,7 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
       const offers = s.remoteOffers;
       s.send({ type: "request-offer" });
       await Interop.until(() => s.remoteOffers > offers && s.pc.signalingState === "stable", 15000, "Rust's offer").catch(() => {});
-      const rustOffer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      const rustOffer = Interop.bundleLayout(received("offer"));
       const hello = await Promise.race([fromRust, Interop.sleep(15000).then(() => "timeout")]);
       later = {
         reoffer,
@@ -1092,6 +1098,12 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
 async function maxBundleRustOffers(page, { dataChannel, renegotiate = false, profile = "chrome" }) {
   return page.evaluate(async ([ws, dataChannel, renegotiate]) => {
     const s = await Interop.open(ws, {});
+    // Rust's descriptions as Rust wrote them (the browser's remoteDescription is its own
+    // serialisation: libwebrtc writes the fingerprint and a=rtcp-mux per section whatever it got).
+    const received = (type) => {
+      const d = [...s.descriptions].reverse().find(([dir, t]) => dir === "received" && t === type);
+      return d ? d[2] : "";
+    };
     s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
     // Every channel Rust opens, with its first message (`hello-from-rust`) and its close events.
     const channels = [];
@@ -1147,7 +1159,7 @@ async function maxBundleRustOffers(page, { dataChannel, renegotiate = false, pro
       s.close();
       return { refused };
     }
-    const offer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+    const offer = Interop.bundleLayout(received("offer"));
     const answer = Interop.bundleLayout(s.pc.localDescription.sdp);
     await s.connected();
     const hello = await helloOf(0);
@@ -1157,11 +1169,11 @@ async function maxBundleRustOffers(page, { dataChannel, renegotiate = false, pro
     if (renegotiate) {
       await s.negotiate();
       const reoffer = Interop.bundleLayout(s.pc.localDescription.sdp);
-      const reanswer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      const reanswer = Interop.bundleLayout(received("answer"));
       const offers = s.remoteOffers;
       s.send({ type: "request-offer" });
       await Interop.until(() => s.remoteOffers > offers && s.pc.signalingState === "stable", 15000, "Rust's second offer").catch(() => {});
-      const rustOffer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
+      const rustOffer = Interop.bundleLayout(received("offer"));
       later = {
         reoffer,
         reanswer,
