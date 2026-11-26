@@ -4844,7 +4844,9 @@ pub(crate) fn apply_voice_activity_detection(
             .any(|p| is_usedtx(p.trim()) && p.split_once('=').is_some_and(|(_, v)| v.trim() == "1"))
     }
     for media in &mut d.media_descriptions {
-        if media.media_name.media != "audio" || media.media_name.port.value == 0 {
+        // A bundle-only section of an offer (port zero, RFC 9143 section 7.2) is an audio
+        // section like the others; a rejected one is left as it is.
+        if media.media_name.media != "audio" || is_rejected_media(media) {
             continue;
         }
         let offered = offer.and_then(|offer| {
@@ -4955,10 +4957,16 @@ pub(crate) fn validate_application_media_section(desc: &SessionDescription) -> R
     }
 }
 
-/// A data channel section with port zero: rejected (RFC 3264 section 6) or, in an offer,
-/// closed (RFC 8841 section 10.5).
+/// A data channel section with port zero and no `a=bundle-only`: rejected (RFC 3264 section
+/// 6) or, in an offer, closed (RFC 8841 section 10.5). A zero port with `a=bundle-only` is a
+/// bundled section of an offer, not a rejected one (RFC 9143 sections 7.2 and 13): every
+/// section but the first of a `max-bundle` initial offer (RFC 9429 sections 5.2.1 and 7.2),
+/// so the data section beside media. An answer never carries `a=bundle-only` (RFC 9429
+/// section 5.3.1; a remote answer's is discarded, `discard_stray_bundle_only`), so a zero port
+/// there is a rejection. 0.2.0 read the zero port alone and took the data section of such an
+/// offer for a rejected one: no association, the channels failed.
 fn is_rejected_application_media(media_desc: &MediaDescription) -> bool {
-    media_desc.media_name.port.value == 0
+    is_rejected_media(media_desc)
 }
 
 /// What an offer/answer pair negotiated for the SCTP association (RFC 8841 section 10).

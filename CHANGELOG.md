@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Data channels never opened under `max-bundle` when the offer also had media (regression in
+  0.1.0 and 0.2.0; v0.22.0+brainwires.5.1 worked)** (`conf/bundle-1-bundle-only-application-section-not-rejected`;
+  RFC 9143 sections 7.2 and 13, RFC 9429 sections 5.2.1, 5.3.1 and 7.2, RFC 8841 sections 10.3
+  and 10.4). Under `max-bundle` every section of the initial offer but the first is
+  `port 0` + `a=bundle-only` (RFC 9429 5.2.1), so the data section beside audio or video is
+  `m=application 0 ... a=bundle-only`: a bundled section, not a rejected one (RFC 9143 7.2: a
+  zero port without `a=bundle-only` is the one that disables a section). The data section's
+  own check read the zero port alone: both the offerer and the answerer took the section for
+  a rejected one, started no SCTP association, and every channel failed with "signalling
+  closed the SCTP association before the channel opened" (WPT
+  `RTCPeerConnection-createDataChannel.html`, "addTrack, then creating datachannel, should
+  negotiate properly when max-bundle is used"). `RTCPeerConnection::sctp()` was also `None`
+  after such an offer was applied (W3C webrtc-pc 4.4.1.6). A data channel alone, or the
+  default `balanced` policy, was not affected. The data section now uses the rule every other
+  section already used (`is_rejected_media`: port zero without `a=bundle-only`; an answer
+  never has `a=bundle-only`, so a zero port in an answer still rejects it). Introduced when
+  `conf/datachannel-dcep` (6feffc07, the port-only check) and `conf/jsep-6-bundle-policy`
+  (32d41287, bundle-only sections in initial offers) met in train merge 7b241658 (PR #38,
+  2026-11-22); first released in v0.22.0+brainwires.6. Test:
+  `tests/data_channel_max_bundle_rtc2rtc.rs`.
+- **`voice_activity_detection` skipped the bundle-only audio sections of an offer** (same
+  branch; RFC 9429 section 5.2.3.2): the second audio section of a `balanced` initial offer
+  (and every audio section but the first under `max-bundle`) kept its comfort noise formats
+  and got no `usedtx` when the option was set, its zero port read as a rejection. Test:
+  `tests/jsep_voice_activity_detection.rs::a_bundle_only_audio_section_follows_the_option_too`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
