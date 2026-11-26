@@ -49,20 +49,20 @@ whole session reproducible in a test without a socket or a sleep.
 
 ## Status
 
-As of 2026-11-23 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
+As of 2026-11-26 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
 API, statistics, extensions, encoded transform and SVC specifications, and the IETF RFCs and drafts
 WebRTC uses); every row names the code and the test that proves it. From
 [docs/conformance/audit/COUNTS.md](docs/conformance/audit/COUNTS.md), of the rows that bind this engine:
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5080 | 5064 (99.7 %) | 5033 (99.1 %) |
-| SHOULD | 968 | 851 (87.9 %) | 851 (87.9 %) |
-| MAY | 607 | 445 (73.3 %) | 445 (73.3 %) |
+| MUST | 5089 | 5084 (99.9 %) | 5051 (99.3 %) |
+| SHOULD | 986 | 920 (93.3 %) | 914 (92.7 %) |
+| MAY | 603 | 500 (82.9 %) | 500 (82.9 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. 16 MUST rows are open (1 untested,
-10 partial, 5 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+browser or a deployed peer cannot interoperate with it by default. 5 MUST rows are open (0 untested,
+3 partial, 2 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/rtci/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
