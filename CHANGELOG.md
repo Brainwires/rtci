@@ -73,6 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `untested`, a half of the clause or the refused case without a test (webrtc-pc 7, RFC 8446 10,
   RFC 7728 4, RFC 3611 3 reserved-field rows, RFC 5246 1). Citations corrected for about 15
   rows, five stale notes fixed. Open MUST rows 27 -> 57. No engine change on this branch.
+- Fifth audit sweep (`conf/audit-6-tested-must-sweep-5`): the remaining receive-side `tested`
+  MUST rows (about 145 in some 50 files, RFC 6679 to W3C mediacapture, and 15 rows left in files
+  already swept), and a first sample of the rows that are not receive-side (every tenth `tested`
+  MUST row of RFC 3264, 9429, 9143, 8445, 8839, 6347, 9147, 5764, 3711, 7714, 3550, 4585, 4588,
+  8888, 8831 and 8832: 88 rows; RFC 9260's 22 not yet sampled). Seven receive-side rows
+  `tested` -> `untested`: RFC8851-6.3-5 (an offered `pt=` list emptied by the answer), RFC8834-4.1-24
+  (an unsignalled RTP header extension, the clause RFC8834-10-5 holds and `conf/must7-3` fixes),
+  RFC5746-3.6-5 (a DTLS 1.2 server handed an unknown ClientHello extension), RFC4733-2.3.4-1
+  (volume of events without one; class E, proposed n/a), RFC6525-5.2.7-1 (a response whose
+  number has no running timer), RFC5576-9-1 (a receiver that ignores a=ssrc), RFC8853-5.2-1
+  (session-level a=simulcast). In the sample three of 88 (RFC9147-4-9 records of two
+  associations in one datagram, 5-1 the legacy_session_id echo half, 5.5-1 non-overlapping
+  fragments). Citations corrected for about 12 rows, one paraphrase that read as the opposite of
+  its MUST NOT (RFC8839-4.3.1-5), ten stale notes replaced. No violation found. Open MUST rows
+  57 -> 67. No engine change.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
