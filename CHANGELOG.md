@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`set_configuration` with new STUN / TURN servers or a new ICE candidate policy after a local
+  description sets the 'needs-ice-restart' bit** (RFC 9429 section 4.1.18): `negotiationneeded`
+  fires and the next `create_offer` restarts ICE (W3C [[LocalIceCredentialsToReplace]], as
+  `restartIce`; libwebrtc does the same). Before, the new list waited for a restart the
+  application had to ask for (W3C's own text: "it should do an ICE restart"). Behaviour change
+  for every application that calls `set_configuration` with other servers on a negotiated
+  connection. jsep-85.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

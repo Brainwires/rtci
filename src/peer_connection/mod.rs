@@ -4219,6 +4219,35 @@ impl RTCPeerConnection {
         configuration
             .set_the_configuration(Some(&self.configuration), self.local_description_was_set)?;
 
+        // RFC 9429 section 4.1.18: "Any changes to the STUN/TURN servers to use affect the
+        // next gathering phase. If an ICE gathering phase has already started or completed,
+        // the 'needs-ice-restart' bit mentioned in Section 3.5.1 will be set" (the same for a
+        // change of the ICE candidate policy). The bit is W3C's
+        // [[LocalIceCredentialsToReplace]] (what restartIce sets): the next createOffer
+        // restarts ICE, and the negotiation-needed flag is updated. A gathering phase has
+        // started once a local description was applied.
+        let servers_changed = {
+            let urls = |servers: &[crate::peer_connection::transport::RTCIceServer]| -> Result<Vec<ice::url::Url>> {
+                let mut urls = vec![];
+                for server in servers {
+                    urls.extend(server.urls()?);
+                }
+                Ok(urls)
+            };
+            let (old, new) = (
+                urls(&self.configuration.ice_servers)?,
+                urls(&configuration.ice_servers)?,
+            );
+            old.len() != new.len()
+                || old
+                    .iter()
+                    .zip(&new)
+                    .any(|(a, b)| !crate::peer_connection::servers_in_force::same_url(a, b))
+        };
+        let needs_ice_restart = self.local_description_was_set
+            && (servers_changed
+                || configuration.ice_transport_policy != self.configuration.ice_transport_policy);
+
         // Every check passed: the configuration is stored, and the ICE agent's transport
         // setting follows; candidates already added stay, and the new setting applies from
         // the next gathering (RFC 9429, Section 4.1.18).
@@ -4258,6 +4287,9 @@ impl RTCPeerConnection {
         self.streams.srflx.set_servers(&urls);
         self.streams.turn.set_servers(&urls);
         self.configuration.ice_servers = configuration.ice_servers;
+        if needs_ice_restart {
+            self.restart_ice();
+        }
 
         Ok(())
     }
