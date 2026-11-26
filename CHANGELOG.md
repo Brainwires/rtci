@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Tests for two RFC MUST rows the third audit sweep found untested (`conf/jsep-81-must-sweep3-rows`),
+  each checked by a mutation (`mut/jsep-81-1`): RFC9429-5.3.1-7, a section none of whose offered
+  formats the transceiver's codec preferences allow is answered rejected
+  (`a_section_whose_offered_formats_the_codec_preferences_exclude_is_rejected`); RFC9143-9.3.1.2-3,
+  a rejected suggested offerer-tagged section of a BUNDLE answer carries no `a=rtcp-mux-only`
+  (`a_rejected_suggested_offerer_tagged_section_has_no_rtcp_mux_only`). Both `untested` ->
+  `tested`. RFC9429-5.8.2-22 (`a=msid` read "ignoring any appdata field") `tested` -> `partial`:
+  the track id and track events ignore the appdata as RFC 9429 and W3C webrtc-pc have it (the RFC
+  8830 form stays behind `with_msid_appdata_change_renews_track`, row RFC8830-3-6 `conflict`),
+  but a changed appdata alone still makes the receiver drop the SSRCs it learned from RTP
+  (`is_same_remote_track`). No engine change. Open MUST rows 27 -> 26.
 - **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
   owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
   initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
