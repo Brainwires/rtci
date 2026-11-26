@@ -290,11 +290,14 @@ fn test_rtp_sender_replace_track_invalid_track_kind_change() -> Result<()> {
     receiver.close()
 }
 
-/// Replaced: the old test expected `replace_track` to refuse a track whose codec (VP9) was not
-/// negotiated (`ErrUnsupportedCodec`). W3C `replaceTrack` checks only the kind, and so does the
-/// sans-IO sender; what keeps an unnegotiated codec off the wire is the sender's negotiated
-/// parameters. This checks that: after the replacement the sender still offers only the
-/// preferred codec, and media written with VP9's payload type leaves as VP8.
+/// W3C webrtc-pc `replaceTrack`: "If sending is true, and withTrack is not null, determine if
+/// withTrack can be sent immediately by the sender without violating the sender's
+/// already-negotiated envelope, and if it cannot, then ... reject p with a newly created
+/// InvalidModificationError", the cases including "Sources that also encode ... might be
+/// unable to produce the negotiated codec". A track whose codings name VP9 on a sender that
+/// negotiated VP8 only is refused, and the sender keeps its track and sends VP8 as before.
+/// (This test used to assert the opposite: the VP9 track taken and its packets relabelled
+/// with VP8's payload type.)
 #[test]
 fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     let (mut sender, mut receiver) = new_pair()?;
@@ -314,35 +317,107 @@ fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     let mut pair = Pair::new(sender, receiver);
     pair.connect()?;
 
-    pair.offerer
-        .rtp_sender(sender_id)
-        .expect("sender")
-        .replace_track(Some(track(MIME_TYPE_VP9, "", Some(ssrc))))?;
-
-    let codecs = pair
+    let refused = pair
         .offerer
         .rtp_sender(sender_id)
         .expect("sender")
-        .get_parameters()
-        .rtp_parameters
-        .codecs
-        .clone();
-    assert!(
-        !codecs
-            .iter()
-            .any(|c| c.rtp_codec.mime_type == MIME_TYPE_VP9),
-        "VP9 was never negotiated: {codecs:?}"
+        .replace_track(Some(track(MIME_TYPE_VP9, "", Some(ssrc))));
+    assert_eq!(refused, Err(Error::InvalidModificationError));
+    assert_eq!(
+        refused.err().and_then(|e| e.dom_exception_name()),
+        Some("InvalidModificationError")
+    );
+    assert_eq!(
+        pair.offerer
+            .rtp_sender(sender_id)
+            .expect("sender")
+            .track()
+            .expect("the sender keeps its track")
+            .codings()[0]
+            .codec
+            .mime_type,
+        MIME_TYPE_VP8,
+        "the refused track is not taken"
     );
 
-    // 98 is VP9 in the default codecs, and not negotiated on this sender.
     let mut sequence_number = 0;
-    let packet = send_until_seen(&mut pair, sender_id, ssrc, 98, 0xAA, &mut sequence_number);
+    let packet = send_until_seen(&mut pair, sender_id, ssrc, 96, 0xAA, &mut sequence_number);
     let (codec, _) = pair
         .answerer
         .media_engine
         .get_codec_by_payload(packet.header.payload_type)?;
     assert_eq!(codec.rtp_codec.mime_type, MIME_TYPE_VP8);
 
+    pair.close()
+}
+
+/// The envelope binds only while the sender is sending ("If sending is true"): before any
+/// negotiation a VP9 track replaces a VP8 one.
+#[test]
+fn test_rtp_sender_replace_track_before_negotiation_takes_any_codec() -> Result<()> {
+    let (mut sender, _receiver) = new_pair()?;
+    let sender_id = sender.add_track(track(MIME_TYPE_VP8, "", Some(0x2323_2323)))?;
+    sender
+        .rtp_sender(sender_id)
+        .expect("sender")
+        .replace_track(Some(track(MIME_TYPE_VP9, "", Some(0x2323_2323))))?;
+    sender.close()
+}
+
+/// W3C `replaceTrack`'s envelope cases: "An audio track having a different number of
+/// channels." A sender that negotiated PCMU (one channel) refuses a track whose coding is
+/// two-channel PCMU, and takes a one-channel one.
+#[test]
+fn test_rtp_sender_replace_track_with_another_channel_count_is_refused() -> Result<()> {
+    use crate::peer_connection::configuration::media_engine::MIME_TYPE_PCMU;
+    let pcmu = |channels: u16| RTCRtpEncodingParameters {
+        rtp_coding_parameters: RTCRtpCodingParameters {
+            ssrc: Some(0x2424_2424),
+            ..Default::default()
+        },
+        codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_PCMU.to_owned(),
+            clock_rate: 8000,
+            channels,
+            sdp_fmtp_line: String::new(),
+            rtcp_feedback: vec![],
+        },
+        ..Default::default()
+    };
+    let (mut sender, mut receiver) = new_pair()?;
+    let sender_id = sender.add_track(track_with(
+        "webrtc-rs",
+        "audio",
+        RtpCodecKind::Audio,
+        vec![pcmu(1)],
+    ))?;
+    sender
+        .rtp_transceiver(sender_id.0)
+        .expect("transceiver")
+        .set_codec_preferences(vec![RTCRtpCodecParameters {
+            rtp_codec: pcmu(1).codec,
+            payload_type: 0,
+        }])?;
+    signal_pair(&mut sender, &mut receiver)?;
+    let mut pair = Pair::new(sender, receiver);
+    pair.connect()?;
+
+    let mut rtp_sender = pair.offerer.rtp_sender(sender_id).expect("sender");
+    assert_eq!(
+        rtp_sender.replace_track(Some(track_with(
+            "webrtc-rs",
+            "stereo",
+            RtpCodecKind::Audio,
+            vec![pcmu(2)],
+        ))),
+        Err(Error::InvalidModificationError)
+    );
+    rtp_sender.replace_track(Some(track_with(
+        "webrtc-rs",
+        "mono",
+        RtpCodecKind::Audio,
+        vec![pcmu(1)],
+    )))?;
     pair.close()
 }
 
