@@ -52,7 +52,8 @@
 //!
 //! # Cells
 //!
-//! A cell names everything but the seed: `scenario/chain/gapN/direction/qN/rlN`.
+//! A cell names everything but the seed: `scenario/chain/gapN/direction/qN/rlN`, and
+//! optionally a seventh part for the start order.
 //!
 //! - scenario: `cap`, `cap60` (the cap stays 60 s instead of 20: what a sender does to a path
 //!   that does not come back for a long time, and whether trying for the old rate meanwhile
@@ -90,7 +91,14 @@
 //!   `gap1000` are measured for comparison (docs/capacity-instrument.md);
 //! - direction: `up` (the caller's uplink capped, feedback path open) or `both`;
 //! - `qN`: the capped link's drop-tail queue in ms at the link's rate (100, 300, 1000);
-//! - `rlN`: per cent of the callee's datagrams (its media and all its feedback) lost.
+//! - `rlN`: per cent of the callee's datagrams (its media and all its feedback) lost;
+//! - start order (optional, measurement only): `aN`, each peer's audio writes its first frame
+//!   N ms before its video; `vN`, the video N ms before the audio. Without the part both
+//!   write in the same instant, the audio's frame first (what every cell did before the part
+//!   existed, so their rows do not move). The same instant hides what an engine does with a
+//!   first packet that comes before the video's (`conf/probe-1-start-up-probe-before-the-video`:
+//!   a start-up cluster asked for by the first audio packet, which a chain without a pacer had
+//!   no video packet to pad on); read in `startup`.
 //!
 //! The cap arrives 20 s into the call plus a PHASE of 0, 11 or 23 ms ([`PHASES_MS`], a third of
 //! the seeds each): the frame clock is 33.3 ms and the phase at which the cap meets it moves
@@ -544,20 +552,39 @@ struct Cell {
     both: bool,
     queue_ms: u64,
     reverse_loss: u32,
+    /// Which source writes its first frame first ([`StartOrder`]): the optional seventh part
+    /// of the name, `aN` (audio N ms before video) or `vN` (video N ms before audio); a name
+    /// without it starts both in the same instant, as every cell did before the part existed.
+    start: StartOrder,
 }
 
 impl Cell {
     fn parse(name: &str) -> Result<Self> {
         let parts: Vec<&str> = name.split('/').collect();
-        let [scenario, chain, gap, direction, queue, loss] = parts[..] else {
-            bail!("a cell is scenario/chain/gapN/direction/qN/rlN, not {name}");
+        let (&[scenario, chain, gap, direction, queue, loss], start) = (match parts[..] {
+            [.., start] if parts.len() == 7 => (&parts[..6], Some(start)),
+            _ => (&parts[..], None),
+        }) else {
+            bail!("a cell is scenario/chain/gapN/direction/qN/rlN[/aN|/vN], not {name}");
         };
         let number = |text: &str, prefix: &str| -> Result<u64> {
             text.strip_prefix(prefix)
                 .and_then(|digits| digits.parse().ok())
                 .ok_or_else(|| anyhow!("{text} in {name} is not {prefix}N"))
         };
+        let start = match start {
+            None => StartOrder::Together,
+            Some(text) if text.starts_with('a') => {
+                StartOrder::AudioFirst(Duration::from_millis(number(text, "a")?))
+            }
+            Some(text) => StartOrder::VideoFirst(Duration::from_millis(number(text, "v")?)),
+        };
+        if matches!(start, StartOrder::AudioFirst(lead) | StartOrder::VideoFirst(lead) if lead.is_zero())
+        {
+            bail!("a cell whose sources start together has no seventh part: {name}");
+        }
         Ok(Self {
+            start,
             scenario: match scenario {
                 "cap" => Scenario::Cap,
                 "cap60" => Scenario::LongCap,
@@ -597,8 +624,13 @@ impl Cell {
     }
 
     fn name(&self) -> String {
+        let start = match self.start {
+            StartOrder::Together => String::new(),
+            StartOrder::AudioFirst(lead) => format!("/a{}", lead.as_millis()),
+            StartOrder::VideoFirst(lead) => format!("/v{}", lead.as_millis()),
+        };
         format!(
-            "{}/{}/gap{}/{}/q{}/rl{}",
+            "{}/{}/gap{}/{}/q{}/rl{}{start}",
             match self.scenario {
                 Scenario::Cap => "cap".to_owned(),
                 Scenario::LongCap => "cap60".to_owned(),
@@ -629,7 +661,8 @@ impl Cell {
         let setup = Setup::new(seed, None)
             .chain(self.chain)
             .anchor(ANCHORS[0])
-            .reverse_loss(self.reverse_loss);
+            .reverse_loss(self.reverse_loss)
+            .start_order(self.start);
         let setup = match self.tuning {
             Tuning::Default => setup,
             Tuning::Share => setup.share_follows_send_rate(true),
@@ -1826,6 +1859,24 @@ fn a_cell_has_one_name() -> Result<()> {
     assert_eq!(Scenario::LongCap, Cell::parse(long)?.scenario);
     assert!(Cell::parse("cap/paced/gap300/up/q300").is_err());
     assert!(Cell::parse("cap/paced/wait300/up/q300/rl0").is_err());
+    // The start order: a seventh part, absent when both sources start together.
+    assert_eq!(StartOrder::Together, Cell::parse(PR_CELLS[0].0)?.start);
+    for (name, start) in [
+        (
+            "cap/nopacer/gap300/up/q300/rl0/a20",
+            StartOrder::AudioFirst(ms(20)),
+        ),
+        (
+            "cap/parolnet/gap300/up/q300/rl0/v15",
+            StartOrder::VideoFirst(ms(15)),
+        ),
+    ] {
+        assert_eq!(start, Cell::parse(name)?.start);
+        assert_eq!(name, Cell::parse(name)?.name());
+    }
+    assert!(Cell::parse("cap/paced/gap300/up/q300/rl0/a0").is_err());
+    assert!(Cell::parse("cap/paced/gap300/up/q300/rl0/x20").is_err());
+    assert!(Cell::parse("cap/paced/gap300/up/q300/rl0/a20/v5").is_err());
     // A third of the seeds at each phase.
     for phase in PHASES_MS {
         assert_eq!(
