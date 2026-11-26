@@ -8,24 +8,24 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5053 of 5088 (99.3 %).
-- Tested as the default (`tested`): 5021 of 5088 (98.7 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 35: 21 untested, 10 partial, 2 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5043 of 5088 (99.1 %).
+- Tested as the default (`tested`): 5011 of 5088 (98.5 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 45: 31 untested, 10 partial, 2 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 21 | 0 |
+| B | implemented, lacking a test that fails without it | 30 | 0 |
 | C | partly implemented | 11 | 1 |
 | D | not implemented | 2 | 0 |
-| E | cannot be met or observed inside this engine | 7 | 6 |
+| E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 67 | 26 |
+| all | | 77 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 34 rows, 30 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
+- Work in code and tests (classes B, C, D, F): 43 rows, 39 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
 Class C rows that say "Owner decision" are implemented as a setting whose default differs
@@ -36,13 +36,15 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 12 | 1 | 0 | 0 | 0 | 13 | 13 | 0 | 0 |
+| dtls-srtp | 16 | 1 | 0 | 0 | 0 | 17 | 17 | 0 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
-| jsep | 2 | 2 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
+| jsep | 4 | 2 | 0 | 0 | 0 | 6 | 6 | 0 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
+| media | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| sctp | 5 | 2 | 0 | 0 | 0 | 7 | 7 | 0 | 0 |
+| rtp | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
+| sctp | 6 | 2 | 0 | 0 | 0 | 8 | 8 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 | turn | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 
@@ -79,6 +81,7 @@ Sorted by class, then owner, size and ID.
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC5246-7.4.1.3-3 | `rfc5246.md` | Client rejects a ServerHello cipher suite it did not offer | untested | B | A test that a DTLS 1.2 client handed a ServerHello with a suite it did not offer aborts (audit-5 sweep) | S | dtls-srtp |
+| RFC5746-3.6-5 | `rfc5746.md` | Server ignores unknown extensions and accepts higher version numbers | untested | B | A DTLS 1.2 server test handed a ClientHello with an unknown extension type that completes the handshake (audit-6 sweep) | S | dtls-srtp |
 | RFC8446-4.1.2-16 | `rfc8446.md` | Servers MUST ignore unrecognized extensions. | untested | B | A test that the DTLS 1.3 server answers a ClientHello carrying an unknown extension (e.g. 0x7777) with a ServerHello (audit-5 sweep) | S | dtls-srtp |
 | RFC8446-4.1.4-12 | `rfc8446.md` | The value of selected_version in the HelloRetryRequest ... | untested | B | A test that a ServerHello whose selected_version differs from the HelloRetryRequest's is refused with illegal_parameter (audit-5 sweep) | S | dtls-srtp |
 | RFC8446-4.2.1-5 | `rfc8446.md` | Servers MUST only select a version of TLS present in that extension ... | untested | B | A test that a ClientHello whose supported_versions also lists an unknown version (a GREASE value) negotiates DTLS 1.3 (audit-5 sweep) | S | dtls-srtp |
@@ -89,11 +92,19 @@ Sorted by class, then owner, size and ID.
 | RFC8446-6.1-4 | `rfc8446.md` | Any data received after a closure alert has been received MUST be ... | untested | B | As RFC8446-6.1-1 (audit-5 sweep) | S | dtls-srtp |
 | RFC8446-9.3-5 | `rfc8446.md` | - A server receiving a ClientHello MUST correctly ignore all ... | untested | B | As RFC8446-4.1.2-16 (audit-5 sweep) | S | dtls-srtp |
 | RFC8446-9.3-6 | `rfc8446.md` | In TLS 1.3, a client receiving a CertificateRequest or ... | untested | B | As RFC8446-4.6.1-14 (the CertificateRequest half is tested) (audit-5 sweep) | S | dtls-srtp |
+| RFC9147-4-9 | `rfc9147.md` | Sending implementations MUST NOT mix records from multiple DTLS ... | untested | B | A test with two DTLS 1.3 associations on one endpoint flushing at once: every datagram holds records of one association only (audit-6 sample) | S | dtls-srtp |
+| RFC9147-5-1 | `rfc9147.md` | DTLS servers MUST NOT echo the "legacy_session_id" value from the ... | untested | B | A test handing the DTLS 1.3 server a ClientHello with a non-empty legacy_session_id: the ServerHello echoes none (audit-6 sample) | S | dtls-srtp |
+| RFC9147-5.5-1 | `rfc9147.md` | The ranges MUST NOT overlap. | untested | B | A test that the fragments of a handshake message sent at a small MTU are contiguous and do not overlap (offset of each = end of the previous) (audit-6 sample) | S | dtls-srtp |
 | WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep) | S | dtls-srtp |
 | WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
 | WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
+| RFC8851-6.3-5 | `rfc8851.md` | A line whose formats are all discarded is dropped; no pt= in the ... | untested | B | A test whose offer lists a `pt=` none of the answerer's formats keep: the answer drops that a=rid line (audit-6 sweep) | S | jsep |
+| RFC8853-5.2-1 | `rfc8853.md` | a=simulcast is not used at session level; one received there is ... | untested | B | A test of a remote offer with a=simulcast at session level only: taken, no simulcast negotiated for its sections (audit-6 sweep) | S | jsep |
 | WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
 | WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
+| RFC5576-9-1 | `rfc5576.md` | The sender is prepared for receivers that ignore its source ... | untested | B | An rtc2rtc test whose answerer is handed the offer with every a=ssrc / a=ssrc-group line removed: media and RTX still bound (MID, RID, RRID) (audit-6 sweep) | S | rtp |
+| RFC8834-4.1-24 | `rfc8834.md` | Ignore unknown RTP header extensions | untested | B | As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep) | S | rtp |
+| RFC6525-5.2.7-1 | `rfc6525.md` | H1: a response marks its request acknowledged; the timer stops when ... | untested | B | A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep) | S | sctp |
 | RFC9260-3.2-8 | `rfc9260.md` | Chunk Length smaller than 4 or past the packet end is rejected | untested | B | A test that a chunk whose Chunk Length is below 4 refuses the packet (past the end is tested by a_partial_chunk_at_the_end_of_a_packet_is_dropped_alone) (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.2.1.5-2 | `rfc9260.md` | Supported Address Types is accepted; a Host Name entry in it is ... | untested | B | A test of an INIT whose Supported Address Types lists the Host Name type (11): answered with an INIT ACK, the entry ignored (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |
@@ -119,6 +130,7 @@ Sorted by class, then owner, size and ID.
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC9429-4.1.9-2 | `rfc9429.md` | Each answer line follows the answer rules of its defining spec | conflict | E | `conflict`: umbrella of 5.3.1-6 | S | jsep (running) |
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| RFC4733-2.3.4-1 | `rfc4733.md` | Sender sets volume to zero for events where volume does not apply; ... | untested | E | Which events have no volume is the event registry's (RFC 4734); the engine passes the application's volume both ways and names only DTMF 0-15, which have one. Proposed n/a, or a sender that zeroes volume for events outside 0-15 with a test (audit-6 sweep) | S | media |
 
 ## Closed since classified
 
