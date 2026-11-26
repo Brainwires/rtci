@@ -1599,6 +1599,51 @@ fn nothing(_: usize, _: &RTCIceCandidateInit) -> bool {
     false
 }
 
+/// What each peer is at, for a failure message: its ICE state changes, the stream commands it
+/// gave (listen / connect), its local and remote candidates as its statistics list them.
+fn lite_diagnostics(peers: &mut [Peer], net: &Net) -> String {
+    let mut out = String::new();
+    for (i, p) in peers.iter_mut().enumerate() {
+        let ice: Vec<String> = p
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(_)
+                )
+            })
+            .map(|e| format!("{e:?}"))
+            .collect();
+        let listens = p
+            .commands
+            .iter()
+            .filter(|c| matches!(c, StreamCommand::Listen { .. }))
+            .count();
+        let report = p.pc.get_stats(net.now, StatsSelector::None);
+        let candidates: Vec<String> = report
+            .iter()
+            .filter_map(|e| match e {
+                RTCStatsReportEntry::LocalCandidate(c) => Some(("local", c)),
+                RTCStatsReportEntry::RemoteCandidate(c) => Some(("remote", c)),
+                _ => None,
+            })
+            .map(|(side, c)| {
+                format!(
+                    "{side} {} {:?}:{} {:?}",
+                    c.protocol, c.address, c.port, c.tcp_type
+                )
+            })
+            .collect();
+        out += &format!(
+            "\npeer {i}: gathering {:?}, ICE {ice:?}, listen {listens}, connect {}, candidates {candidates:?}",
+            p.pc.ice_gathering_state(),
+            connect_commands(p),
+        );
+    }
+    out + &format!("\nconnections {:?}", net.conns)
+}
+
 /// The offerer's active TCP candidate in the offer's own candidate lines (not trickled): the
 /// answerer knows the offerer is lite (`a=ice-lite`) before it reads them, keeps the active
 /// candidate as two lite agents do, and the pair connects.
@@ -1612,14 +1657,19 @@ fn two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer() -> R
     peers[0].pc.set_local_description(net.now, offer)?;
     let c = udp_host(&peers[0]);
     peers[0].pc.add_local_candidate(c)?;
-    // The application's end of candidates: gathering completes once the engine's TCP
-    // listeners are bound too.
+    // The driver serves the stream interface before the application's end of candidates (as
+    // `rtci-stream-driver` does from the start): gathering then waits for the engine's TCP
+    // listeners. Without a first poll the engine takes the application for one that serves
+    // no streams and ends gathering at once, without TCP candidates
+    // (`an_application_that_never_serves_streams_gets_no_tcp_candidate_and_ends_gathering_at_once`).
+    net.step(&mut peers);
     peers[0]
         .pc
         .add_local_candidate(RTCIceCandidateInit::default())?;
     run_until(&mut peers, &mut net, Duration::from_secs(5), |_, peers| {
         peers[0].pc.ice_gathering_state() == RTCIceGatheringState::Complete
-    })?;
+    })
+    .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
     let gathered = peers[0].pc.local_description().expect("the offer").sdp;
     let offer: String = gathered
         .lines()
@@ -1628,7 +1678,11 @@ fn two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer() -> R
         })
         .map(|l| format!("{l}\r\n"))
         .collect();
-    assert!(offer.contains("tcptype active"), "{gathered}");
+    assert!(
+        offer.contains("tcptype active"),
+        "{gathered}{}",
+        lite_diagnostics(&mut peers, &net)
+    );
     let now = net.now;
     peers[1].pc.set_remote_description(
         now,
@@ -1648,7 +1702,8 @@ fn two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer() -> R
         &expected,
         Duration::from_secs(5),
         |_, _| {},
-    )?;
+    )
+    .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
     assert_eq!(peers[1].received, expected, "every message, in order");
     assert!(connect_commands(&peers[0]) > 0, "the offerer connected");
     Ok(())
