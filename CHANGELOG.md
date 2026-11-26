@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **A peer connection's DTLS ClientHello carries no server_name extension, and nothing is
+  logged for it** (`conf/dtlssni-1-no-sni-from-peer-connection`; RFC 6066 section 3, RFC 8446
+  section 4.4.2.2 "when applicable"). In 0.2.0 every client-role association sent SNI
+  `localhost` and logged a warning ("conn.remote_addr is empty ..."): the peer connection
+  gives rtci-dtls no server name and no address (DTLS runs over the ICE pair), and rtci-dtls
+  then made up `localhost`. RFC 6066 makes the extension a MAY whose HostName is "the fully
+  qualified DNS hostname of the server, as understood by the client"; a WebRTC endpoint knows
+  its peer by the certificate fingerprint in the session description (RFC 8122, RFC 8827)
+  and has no such name. libwebrtc's DTLS sends none either (`rtc_base/openssl_stream_adapter.cc`
+  at a222406d sets no host name), so no `Chrome` profile row. The connection's own DTLS 1.3
+  session tickets (`with_dtls_session_resumption`) are now kept under the empty name on both
+  sides, as they were under `localhost`; TURN over DTLS keeps the URI host.
+  - **rtci-dtls used on its own:** a client that verifies nothing by name
+    (`with_insecure_skip_verify(true)`, or a PSK) with no `with_server_name` and no remote
+    address sends no server_name extension and logs nothing, where 0.2.0 sent `localhost`. A
+    client that verifies the certificate by name with neither keeps 0.2.0's fallback
+    (`localhost`, with the warning); refusing that configuration is planned for 0.3.0
+    (`conf/dtlssni-2-nameless-verifying-client-refused`). Tests that keyed tickets on the
+    made-up name now name the server (`psk_test.rs`, `early_data_test.rs`), and the
+    fragmented-ClientHello test gives its client a long name to stay above the 128-octet MTU.
+    Audit row RFC8446-4.4.2.2-4.
+
 ### Changed
 
 - **sctp** (`conf/sctp-22-t1-rto-backoff`): an expiry of T1-init or T1-cookie backs off the

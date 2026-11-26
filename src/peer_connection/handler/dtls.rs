@@ -1912,7 +1912,8 @@ mod tests {
         let provider = crypto::default_provider().expect("a built-in crypto provider");
         let store = Arc::new(MemorySessionStore::new());
 
-        // A ticket of another server for the name the peer client uses ("localhost").
+        // A ticket of another server for the name the peer client uses: none (a client with
+        // no server name and no remote address keys its tickets under the empty name).
         {
             use dtls::config::ConfigBuilder;
             let certificate = dtls::crypto::Certificate::generate_self_signed(
@@ -1954,7 +1955,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(store.len("localhost"), 1, "the issuing server's ticket");
+        assert_eq!(store.len(""), 1, "the issuing server's ticket");
 
         // The transport as the server, the peer a client with that store.
         let mut pair = HandlerAndPeer::new_with(RTCDtlsRole::Server, vec![], false, |builder| {
@@ -1969,12 +1970,8 @@ mod tests {
             !handler_resumed(&pair),
             "the ticket offered was not accepted"
         );
-        assert_eq!(
-            store.len("localhost"),
-            0,
-            "it was taken, and none came back"
-        );
-        assert!(store.take("localhost").is_none());
+        assert_eq!(store.len(""), 0, "it was taken, and none came back");
+        assert!(store.take("").is_none());
 
         // The transport as the client, the peer a server that issues tickets.
         let mut pair = HandlerAndPeer::new_with(RTCDtlsRole::Client, vec![], false, |builder| {

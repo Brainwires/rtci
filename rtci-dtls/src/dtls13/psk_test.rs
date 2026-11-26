@@ -31,6 +31,7 @@ fn store() -> Arc<MemorySessionStore> {
 fn resuming_client(store: &Arc<MemorySessionStore>) -> Result<Arc<HandshakeConfig>> {
     Ok(Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .build(true, None)?,
     ))
@@ -363,6 +364,7 @@ fn psk_ke_is_refused_unless_the_server_allows_it() -> Result<()> {
     assert_eq!(store.len(NAME), 1);
 
     let mut psk_ke_only = client_builder()
+        .with_server_name(NAME.to_owned())
         .with_session_store(Some(store.clone()))
         .with_psk_without_key_exchange(true)
         .build(true, None)?;
@@ -390,6 +392,7 @@ fn psk_ke_resumes_where_both_sides_allow_it() -> Result<()> {
     );
     let _ = Pair::with(resuming_client(&store)?, server.clone())?.complete();
     let mut psk_ke_only = client_builder()
+        .with_server_name(NAME.to_owned())
         .with_session_store(Some(store.clone()))
         .with_psk_without_key_exchange(true)
         .build(true, None)?;
@@ -403,6 +406,7 @@ fn psk_ke_resumes_where_both_sides_allow_it() -> Result<()> {
     // A client that offers both modes gets psk_dhe_ke, which keeps forward secrecy.
     let both = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .with_psk_without_key_exchange(true)
             .build(true, None)?,
@@ -421,7 +425,9 @@ fn a_dtls_1_2_server_ignores_the_psk_offer() -> Result<()> {
     let _ = Pair::with(client.clone(), ticket_server(1)?)?.complete();
     assert_eq!(store.len(NAME), 1);
     let pair = Pair::new(
-        client_builder().with_session_store(Some(store.clone())),
+        client_builder()
+            .with_server_name(NAME.to_owned())
+            .with_session_store(Some(store.clone())),
         server_builder().with_protocol_versions(DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_2),
     )?
     .complete();
@@ -444,6 +450,7 @@ fn the_peer_certificate_check_runs_again_on_resumption() -> Result<()> {
     let (refuse_in, calls_in) = (refuse.clone(), calls.clone());
     let client = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .with_verify_peer_certificate(Some(Arc::new(move |chain: &[Vec<u8>], _| {
                 calls_in.fetch_add(1, Ordering::SeqCst);
@@ -519,7 +526,9 @@ fn a_selected_identity_out_of_range_is_an_illegal_parameter() -> Result<()> {
 fn an_external_psk_authenticates_without_certificates() -> Result<()> {
     let psk = ExternalPsk::new(b"device-7".to_vec(), vec![0x42; 32]);
     let mut pair = Pair::new(
-        client_builder().with_external_psks(vec![psk.clone()]),
+        client_builder()
+            .with_server_name(NAME.to_owned())
+            .with_external_psks(vec![psk.clone()]),
         server_builder().with_external_psks(vec![psk]),
     )?
     .complete();
@@ -542,6 +551,7 @@ fn an_external_psk_with_another_secret_is_a_decrypt_error() -> Result<()> {
         .with_external_psks(vec![ExternalPsk::new(b"device-7".to_vec(), vec![0x42; 32])]);
     let mut pair = Pair::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_external_psks(vec![ExternalPsk::new(b"device-7".to_vec(), vec![0x43; 32])]),
         server.clone(),
     )?;
@@ -554,6 +564,7 @@ fn an_external_psk_with_another_secret_is_a_decrypt_error() -> Result<()> {
 
     let pair = Pair::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_external_psks(vec![ExternalPsk::new(b"device-8".to_vec(), vec![0x42; 32])]),
         server,
     )?
@@ -573,7 +584,9 @@ fn an_external_psk_is_used_only_with_a_suite_of_its_hash() -> Result<()> {
     // By default the client lists TLS_AES_128_GCM_SHA256 first and TLS_AES_256_GCM_SHA384
     // last; the PSK makes the server take the latter.
     let mut pair = Pair::new(
-        client_builder().with_external_psks(vec![psk.clone()]),
+        client_builder()
+            .with_server_name(NAME.to_owned())
+            .with_external_psks(vec![psk.clone()]),
         server_builder().with_external_psks(vec![psk.clone()]),
     )?
     .complete();
@@ -591,6 +604,7 @@ fn an_external_psk_is_used_only_with_a_suite_of_its_hash() -> Result<()> {
     ];
     let mut pair = Pair::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_cipher_suites(sha256_only.clone())
             .with_external_psks(vec![psk.clone()]),
         server_builder().with_external_psks(vec![psk.clone()]),
@@ -604,7 +618,9 @@ fn an_external_psk_is_used_only_with_a_suite_of_its_hash() -> Result<()> {
             .contains(&EXT_PRE_SHARED_KEY)
     );
     let pair = Pair::new(
-        client_builder().with_external_psks(vec![psk.clone()]),
+        client_builder()
+            .with_server_name(NAME.to_owned())
+            .with_external_psks(vec![psk.clone()]),
         server_builder()
             .with_cipher_suites(sha256_only)
             .with_external_psks(vec![psk]),
@@ -653,7 +669,9 @@ fn refusal_of(cfg: &HandshakeConfig, body: &[u8]) -> Option<u8> {
 fn a_pre_shared_key_that_is_not_last_or_comes_without_modes_is_refused() -> Result<()> {
     let psk = ExternalPsk::new(b"device-7".to_vec(), vec![0x42; 32]);
     let mut pair = Pair::new(
-        client_builder().with_external_psks(vec![psk.clone()]),
+        client_builder()
+            .with_server_name(NAME.to_owned())
+            .with_external_psks(vec![psk.clone()]),
         server_builder(),
     )?;
     let datagram = take(&mut pair.client).remove(0);
@@ -728,6 +746,7 @@ fn a_ticket_carries_the_client_certificate_and_the_server_asks_for_none() -> Res
     let store = store();
     let client = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_certificates(vec![crate::crypto::Certificate::generate_self_signed(
                 vec!["client".to_owned()],
                 provider.crypto(),
@@ -762,6 +781,7 @@ fn a_ticket_is_offered_only_to_the_server_name_it_came_from() -> Result<()> {
     assert_eq!(store.len(NAME), 1);
     let other_name = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_server_name("other.example".to_owned())
             .with_session_store(Some(store.clone()))
             .build(true, None)?,
@@ -902,7 +922,11 @@ fn malformed_pre_shared_key_extensions_are_refused() {
 #[test]
 fn without_a_session_store_no_ticket_is_asked_for_or_sent() -> Result<()> {
     let mut pair = Pair::with(
-        Arc::new(client_builder().build(true, None)?),
+        Arc::new(
+            client_builder()
+                .with_server_name(NAME.to_owned())
+                .build(true, None)?,
+        ),
         ticket_server(2)?,
     )?;
     pair.run();
@@ -981,6 +1005,7 @@ fn the_server_runs_its_peer_certificate_check_again_on_a_resumed_client() -> Res
     let store = store();
     let client = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_certificates(vec![crate::crypto::Certificate::generate_self_signed(
                 vec!["client".to_owned()],
                 provider.crypto(),
@@ -1046,6 +1071,7 @@ fn a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate() -> R
     let ((_, calls, _), check) = counting_check();
     let client = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .with_verify_peer_certificate(Some(check))
             .build(true, None)?,
@@ -1063,6 +1089,7 @@ fn a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate() -> R
     // Without a check the same ticket resumes.
     let unchecked = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .build(true, None)?,
     );
@@ -1153,7 +1180,9 @@ fn external_psk_with_a_check(
 ) -> Result<((bool, bool), usize)> {
     let psk = ExternalPsk::new(b"device-7".to_vec(), vec![0x42; 32]);
     let ((_, calls, _), check) = counting_check();
-    let mut client = client_builder().with_external_psks(vec![psk.clone()]);
+    let mut client = client_builder()
+        .with_server_name(NAME.to_owned())
+        .with_external_psks(vec![psk.clone()]);
     let mut server = server_builder()
         .with_external_psks(vec![psk])
         .with_client_auth(client_auth);
