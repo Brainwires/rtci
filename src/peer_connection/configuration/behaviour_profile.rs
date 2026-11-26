@@ -550,6 +550,18 @@ governed_behaviours! {
         apply_setting: |b: SettingEngineBuilder, v| b.with_srtp_protection_profiles(v),
         read: |s: &SettingEngine| srtp_profiles_shown(&s.srtp_protection_profiles),
     },
+    {
+        id: "dtls.session-resumption",
+        setting: "SettingEngineBuilder::with_dtls_session_resumption",
+        clause: "RFC 5764 3 (SHOULD)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc rtc_base/openssl_stream_adapter.cc @ a222406d sets SSL_OP_NO_TICKET (line 1223) with an SSL_CTX per adapter (line 1149): no ticket is issued or offered, and no session is shared between transports. Off in `Rfc` too, measured: the clause's strategy has the other transports wait for the first, which on links with latency costs connection time (tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency, three unbundled transports, time until all are connected: round trip 100 ms off 453 ms, on 703 ms between two engines, 753 ms against a peer that issues no ticket; round trip 300 ms 1.353 s, 2.103 s, 2.253 s) to save one signature and one verification per other transport. `StrictRfc` runs the SHOULD: the transports of unbundled sections share one DTLS session, the others waiting for the first (at most three flight intervals and never more than 3 s) and resuming it with DTLS 1.3 tickets (psk_dhe_ke only). With BUNDLE it does nothing",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_dtls_session_resumption(v),
+        read: |s: &SettingEngine| s.dtls_session_resumption,
+    },
     // ---- JSEP / SDP ----
     {
         id: "sdp.bundle-attributes-repeated",
@@ -1693,11 +1705,6 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_dtls_alpn",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228)",
-    },
-    NotGoverned {
-        setting: "SettingEngineBuilder::with_dtls_session_resumption",
-        class: NotGovernedClass::EngineOnly,
-        note: "RFC 5764 3 (SHOULD, \"as an optimization\"): the transports of unbundled sections share one DTLS session, the others waiting for the first (at most three flight intervals and never more than 3 s) and resuming it with DTLS 1.3 tickets (psk_dhe_ke only; no DTLS 1.2 session id or ticket in any configuration). Off in every profile, an opt-in (`true`), a standing departure from the SHOULD because it costs connection time and no browser can take part. Measured (tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency, three unbundled transports, time until all are connected): round trip 100 ms: off 453 ms, on against a peer that issues no ticket 753 ms (+300 ms, about 3 round trips, nothing resumed), on between two engines with tickets 703 ms (+250 ms, about 2.5 round trips); round trip 300 ms: 1.353 s, 2.253 s (+900 ms), 2.103 s (+750 ms); one datagram lost on the first handshake delays every transport. It saves one signature and one verification per other transport. No browser issues or offers a ticket: libwebrtc rtc_base/openssl_stream_adapter.cc @ a222406d sets SSL_OP_NO_TICKET (line 1223) with an SSL_CTX per adapter (line 1149); Firefox dom/media/webrtc/transport/transportlayerdtls.cpp TransportLayerDtls::Setup() sets SSL_ENABLE_SESSION_TICKETS to PR_FALSE and SSL_NO_CACHE to PR_TRUE (read by the second review, 2026-11-24). With BUNDLE (one transport, Chrome's connection in every bundle policy) it does nothing: no wait, no ticket",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_connection_id",

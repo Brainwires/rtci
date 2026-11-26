@@ -52,6 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (only its own tests and examples use it: now a dev-dependency) and `rtci-srtp` no longer
   depends on `byteorder` (unused). The 0.2.0 publish dry run warned about both.
 
+- **`BehaviourProfile::StrictRfc` turns DTLS session resumption between a connection's
+  transports on** (`conf/dtls-27-session-resumption-strict-rfc`; RFC 5764 section 3, "As an
+  optimization, the DTLS-SRTP implementation SHOULD use the following strategy"). The setting
+  `SettingEngineBuilder::with_dtls_session_resumption` is now a governed behaviour
+  (`dtls.session-resumption`): `false` under `Rfc` (the default), `Chrome` and `Performance`,
+  `true` under `StrictRfc`. The default is unchanged and stays off, measured: the strategy has
+  the other transports wait for the first, which costs connection time on links with latency
+  (`tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`:
+  round trip 100 ms, 453 ms off against 703 ms on), and no browser issues or offers a ticket.
+  Audit row RFC5764-3-4: `partial` to `setting`.
+
 ### Testing
 
 - **RFC 8108 5.3.2 step b is tested: an aggregated SSRC's transmission time ignores the
@@ -71,7 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers only and its `DecodeTargetSelector` forwards the T0 frames whole for a T0 receiver and
   every frame for a T2 one; the end receiver decrypts what it forwards. RFC9605-X-6 `tested` (was
   `missing`, open-must class C).
-
 - **RFC 8836 property tests for the delay-based estimator** (`conf/ccrows-13-rfc8836-tests-on-master`,
   the tests of `conf/ccrows-2-rfc8836-tests` re-based on 0.2.0): in
   `rtci-interceptor/tests/rfc8836_multi_flow.rs`, jitter on the path is not taken for congestion
