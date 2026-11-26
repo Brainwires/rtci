@@ -1579,7 +1579,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidate pairs to be incrementally added"): the peer's check forms the peer-reflexive pair
   and the agent connects, and if no check comes the checking timeout fails it as before
   (`disconnected_timeout + failed_timeout`, 30 s by default). The peer connection now hands
-  remote active candidates to the agent instead of dropping them itself. A checklist with no
+  remote active candidates to the agent instead of dropping them itself, and no longer takes
+  an active candidate for administratively prohibited because of its port: RFC 6544 section
+  4.5 sets that port to 9, a Fetch bad port, but no connection is ever made to it (the W3C
+  rule prohibits connections to bad ports). A checklist with no
   remote candidate at all, or whose pairs have all failed with nothing that could still dial
   in, fails at once as before. Tests: `agent_checklist_test.rs::
   a_peer_reached_only_by_its_own_checks_keeps_the_empty_checklist_running_and_connects`,
