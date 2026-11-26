@@ -259,13 +259,11 @@ pub struct Candidate {
     /// current session had nominated a pair: it is not paired in that session (RFC 8838
     /// Section 13), only in the one the restart begins.
     pub(crate) awaiting_restart: bool,
-    /// A local candidate withdrawn from the current session
+    /// A local candidate withdrawn
     /// ([`Agent::withdraw_local_candidate`](crate::agent::Agent::withdraw_local_candidate)):
-    /// never paired again, nor signalled; the next restart drops it.
+    /// never paired again, nor signalled; its pairs other than the one carrying the data are
+    /// removed; the next restart drops it.
     pub(crate) withdrawn: bool,
-    /// Withdrawn while an ICE restart was staged: the current session keeps it, the session
-    /// the restart begins does not have it.
-    pub(crate) withdrawn_at_restart: bool,
 
     pub(crate) network: String,
 
@@ -300,7 +298,6 @@ impl Default for Candidate {
             restart_generation: false,
             awaiting_restart: false,
             withdrawn: false,
-            withdrawn_at_restart: false,
             network: String::new(),
 
             url: None,

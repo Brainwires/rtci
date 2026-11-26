@@ -582,6 +582,19 @@ impl RTCPeerConnection {
             return;
         }
         self.release_retired_turn_links();
+        // Again for the links already retiring: an ICE restart taken back
+        // (`Agent::revert_restart`) restores a session as it was before the withdrawal.
+        let retiring: Vec<(TransportId, SocketAddr, bool)> = self
+            .streams
+            .turn
+            .links
+            .iter()
+            .filter(|l| l.retiring)
+            .filter_map(|l| l.relay.map(|r| (l.transport, r, l.relay_tcp)))
+            .collect();
+        for (transport, relay, tcp) in retiring {
+            self.withdraw_relay_candidate(transport, relay, tcp);
+        }
         let mut dropped = vec![];
         for transport in self.pipeline_context.transports.ids() {
             let ufrag = self
@@ -601,27 +614,12 @@ impl RTCPeerConnection {
                     "{}: kept while its relayed candidate carries the data",
                     link.url
                 );
-                // Its relayed candidate stays the previous path's only: a restart that keeps
-                // the local candidates kept it, and the new session must not pair (and so
-                // nominate) it, or the allocation of the credentials just replaced would
-                // carry the new session too and never be released.
+                // Its relayed candidate is the previous path's only: a restart that keeps the
+                // local candidates would carry it into the new session, which would pair (and
+                // nominate) it, and the allocation of the credentials just replaced would never
+                // be let go (`Agent::withdraw_local_candidate`).
                 if let Some(relay) = link.relay {
-                    let now = self.pipeline_context.now;
-                    let targets: Vec<(SocketAddr, TransportProtocol)> = if link.relay_tcp {
-                        vec![
-                            (relay, TransportProtocol::TCP),
-                            (SocketAddr::new(relay.ip(), 9), TransportProtocol::TCP),
-                        ]
-                    } else {
-                        vec![(relay, TransportProtocol::UDP)]
-                    };
-                    self.with_transport(link.transport, |pc| {
-                        for (addr, protocol) in targets {
-                            pc.ice_transport_mut()
-                                .agent
-                                .withdraw_local_candidate(now, addr, protocol);
-                        }
-                    });
+                    self.withdraw_relay_candidate(link.transport, relay, link.relay_tcp);
                 }
                 link.retiring = true;
                 self.streams.turn.links.push(link);
@@ -1685,6 +1683,27 @@ impl RTCPeerConnection {
                         && p.local_addr.ip() == relay.ip()
                         && p.local_addr.port() == 9)
             })
+    }
+
+    /// Withdraws the relayed candidate(s) of `relay` from the agent of `transport` (UDP, or
+    /// the passive and active TCP candidates of a TCP allocation).
+    fn withdraw_relay_candidate(&mut self, transport: TransportId, relay: SocketAddr, tcp: bool) {
+        let now = self.pipeline_context.now;
+        let targets: Vec<(SocketAddr, TransportProtocol)> = if tcp {
+            vec![
+                (relay, TransportProtocol::TCP),
+                (SocketAddr::new(relay.ip(), 9), TransportProtocol::TCP),
+            ]
+        } else {
+            vec![(relay, TransportProtocol::UDP)]
+        };
+        self.with_transport(transport, |pc| {
+            for (addr, protocol) in targets {
+                pc.ice_transport_mut()
+                    .agent
+                    .withdraw_local_candidate(now, addr, protocol);
+            }
+        });
     }
 
     /// Releases the retiring links whose relayed candidate no longer carries data (the
