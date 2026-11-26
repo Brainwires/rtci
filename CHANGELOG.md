@@ -44,6 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cited tests that no longer exist (TWCC-3.1-6, RFC2198-5-4, RFC8866-5.13-5, RFC8888-3.1-17,
   RFC9628-6.1.1-4) and one whose test was hollow for the clause (RFC7587-7-4). No violation
   found. Open MUST rows 15 -> 20. No engine change.
+- Third audit sweep (`conf/audit-4-tested-must-sweep-3`): the receive-side `tested` MUST rows the
+  second sweep left (RFC 9260 SCTP, RFC 9429, 9143, 8445, 8839, 6347, 9147, 3550, 8831) and the
+  last "same" rows, each test body read against the RFC sentence (about 140 rows). Six rows
+  `tested` -> `untested`: RFC9260-3.2-8 (a Chunk Length below 4), RFC9260-3.3.2.1.5-2 (the Host
+  Name type inside Supported Address Types), RFC9260-3.3.7-5 (a malformed ABORT discarded),
+  RFC9429-5.3.1-7 (a section whose formats setCodecPreferences excludes is rejected),
+  RFC9143-9.3.1.2-3 (no rtcp-mux-only in a rejected section; the paraphrase said rtcp-mux); two
+  `tested` -> `partial`: RFC9260-3.1-1 / 3.1-2 (port 0 MUST NOT be sent: the test is
+  receive-only and `with_sctp_port(0)` / `with_remote_sctp_port(0)` are accepted). Citations
+  corrected for about 15 rows, two of them dead or misnamed (GCC-5.5-15 named a test renamed in
+  November; four rows cited `me.rs::` for `media_engine.rs`). `scripts/check-test-inventory.py
+  --check` (CI) now fails on a backticked name in the Test cell of a MUST or SHOULD audit row
+  that is no `fn`, module, fuzz target or field in the tree, with its unit tests
+  (`scripts/test_check_test_inventory.py`). No violation found. Open MUST rows 20 -> 27. No
+  engine change.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
