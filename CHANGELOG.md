@@ -330,6 +330,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/renegotiation_duplicate_mid.rs::a_new_media_description_goes_below_the_existing_ones`
   asserts the order of the m= sections of a re-offer from each side. Proved by a mutation
   placing a new section first. Test only, no engine change.
+- ICE `completed` (W3C webrtc 5.6.4, audit row WEBRTC-5.6.4-6;
+  `conf/ice-31-completed-only-when-no-check-is-in-progress`): a regression test that the
+  transport never enters `completed` while a check is in flight. A triggered check the peer's
+  request starts afterwards (RFC 8445 7.3.1.4) leaves it `completed`, as the specification's
+  transitions out of the state (lost connectivity, consent failure, ICE restart) imply. Tests
+  and audit only, no engine change.
 
 ### Testing
 
