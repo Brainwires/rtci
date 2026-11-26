@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5031 of 5088 (98.9 %).
-- Tested as the default (`tested`): 4999 of 5088 (98.3 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 57: 43 untested, 9 partial, 3 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5042 of 5088 (99.1 %).
+- Tested as the default (`tested`): 5010 of 5088 (98.5 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 46: 32 untested, 9 partial, 3 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 43 | 2 |
+| B | implemented, lacking a test that fails without it | 32 | 2 |
 | C | partly implemented | 11 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 89 | 28 |
+| all | | 78 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 56 rows, 52 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 45 rows, 41 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -36,7 +36,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 12 | 1 | 0 | 0 | 0 | 13 | 13 | 0 | 0 |
+| dtls-srtp | 1 | 1 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
 | jsep | 9 | 1 | 0 | 0 | 0 | 10 | 10 | 0 | 0 |
@@ -81,17 +81,6 @@ Sorted by class, then owner, size and ID.
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | setting | A | `setting` (measured, rtcpbudget-4): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; capacity instrument `tests/capacity_instrument.rs::measure`, chain `every` against `paced`, 1000 seeds: oldest picture 8.00 -> 8.53 s, target under the cap 209.8 -> 185.8 kbit/s, recovery over 20 s 81 -> 244 calls, 15 gate and 33 star statistics worse (RTCP 122 -> 149 kbit/s open); the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
-| RFC5246-7.4.1.3-3 | `rfc5246.md` | Client rejects a ServerHello cipher suite it did not offer | untested | B | A test that a DTLS 1.2 client handed a ServerHello with a suite it did not offer aborts (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-4.1.2-16 | `rfc8446.md` | Servers MUST ignore unrecognized extensions. | untested | B | A test that the DTLS 1.3 server answers a ClientHello carrying an unknown extension (e.g. 0x7777) with a ServerHello (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-4.1.4-12 | `rfc8446.md` | The value of selected_version in the HelloRetryRequest ... | untested | B | A test that a ServerHello whose selected_version differs from the HelloRetryRequest's is refused with illegal_parameter (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-4.2.1-5 | `rfc8446.md` | Servers MUST only select a version of TLS present in that extension ... | untested | B | A test that a ClientHello whose supported_versions also lists an unknown version (a GREASE value) negotiates DTLS 1.3 (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-4.2.11-14 | `rfc8446.md` | If any other value is returned, the client MUST abort the handshake ... | untested | B | Assert the illegal_parameter alert in accepted_early_data_with_another_identity_is_an_illegal_parameter (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-4.6.1-14 | `rfc8446.md` | Clients MUST ignore unrecognized extensions. | untested | B | A test that a NewSessionTicket with an unknown extension is taken (stored, usable) (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-6-5 | `rfc8446.md` | Unknown Alert types MUST be treated as error alerts. | untested | B | A test that a received alert of an unknown description fails the connection (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-6.1-1 | `rfc8446.md` | Any data received after a closure alert has been received MUST be ... | untested | B | A test that a record received after the peer's close_notify reaches nothing (no application data, no new connection) (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-6.1-4 | `rfc8446.md` | Any data received after a closure alert has been received MUST be ... | untested | B | As RFC8446-6.1-1 (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-9.3-5 | `rfc8446.md` | - A server receiving a ClientHello MUST correctly ignore all ... | untested | B | As RFC8446-4.1.2-16 (audit-5 sweep) | S | dtls-srtp |
-| RFC8446-9.3-6 | `rfc8446.md` | In TLS 1.3, a client receiving a CertificateRequest or ... | untested | B | As RFC8446-4.6.1-14 (the CertificateRequest half is tested) (audit-5 sweep) | S | dtls-srtp |
 | WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep) | S | dtls-srtp |
 | WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
 | WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
