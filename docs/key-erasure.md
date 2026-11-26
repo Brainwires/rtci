@@ -69,12 +69,34 @@ What remains with ring:
   that built it, and a value moved out of the wrapper would be a copy it cannot reach (the
   wrapper never moves its value out). The engine calls `crypto::scrub_stack()` after building
   keyed objects. What the tests show: in DTLS, copies carried from dead frames into heap padding
-  were found and the scrub removes them (its removal is caught, m13 of the first round); the
-  Linux process scan also searches the dead worker stacks and finds nothing after the drop. A
+  were found and the scrub removes them (its removal is caught, m13 of the first round). The
+  Linux process scan also searches the dead stack frames of the worker thread that built and
+  dropped the SRTP contexts, and there it HAS found keys after the drop: in train 34's test
+  environment (rustc 1.99.1, run 45714962513, all ten SRTP profiles, ring) the SRTCP encryption
+  key and its AES round keys, the SRTCP HMAC-SHA1 inner and outer states and the master key
+  (with the AES-GCM profiles also one or two SRTP round keys), 120 key forms, all in that
+  thread's stack below its live frame, none in the heap or any other mapping. They are what
+  building the contexts left (deriving the SRTCP keys is the last step of building a cipher).
+  It depends on the environment, for a reason not identified: inside the test-environment image
+  (`scripts/test-env/Dockerfile`, rustc 1.99.1) the same sources failed in 20 of 20 runs
+  (45727898239), directly on GitHub's Ubuntu runners in 0 of 40, with rustc 1.99.1 and with
+  1.100.0 (45726148580, 45726156299). With this branch's tests, inside the image every run
+  reports 114 key forms in those dead frames (45727888207); on GitHub's runners 0, except once
+  146 in 40 test runs with rustc 1.100.0 (45727843950). The process-memory tests therefore assert on everything but those dead frames
+  and print what they find there (`STACK RESIDUE`); the ignored test
+  `known_limit_with_ring_building_an_srtp_context_leaves_keys_in_dead_stack_frames` (and its
+  AWS-LC twin) is the limit as a test. A
   copy deliberately moved onto the stack before the drop (mutation m3) was NOT caught, nor was
   a scrub added after the SRTP AES-GCM context is built ever needed (its removal, m5, changed
   nothing any test sees; it cost about 10 µs per context with the per-byte form, so it was taken out): residue that
-  stays on the stack is not observed by the tests, and its absence is not guaranteed.
+  stays on the stack is not guaranteed erased, and is reported rather than asserted.
+  For an application: the thread that builds SRTP contexts (and DTLS associations) can keep
+  copies of their keys in its dead stack frames after they are dropped, until later calls on
+  that thread overwrite them, or after the thread ends, until the C library gives its cached
+  stack to another thread. Build them on a long-lived thread whose stack is reused (an event
+  loop), or call `crypto::scrub_stack()` from the frame that built them: it overwrites the
+  32 KiB below its caller's frame, and reaches neither the caller's own frame, the frames above
+  it, registers, other threads' stacks nor anything deeper.
   `scrub_stack` is one bulk zero fill of a 32 KiB buffer in a never-inlined frame, made
   observable to the optimiser (`black_box` and a compiler fence) so it is not dropped as a
   dead store; it reaches the stack below its caller only, never registers or the frames above.
@@ -86,8 +108,8 @@ What remains with ring:
   master, run 45660052237; the first form, a volatile write per byte, took 13.8 and 22.5 µs).
 
 The AWS-LC provider (`crypto-aws-lc-rs`) cleanses its `EVP_AEAD_CTX` and `HMAC_CTX` itself; the
-process-memory tests find nothing after the drop, for every SRTP profile and the DTLS suites
-tested.
+process-memory tests find nothing after the drop outside dead stack frames, for every SRTP
+profile and the DTLS suites tested.
 
 ## What the tests look at
 
@@ -96,7 +118,14 @@ secret crossing the provider boundary (kept inverted) and derives what the assoc
 computes from them; a test allocator keeps every block freed during the association (and
 tracks those still allocated after it) and searches them all. On Linux the whole process is
 searched after a worker thread has dropped the association. `rtci-srtp/tests/key_*` do the
-same for SRTP contexts with keys they compute themselves.
+same for SRTP contexts with keys they compute themselves; `key_erasure_process_memory.rs`
+classifies each hit by its address, fails on any hit outside the worker's dead stack frames
+(heap, other mappings, the worker's live frame, its TLS) and prints those inside them. Each of
+its tests uses master keys of its own: a test thread computes the keys it looks for on its
+stack, and the C library can give that stack to a later thread, so two tests looking for the
+same keys found each other's computations (10 of 50 runs with two tests per provider and shared
+keys, runs 45726164797, 45726174061, 45726181744, 45726197738; 0 of 40 with one test per
+provider, 45726148580, 45726156299).
 
 ## Serialized state
 

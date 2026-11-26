@@ -42,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself, ring issue #15), `crypto::scrub_stack` runs after keyed objects and shared
   secrets are built, and secrets are drawn with the new `RTCRandom::fill_secret` (the built-in
   providers read the operating system for it). Tests: `tests/dtls_secret_erasure.rs` (every
-  freed heap block and every block still allocated, all platforms; the whole process on Linux),
+  freed heap block and every block still allocated, all platforms; the whole process on Linux
+  outside dead stack frames, see Known limits),
   the DTLS 1.2 exporter test of `tests/dtls_srtp_keying_material_erasure.rs` (was a known
   limit), `with_ring_no_key_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
   `key_erasure_process_memory.rs` (were the `known_limit_*` tests),
@@ -1954,10 +1955,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stack copies of key material with either provider** (`conf/zeroize-1-dtls-srtp-key-erasure`;
   RFC 7714 section 13.1): building a key object leaves copies in dead stack frames, and the
   providers' own stack temporaries are not erased by them. The engine scrubs 32 KiB of stack
-  after building keyed objects; the tests see stack residue only where it reaches the heap
-  (DTLS, caught) and in dead worker stacks on Linux (none found), and a copy deliberately moved
-  onto the stack is not caught, so this is a measure, not a tested guarantee
-  (RFC7714-13.1-3 `partial`, class E). With the ring provider an RSA signing key keeps its
+  after building keyed objects (DTLS); the tests catch stack residue where it reaches the heap
+  (DTLS), and a copy deliberately moved onto the stack is not caught, so this is a measure,
+  not a tested guarantee (RFC7714-13.1-3 `partial`, class E). CORRECTED (this entry first
+  said the Linux process scan found none in dead worker stacks): building SRTP contexts DOES
+  leave keys in the dead stack frames of the thread that built them. Train 34's test
+  environment (rustc 1.99.1, run 45714962513) found, after the contexts were dropped, the
+  SRTCP encryption key and its AES round keys, the SRTCP HMAC-SHA1 states and the master key
+  (all ten profiles, ring; 120 key forms), in that thread's stack only, none in the heap; the
+  same sources fail in 20 of 20 runs inside the test-environment image and in 0 of 40 directly
+  on GitHub's Ubuntu runners (rustc 1.99.1 and 1.100.0): environment-dependent, the reason not
+  identified (`conf/zeroize-2b-claim-matches-proof`). The
+  copies stay until later calls on that thread overwrite them, or, after the thread ends,
+  until its cached stack is given to another thread. An application can build contexts on a
+  long-lived thread or call `crypto::scrub_stack()` from the frame that built them (it reaches
+  the 32 KiB below that frame only). The process-memory tests now fail on any key outside those
+  dead frames and print what they find inside them; the ignored
+  `known_limit_with_{ring,aws_lc}_building_an_srtp_context_leaves_keys_in_dead_stack_frames`
+  are the limit as tests (docs/test-exclusions.md). With the ring provider an RSA signing key keeps its
   private limbs in ring's own heap allocations, which ring frees without erasure (not
   measured). Until this branch, ring's AEAD, header-protection, HMAC, ECDHE and Ed25519/P-256
   signing key objects were also left in freed memory; they are now erased (Security).
@@ -2034,6 +2049,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **The SRTP process-memory tests use keys of their own per test and classify every hit by its
+  address** (`rtci-srtp/tests/key_erasure_process_memory.rs`, `conf/zeroize-2b-claim-matches-proof`).
+  A test thread computes the keys it looks for on its own stack; two tests looking for the same
+  keys could find each other's computations in a dead thread stack the C library had handed to
+  a later worker (10 of 50 runs with two tests per provider, runs 45726164797, 45726174061,
+  45726181744, 45726197738), the likely source of the one after-drop finding zeroize-1 left
+  unexplained (45641590609). The worker is given its master key in zeroizing heap buffers; a
+  hit in the worker's stack below its live frame is reported (`STACK RESIDUE`), any other
+  (heap, other mappings, the worker's live frame and TLS) fails the test, and the live-key
+  check now requires the key outside those dead frames. No engine code changed.
 
 - **The released-sections gate compares with the newest release tag that is an ancestor of the
   commit**, not the newest tag in the repository (`scripts/check-changelog-released.py`). A
