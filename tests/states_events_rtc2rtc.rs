@@ -817,6 +817,10 @@ fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
         })
         .collect();
     assert_eq!(errors.len(), 2, "701 once per URL: {errors:?}");
+    // 4.8.3 url: "the STUN or TURN URL that identifies the STUN or TURN server for which the
+    // failure occurred", each event its own.
+    assert_eq!(errors[0].url, "stun:stun.example.org");
+    assert_eq!(errors[1].url, "turn:turn.example.org");
     assert_eq!(errors[0].address, "10.0.0.1", "an exposed address is given");
     assert_eq!(
         (errors[1].address.as_str(), errors[1].port),

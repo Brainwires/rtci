@@ -130,6 +130,33 @@ fn ice_server_urls_are_validated_as_the_spec_says() -> Result<()> {
             }],
             Error::InvalidAccessError,
         ),
+        // RFC 8265 section 4.1 (the OpaqueString profile of 4.2): a control character, or a
+        // default-ignorable code point such as SOFT HYPHEN, in the credential; RFC 8489
+        // section 14.3 has the username processed with the same profile.
+        (
+            vec![crate::peer_connection::transport::RTCIceServer {
+                credential: "sec\u{7}ret".to_owned(),
+                ..server("turn:example.org")
+            }],
+            Error::InvalidAccessError,
+        ),
+        (
+            vec![crate::peer_connection::transport::RTCIceServer {
+                credential: "The\u{ad}Matrix".to_owned(),
+                ..server("turn:example.org")
+            }],
+            Error::InvalidAccessError,
+        ),
+        (
+            vec![crate::peer_connection::transport::RTCIceServer {
+                username: "us\u{0}er".to_owned(),
+                ..server("turn:example.org")
+            }],
+            Error::InvalidAccessError,
+        ),
+        // "hostAndPortURL is failure": a host or a port that does not parse.
+        (vec![server("turn:exa mple.org")], Error::ErrInvalidUrl),
+        (vec![server("stun:example.org:99999")], Error::ErrInvalidUrl),
     ] {
         let refused = pc.set_configuration(with_servers(servers.clone()));
         assert_eq!(refused.as_ref().err(), Some(&expected), "{servers:?}");
@@ -139,6 +166,13 @@ fn ice_server_urls_are_validated_as_the_spec_says() -> Result<()> {
         assert_eq!(built.err(), Some(expected), "constructor, {servers:?}");
     }
     pc.set_configuration(with_servers(vec![server("turn:example.org?transport=tcp")]))?;
+    // Non-ASCII that is an OpaqueString is taken.
+    pc.set_configuration(with_servers(vec![
+        crate::peer_connection::transport::RTCIceServer {
+            credential: "Jack of \u{2666}s".to_owned(),
+            ..server("turn:example.org")
+        },
+    ]))?;
     Ok(())
 }
 
