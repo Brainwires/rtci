@@ -1440,3 +1440,75 @@ fn the_remote_capture_time_holds_across_clock_rate_changes_on_one_ssrc() -> Resu
     );
     Ok(())
 }
+
+/// RFC 8834 section 10 ("implementations are REQUIRED to ignore unknown RTCP packets and RTP
+/// header extensions"), RFC 8285 section 4.1.2: the audio level of a received frame's
+/// metadata (webrtc-encoded-transform `audioLevel`) is read only from an element the
+/// receiving section signals. The audio level is negotiated and read; a later offer leaves it
+/// out on its way to the receiver, whose answer then has none, and the sender (whose copy of
+/// the answer still lists it) keeps sending the element: the frame's metadata has no level.
+#[test]
+fn a_frames_audio_level_is_not_read_from_an_element_the_section_no_longer_signals() -> Result<()> {
+    let without = |sdp: &str| -> String {
+        sdp.split("\r\n")
+            .filter(|line| !(line.starts_with("a=extmap:") && line.contains(AUDIO_LEVEL)))
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    };
+    let with = |sdp: &str, id: u8| -> String {
+        sdp.split("\r\n")
+            .flat_map(|line| {
+                let mut lines = vec![line.to_owned()];
+                if line.starts_with("a=mid:") {
+                    lines.push(format!("a=extmap:{id} {AUDIO_LEVEL}"));
+                }
+                lines
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    };
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let (_, _, id) = sender_stream(&mut world, sender, AUDIO_LEVEL);
+    let level: &[u8] = &[0x80 | 20];
+    let metadata_level = |world: &mut World, seq: u16| -> Result<Option<f64>> {
+        let frame = read_frame(world, u32::from(seq) * 960);
+        assert_eq!(frame.len(), 1, "packet {seq} was read");
+        let RTCEncodedFrameMetadataKind::Audio(meta) = receiver_metadata(world, &frame)? else {
+            bail!("an audio frame");
+        };
+        Ok(meta.audio_level)
+    };
+    world.send(sender, 700, &[(id, level)])?;
+    assert!(
+        metadata_level(&mut world, 700)?.is_some(),
+        "negotiated, the level is read"
+    );
+
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1]
+        .pc
+        .set_remote_description(now, RTCSessionDescription::offer(without(&offer.sdp))?)?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    assert!(
+        !answer.sdp.contains(AUDIO_LEVEL),
+        "the receiver's answer leaves it out"
+    );
+    world.peers[0]
+        .pc
+        .set_remote_description(now, RTCSessionDescription::answer(with(&answer.sdp, id))?)?;
+    world.pump()?;
+    world.send(sender, 701, &[(id, level)])?;
+    assert_eq!(
+        None,
+        metadata_level(&mut world, 701)?,
+        "no longer signalled: the element is ignored"
+    );
+    Ok(())
+}
