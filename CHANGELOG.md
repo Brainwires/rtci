@@ -97,6 +97,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8830 track settings; the default and `Chrome` keep it off. Test
   `tests/jsep_msid.rs::the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid`.
 
+### Fixed
+
+- **Behaviour change: the TURN client discards a 400 (Bad Request) without an integrity
+  attribute as if it had never been received** (`conf/stun-1-unsigned-400-discarded`; RFC 8489
+  section 9.2.5, "MUST be discarded, as if it were never received. This means that retransmits,
+  if applicable, will continue", with its note "resulting in a timeout"; audit row
+  RFC8489-9.2.5-14 `violated` -> `tested`). In 0.2.0 the first Allocate, which carries no
+  credential, took any response, so an unsigned 400 ended it with `AllocateError` at once; a
+  request that carried the credential counted it as a response failing its integrity check
+  (ended at once over TCP, `ErrIntegrityMismatch` at the end over UDP). Now the request is
+  retransmitted and, answered by nothing else, ends in `Event::TransactionTimeout`; a
+  ConnectionBind (RFC 6062) waits on to its 30-second deadline (`ErrTimeout`). A 400 carrying an
+  integrity attribute is checked as before, and the 401 that asks for the credential is still
+  taken unsigned. A server that answers the first Allocate with an unsigned 400 is therefore
+  given up on when the Allocate times out (RFC 8489 section 6.2: 39.5 s with the default RTO
+  over UDP, Ti = 39.5 s over TCP / TLS) instead of at once. Also from section 9.2.5, for the request without a credential: a response other
+  than 401 / 438 whose NONCE has the nonce cookie with the "password algorithms" bit and no
+  PASSWORD-ALGORITHMS is ignored ("MUST be ignored"; it was taken), as it already was for a
+  signed request. Tests `client_stun8489_test.rs::test_an_unsigned_400_to_the_first_allocate_is_never_received`,
+  `test_a_first_allocate_answered_only_by_an_unsigned_400_times_out`,
+  `test_an_unsigned_400_to_a_signed_request_is_never_received`,
+  `test_an_error_to_the_first_allocate_whose_nonce_cookie_promises_algorithms_is_ignored`,
+  `client_tcp_allocation_test.rs::test_an_unsigned_400_to_a_connection_bind_is_never_received`;
+  `test_discarded_responses_end_the_transaction_as_an_integrity_violation` now forges a 403 (its
+  400 falls under the 400 rule).
+- The engine's TURN links: an Allocate that timed out on a stream (TCP / TLS), DTLS or open UDP
+  link was ignored, so the link waited for ever without a relayed candidate; it is now that
+  server's failure as a refusal is (RFC 5928 section 3: the next SRV target, or the link fails
+  until a new ICE generation). Reached by a silent server before, and now by one whose only
+  answer is an unsigned 400. Test `tests/turn_resolution.rs::an_unsigned_400_to_the_first_allocate_fails_the_server_when_the_allocate_times_out`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
