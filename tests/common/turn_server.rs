@@ -100,6 +100,13 @@ pub struct TurnServer {
     pub deleted: Vec<(SocketAddr, SocketAddr, SocketAddr, Instant)>,
     /// Datagrams relayed each way: (relayed, peer, client to peer?).
     pub relayed: Vec<(SocketAddr, SocketAddr, bool, Instant)>,
+    /// Refreshes of LIFETIME 0 to lose (as if the datagram never arrived), the next ones.
+    pub lose_releases: usize,
+    /// The next authenticated request is answered 438 (Stale Nonce) with a new nonce.
+    pub stale_nonce_next: bool,
+    /// While set, what the server sends waits in `held` instead of `out`.
+    pub hold: bool,
+    pub held: Vec<(SocketAddr, SocketAddr, Vec<u8>)>,
 }
 
 impl TurnServer {
@@ -117,6 +124,10 @@ impl TurnServer {
             requests: vec![],
             deleted: vec![],
             relayed: vec![],
+            lose_releases: 0,
+            stale_nonce_next: false,
+            hold: false,
+            held: vec![],
         }
     }
 
@@ -259,11 +270,26 @@ impl TurnServer {
             .unwrap_or_default();
         let mut lifetime = Lifetime::default();
         let asked = lifetime.get_from(&m).ok().map(|_| lifetime.0);
+        if m.typ.method == METHOD_REFRESH && asked == Some(Duration::ZERO) && self.lose_releases > 0
+        {
+            self.lose_releases -= 1;
+            return Ok(());
+        }
         self.requests
             .push((from, to, m.typ.method, username.clone(), asked));
         let reply = self.request(now, tuple, &mut m, &username, asked)?;
-        self.out.push((to, from, reply));
+        if self.hold {
+            self.held.push((to, from, reply));
+        } else {
+            self.out.push((to, from, reply));
+        }
         Ok(())
+    }
+
+    /// Sends what `hold` kept back.
+    pub fn release_held(&mut self) {
+        self.hold = false;
+        self.out.append(&mut self.held);
     }
 
     fn request(
@@ -285,6 +311,24 @@ impl TurnServer {
         let provider = rtci::crypto::default_provider()?;
         if MessageIntegrity::check(m, &key, provider.crypto()).is_err() {
             return self.error(m, CODE_UNAUTHORIZED, username, None);
+        }
+        if self.stale_nonce_next {
+            self.stale_nonce_next = false;
+            self.rejections
+                .push((m.typ.method, 438, username.to_owned()));
+            return Self::build(
+                m,
+                CLASS_ERROR_RESPONSE,
+                vec![
+                    Box::new(ErrorCodeAttribute {
+                        code: ErrorCode(438),
+                        reason: b"Stale Nonce".to_vec(),
+                    }),
+                    Box::new(Nonce::new(ATTR_NONCE, "nonce-2".to_owned())),
+                    Box::new(Realm::new(ATTR_REALM, REALM.to_owned())),
+                ],
+                None,
+            );
         }
         let key = Some(&key[..]);
         self.allocations.retain(|_, a| a.expires > now);
