@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5073 of 5088 (99.7 %).
-- Tested as the default (`tested`): 5041 of 5088 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 15: 7 untested, 5 partial, 3 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5074 of 5088 (99.7 %).
+- Tested as the default (`tested`): 5042 of 5088 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 14: 7 untested, 4 partial, 3 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 7 | 2 |
-| C | partly implemented | 5 | 1 |
+| C | partly implemented | 4 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 47 | 28 |
+| all | | 46 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 14 rows, 12 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 13 rows, 11 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -41,7 +41,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | jsep (running) | 2 | 1 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| rtp | 3 | 1 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
+| rtp | 3 | 0 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
 | sdp | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
 
@@ -87,7 +87,6 @@ Sorted by class, then owner, size and ID.
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
-| RFC8834-10-5 | `rfc8834.md` | Ignore unknown RTCP packets and header extensions not signalled | partial | C | The encoded-transform frame metadata audio level (`rtp_receiver/mod.rs` `extension_payloads`) and the interceptors' remote stream bindings read header extensions by the session-wide mapping, not the receiving section's negotiation (must7-3 restricted the synchronization / contributing sources and frame records) | S | rtp |
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |

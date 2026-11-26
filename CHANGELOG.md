@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mapping is used as before. Not breaking, API unchanged. Audit row RFC8834-10-5 `untested` ->
   `partial`: the encoded-transform frame metadata (`RTCRtpReceiver` frame `audio_level`) and the
   interceptors' stream bindings still take the session-wide mapping.
+- **The frame metadata audio level and the interceptors' stream bindings follow the receiving
+  section's header extensions too** (RFC 8834 section 10;
+  `conf/must7-4-section-header-extensions-everywhere`, on top of must7-3). The encoded-transform
+  metadata of a received audio frame (`audio_level`) is read only from an extension the section
+  negotiated for receiving, and the header extensions a remote stream is bound to the
+  interceptors with (transport-wide sequence numbers, absolute send time, ...) are the
+  section's: an applied answer that changes them binds an established stream again (its
+  interceptor state starts over), so, for one, transport-wide feedback stops when a later
+  answer leaves `transport-wide-cc` out. Not breaking, API unchanged. Audit row RFC8834-10-5
+  `partial` -> `tested`.
 
 ### Documentation
 

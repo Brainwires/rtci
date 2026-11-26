@@ -113,6 +113,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     associated_media_stream_ids: Vec<MediaStreamId>,
     /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
     rtcp_reduced_size: bool,
+    /// The transceiver's `[[NegotiatedHeaderExtensions]]` (webrtc-extensions 4.1), set when an
+    /// answer is applied; empty before the section's first answer. What this receiver reads
+    /// from a stream's header extensions is restricted to what it negotiated for receiving
+    /// (RFC 8834 section 10: an extension that is not signalled is ignored).
+    negotiated_header_extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
     /// What the public `getParameters` returns while the negotiated direction does not
@@ -163,6 +168,7 @@ impl RTCRtpReceiverInternal {
             offered: None,
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
+            negotiated_header_extensions: vec![],
             last_returned_parameters: None,
             not_receiving_parameters: None,
             local_fmtp: Vec::new(),
@@ -287,6 +293,33 @@ impl RTCRtpReceiverInternal {
     pub(crate) fn invalidate_parameters(&mut self) {
         self.last_returned_parameters = None;
         self.not_receiving_parameters = None;
+    }
+
+    /// See the field: the transceiver's negotiated header extensions, from its applied answer.
+    pub(crate) fn set_negotiated_header_extensions(
+        &mut self,
+        negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
+    ) {
+        if self.negotiated_header_extensions != negotiated {
+            self.negotiated_header_extensions = negotiated;
+            self.last_returned_parameters = None;
+        }
+    }
+
+    /// Whether a local offer that this receiver's section is in is pending (the early streams
+    /// are settled by the answer's own steps).
+    pub(crate) fn has_pending_offer(&self) -> bool {
+        self.offered.is_some()
+    }
+
+    /// Whether this receiver reads the header extension `uri`: the section negotiated it for
+    /// receiving, or no answer was applied to the section yet (the engine's mapping applies).
+    pub(crate) fn reads_header_extension(&self, uri: &str) -> bool {
+        self.negotiated_header_extensions.is_empty()
+            || self
+                .negotiated_header_extensions
+                .iter()
+                .any(|extension| extension.uri == uri && extension.direction.has_recv())
     }
 
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
@@ -852,6 +885,15 @@ impl RTCRtpReceiverInternal {
         media_engine: &MediaEngine,
     ) -> RTCRtpReceiveParameters {
         let mut parameters = self.get_parameters(media_engine).clone();
+        // The header extensions the interceptors are told of: the section's (RFC 8834 section
+        // 10), not every id the engine ever negotiated.
+        if !self.negotiated_header_extensions.is_empty() {
+            crate::rtp_transceiver::header_extension_control::retain_negotiated(
+                &mut parameters.rtp_parameters.header_extensions,
+                &self.negotiated_header_extensions,
+                false,
+            );
+        }
         if let Some(offered) = self.offered.as_ref() {
             if offered.negotiated {
                 let extra: Vec<RTCRtpCodecParameters> = offered
@@ -977,7 +1019,7 @@ impl RTCRtpReceiverInternal {
         Self::rebind_remote_streams(interceptor, &before, &now);
     }
 
-    fn rebind_remote_streams(
+    pub(crate) fn rebind_remote_streams(
         interceptor: &mut dyn Interceptor,
         before: &[StreamInfo],
         now: &[StreamInfo],
