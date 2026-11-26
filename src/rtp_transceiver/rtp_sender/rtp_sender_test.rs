@@ -365,8 +365,9 @@ fn test_rtp_sender_replace_track_before_negotiation_takes_any_codec() -> Result<
 }
 
 /// W3C `replaceTrack`'s envelope cases: "An audio track having a different number of
-/// channels." A sender that negotiated PCMU (one channel) refuses a track whose coding is
-/// two-channel PCMU, and takes a one-channel one.
+/// channels." A sender that negotiated PCMU (one channel: no count in its rtpmap) refuses a
+/// track whose coding is two-channel PCMU, and takes a one-channel one and one that gives no
+/// channel count.
 #[test]
 fn test_rtp_sender_replace_track_with_another_channel_count_is_refused() -> Result<()> {
     use crate::peer_connection::configuration::media_engine::MIME_TYPE_PCMU;
@@ -395,7 +396,8 @@ fn test_rtp_sender_replace_track_with_another_channel_count_is_refused() -> Resu
         .rtp_transceiver(sender_id.0)
         .expect("transceiver")
         .set_codec_preferences(vec![RTCRtpCodecParameters {
-            rtp_codec: pcmu(1).codec,
+            // As the media engine registers it: no channel count, which is one.
+            rtp_codec: pcmu(0).codec,
             payload_type: 0,
         }])?;
     signal_pair(&mut sender, &mut receiver)?;
@@ -403,6 +405,11 @@ fn test_rtp_sender_replace_track_with_another_channel_count_is_refused() -> Resu
     pair.connect()?;
 
     let mut rtp_sender = pair.offerer.rtp_sender(sender_id).expect("sender");
+    assert_eq!(
+        negotiated_payload_type(&mut rtp_sender, MIME_TYPE_PCMU),
+        0,
+        "the sender negotiated PCMU"
+    );
     assert_eq!(
         rtp_sender.replace_track(Some(track_with(
             "webrtc-rs",
@@ -417,6 +424,12 @@ fn test_rtp_sender_replace_track_with_another_channel_count_is_refused() -> Resu
         "mono",
         RtpCodecKind::Audio,
         vec![pcmu(1)],
+    )))?;
+    rtp_sender.replace_track(Some(track_with(
+        "webrtc-rs",
+        "unspecified",
+        RtpCodecKind::Audio,
+        vec![pcmu(0)],
     )))?;
     pair.close()
 }

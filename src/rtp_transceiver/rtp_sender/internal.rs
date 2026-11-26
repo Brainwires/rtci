@@ -540,20 +540,33 @@ impl RTCRtpSenderInternal {
     /// produces: every coding that names one must name a codec of [[SendCodecs]] by mime type,
     /// clock rate and channel count (webrtc-pc: "Sources that also encode ... might be unable
     /// to produce the negotiated codec", "An audio track having a different number of
-    /// channels"). A coding without a codec, or a sender with nothing negotiated, is within it.
+    /// channels"). A coding without a codec, or a sender with nothing negotiated, is within it;
+    /// a coding's clock rate or channel count of 0 is not compared.
     pub(crate) fn within_negotiated_envelope(&self, codings: &[RTCRtpEncodingParameters]) -> bool {
         if self.send_codecs.is_empty() {
             return true;
         }
-        let same = |a: u32, b: u32| a == 0 || b == 0 || a == b;
         codings.iter().all(|coding| {
             let codec = &coding.codec;
             codec.mime_type.is_empty()
                 || self.send_codecs.iter().any(|negotiated| {
                     let n = &negotiated.rtp_codec;
+                    // A negotiated audio codec without a channel count has one (RFC 8866
+                    // section 6.6: "the default value is one"); a coding that names none says
+                    // nothing about its channels.
+                    let negotiated_channels = match n.channels {
+                        0 if n
+                            .mime_type
+                            .get(..6)
+                            .is_some_and(|p| p.eq_ignore_ascii_case("audio/")) =>
+                        {
+                            1
+                        }
+                        channels => channels,
+                    };
                     n.mime_type.eq_ignore_ascii_case(&codec.mime_type)
-                        && same(n.clock_rate, codec.clock_rate)
-                        && same(u32::from(n.channels), u32::from(codec.channels))
+                        && (codec.clock_rate == 0 || codec.clock_rate == n.clock_rate)
+                        && (codec.channels == 0 || codec.channels == negotiated_channels)
                 })
         })
     }
