@@ -366,6 +366,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep draining `poll_write` after `close()`; the engine gathers srflx and relay candidates by
   default (`ReflexiveGathering` / `RelayGathering`); `RTCOfferOptions::ice_restart` against
   `restart_ice()`.
+- **Re-send local candidates after an ICE restart; a re-sent packet keeps its transport-wide
+  number** (`conf/docs-4-ice-restart-candidates-twcc-note`; docs only). README "Feeding ICE
+  Candidates": the restarted generation keeps its local candidates by default and does not
+  announce them again, so the application signals them to the peer again (a peer reached only
+  through a relay otherwise selects no pair in the new generation). Audit row TWCC-2.2-3
+  (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 2, "+1 for each packet"): notes
+  the deliberate exception that a byte-identical re-send keeps its number, for SRTP's one
+  packet per index (RFC 3711 3.3.1, RFC 7714 8.1).
 
 ### Testing
 
