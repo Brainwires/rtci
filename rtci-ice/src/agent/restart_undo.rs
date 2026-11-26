@@ -24,6 +24,7 @@ pub(crate) struct RestartUndo {
     remote_end_of_candidates: bool,
     local_gathering_complete: bool,
     lite_update_raised: bool,
+    lite_update_taken: bool,
     next_check_at: Instant,
     next_consent_at: Option<Instant>,
     consent_unanswered_since: Option<Instant>,
@@ -64,6 +65,7 @@ impl Agent {
                 remote_end_of_candidates: self.remote_end_of_candidates,
                 local_gathering_complete: self.local_gathering_complete,
                 lite_update_raised: self.lite_update_raised,
+                lite_update_taken: self.lite_update_taken,
                 next_check_at: self.next_check_at,
                 next_consent_at: self.next_consent_at,
                 consent_unanswered_since: self.consent_unanswered_since,
@@ -136,6 +138,7 @@ impl Agent {
         self.mdns_known_public = undo.mdns_known_public;
         self.local_gathering_complete = undo.local_gathering_complete;
         self.lite_update_raised = undo.lite_update_raised;
+        self.lite_update_taken = undo.lite_update_taken;
         self.next_check_at = undo.next_check_at.max(now);
         self.next_consent_at = undo.next_consent_at;
         self.consent_unanswered_since = undo.consent_unanswered_since;

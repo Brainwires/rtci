@@ -2375,7 +2375,21 @@ impl RTCPeerConnection {
                 self.ice_transport_mut()
                     .agent
                     .replace_remote_candidates_pinning(now, candidates, pinned);
+                // RFC 6544 section 6.1: a TCP connection the offerer opened in parallel with
+                // this offer is kept if it matches the new pair, closed otherwise
+                // (`settle_lite_tcp_updates`, once the agent has selected the pair again).
+                let active = self.pipeline_context.transports.active_id();
+                self.streams.lite_updates.insert(active);
             } else {
+                // The agent learns that the peer is lite (`a=ice-lite`) before the first
+                // description's candidates: two lite agents keep the peer's active TCP
+                // candidates, which a full agent drops (RFC 6544 section 6.1). The transport's
+                // start says it again.
+                if !transports_started {
+                    self.ice_transport_mut()
+                        .agent
+                        .set_remote_lite(remote_is_lite);
+                }
                 // The description's candidate lines: candidates the application supplied, as
                 // much as those it trickles.
                 for candidate in candidates {

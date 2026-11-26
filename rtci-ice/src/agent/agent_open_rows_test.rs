@@ -140,6 +140,85 @@ fn test_a_lite_agent_takes_one_passive_and_one_active_tcp_candidate_per_address(
     );
 }
 
+/// RFC 8445 Section 8.2 with RFC 6544 Sections 6.1 and 6.2: two lite agents pair without
+/// checks, and an active TCP candidate of the peer is the remote side of the pair with a
+/// local passive one (the peer opens its connection, RFC 6544 Section 6.1). It is a remote
+/// candidate like any other, not one only the peer's checks could pair (a full agent, or a
+/// lite one with a full peer, still drops it: there the peer's checks find it). A controlled
+/// agent with several pairs waits for the controlling agent's updated candidate exchange
+/// (RFC 8445 Section 8.2) until it takes it.
+#[test]
+fn test_two_lite_agents_pair_the_peers_active_tcp_candidate() {
+    let now = Instant::now();
+    let active = candidate("tcp", "192.168.0.3", 9, 1000, TcpType::Active);
+    let peer_udp = udp("192.168.0.3", 2000, 2000);
+    let passive = candidate("tcp", "192.168.0.2", 2000, 0, TcpType::Passive);
+    let mut b = lite_agent_with(
+        now,
+        false,
+        std::slice::from_ref(&passive),
+        &[active.clone(), peer_udp],
+    );
+    run(&mut b, now, now + Duration::from_secs(1));
+    assert!(b.is_remote_lite());
+    assert_eq!(
+        b.get_remote_candidates().len(),
+        2,
+        "the active candidate is a remote candidate"
+    );
+    assert!(
+        b.awaits_lite_update(),
+        "several pairs: the update is to come"
+    );
+
+    let later = now + Duration::from_secs(1);
+    assert!(b.replace_remote_candidates(later, vec![active.clone()]));
+    run(&mut b, later, later + Duration::from_secs(1));
+    assert!(!b.awaits_lite_update(), "the update was taken");
+    let (local, remote) = b.get_selected_candidate_pair().expect("a pair");
+    assert_eq!(
+        (
+            local.tcp_type(),
+            local.addr(),
+            remote.tcp_type(),
+            remote.addr()
+        ),
+        (
+            TcpType::Passive,
+            addr("192.168.0.2:2000"),
+            TcpType::Active,
+            addr("192.168.0.3:9")
+        )
+    );
+
+    // The controlling agent sends the update; it waits for none.
+    let mut a = lite_agent_with(
+        now,
+        true,
+        &[passive],
+        &[active.clone(), udp("192.168.0.3", 2000, 0)],
+    );
+    run(&mut a, now, now + Duration::from_secs(1));
+    assert!(a.get_selected_candidate_pair().is_some());
+    assert!(!a.awaits_lite_update());
+
+    // A lite agent with a full peer, and a full agent, drop it.
+    let mut with_full_peer = bare_agent(
+        now,
+        AgentConfig {
+            lite: true,
+            candidate_types: vec![CandidateType::Host],
+            ..config(false)
+        },
+    );
+    assert!(!with_full_peer.is_remote_lite());
+    assert!(!with_full_peer.add_remote_candidate(active.clone()).unwrap());
+    assert!(with_full_peer.get_remote_candidates().is_empty());
+    let mut full = started_agent(now, config(false), &[]);
+    assert!(!full.add_remote_candidate(active).unwrap());
+    assert!(full.get_remote_candidates().is_empty());
+}
+
 /// Section 6.1.1, both lite: "no connectivity checks are ever sent. Rather, once the
 /// candidates are exchanged, each agent performs the processing described in Section 8
 /// without connectivity checks." Section 8.2: "if there is only one candidate pair, that pair
