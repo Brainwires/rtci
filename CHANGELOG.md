@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The default interceptor set can be given a start, a floor and a ceiling for its
+  congestion controller** (`conf/ccstart-1-start-bitrate-option`; RFC 8836 section 2,
+  requirement 4a, "history-based startup"). New `DefaultInterceptorOptions` fields
+  `congestion_start_bitrate`, `congestion_min_bitrate`, `congestion_max_bitrate` (bits per
+  second; defaults unchanged: `GCC_INITIAL_BITRATE` 300 kbit/s, `GCC_MIN_BITRATE` 100 kbit/s,
+  `GCC_MAX_BITRATE` 100 Mbit/s). Not breaking: the struct is `#[non_exhaustive]`. The start
+  seeds the controller of every transport (`Gcc::new(start, min, max)`; it was
+  `Gcc::default()`), the remote-limit interceptor and the pacer, so the first target
+  (`CongestionControlHandle::target_bitrate`), the pacer's first budget and the start-up
+  probes (three and six times the start) all follow it. Before, the only way to start higher
+  was `set_min_bitrate`, which also floored the whole call, or replacing the slots by hand.
+  `register_default_interceptors_with_options` refuses values that are not finite, a negative
+  floor, a start of zero or `min <= start <= max` broken, with `Error::InvalidBitrate`
+  (libwebrtc's `SetBitrate` checks the same). Neither RFC 8836 nor draft-ietf-rmcat-gcc-02
+  names a start value; libwebrtc's defaults are 30 kbit/s / 300 kbit/s / 2 Mbit/s
+  (`pc/peer_connection_factory.cc` at a222406d): the start is the same, the floor and ceiling
+  stay the engine's in every profile (docs/behaviour-profiles.md, class `Input`). Audit row
+  RFC8836-2-4a.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

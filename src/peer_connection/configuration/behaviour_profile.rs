@@ -1658,6 +1658,21 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate)",
     },
     NotGoverned {
+        setting: "DefaultInterceptorOptions::congestion_start_bitrate",
+        class: NotGovernedClass::Same,
+        note: "300 kbit/s, libwebrtc's start too (pc/peer_connection_factory.cc FieldTrialParameter start_bandwidth KilobitsPerSec(300) @ a222406d). No specification names a value: RFC 8836 2 requirement 4 asks to adapt as quickly as possible at the start and allows a history-based start; draft-ietf-rmcat-gcc-02 has none",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::congestion_min_bitrate",
+        class: NotGovernedClass::Input,
+        note: "100 kbit/s in every profile, the estimator's floor since before the profiles; libwebrtc's is 30 kbit/s (pc/peer_connection_factory.cc min_bandwidth @ a222406d), not taken into the Chrome profile: a floor is a limit of the application's own deployment, set here or with CongestionControlHandle::set_min_bitrate",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::congestion_max_bitrate",
+        class: NotGovernedClass::Input,
+        note: "100 Mbit/s in every profile; libwebrtc's is 2 Mbit/s (pc/peer_connection_factory.cc max_bandwidth @ a222406d), not taken into the Chrome profile: a ceiling is a limit of the application's own deployment (b=AS / b=TIAS and set_session_bitrate_limit lower it during a call)",
+    },
+    NotGoverned {
         setting: "DefaultInterceptorOptions::recovery_probing",
         class: NotGovernedClass::EngineOnly,
         note: "off in every profile: an opt-in that probes back towards the rate before a large drop for a minute (twice the target every 5 s while the estimator does not read over-use). Tuning with no specification behind it (RFC 8836 2 names probing at the start only; draft-ietf-rmcat-gcc-02 has none); libwebrtc does not do it: its periodic probes are for an application-limited sender (probe_controller.cc lines 441-449 @ a222406d) and its probe after a drop is one cluster within 5 s (RequestProbe, lines 385-419). Measured on the capacity instrument (default chain, 200 calls a cell): 1 Mbit/s 4.9 s after a 20 s limit went against 17.3 s; under the limit 238 against 246 kbit/s of target, behind a 100 ms queue 52 against 41 audio packets lost a call; no gain after a limit of a minute",
