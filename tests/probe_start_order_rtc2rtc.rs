@@ -134,26 +134,29 @@ fn audio_first(chain: Chain) -> Vec<(String, Setup)> {
     runs
 }
 
-/// How long a call whose audio starts first takes to 1 Mbit/s without a pacer: the first
-/// start-up cluster, asked for by the first audio packet, cannot be carried and its result is
-/// waited for (`PROBE_RESULT_TIMEOUT`, 1 s); the next one is carried, and its result comes as
-/// it does for a call whose sources start together (0.37 s to 1 Mbit/s there). Measured
-/// 1.07 s on the fix (hosted run 45859028514); never within the 5 s on 0.2.0 (45859034615:
-/// one cluster, no padding, 447 kbit/s at the end).
-const AUDIO_FIRST_1M_BY: Duration = Duration::from_millis(1_500);
+/// How long a call whose audio starts first takes to 1 Mbit/s without a pacer. The first
+/// start-up cluster, asked for by the first audio packet, cannot be carried: the NACK
+/// responder says so and the cluster is counted as never asked for
+/// (`conf/probe-3-start-up-sequence-waits-for-a-carrier`), so the video's first packet asks
+/// for it again and the start-up goes as for a call whose video starts first (0.27-0.37 s to
+/// 1 Mbit/s, 0.47 s to the maximum). Was 1.07 s with probe-1 alone (its result was waited for,
+/// `PROBE_RESULT_TIMEOUT`, 1 s: hosted run 45859028514) and never within the 5 s on 0.2.0
+/// (45859034615: one cluster, no padding, 447 kbit/s at the end).
+const AUDIO_FIRST_1M_BY: Duration = Duration::from_millis(500);
+/// And to the maximum.
+const AUDIO_FIRST_MAX_BY: Duration = Duration::from_secs(1);
 
 /// The default interceptors with the pacer's slot passed through: the first audio packet
 /// asks for the first start-up cluster before the video has sent, and nothing can be padded
-/// for it. The video starts while it awaits its result, so its going unanswered does not stop
-/// the probing: the next start-up cluster leaves as padding on the video's RTX stream
-/// ([`AUDIO_FIRST_1M_BY`]).
+/// for it. It is asked for again with the video's first packet and leaves as padding on the
+/// video's RTX stream ([`AUDIO_FIRST_1M_BY`]).
 #[test]
 fn audio_before_video_still_probes_without_a_pacer() -> Result<()> {
     check(
         audio_first(Chain::DefaultWithoutPacer),
         open_link_run,
         AUDIO_FIRST_1M_BY,
-        Duration::from_secs(2),
+        AUDIO_FIRST_MAX_BY,
     )
 }
 
@@ -165,7 +168,7 @@ fn audio_before_video_still_probes_in_parolnets_chain() -> Result<()> {
         audio_first(Chain::ParolNet),
         open_link_run,
         AUDIO_FIRST_1M_BY,
-        Duration::from_secs(2),
+        AUDIO_FIRST_MAX_BY,
     )
 }
 
