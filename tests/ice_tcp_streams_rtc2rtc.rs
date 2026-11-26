@@ -1595,6 +1595,60 @@ fn two_lite_agents_close_a_parallel_connection_the_updated_offer_does_not_match(
     Ok(())
 }
 
+fn nothing(_: usize, _: &RTCIceCandidateInit) -> bool {
+    false
+}
+
+/// The offerer's active TCP candidate in the offer's own candidate lines (not trickled): the
+/// answerer knows the offerer is lite (`a=ice-lite`) before it reads them, keeps the active
+/// candidate as two lite agents do, and the pair connects.
+#[test]
+fn two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer() -> Result<()> {
+    let mut net = Net::new();
+    net.carry = Some(nothing);
+    let mut peers = peers(&net, lite);
+    let channel = peers[0].pc.create_data_channel("tcp", None)?.id();
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(net.now, offer)?;
+    let c = udp_host(&peers[0]);
+    peers[0].pc.add_local_candidate(c)?;
+    run_until(&mut peers, &mut net, Duration::from_secs(5), |_, peers| {
+        peers[0].pc.ice_gathering_state() == RTCIceGatheringState::Complete
+    })?;
+    let gathered = peers[0].pc.local_description().expect("the offer").sdp;
+    let offer: String = gathered
+        .lines()
+        .filter(|l| {
+            !l.starts_with("a=candidate") || (l.contains(" tcp ") && l.contains("tcptype active"))
+        })
+        .map(|l| format!("{l}\r\n"))
+        .collect();
+    assert!(offer.contains("tcptype active"), "{gathered}");
+    let now = net.now;
+    peers[1].pc.set_remote_description(
+        now,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+    )?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    peers[0].pc.set_remote_description(now, answer)?;
+    let c = udp_host(&peers[1]);
+    peers[1].pc.add_local_candidate(c)?;
+    net.carry = Some(offerer_active_only);
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(5),
+        |_, _| {},
+    )?;
+    assert_eq!(peers[1].received, expected, "every message, in order");
+    assert!(connect_commands(&peers[0]) > 0, "the offerer connected");
+    Ok(())
+}
+
 /// RFC 6544 section 6.1 RECOMMENDS full mode, and its connection without checks is for two
 /// lite agents only: a lite peer whose peer is full opens no connection of its own (the full
 /// agent's active candidate connects with its checks), whatever candidates it has.
