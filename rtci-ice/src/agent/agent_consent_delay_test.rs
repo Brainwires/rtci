@@ -18,6 +18,8 @@ use sansio::Protocol;
 
 use super::agent_rfc8445_test::*;
 use super::*;
+use crate::attributes::control::AttrControlling;
+use crate::attributes::priority::PriorityAttr;
 use crate::candidate::candidate_host::CandidateHostConfig;
 
 const MS: Duration = Duration::from_millis(1);
@@ -754,32 +756,43 @@ fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consen
     );
 }
 
-/// The pair ICE selects is not the pair that was checked: the response's XOR-MAPPED-ADDRESS
-/// is not a local candidate, so the valid pair has a peer-reflexive local candidate (RFC 8445
-/// Section 7.2.5.3.1) on the checked pair's base. Both are the same 5-tuple (RFC 7675
-/// Section 1), so the response that validated the checked pair is the selected pair's
-/// consent: with it answered 20 s after the check and nothing answered afterwards, the agent
-/// fails 30 s after that response, not 30 s after the start.
+/// The pair ICE selects is not the pair that was checked, and the only consent response is
+/// on the checked one. A controlled agent: 10 s after the start the peer nominates (L, R)
+/// with a request carrying USE-CANDIDATE; the agent's triggered check on (L, R) is answered
+/// with an XOR-MAPPED-ADDRESS that is not a local candidate, so the valid pair has a
+/// peer-reflexive local candidate on L's base (RFC 8445 Section 7.2.5.3.1) and the
+/// nomination is accepted on that valid pair (Section 7.2.5.3.4). The response was to a
+/// request sent on the checked pair; it is the selected pair's consent because the two are
+/// one 5-tuple (RFC 7675 Section 1). Nothing after it is answered: the agent fails 30 s
+/// after that response, not 30 s after the start (which is what reading the selected pair's
+/// own responses alone gives).
 #[test]
 fn test_the_response_that_validated_another_pair_is_the_selected_pairs_consent() {
     const MAPPED: &str = "203.0.113.7:4000";
     let start = Instant::now();
-    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    let mut a = started_agent(start, config(false), &[REMOTE_A]);
 
+    let nominate_at = start + 10 * S;
+    let mut nominated = false;
     let mut seen = std::collections::HashSet::new();
-    let mut in_flight: Vec<(Instant, Message)> = vec![];
-    let mut validated_at: Option<Instant> = None;
-    let mut last_answer: Option<Instant> = None;
+    let mut answered_at: Option<Instant> = None;
+    let mut answers = 0;
     let mut selected: Option<(CandidateType, SocketAddr)> = None;
+    let mut checked_consent_only = false;
     let mut failed_at: Option<Instant> = None;
     let mut now = start;
     while now <= start + 120 * S && failed_at.is_none() {
-        in_flight.sort_by_key(|(at, _)| *at);
-        while in_flight.first().is_some_and(|(at, _)| *at <= now) {
-            let (_, response) = in_flight.remove(0);
-            deliver(&mut a, now, &response, REMOTE_A).unwrap();
-            validated_at.get_or_insert(now);
-            last_answer = Some(now);
+        if !nominated && now >= nominate_at {
+            nominated = true;
+            let request = peer_request(
+                &a,
+                vec![
+                    Box::new(AttrControlling(1)),
+                    Box::new(PriorityAttr(1000)),
+                    Box::new(crate::attributes::use_candidate::UseCandidateAttr::new()),
+                ],
+            );
+            deliver(&mut a, now, &request, REMOTE_A).unwrap();
         }
         a.handle_timeout(now).unwrap();
         while let Some(t) = a.poll_write() {
@@ -791,30 +804,36 @@ fn test_the_response_that_validated_another_pair_is_the_selected_pairs_consent()
             if m.typ != BINDING_REQUEST || !seen.insert(m.transaction_id) {
                 continue;
             }
-            let response = peer_response(BINDING_SUCCESS, m.transaction_id, addr(MAPPED), None);
-            if seen.len() == 1 {
-                // The first check is answered 20 s later (its transaction lasts 39.5 s).
-                in_flight.push((now + 20 * S, response));
-            } else if validated_at.is_some() && selected.is_none() {
-                // The nomination, at once; nothing after the selection is answered.
-                in_flight.push((now, response));
+            // Only the check the nomination triggers is answered, at once.
+            if nominated && selected.is_none() && answered_at.is_none() {
+                let response = peer_response(BINDING_SUCCESS, m.transaction_id, addr(MAPPED), None);
+                deliver(&mut a, now, &response, REMOTE_A).unwrap();
+                answered_at = Some(now);
+                answers += 1;
             }
         }
         while let Some(e) = a.poll_event() {
             match e.event {
                 Event::ConnectionStateChange(ConnectionState::Connected) if selected.is_none() => {
+                    let pair = a.selected_pair.expect("a selected pair");
                     selected = a
                         .get_selected_candidate_pair()
                         .map(|(l, _)| (l.candidate_type(), l.addr()));
+                    // The consent is on the checked pair, not on the selected one.
+                    checked_consent_only = a.candidate_pairs[pair].last_consent.is_none()
+                        && a.candidate_pairs
+                            .iter()
+                            .any(|p| p.last_consent == answered_at);
                 }
                 Event::ConnectionStateChange(ConnectionState::Failed) => failed_at = Some(e.now),
                 _ => {}
             }
         }
-        let arrival = in_flight.iter().map(|(at, _)| *at).min();
-        let next = match (a.poll_timeout(), arrival) {
-            (Some(timer), Some(arrival)) => Some(timer.min(arrival)),
-            (timer, arrival) => timer.or(arrival),
+        let next = a.poll_timeout();
+        let next = if nominated {
+            next
+        } else {
+            Some(next.map_or(nominate_at, |n| n.min(nominate_at)))
         };
         match next {
             Some(next) => now = next.max(now + Duration::from_micros(1)),
@@ -822,23 +841,23 @@ fn test_the_response_that_validated_another_pair_is_the_selected_pairs_consent()
         }
     }
 
-    let validated_at = validated_at.expect("the first check was answered");
-    assert!(validated_at >= start + 20 * S);
+    let answered_at = answered_at.expect("the triggered check was answered");
+    assert_eq!(answers, 1);
+    assert!(answered_at >= nominate_at);
     assert_eq!(
         selected,
         Some((CandidateType::PeerReflexive, addr(MAPPED))),
         "the selected pair is the valid pair, not the checked one"
     );
-    // The last response is the nomination's, sent on the checked pair (or on the valid
-    // one): either way consent on the selected pair's 5-tuple.
-    let last_answer = last_answer.unwrap();
-    assert!(last_answer - validated_at < S);
     assert!(
-        is_at(failed_at, last_answer + 30 * S),
-        "failed at {:?}, first response at {:?}, last at {:?}",
+        checked_consent_only,
+        "the only response is recorded on the checked pair"
+    );
+    assert!(
+        is_at(failed_at, answered_at + 30 * S),
+        "failed at {:?}, the one response at {:?}",
         failed_at.map(|t| t - start),
-        validated_at - start,
-        last_answer - start,
+        answered_at - start,
     );
 }
 

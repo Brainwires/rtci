@@ -23,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (same local base and remote candidate) only. `Candidate::last_consent` still reports the last
   response from that remote candidate on any pair. Tests:
   `rtci-ice/src/agent/agent_consent_delay_test.rs::test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent`,
-  `test_the_response_that_validated_another_pair_is_the_selected_pairs_consent` (the selected
-  pair has a peer-reflexive local candidate, not the checked pair's).
+  `test_the_response_that_validated_another_pair_is_the_selected_pairs_consent` (a controlled
+  agent selects a valid pair with a peer-reflexive local candidate; the one response is on the
+  checked pair, the same 5-tuple).
 
 ## [0.2.0] - 2026-11-26
 
