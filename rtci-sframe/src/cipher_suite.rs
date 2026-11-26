@@ -9,9 +9,10 @@ pub const NONCE_LEN: usize = 12;
 /// An SFrame cipher suite: the hash used for key derivation and the AEAD used for the frames.
 ///
 /// The first five are the suites of RFC 9605 section 4.5. The three `Aes256CtrHmacSha512`
-/// suites are the AES-256 counterparts of the AES-CTR construction (IANA "SFrame Cipher Suites"
-/// values 0x0006 to 0x0008, from draft-barnes-sframe-iana-256), which the W3C Encoded Transform
-/// API lists in `SFrameCipherSuite`.
+/// suites are the AES-256 counterparts of the AES-CTR construction that RFC 10079 registers
+/// (IANA "SFrame Cipher Suites" values 0x0006 to 0x0008, section 4.2), which the W3C Encoded
+/// Transform API lists in `SFrameCipherSuite`. The sizes below are the registry's columns as
+/// RFC 10079 section 4.1 adds them (`Nh`, `Nka`, `Nk`, `Nn`, `Nt`).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CipherSuite {
