@@ -3,7 +3,7 @@
 use super::send_buffer::SendBuffer;
 use super::stream_supports_nack;
 use crate::Interceptor;
-use crate::cc::probe::ProbeRequest;
+use crate::cc::probe::{ProbePacket, ProbeRequest};
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
@@ -35,6 +35,11 @@ pub struct NackResponderBuilder {
     rate_limit: RetransmissionRateLimit,
     /// The most of the target the retransmission reserve takes.
     max_reserve_fraction: f64,
+    /// A packet written longer ago is not repaired.
+    max_repair_age: Option<Duration>,
+    /// Repairs waiting that would take this long or more at the target, after it halved, are
+    /// given up.
+    repair_backlog_bound: Option<Duration>,
 }
 
 impl Default for NackResponderBuilder {
@@ -44,6 +49,8 @@ impl Default for NackResponderBuilder {
             max_packet_age: None,
             rate_limit: RetransmissionRateLimit::default(),
             max_reserve_fraction: MAX_RETRANSMISSION_RESERVE,
+            max_repair_age: Some(MAX_REPAIR_AGE),
+            repair_backlog_bound: Some(REPAIR_BACKLOG_BOUND),
         }
     }
 }
@@ -295,12 +302,79 @@ impl NackResponderBuilder {
         self
     }
 
+    /// Set how old a packet may be and still be repaired: a NACK for a packet written to the
+    /// responder longer ago is declined (RFC 8834 section 6.1: "the likelihood of them
+    /// arriving in time to be useful need[s] to be considered before RTP retransmission is
+    /// used"; RFC 4588 section 7: the sender "MAY selectively retransmit only the packets that
+    /// it deems important and ignore NACK messages for other packets").
+    ///
+    /// A receiver that still asks for a video packet that old is waiting for a picture
+    /// nobody can use, so the first such request **gives the stream up**: everything sent on
+    /// it so far is forgotten (its buffer, the requests waiting), the retransmission reserve
+    /// they held is released at once, and the application is asked for a key frame (a Picture
+    /// Loss Indication with sender SSRC 0, `RTCPeerConnectionEvent::OnKeyFrameRequest`, as at
+    /// the pacer's flush). What is written afterwards is buffered and repaired as ever. An
+    /// audio packet that old is not retransmitted and nothing else happens.
+    ///
+    /// Default: [`MAX_REPAIR_AGE`]. `None`: a packet is repaired for as long as the buffer
+    /// holds it. This is the sender's own judgement and is not announced.
+    ///
+    /// **An `rtx-time` takes its place.** RFC 4588 section 8.1: `rtx-time` is "the maximum
+    /// time a sender will keep an original RTP packet in its buffers available for
+    /// retransmission". Where one is in force for a stream (announced in the session
+    /// description or set by the application for its retransmission format,
+    /// [`NackControl::LocalRtxTime`](super::NackControl::LocalRtxTime), or configured with
+    /// [`with_max_packet_age`](Self::with_max_packet_age)), that is how old a packet of the
+    /// stream may be and still be repaired, whether shorter or longer than this setting, and
+    /// this setting does nothing for the stream: a packet older than the `rtx-time` is not
+    /// retransmitted and nothing else happens (the stream is not given up, no key frame is
+    /// asked for: the receiver was told the time and "should take into account the signalled
+    /// sender retransmission buffer length", section 8.8).
+    ///
+    /// The `rtx-time` is that of the packet's own retransmission format (RFC 4588 section 8.6:
+    /// a parameter of each RTX payload type, which `apt` ties to one original payload type):
+    /// a RED packet's is the one announced for the RTX of `red`, a plain packet's the one of
+    /// its codec's RTX. That one value decides all three for the packet: the cut at the time,
+    /// this setting where there is no time, and whether the packet's age gives the stream up.
+    /// A packet that is never sent again (a FEC packet in RED on a stream without RTX, a
+    /// payload type without an RTX format on a stream that has RTX) gives nothing up by its
+    /// age: the receiver is not waiting for a picture because of it.
+    pub fn with_max_repair_age(mut self, max_repair_age: Option<Duration>) -> Self {
+        self.max_repair_age = max_repair_age;
+        self
+    }
+
+    /// Set the backlog of repairs past which they are given up when the path's capacity has
+    /// collapsed: the requests waiting would take this long or more to leave at the congestion
+    /// controller's whole target, and the target is at most half of the highest in force
+    /// within the last two seconds. Every video stream with a request waiting is then given
+    /// up as [`with_max_repair_age`](Self::with_max_repair_age) describes (forgotten, the
+    /// reserve released, a key frame asked for). The targets from before a give-up no longer
+    /// count: the next one needs the target to halve again. RFC 4588 section 7: "If
+    /// congestion is not kept under control, then retransmission SHOULD NOT be used": such a
+    /// backlog is repaired at a rate the path drops again, for seconds, while the original
+    /// media is held at the reserve's floor.
+    ///
+    /// A backlog at a steady target (ordinary loss, however heavy) is never given up: it
+    /// is repaired within the target. Audio requests count toward the backlog and are never
+    /// given up. Without a congestion controller's target there is no such rule. An
+    /// `rtx-time` does not change it: the time is the most a packet is kept, and a collapse
+    /// ends the repairs of what was sent before it as the pacer's flush does.
+    ///
+    /// Default: [`REPAIR_BACKLOG_BOUND`]. `None`: every request is served in order.
+    pub fn with_repair_backlog_bound(mut self, bound: Option<Duration>) -> Self {
+        self.repair_backlog_bound = bound;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> NackResponderInterceptor {
         let mut interceptor = NackResponderInterceptor::new(self.size);
         interceptor.max_packet_age = self.max_packet_age;
         interceptor.rate_limit = self.rate_limit;
         interceptor.max_reserve_fraction = self.max_reserve_fraction;
+        interceptor.max_repair_age = self.max_repair_age;
+        interceptor.repair_backlog_bound = self.repair_backlog_bound;
         interceptor
     }
 }
@@ -318,6 +392,60 @@ fn extension_id(info: &StreamInfo, uri: &str) -> Option<u8> {
         .and_then(|extension| u8::try_from(extension.id).ok())
 }
 
+/// The subtype of a MIME type (`video/rtx` -> `rtx`).
+fn subtype(mime_type: &str) -> &str {
+    mime_type
+        .rsplit_once('/')
+        .map_or(mime_type, |(_, subtype)| subtype)
+}
+
+/// The `(apt, rtx)` pairs of the retransmission formats of `info`'s m= section: every format
+/// whose MIME subtype is `rtx` and whose fmtp names an associated payload type (RFC 4588
+/// section 8.1: "apt (associated payload type) ... the value of this parameter is the
+/// payload type of the associated original stream").
+fn section_rtx_payload_types(info: &StreamInfo) -> Vec<(u8, u8)> {
+    info.section_mime_types
+        .iter()
+        .filter(|(_, mime_type)| subtype(mime_type).eq_ignore_ascii_case("rtx"))
+        .filter_map(|(rtx, _)| {
+            let (_, fmtp) = info.section_fmtp_lines.iter().find(|(pt, _)| pt == rtx)?;
+            let apt = fmtp
+                .split(';')
+                .filter_map(|parameter| parameter.trim().strip_prefix("apt="))
+                .find_map(|value| value.trim().parse::<u8>().ok())?;
+            Some((apt, *rtx))
+        })
+        .collect()
+}
+
+/// The `red` and `ulpfec` payload types of `info`'s m= section, when it has both: FEC is
+/// then sent as RED packets of the media stream (RFC 5109 section 14.2).
+fn section_fec_in_red(info: &StreamInfo) -> Option<(u8, u8)> {
+    let payload_type = |name: &str| {
+        info.section_mime_types
+            .iter()
+            .find(|(_, mime_type)| subtype(mime_type).eq_ignore_ascii_case(name))
+            .map(|(payload_type, _)| *payload_type)
+    };
+    Some((payload_type("red")?, payload_type("ulpfec")?))
+}
+
+/// How a packet asked for again is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairForm {
+    /// As a retransmission packet (RFC 4588 section 4) of this payload type on the stream's
+    /// RTX SSRC.
+    Rtx(u8),
+    /// A FEC packet ([`LocalStream::is_fec`]): a retransmission packet of this payload type
+    /// on the stream's RTX SSRC that carries the packet's sequence number and its RED block
+    /// header and none of its FEC data. See [`LocalStream::repair_form`].
+    RtxWithoutFec(u8),
+    /// The stream negotiated no retransmission format: the packet again as it was sent, on
+    /// the media SSRC under its sequence number (RFC 4585 section 6.2.1 leaves the form of a
+    /// retransmission to the sender).
+    Original,
+}
+
 /// Per-stream state for the responder.
 struct LocalStream {
     /// Buffer of sent packets for retransmission.
@@ -326,6 +454,17 @@ struct LocalStream {
     ssrc_rtx: Option<u32>,
     /// RTX payload type for RFC4588 retransmission (if configured).
     payload_type_rtx: Option<u8>,
+    /// The payload type the stream was bound with: the one `payload_type_rtx` repairs.
+    payload_type: u8,
+    /// The retransmission payload type of each payload type of the stream's m= section that
+    /// has one: `(apt, rtx)` for every `rtx` format the binder listed
+    /// ([`StreamInfo::section_mime_types`], [`StreamInfo::section_fmtp_lines`]). Empty when
+    /// the binder did not list the section's formats: `payload_type_rtx` then stands for
+    /// every packet. See [`LocalStream::repair_form`].
+    rtx_payload_types: Vec<(u8, u8)>,
+    /// The section's `red` and `ulpfec` payload types, when FEC is sent in RED packets of
+    /// this stream. See [`LocalStream::is_fec`].
+    fec_in_red: Option<(u8, u8)>,
     /// Sequence number counter for RTX packets.
     rtx_sequence_number: u16,
     /// The sequence number of the packet sent last, and when.
@@ -364,6 +503,11 @@ struct LocalStream {
     /// a retransmission.
     repairs_by_rtx: HashMap<u16, (u16, Instant)>,
     repairs_order: VecDeque<(u16, Instant)>,
+    /// Whether the stream is video (not audio): a key frame can be asked for it.
+    video: bool,
+    /// The newest packet the buffer held when it was last emptied (a give-up, the pacer's
+    /// flush): the header of a probe's padding until the next packet is written.
+    probe_template: Option<rtp::Packet>,
 }
 
 /// What is remembered of the retransmissions of one packet.
@@ -401,6 +545,90 @@ enum RepairState {
 }
 
 impl LocalStream {
+    /// Whether `packet` is a FEC packet: a RED packet of the stream whose one block is the
+    /// section's `ulpfec` format (RFC 2198 section 3: the last block header is one octet,
+    /// F = 0 and the block's payload type; RFC 5109 section 14.2).
+    ///
+    /// FEC data is not retransmitted: it repairs media that the receiver also asks for by
+    /// NACK, and the media's own retransmission is what answers the NACK. libwebrtc does not
+    /// keep FEC packets for retransmission at all (modules/rtp_rtcp/source/ulpfec_generator.cc:233
+    /// at a222406d, `red_packet->set_allow_retransmission(false)`; rtp_sender_egress.cc:316
+    /// puts a packet in the history only `if (options.is_media &&
+    /// packet->allow_retransmission())`), so a NACK that names one finds nothing
+    /// (rtp_sender.cc:348-351, `ReSendPacket`: "Packet not found or already queued for
+    /// retransmission, ignore.") and its receiver asks until the request ages out
+    /// (modules/video_coding/nack_requester.cc:34-39: 10 000 sequence numbers, 100 requests).
+    /// The sequence number is answered here all the same: see [`Self::repair_form`].
+    fn is_fec(&self, packet: &rtp::Packet) -> bool {
+        self.fec_in_red.is_some_and(|(red, ulpfec)| {
+            packet.header.payload_type == red && packet.payload.first() == Some(&ulpfec)
+        })
+    }
+
+    /// How `packet`, sent on this stream, is sent again; `None` when it is not.
+    ///
+    /// RFC 4588 section 8.1 ties a retransmission format to ONE original payload type: "apt
+    /// (associated payload type) ... the value of this parameter is the payload type of the
+    /// associated original stream", and section 8.6: "the retransmission payload type is
+    /// mapped to the payload type of the original stream with the apt parameter". A stream
+    /// does not always leave under the payload type it was bound with: a FEC encoder
+    /// application-ward of this interceptor rewrites video into RED packets (RFC 2198), whose
+    /// retransmission format is the one whose `apt` names the `red` payload type
+    /// (`a=fmtp:117 apt=116`), not the media format's; a source may switch between the
+    /// formats of its section (RFC 7160). A receiver restores the payload type from the
+    /// `apt` of the payload type the retransmission arrives under, so a RED packet
+    /// retransmitted under the media format's RTX is restored as media with a RED header in
+    /// front of it. libwebrtc looks the RTX payload type up by the payload type of the packet
+    /// it retransmits and sends nothing when there is none
+    /// (modules/rtp_rtcp/source/rtp_sender.cc, `BuildRtxPacket`:
+    /// `rtx_payload_type_map_.find(packet.PayloadType())`).
+    ///
+    /// - A FEC packet ([`Self::is_fec`]) is answered with its sequence number alone
+    ///   ([`RepairForm::RtxWithoutFec`]): the retransmission packet of the RED packet cut
+    ///   down to its one-octet block header, three octets of payload with the original
+    ///   sequence number. A FEC packet in RED has a sequence number of the media stream, and a
+    ///   receiver that puts frames together in sequence-number order cannot tell a lost one
+    ///   from a lost one-packet frame: it waits for it and then asks for a key frame.
+    ///   Restored, the answer is a RED packet whose FEC block is empty, which a receiver
+    ///   takes as it takes any FEC packet (present, no media; libwebrtc:
+    ///   video/rtp_video_stream_receiver2.cc:1603-1612, a RED packet whose first octet is the
+    ///   `ulpfec` payload type is an empty packet to its packet buffer and NACK module). On a
+    ///   stream without retransmission a FEC packet is not sent again: the packet as it was
+    ///   is all that can leave under its sequence number.
+    /// - A stream without retransmission (no RTX SSRC or no RTX payload type): the packet as
+    ///   it was.
+    /// - Otherwise the RTX format whose `apt` is the packet's payload type, among the
+    ///   section's formats and the stream's own pair. A payload type without one is not sent
+    ///   again: never as a duplicate on the media SSRC of a stream that negotiated RTX (the
+    ///   receiver of such a stream expects its repairs on the RTX stream, and a duplicate is
+    ///   one more packet of the media stream's own sequence space on a path that just lost
+    ///   packets).
+    /// - When the binder listed no `rtx` format for the section, the stream's one RTX payload
+    ///   type stands for every packet.
+    fn repair_form(&self, packet: &rtp::Packet) -> Option<RepairForm> {
+        let fec = self.is_fec(packet);
+        let (Some(_), Some(stream_rtx)) = (self.ssrc_rtx, self.payload_type_rtx) else {
+            return (!fec).then_some(RepairForm::Original);
+        };
+        let payload_type = packet.header.payload_type;
+        let rtx = if self.rtx_payload_types.is_empty() {
+            Some(stream_rtx)
+        } else {
+            self.rtx_payload_types
+                .iter()
+                .find(|(apt, _)| *apt == payload_type)
+                .map(|(_, rtx)| *rtx)
+                .or_else(|| (payload_type == self.payload_type).then_some(stream_rtx))
+        };
+        rtx.map(|rtx| {
+            if fec {
+                RepairForm::RtxWithoutFec(rtx)
+            } else {
+                RepairForm::Rtx(rtx)
+            }
+        })
+    }
+
     /// The serial of the packet now held under `sequence_number`.
     fn packet(&self, sequence_number: u16) -> Option<u64> {
         self.sent_at[usize::from(sequence_number) % self.sent_at.len()]
@@ -465,9 +693,15 @@ pub const REPAIR_REPORT_MARGIN: Duration = Duration::from_millis(100);
 /// request's own (the engine's clock), so the memory ends whether or not another report
 /// comes: a request after it is answered, which is also what bounds a receiver whose feedback
 /// reports retransmissions it did not get. It is the memory of one packet (SSRC and extended
-/// sequence number): it ends with the packet's place in the send buffer or its `rtx-time`,
-/// past which no request for it is answered anyway, and the packet that has the same 16-bit
-/// number a cycle later starts without it.
+/// sequence number): it ends with the packet's place in the send buffer, its `rtx-time` or
+/// its repair age, past which no request for it is answered anyway, and the packet that has
+/// the same 16-bit number a cycle later starts without it.
+///
+/// Longer than the default repair age ([`MAX_REPAIR_AGE`]), under which no request for the
+/// packet is answered once it is two seconds old whatever is remembered of it. The memory is
+/// the bound for the configurations where a packet is repaired longer: an `rtx-time` over two
+/// seconds, the repair age off (`PacerBacklog::Keep`, the `Chrome` profile). There a shorter
+/// memory would answer a request that crossed its repair behind a deep queue.
 pub const DELIVERED_MEMORY: Duration = Duration::from_secs(4);
 
 /// What a request for a packet that was retransmitted before gets
@@ -483,8 +717,35 @@ enum Repeat {
 }
 
 /// How long a retransmission is taken to wait in the pacer at most: longer than the pacer's
-/// queue time bound (2 s by default), past which the pacer drops it and says so.
+/// queue time bound (2 s by default), past which the pacer drops it and says so. Not tied to
+/// the repair age: it bounds a state (a pacer that never reports), and a retransmission made
+/// of a packet just under the repair age may wait the pacer's bound after that.
 const IN_PACER_LIFETIME: Duration = Duration::from_secs(4);
+
+/// How old a packet may be and still be repaired, by default
+/// ([`NackResponderBuilder::with_max_repair_age`]): two seconds, the pacer's queue time bound,
+/// past which the pacer itself drops what waits as stale. One second (libwebrtc's shortest
+/// packet history) was measured and is too short: behind a path queue of a second a NACK for a
+/// packet still wanted arrives later than that.
+pub const MAX_REPAIR_AGE: Duration = Duration::from_secs(2);
+
+/// The backlog of repairs given up after the target halved, by default
+/// ([`NackResponderBuilder::with_repair_backlog_bound`]): what would take two seconds or more
+/// to leave at the target. One second was measured and gives up too early: the key frame asked
+/// for goes into a path queue that is still full (200 calls per cell: 8 and 24 with no frame
+/// for over 2 s behind queues of 100 ms and 1 s, against none with two seconds).
+pub const REPAIR_BACKLOG_BOUND: Duration = Duration::from_secs(2);
+
+/// How far back the highest target counts when a backlog of repairs is judged a collapse
+/// (the pacer's queue time bound).
+const COLLAPSE_LOOK_BACK: Duration = Duration::from_secs(2);
+
+/// A backlog of repairs is a collapse when the target is at most this share of the highest
+/// in force within [`COLLAPSE_LOOK_BACK`] (the pacer's `COLLAPSE_AT`).
+const COLLAPSE_AT: f64 = 0.5;
+
+/// The most target changes remembered.
+const MAX_TARGETS_KEPT: usize = 256;
 
 /// Most retransmissions queued and not yet taken by `poll_write`. Past it further NACKed
 /// packets are not queued until the queue drains.
@@ -561,6 +822,16 @@ pub struct NackResponderInterceptor {
     /// Whether transport-wide feedback reports on the retransmissions
     /// ([`RetransmissionsReported`](crate::RetransmissionsReported)): it has once.
     repairs_reported: bool,
+    /// See [`NackResponderBuilder::with_max_repair_age`].
+    max_repair_age: Option<Duration>,
+    /// See [`NackResponderBuilder::with_repair_backlog_bound`].
+    repair_backlog_bound: Option<Duration>,
+    /// The targets set within [`COLLAPSE_LOOK_BACK`] (and the one in force before), oldest
+    /// first; cleared when repairs are given up.
+    targets: VecDeque<(Instant, f64)>,
+    /// Retransmissions made before this instant no longer hold the reserve: what they
+    /// repaired was given up.
+    reserve_since: Option<Instant>,
 }
 
 impl NackResponderInterceptor {
@@ -590,6 +861,10 @@ impl NackResponderInterceptor {
             pacer_reports: false,
             paused: false,
             repairs_reported: false,
+            max_repair_age: Some(MAX_REPAIR_AGE),
+            repair_backlog_bound: Some(REPAIR_BACKLOG_BOUND),
+            targets: VecDeque::new(),
+            reserve_since: None,
         }
     }
 
@@ -644,7 +919,18 @@ impl NackResponderInterceptor {
             return 0.0;
         }
         self.retransmitted.expire(now);
-        if self.pending.is_empty() && self.retransmitted.octets == 0 {
+        // Retransmissions of what was given up since hold no reserve: nothing follows them.
+        let retransmitted = match self.reserve_since {
+            Some(since) => self
+                .retransmitted
+                .sent
+                .iter()
+                .filter(|(at, _)| *at >= since)
+                .map(|(_, octets)| *octets)
+                .sum(),
+            None => self.retransmitted.octets,
+        };
+        if self.pending.is_empty() && retransmitted == 0 {
             return 0.0;
         }
         let horizon = self
@@ -652,8 +938,7 @@ impl NackResponderInterceptor {
             .unwrap_or(RETRANSMISSION_RATE_WINDOW)
             .clamp(MIN_RESERVE_HORIZON, RETRANSMISSION_RATE_WINDOW);
         let needed = self.pending_octets as f64 * 8.0 / horizon.as_secs_f64();
-        let in_use =
-            self.retransmitted.octets as f64 * 8.0 / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
+        let in_use = retransmitted as f64 * 8.0 / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
         needed
             .max(in_use)
             .min(self.max_reserve_fraction * target_bps)
@@ -689,35 +974,60 @@ impl NackResponderInterceptor {
         }
     }
 
-    /// The wire size of the retransmission of `packet` on `stream`.
-    fn retransmission_size(stream: &LocalStream, packet: &rtp::Packet) -> usize {
-        packet.marshal_size()
-            + if stream.ssrc_rtx.is_some() && stream.payload_type_rtx.is_some() {
-                2
-            } else {
-                0
-            }
+    /// The wire size of the retransmission of `packet` in `form`: an RTX packet carries the
+    /// original sequence number ahead of the payload (RFC 4588 section 4).
+    fn retransmission_size(form: RepairForm, packet: &rtp::Packet) -> usize {
+        match form {
+            RepairForm::Rtx(_) => packet.marshal_size() + 2,
+            // The header, the original sequence number and the RED block header.
+            RepairForm::RtxWithoutFec(_) => packet.marshal_size() - packet.payload.len() + 3,
+            RepairForm::Original => packet.marshal_size(),
+        }
     }
 
-    /// Whether `seq` of `stream` may be retransmitted at `now` (it is still held, not older
-    /// than the `rtx-time`), and its retransmission's size.
-    fn retransmittable(&self, stream: &LocalStream, seq: u16, now: Instant) -> Option<usize> {
-        let original_packet = stream.send_buffer.get(seq)?;
-        // RFC 4588 8.1 (`rtx-time`): a packet is kept for retransmission that long. What
-        // the session description announced for the stream's retransmission format is
-        // the value; without one, the configured age.
-        if let Some(max_packet_age) = stream
-            .payload_type_rtx
+    /// The `rtx-time` in force for a packet of `stream` sent again in `form` (RFC 4588 8.1: a
+    /// packet is kept for retransmission that long): what the session description announced
+    /// for the packet's retransmission format, the RTX payload type whose `apt` is the
+    /// packet's payload type (RED's RTX for a RED packet; the stream's own, for a packet sent
+    /// again as it was); without one, the configured age. RFC 4588 section 8.6 makes
+    /// `rtx-time` a parameter of each retransmission payload type, so two formats of one
+    /// stream may announce different times, or one and not the other.
+    fn rtx_time(&self, stream: &LocalStream, form: RepairForm) -> Option<Duration> {
+        let payload_type_rtx = match form {
+            RepairForm::Rtx(payload_type_rtx) | RepairForm::RtxWithoutFec(payload_type_rtx) => {
+                Some(payload_type_rtx)
+            }
+            RepairForm::Original => stream.payload_type_rtx,
+        };
+        payload_type_rtx
             .and_then(|payload_type_rtx| self.local_rtx_times.get(&payload_type_rtx))
             .copied()
             .or(self.max_packet_age)
-            && let Some((_, sent, _)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
-                .filter(|(sequence_number, _, _)| *sequence_number == seq)
-            && now.saturating_duration_since(sent) > max_packet_age
+    }
+
+    /// How long ago `seq` of `stream` was written, if the stream holds it.
+    fn age(stream: &LocalStream, seq: u16, now: Instant) -> Option<Duration> {
+        stream.sent_at[usize::from(seq) % stream.sent_at.len()]
+            .filter(|(sequence_number, _, _)| *sequence_number == seq)
+            .map(|(_, sent, _)| now.saturating_duration_since(sent))
+    }
+
+    /// Whether `seq` of `stream` may be retransmitted at `now` (it is still held, it has a
+    /// form to be sent again in, see [`LocalStream::repair_form`], and it is not older than
+    /// the `rtx-time` of that form or, without one, than the repair age), and its
+    /// retransmission's size.
+    fn retransmittable(&self, stream: &LocalStream, seq: u16, now: Instant) -> Option<usize> {
+        let original_packet = stream.send_buffer.get(seq)?;
+        let form = stream.repair_form(original_packet)?;
+        if let Some(rtx_time) = self.rtx_time(stream, form)
+            && Self::age(stream, seq, now).is_some_and(|age| age > rtx_time)
         {
             return None;
         }
-        Some(Self::retransmission_size(stream, original_packet))
+        if self.too_old(stream, form, seq, now) {
+            return None;
+        }
+        Some(Self::retransmission_size(form, original_packet))
     }
 
     /// Sends the waiting retransmissions the rate limit has room for, oldest request first.
@@ -799,9 +1109,14 @@ impl NackResponderInterceptor {
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
-        if stream.send_buffer.get(seq).is_none() {
+        // Held, and with a form to be sent again in (`retransmittable` said so already).
+        let Some(form) = stream
+            .send_buffer
+            .get(seq)
+            .and_then(|packet| stream.repair_form(packet))
+        else {
             return;
-        }
+        };
         stream.last_retransmit.insert(seq, now);
         if let Some(packet) = stream.packet(seq) {
             // An earlier retransmission of this same packet still remembered: reports on it
@@ -831,8 +1146,24 @@ impl NackResponderInterceptor {
             return;
         };
 
+        let without_fec;
+        let original_packet = if matches!(form, RepairForm::RtxWithoutFec(_)) {
+            // The RED block header (RFC 2198 section 3: one octet, the block's payload
+            // type), without the FEC data behind it.
+            without_fec = rtp::Packet {
+                header: original_packet.header.clone(),
+                payload: original_packet
+                    .payload
+                    .slice(..original_packet.payload.len().min(1)),
+            };
+            &without_fec
+        } else {
+            original_packet
+        };
         let packet =
-            if let (Some(ssrc_rtx), Some(pt_rtx)) = (stream.ssrc_rtx, stream.payload_type_rtx) {
+            if let (RepairForm::Rtx(pt_rtx) | RepairForm::RtxWithoutFec(pt_rtx), Some(ssrc_rtx)) =
+                (form, stream.ssrc_rtx)
+            {
                 if stream.repairs_order.len() >= usize::from(self.size).max(1)
                     && let Some((oldest, made)) = stream.repairs_order.pop_front()
                     && stream
@@ -856,7 +1187,7 @@ impl NackResponderInterceptor {
                     pt_rtx,
                 )
             } else {
-                // No RTX: retransmit original packet as-is
+                // No RTX negotiated for the stream: retransmit the original packet as-is
                 original_packet.clone()
             };
         self.retransmitted.add(now, size);
@@ -1047,6 +1378,11 @@ impl NackResponderInterceptor {
     /// SSRC would take sequence numbers the application owns. Not charged to the NACK budget:
     /// it answers no NACK.
     ///
+    /// In a chain without a pacer (the request carries no [`ProbeFill`](crate::ProbeFill)) the
+    /// padding is the whole cluster and leaves as one burst, marked here with the cluster's
+    /// [`ProbePacket`]: without the mark the congestion controller would count no packet for
+    /// the cluster and wait for a result that cannot come.
+    ///
     /// With several RTP sessions (transports) a cluster is the session's that asked for it
     /// (the request carries its [`RtpSession`](crate::RtpSession)): it is filled on a stream of
     /// that session only, so the probe travels the path whose capacity it measures (RFC 8836
@@ -1079,8 +1415,15 @@ impl NackResponderInterceptor {
             return;
         };
 
-        // The newest packet still held gives the header.
-        let Some(template) = stream.send_buffer.get(newest).cloned() else {
+        // The newest packet still held gives the header; after the buffer was emptied (a
+        // give-up, the pacer's flush) and before the next packet is written, the newest it
+        // held then.
+        let Some(template) = stream
+            .send_buffer
+            .get(newest)
+            .cloned()
+            .or_else(|| stream.probe_template.clone())
+        else {
             return;
         };
 
@@ -1103,10 +1446,21 @@ impl NackResponderInterceptor {
             );
             filled += packet.marshal_size();
             self.retransmissions_queued += 1;
+            let mut message =
+                AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission);
+            if fill.is_none() {
+                // No pacer took the request on its way here: nothing below releases this
+                // padding at the cluster's rate or marks it, so it leaves as one burst and
+                // carries the cluster's mark from here. The congestion controller measures
+                // such a cluster by how the path spread it (`burst_estimate`).
+                message.add(Attribute::Custom(std::sync::Arc::new(ProbePacket {
+                    cluster: request.cluster,
+                })));
+            }
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission),
+                message,
             });
         }
     }
@@ -1159,11 +1513,26 @@ impl NackResponderInterceptor {
     /// RFC 4588 section 7: the sender "MAY selectively retransmit only the packets that it
     /// deems important"). What is written after it is buffered and repaired as ever.
     fn forget_flushed(&mut self, flush: &crate::PacerFlush) {
+        self.forget_streams(&flush.ssrcs);
+    }
+
+    /// Forgets everything sent so far on the streams `ssrcs`: their retransmission buffers,
+    /// what is remembered of their repairs, the requests waiting.
+    fn forget_streams(&mut self, ssrcs: &[u32]) {
         let size = self.size;
-        for ssrc in &flush.ssrcs {
+        for ssrc in ssrcs {
             let Some(stream) = self.streams.get_mut(ssrc) else {
                 continue;
             };
+            // A probe cluster asked for before the next packet is written still needs a
+            // header to pad under: without one no padding leaves, the cluster goes
+            // unanswered and a chain without a pacer stops asking.
+            if let Some(newest) = stream
+                .last_sent
+                .and_then(|(newest, _)| stream.send_buffer.get(newest))
+            {
+                stream.probe_template = Some(newest.clone());
+            }
             if let Some(buffer) = SendBuffer::new(size) {
                 stream.send_buffer = buffer;
             }
@@ -1183,7 +1552,7 @@ impl NackResponderInterceptor {
         let asked = &mut self.pending_asked;
         let octets = &mut self.pending_octets;
         self.pending.retain(|entry| {
-            let flushed = flush.ssrcs.contains(&entry.ssrc);
+            let flushed = ssrcs.contains(&entry.ssrc);
             if flushed {
                 asked.remove(&(entry.ssrc, entry.sequence_number));
                 *octets -= entry.octets;
@@ -1193,6 +1562,111 @@ impl NackResponderInterceptor {
         if self.pending.len() != before {
             self.release_at = None;
         }
+    }
+
+    /// Gives up the repair of everything sent so far on the video streams among `ssrcs` and
+    /// asks the application for a key frame of each (a Picture Loss Indication with sender
+    /// SSRC 0 marked [`Attribute::DeliverToApplication`], as the pacer's flush does). The
+    /// reserve those repairs held is released: the retransmissions made so far no longer count
+    /// as in use. Audio streams are left as they are.
+    fn give_up(&mut self, now: Instant, ssrcs: &[u32]) {
+        let mut ssrcs: Vec<u32> = ssrcs
+            .iter()
+            .copied()
+            .filter(|ssrc| self.streams.get(ssrc).is_some_and(|stream| stream.video))
+            .collect();
+        ssrcs.sort_unstable();
+        ssrcs.dedup();
+        if ssrcs.is_empty() {
+            return;
+        }
+        self.forget_streams(&ssrcs);
+        self.reserve_since = Some(now);
+        self.release_at = None;
+        // No target from before counts again: what is written from here on (the key frame)
+        // is written for the target now.
+        if let Some(target) = self.target_bps {
+            self.targets.clear();
+            self.targets.push_back((now, target));
+        }
+        for ssrc in ssrcs {
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+                    rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                        sender_ssrc: 0,
+                        media_ssrc: ssrc,
+                    },
+                )]))
+                .with(Attribute::DeliverToApplication),
+            });
+        }
+    }
+
+    /// Notes the target `target` set at `now` (for [`Self::backlog_collapsed`]).
+    fn note_target(&mut self, now: Instant, target: f64) {
+        if self.targets.back().is_some_and(|(_, last)| *last == target) {
+            return;
+        }
+        self.targets.push_back((now, target));
+        while self.targets.len() > 1
+            && now.saturating_duration_since(self.targets[1].0) >= COLLAPSE_LOOK_BACK
+        {
+            self.targets.pop_front();
+        }
+        while self.targets.len() > MAX_TARGETS_KEPT {
+            self.targets.pop_front();
+        }
+    }
+
+    /// Whether the requests waiting are a backlog the path will not carry in time
+    /// ([`NackResponderBuilder::with_repair_backlog_bound`]): they would take the bound or
+    /// more to leave if they had the whole target, and the target is at most [`COLLAPSE_AT`]
+    /// of the highest in force within [`COLLAPSE_LOOK_BACK`].
+    fn backlog_collapsed(&self, now: Instant) -> bool {
+        let (Some(bound), Some(target)) = (self.repair_backlog_bound, self.target_bps) else {
+            return false;
+        };
+        if self.pending.is_empty() || target <= 0.0 {
+            return false;
+        }
+        if (self.pending_octets as f64 * 8.0 / target) < bound.as_secs_f64() {
+            return false;
+        }
+        let mut highest: f64 = 0.0;
+        for (index, (_, in_force)) in self.targets.iter().enumerate() {
+            let superseded = self.targets.get(index + 1).is_some_and(|(next, _)| {
+                now.saturating_duration_since(*next) >= COLLAPSE_LOOK_BACK
+            });
+            if !superseded {
+                highest = highest.max(*in_force);
+            }
+        }
+        highest > 0.0 && target <= COLLAPSE_AT * highest
+    }
+
+    /// Gives up a collapsed backlog at `now`: the video streams with requests waiting. The
+    /// give-up forgets the targets from before it ([`Self::give_up`]), so the key frame that
+    /// answers it is not given up in its turn unless the target halves again.
+    fn give_up_a_backlog(&mut self, now: Instant) {
+        if !self.backlog_collapsed(now) {
+            return;
+        }
+        let ssrcs: Vec<u32> = self.pending.iter().map(|entry| entry.ssrc).collect();
+        self.give_up(now, &ssrcs);
+    }
+
+    /// Whether `seq` of `stream`, sent again in `form`, was written longer ago than the
+    /// sender's own judgement repairs ([`NackResponderBuilder::with_max_repair_age`]). Never
+    /// with an `rtx-time` in force for that form ([`Self::rtx_time`]): that time is then the
+    /// one that counts ([`Self::retransmittable`]). One rule per packet: the same per-form
+    /// value is the age cut, this switch, and the switch of the give-up in the NACK handler.
+    fn too_old(&self, stream: &LocalStream, form: RepairForm, seq: u16, now: Instant) -> bool {
+        self.rtx_time(stream, form).is_none()
+            && self
+                .max_repair_age
+                .is_some_and(|bound| Self::age(stream, seq, now).is_some_and(|age| age > bound))
     }
 
     /// The pacer's report of retransmissions that left it or were dropped
@@ -1512,6 +1986,27 @@ impl NackResponderInterceptor {
             .last_retransmit
             .retain(|_, at| now.saturating_duration_since(*at) < resend_interval);
 
+        // A packet asked for that was written too long ago to be of use
+        // (`with_max_repair_age`). For a video stream the repair of everything sent so far
+        // is given up and a key frame asked for; an audio packet is simply not retransmitted
+        // (`retransmittable`). Only a packet that would be answered counts: one without a
+        // repair form (a FEC packet in RED on a stream without RTX, a payload type without
+        // an RTX format on a stream that has RTX) is never sent again, so the receiver is
+        // not kept waiting for a picture by it, and it is skipped here as it is below.
+        if let Some(stream) = self.streams.get(&ssrc)
+            && stream.video
+            && seqs_to_retransmit.iter().any(|seq| {
+                stream
+                    .send_buffer
+                    .get(*seq)
+                    .and_then(|packet| stream.repair_form(packet))
+                    .is_some_and(|form| self.too_old(stream, form, *seq, now))
+            })
+        {
+            self.give_up(now, &[ssrc]);
+            return;
+        }
+
         // Every packet asked for joins the requests waiting, oldest request first (one asked
         // for again keeps its place and is asked for afresh), and leaves as the rate limit has
         // room (RFC 4588 section 7): what does not fit now leaves when the window has room.
@@ -1587,6 +2082,10 @@ impl NackResponderInterceptor {
         // The original media is lowered by the reserve before any of these is sent (RFC 4588
         // section 7: "the sender SHOULD NOT send retransmission packets without reducing the
         // packet rate and bitrate of the original stream"); the retransmissions may then use it.
+        // A backlog the collapsed path will not carry in time is given up instead (the same
+        // section: "If congestion is not kept under control, then retransmission SHOULD NOT
+        // be used").
+        self.give_up_a_backlog(now);
         self.announce_reserve(now, false);
         self.release(now);
     }
@@ -1713,6 +2212,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             {
                 self.target_bps = Some(pause.target_bits_per_second);
             }
+        }
+
+        if carries_target && let Some(target) = self.target_bps {
+            self.note_target(now, target);
+            // The target fell under what the waiting repairs need.
+            self.give_up_a_backlog(now);
         }
 
         // Retransmissions that left the pacer (or were dropped there).
@@ -1879,6 +2384,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             // back again (a driver would spin on it).
             self.release_at = None;
             self.expire_pending(now);
+            self.give_up_a_backlog(now);
             self.release(now);
             self.announce_reserve(now, true);
         }
@@ -1922,6 +2428,9 @@ impl Interceptor for NackResponderInterceptor {
                     send_buffer,
                     ssrc_rtx: info.ssrc_rtx,
                     payload_type_rtx: info.payload_type_rtx,
+                    payload_type: info.payload_type,
+                    rtx_payload_types: section_rtx_payload_types(info),
+                    fec_in_red: section_fec_in_red(info),
                     rtx_sequence_number,
                     last_sent: None,
                     last_retransmit: HashMap::new(),
@@ -1934,6 +2443,8 @@ impl Interceptor for NackResponderInterceptor {
                     repairs: HashMap::new(),
                     repairs_by_rtx: HashMap::new(),
                     repairs_order: VecDeque::new(),
+                    video: !info.mime_type.to_ascii_lowercase().starts_with("audio/"),
+                    probe_template: None,
                 },
             );
         }

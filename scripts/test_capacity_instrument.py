@@ -248,6 +248,15 @@ class Baseline(unittest.TestCase):
         self.assertEqual(("hi", 2.0, 1, 101), rows[("freeze", "limit")])
         self.assertEqual(("hi", 0.0, 1, 101), rows[("discards", "limit")])
 
+    def test_key_frames_are_held_in_the_forward_loss_cells_only(self):
+        loss = "fl3/paced/gap300/up/q300/rl0"
+        runs = [run(i, keyframes=3.0) for i in range(1, 11)] + [run(i, cell=loss, keyframes=3.0 + (i >= 9)) for i in range(1, 11)]
+        lines = [line.split("\t") for line in ci.baseline_lines(runs)]
+        held = [(cell, level, float(threshold), int(count)) for cell, figure, _, threshold, count, _, level in lines if figure == "keyframes"]
+        # Three key frames a call and a tenth of slack: the two calls with four are beyond the
+        # median's threshold, none beyond the 90th percentile's.
+        self.assertEqual([(loss, "p50", 3.3, 2), (loss, "p90", 4.4, 0)], held)
+
     def test_the_file_reads_back_as_the_test_reads_it(self):
         text = ci.baseline_text([run(i, max_age=float(i)) for i in range(1, 11)], "run 1 on abc")
         body = [line for line in text.splitlines() if not line.startswith("#")]

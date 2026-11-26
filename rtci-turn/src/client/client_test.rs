@@ -54,12 +54,81 @@ fn create_listening_test_client(rto_in_ms: u64) -> Result<(UdpSocket, Client)> {
     Ok((udp_socket, client))
 }
 
-fn create_listening_test_client_with_stun_serv() -> Result<(UdpSocket, Client)> {
-    let udp_socket = UdpSocket::bind("0.0.0.0:0")?;
+/// How long a test waits for a datagram on loopback. A lost datagram, or a responder that never
+/// answers, fails the test after this instead of blocking the job until CI cancels it.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The next datagram on `conn`, waiting at most [`READ_TIMEOUT`]; `what` names it in the panic.
+fn recv_within(conn: &UdpSocket, buffer: &mut [u8], what: &str) -> (usize, SocketAddr) {
+    conn.set_read_timeout(Some(READ_TIMEOUT))
+        .expect("a UDP socket takes a read timeout");
+    match conn.recv_from(buffer) {
+        Ok(received) => received,
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            panic!(
+                "no {what} within {READ_TIMEOUT:?} on {:?}",
+                conn.local_addr()
+            )
+        }
+        Err(err) => panic!("receiving {what} failed: {err}"),
+    }
+}
+
+/// A STUN server on a loopback socket of this process: it answers each Binding request it reads
+/// with a success response whose XOR-MAPPED-ADDRESS is the address the request came from
+/// (RFC 8489 section 14.2), the server-reflexive address a public server would report.
+struct LoopbackStunServer {
+    socket: UdpSocket,
+}
+
+impl LoopbackStunServer {
+    fn bind() -> Result<Self> {
+        Ok(LoopbackStunServer {
+            socket: UdpSocket::bind("127.0.0.1:0")?,
+        })
+    }
+
+    fn addr(&self) -> Result<SocketAddr> {
+        Ok(self.socket.local_addr()?)
+    }
+
+    /// Reads one Binding request and answers it; returns the address it was answered at.
+    fn answer_one(&self) -> Result<SocketAddr> {
+        let mut buffer = vec![0u8; 2048];
+        let (n, from) = recv_within(&self.socket, &mut buffer, "Binding request at the server");
+        let mut request = Message::new();
+        request.raw = buffer[..n].to_vec();
+        request.decode()?;
+        assert_eq!(
+            request.typ, BINDING_REQUEST,
+            "the client sends a Binding request"
+        );
+        let response = test_server::TestServer::new()?.reply(
+            &request,
+            CLASS_SUCCESS_RESPONSE,
+            vec![Box::new(XorMappedAddress {
+                ip: from.ip(),
+                port: from.port(),
+            })],
+            None,
+        )?;
+        self.socket.send_to(&response, from)?;
+        Ok(from)
+    }
+}
+
+/// A client whose STUN server is `stun_server`, on a loopback socket of its own.
+fn create_test_client_with_stun_server(stun_server: SocketAddr) -> Result<(UdpSocket, Client)> {
+    let udp_socket = UdpSocket::bind("127.0.0.1:0")?;
 
     let client = Client::new(
         ClientConfig {
-            stun_serv_addr: "stun1.l.google.com:19302".to_owned(),
+            stun_serv_addr: stun_server.to_string(),
             turn_serv_addr: String::new(),
             local_addr: udp_socket.local_addr()?,
             transport_protocol: TransportProtocol::UDP,
@@ -104,21 +173,29 @@ fn test_has_transaction_reports_outstanding_requests() -> Result<()> {
     Ok(())
 }
 
+/// The client sends a Binding request to its configured STUN server and reads its
+/// server-reflexive address out of the response. The server is a loopback one in this process:
+/// the test needs no network beyond this machine, and every read is bounded.
 #[test]
 fn test_client_with_stun_send_binding_request() -> Result<()> {
-    //env_logger::init();
-
-    let (conn, mut client) = create_listening_test_client_with_stun_serv()?;
+    let server = LoopbackStunServer::bind()?;
+    let (conn, mut client) = create_test_client_with_stun_server(server.addr()?)?;
     let local_addr = conn.local_addr()?;
 
     let tid = client.send_binding_request(Instant::now())?;
 
     while let Some(transmit) = client.poll_write() {
+        assert_eq!(transmit.transport.peer_addr, server.addr()?);
         conn.send_to(&transmit.message, transmit.transport.peer_addr)?;
     }
+    let seen_from = server.answer_one()?;
+    assert_eq!(
+        seen_from, local_addr,
+        "the request leaves from the client's socket"
+    );
 
     let mut buffer = vec![0u8; 2048];
-    let (n, peer_addr) = conn.recv_from(&mut buffer)?;
+    let (n, peer_addr) = recv_within(&conn, &mut buffer, "Binding response at the client");
     client.handle_read(TransportMessage {
         now: Instant::now(),
         transport: TransportContext {
@@ -130,16 +207,15 @@ fn test_client_with_stun_send_binding_request() -> Result<()> {
         message: BytesMut::from(&buffer[..n]),
     })?;
 
-    if let Some(event) = client.poll_event() {
-        match event {
-            Event::BindingResponse(id, refl_addr) => {
-                assert_eq!(tid, id);
-                debug!("mapped-addr: {}", refl_addr);
-            }
-            _ => panic!(),
+    match client.poll_event() {
+        Some(Event::BindingResponse(id, refl_addr)) => {
+            assert_eq!(tid, id);
+            assert_eq!(
+                refl_addr, local_addr,
+                "the reflexive address is the one the server saw"
+            );
         }
-    } else {
-        panic!();
+        other => panic!("expected the Binding response, got {other:?}"),
     }
 
     assert_eq!(0, client.tr_map.size(), "should be no transaction left");
@@ -149,22 +225,25 @@ fn test_client_with_stun_send_binding_request() -> Result<()> {
 
 #[test]
 fn test_client_with_stun_send_binding_request_to_parallel() -> Result<()> {
-    //env_logger::init();
-
+    let server = LoopbackStunServer::bind()?;
     let (conn, mut client) = create_listening_test_client(0)?;
     let local_addr = conn.local_addr()?;
 
-    let to = lookup_host(true, "stun1.l.google.com:19302")?;
+    let to = server.addr()?;
 
     let tid1 = client.send_binding_request_to(Instant::now(), to)?;
     let tid2 = client.send_binding_request_to(Instant::now(), to)?;
     while let Some(transmit) = client.poll_write() {
         conn.send_to(&transmit.message, transmit.transport.peer_addr)?;
     }
+    let mut seen_from = HashSet::new();
+    for _ in 0..2 {
+        seen_from.insert(server.answer_one()?);
+    }
 
     let mut buffer = vec![0u8; 2048];
     for _ in 0..2 {
-        let (n, peer_addr) = conn.recv_from(&mut buffer)?;
+        let (n, peer_addr) = recv_within(&conn, &mut buffer, "Binding response at the client");
         client.handle_read(TransportMessage {
             now: Instant::now(),
             transport: TransportContext {
@@ -181,7 +260,10 @@ fn test_client_with_stun_send_binding_request_to_parallel() -> Result<()> {
     while let Some(event) = client.poll_event() {
         if let Event::BindingResponse(tid, refl_addr) = event {
             tids.insert(tid);
-            debug!("mapped-addr: {}", refl_addr);
+            assert!(
+                seen_from.contains(&refl_addr),
+                "{refl_addr} is an address the server saw ({seen_from:?})"
+            );
         }
     }
 

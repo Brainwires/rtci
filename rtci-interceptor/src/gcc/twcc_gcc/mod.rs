@@ -170,6 +170,7 @@ pub struct GccInterceptorBuilder<P> {
     min_bitrate_bps: u32,
     max_bitrate_bps: u32,
     received_rate_bound: ReceivedRateBound,
+    bandwidth_probing: bool,
     shared: Arc<Mutex<GccShared>>,
     _phantom: PhantomData<P>,
 }
@@ -193,6 +194,7 @@ impl<P> GccInterceptorBuilder<P> {
             min_bitrate_bps: 30_000,
             max_bitrate_bps: 2_500_000,
             received_rate_bound: ReceivedRateBound::default(),
+            bandwidth_probing: true,
             shared,
             _phantom: PhantomData,
         };
@@ -220,6 +222,35 @@ impl<P> GccInterceptorBuilder<P> {
         self
     }
 
+    /// Whether the path is probed for capacity above the estimate (the default), as the peer
+    /// connection's default interceptors do
+    /// ([`CongestionControlBuilder::with_bandwidth_probing`]): two clusters at the start, at
+    /// three and six times the 300 kbit/s the estimate starts at, and further ones while the
+    /// path carries what is asked, so an open path is found within a second instead of by
+    /// the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5 (300 kbit/s to 2.5 Mbit/s: 28 s).
+    /// RFC 8836 section 2, requirement 4: the algorithm "SHOULD adapt as quickly as possible
+    /// to initial network conditions at the start of a flow".
+    ///
+    /// This chain has no pacer. A cluster is the NACK responder's padding on the RTX stream,
+    /// sent as one burst and measured by how far apart the path delivers it
+    /// ([`burst_estimate`](crate::burst_estimate)); it needs a
+    /// [`NackResponderInterceptor`](crate::NackResponderInterceptor) in the chain and RTX
+    /// negotiated for the stream. Without them no cluster can be sent: the first one asked
+    /// for goes unanswered and no more are asked, and the estimate climbs as the draft has it.
+    /// Clusters are asked for at the start and while the application sends less than the
+    /// target allows; not after a large drop of the target, which a chain with the pacer
+    /// probes too (a burst of padding into the queue that caused the drop costs more than it
+    /// finds: [`ProbeController::set_unpaced`](crate::ProbeController::set_unpaced)).
+    ///
+    /// A call that finds the path's rate at the start meets a later capacity collapse from
+    /// that rate, and loses more at it than one that was still climbing (about twice the
+    /// retransmissions when 2.5 Mbit/s drop to 300 kbit/s; the changelog has the measured
+    /// figures). `with_bandwidth_probing(false)` is the start without probes.
+    pub fn with_bandwidth_probing(mut self, bandwidth_probing: bool) -> Self {
+        self.bandwidth_probing = bandwidth_probing;
+        self
+    }
+
     /// Build the interceptor factory closure.
     pub fn build(self) -> impl FnOnce(P) -> GccInterceptor<P> {
         move |inner| {
@@ -230,7 +261,9 @@ impl<P> GccInterceptorBuilder<P> {
             // The estimate starts at 300 kbit/s, and starts over from there on a new path.
             let estimator = Gcc::new(DEFAULT_INITIAL_BITRATE, min, max)
                 .with_received_rate_bound(self.received_rate_bound);
-            let (control, handle) = CongestionControlBuilder::new(estimator).build_with_handle();
+            let (control, handle) = CongestionControlBuilder::new(estimator)
+                .with_bandwidth_probing(self.bandwidth_probing)
+                .build_with_handle();
             GccInterceptor {
                 inner,
                 control,
@@ -477,6 +510,18 @@ mod tests {
         (chain, handle)
     }
 
+    /// The next packet on the read leg that is not a probe request: the feedback. The
+    /// controller's requests come first (each on a carrier of its own: the builder probes by
+    /// default, and the first cluster is asked for with the first packets written).
+    fn next_feedback(chain: &mut impl crate::Interceptor) -> Option<TaggedPacket> {
+        while let Some(read) = chain.poll_read() {
+            if read.message.custom::<crate::ProbeRequest>().is_none() {
+                return Some(read);
+            }
+        }
+        None
+    }
+
     #[test]
     fn test_handle_returns_estimate_after_feedback() {
         let (mut chain, handle) = make_chain();
@@ -513,7 +558,7 @@ mod tests {
         );
 
         // The estimate rides out on the feedback packet, so a pacer in the chain follows it.
-        let feedback = chain.poll_read().expect("the feedback carries on");
+        let feedback = next_feedback(&mut chain).expect("the feedback carries on");
         let announced = match feedback
             .message
             .get(&crate::Attribute::TargetBitrateChanged {
@@ -569,7 +614,7 @@ mod tests {
         assert_eq!(Some(estimate), handle.estimate_bps());
         assert_eq!(Some(estimate - 100_000), handle.target_bitrate_bps());
 
-        let announced = chain.poll_read().and_then(|feedback| {
+        let announced = next_feedback(&mut chain).and_then(|feedback| {
             match feedback
                 .message
                 .get(&crate::Attribute::TargetBitrateChanged {
@@ -813,6 +858,115 @@ mod tests {
         );
     }
 
+    /// The two ends do not take a new path into use at the same instant: what this endpoint
+    /// sends after its own change and before the path carries media to the other end (here a
+    /// burst of twenty-four packets, a probe cluster's worth) is lost, and is no loss of the
+    /// new path's either. Counted, twenty-four of the first thirty-nine packets would lower
+    /// the estimate that has just started over (the loss-based controller's 10 %). A packet
+    /// lost after one that arrived is a loss as ever
+    /// (`rtpfb::history::tests::a_loss_before_anything_arrived_on_a_new_path_is_not_reported`).
+    #[test]
+    fn packets_sent_before_a_new_path_carried_anything_are_not_its_loss() {
+        let feedback = |base_sequence_number: u16, lost: u16, received_us: &[i64], now| {
+            let reference_time = (received_us[0] / 64_000) as u32;
+            let mut recv = reference_time as i64 * 64_000;
+            let recv_deltas = received_us
+                .iter()
+                .map(|t| {
+                    let delta = t - recv;
+                    recv = *t;
+                    RecvDelta {
+                        type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                        delta,
+                    }
+                })
+                .collect();
+            let run = |symbol, run_length| {
+                PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                    type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                    packet_status_symbol: symbol,
+                    run_length,
+                })
+            };
+            let mut packet_chunks = Vec::new();
+            if lost > 0 {
+                packet_chunks.push(run(SymbolTypeTcc::PacketNotReceived, lost));
+            }
+            packet_chunks.push(run(
+                SymbolTypeTcc::PacketReceivedSmallDelta,
+                received_us.len() as u16,
+            ));
+            TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerCc {
+                    base_sequence_number,
+                    packet_status_count: lost + received_us.len() as u16,
+                    reference_time,
+                    packet_chunks,
+                    recv_deltas,
+                    ..Default::default()
+                })])),
+            }
+        };
+        // The estimate after the first feedback on the new path, and after the next one,
+        // which makes the losses the first one named final.
+        let (before, after) = {
+            let (mut chain, handle) = make_chain();
+            let ssrc = 1001u32;
+            chain.bind_local_stream(&stream_info_with_twcc(ssrc));
+            let base = Instant::now();
+            let at = |ms: u64| base + Duration::from_millis(ms);
+            // A clean path first, so that the loss average is zero as after a call's start.
+            for i in 0..10u16 {
+                chain
+                    .handle_write(make_rtp(ssrc, i, at(u64::from(i) * 20)))
+                    .unwrap();
+            }
+            let recv_us: Vec<i64> = (0..10).map(|k: i64| k * 20_000 + 20_000).collect();
+            chain
+                .handle_read(make_twcc_feedback(0, &recv_us, at(250)))
+                .unwrap();
+            chain
+                .handle_read(crate::PathChanged.into_packet(at(7_000), None))
+                .unwrap();
+            // 10..34 at the instant of the change: the path does not carry them.
+            for i in 10..34u16 {
+                chain.handle_write(make_rtp(ssrc, i, at(7_000))).unwrap();
+            }
+            // 34..42 arrive.
+            for i in 34..42u16 {
+                chain
+                    .handle_write(make_rtp(ssrc, i, at(7_010 + u64::from(i - 34) * 20)))
+                    .unwrap();
+            }
+            while chain.poll_write().is_some() {}
+            let received: Vec<i64> = (0..8).map(|k: i64| 7_030_000 + k * 20_000).collect();
+            chain
+                .handle_read(feedback(10, 24, &received, at(7_250)))
+                .unwrap();
+            let before = handle.estimate_bps().unwrap();
+            // 42..57 arrive: the feedback after which the losses the first one named are
+            // final.
+            for i in 42..57u16 {
+                chain
+                    .handle_write(make_rtp(ssrc, i, at(7_200 + u64::from(i - 42) * 20)))
+                    .unwrap();
+            }
+            while chain.poll_write().is_some() {}
+            let received: Vec<i64> = (0..15).map(|k: i64| 7_220_000 + k * 20_000).collect();
+            chain
+                .handle_read(feedback(42, 0, &received, at(7_550)))
+                .unwrap();
+            (before, handle.estimate_bps().unwrap())
+        };
+        assert!(before >= 300_000, "{before}");
+        assert!(
+            after >= before,
+            "cut from {before} to {after} for packets sent before the path carried anything"
+        );
+    }
+
     /// The target rides with the controller's minimum (`MinimumTarget`), so the NACK
     /// responder knows where the original media cannot be lowered further.
     #[test]
@@ -846,7 +1000,7 @@ mod tests {
                 base + Duration::from_millis(200),
             ))
             .unwrap();
-        let feedback = chain.poll_read().expect("the feedback carries on");
+        let feedback = next_feedback(&mut chain).expect("the feedback carries on");
         assert_eq!(
             Some(&crate::MinimumTarget {
                 bits_per_second: 123_000.0

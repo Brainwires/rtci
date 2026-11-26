@@ -69,6 +69,9 @@ test("chrome profile: renegotiation, Rust offers a new channel", async ({ page }
     });
     s.send({ type: "request-offer" });
     const result = await Promise.race([got, Interop.sleep(15000).then(() => "timeout")]);
+    // The new channel opens over the SCTP association that already exists, so its message can
+    // arrive before the offer that the WebSocket carries has reached the page: wait for it.
+    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer").catch(() => {});
     s.close();
     return { result, offers: s.remoteOffers, errors: s.errors };
   }, CHROME);

@@ -153,7 +153,7 @@ impl Flight for Flight5 {
             if let Some(cipher_suite) = &state.cipher_suite {
                 let expected_verify_data = match prf_verify_data_server(
                     cfg.provider().crypto(),
-                    &state.master_secret,
+                    state.master_secret.as_ref(),
                     &plain_text,
                     cipher_suite.hash_func(),
                 ) {
@@ -584,7 +584,7 @@ impl Flight for Flight5 {
             if let Some(cipher_suite) = &state.cipher_suite {
                 state.local_verify_data = match prf_verify_data_client(
                     cfg.provider().crypto(),
-                    &state.master_secret,
+                    state.master_secret.as_ref(),
                     &plain_text,
                     cipher_suite.hash_func(),
                 ) {
@@ -671,7 +671,7 @@ fn initalize_cipher_suite(
 
             state.master_secret = match prf_extended_master_secret(
                 cfg.provider().crypto(),
-                &state.pre_master_secret,
+                state.pre_master_secret.as_ref(),
                 &session_hash,
                 cipher_suite_hash_func,
             ) {
@@ -689,7 +689,7 @@ fn initalize_cipher_suite(
         } else {
             state.master_secret = match prf_master_secret(
                 cfg.provider().crypto(),
-                &state.pre_master_secret,
+                state.pre_master_secret.as_ref(),
                 &client_random,
                 &server_random,
                 cipher_suite_hash_func,
@@ -809,7 +809,7 @@ fn initalize_cipher_suite(
     if let Some(cipher_suite) = &mut state.cipher_suite
         && let Err(err) = cipher_suite.init(
             cfg.provider().clone(),
-            &state.master_secret,
+            state.master_secret.as_ref(),
             &client_random,
             &server_random,
             true,

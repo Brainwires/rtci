@@ -21,6 +21,16 @@
 //! * [`cryptex`] ([RFC 9335]) and [`header_extension`] ([RFC 6904]) — the two ways to encrypt
 //!   RTP header extensions.
 //!
+//! # Key material
+//!
+//! Every struct holding secret key material derives `Zeroize` and `ZeroizeOnDrop`, or holds
+//! each secret in a type that does (`rtci_crypto::SecretVec`, `zeroize::Zeroizing`), and
+//! key material is never built in a buffer that grows (a growing `Vec` frees its old allocation
+//! as it is). What a provider's own objects keep is the provider's to erase: the ring provider
+//! does not erase its AES-GCM keys, the AWS-LC
+//! provider does. `docs/key-erasure.md` lists every secret, where it lives and which test
+//! checks it.
+//!
 //! # Transforms
 //!
 //! AES-128 counter mode with HMAC-SHA1 (the default of [RFC 3711]), AES-192 and AES-256

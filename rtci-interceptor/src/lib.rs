@@ -234,6 +234,7 @@ pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
 pub(crate) mod fec_sent;
 pub(crate) mod fec_session;
+pub(crate) mod first_transmission;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
 pub(crate) mod intervalpli;
@@ -278,9 +279,10 @@ pub use cc::interceptor::{
     DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT, SendEstimate,
 };
 pub use cc::probe::{
-    PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL, PROBE_MAX_OCTETS,
-    PROBE_MIN_DURATION, PROBE_MIN_PACKETS, PROBE_RESULT_TIMEOUT, ProbeController, ProbeFill,
-    ProbePacket, ProbeRequest, probe_estimate,
+    AfterDropProbe, PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL,
+    PROBE_DROP_MEMORY, PROBE_MAX_OCTETS, PROBE_MIN_DURATION, PROBE_MIN_PACKETS,
+    PROBE_RECOVERY_INTERVAL, PROBE_RESULT_TIMEOUT, ProbeController, ProbeFill, ProbePacket,
+    ProbeRequest, burst_estimate, probe_estimate,
 };
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
 pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};
@@ -377,8 +379,9 @@ pub use nack::generator::{
     SUGGESTED_MAX_PACKET_AGE as NACK_SUGGESTED_MAX_PACKET_AGE,
 };
 pub use nack::responder::{
-    MAX_RETRANSMISSION_RESERVE, MinimumTarget, NackResponderBuilder, NackResponderInterceptor,
-    PENDING_REQUEST_LIFETIME, PROBE_PADDING_OCTETS, RETRANSMISSION_RATE_WINDOW,
+    MAX_REPAIR_AGE as NACK_MAX_REPAIR_AGE, MAX_RETRANSMISSION_RESERVE, MinimumTarget,
+    NackResponderBuilder, NackResponderInterceptor, PENDING_REQUEST_LIFETIME, PROBE_PADDING_OCTETS,
+    REPAIR_BACKLOG_BOUND as NACK_REPAIR_BACKLOG_BOUND, RETRANSMISSION_RATE_WINDOW,
     RetransmissionRateLimit, RetransmissionReserve,
 };
 pub use noop::NoopInterceptor;
@@ -435,7 +438,9 @@ pub use twcc::sender::{
     TwccSenderBuilder, TwccSenderInterceptor,
 };
 pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
-pub use ulpfec::sender::{ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS};
+pub use ulpfec::sender::{
+    ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS, ULPFEC_MAX_HELD_FEC_PACKETS,
+};
 pub use ulpfec::{
     FEC_HEADER_LENGTH as ULPFEC_HEADER_LENGTH, FecSessionPacket,
     LONG_MASK_BITS as ULPFEC_LONG_MASK_BITS, MAX_LEVELS as ULPFEC_MAX_LEVELS,

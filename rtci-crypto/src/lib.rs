@@ -2,6 +2,15 @@
 //!
 //! The open traits in this crate allow applications to supply cryptography and randomness without
 //! registering global state. Built-in providers are selected with additive Cargo features.
+//!
+//! Key material: every struct holding secret key material derives `Zeroize` and
+//! `ZeroizeOnDrop`, or holds each secret in [`SecretVec`]; secret keys are drawn with
+//! [`RTCRandom::fill_secret`]; [`scrub_stack`] overwrites what building a key schedule left in
+//! dead stack frames. The RustCrypto primitives the built-in providers use (`aes`, `ctr`, the
+//! HMAC-SHA1 of the ring provider) erase their key schedules when dropped. ring's own key
+//! objects (AEAD, header-protection and HMAC keys) do not erase themselves, so the ring provider
+//! keeps each in an allocation of its own and overwrites it after the drop
+//! (`docs/key-erasure.md`).
 
 mod algorithm;
 mod error;
@@ -35,7 +44,7 @@ pub use hkdf::{hkdf_expand, hkdf_expand_label, hkdf_extract};
 pub use openssl_ctr::openssl_aes_ctr;
 pub use provider::default_provider;
 pub use rsa_pkcs1::{rsa_pkcs1_hash, verify_rsa_pkcs1_without_digest_parameters};
-pub use secret::SecretVec;
+pub use secret::{SecretVec, scrub_stack};
 pub use traits::*;
 
 /// Compares equal-length byte strings without data-dependent early exit.

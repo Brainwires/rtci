@@ -32,6 +32,14 @@ pub struct History {
     pending_losses: Vec<u64>,
     /// Packets reported as not received and then as received by a later feedback.
     recovered: u64,
+    /// The first packet sent on the path in use, once a path was left
+    /// ([`forget_sent`](Self::forget_sent)).
+    path_begins: Option<u64>,
+    /// The earliest packet sent on the path in use that a feedback reported received.
+    first_arrival: Option<u64>,
+    /// Packets sent on a new path before anything arrived over it and reported as not
+    /// received: released without a verdict.
+    before_the_path_carried: u64,
 }
 
 /// A sent packet and whether any feedback has described it yet.
@@ -250,7 +258,35 @@ impl History {
     /// counted as lost or received (section 3), so they are released here without a report.
     /// Loss feedback alone does not advance the reporting window; losses are emitted when a later
     /// packet is reported as arrived.
+    ///
+    /// After a path was left ([`forget_sent`](Self::forget_sent)), a packet sent on the new
+    /// path earlier than every packet reported received over it, and reported as not received,
+    /// has no verdict either: see [`before_the_path_carried`](Self::before_the_path_carried).
     pub fn take_reports(&mut self) -> Vec<PacketReport> {
+        let mut reports = self.take_described();
+        if let Some(path_begins) = self.path_begins {
+            for report in &reports {
+                if report.arrived && report.id >= path_begins {
+                    self.first_arrival = Some(
+                        self.first_arrival
+                            .map_or(report.id, |first| first.min(report.id)),
+                    );
+                }
+            }
+            let first_arrival = self.first_arrival;
+            let before = reports.len();
+            reports.retain(|report| {
+                report.arrived
+                    || report.id < path_begins
+                    || first_arrival.is_some_and(|first| report.id > first)
+            });
+            self.before_the_path_carried += (before - reports.len()) as u64;
+        }
+        reports
+    }
+
+    /// Every packet a feedback described since the last call, in send order.
+    fn take_described(&mut self) -> Vec<PacketReport> {
         let mut reports = Vec::new();
         // The losses the previous call held back: lost after all, or received meanwhile. A
         // packet received late is reported as received but without its arrival time: it
@@ -337,6 +373,23 @@ impl History {
         self.pending_losses.clear();
         self.highest_acknowledged = None;
         self.next_to_report = self.next_id;
+        self.path_begins = Some(self.next_id);
+        self.first_arrival = None;
+    }
+
+    /// Packets sent on a new path before the first packet that arrived over it, reported as
+    /// not received, and released without a verdict.
+    ///
+    /// The two ends of a path do not begin to use it at the same instant: what this endpoint
+    /// sends between its own change (the peer connection's word, or the first packets from new
+    /// addresses) and the moment the path carries media the other way round as well (the
+    /// peer's own selection of the pair, a relay's permission, an address binding) goes
+    /// nowhere. Those packets are in the same case as the ones sent into the path that was
+    /// left: they say nothing of what the new path carries, and the estimate that has just
+    /// started over is not lowered for them (RFC 8836 section 2, requirement 1: the reaction is
+    /// to the path's capacity). A packet lost after one that arrived is a loss as ever.
+    pub fn before_the_path_carried(&self) -> u64 {
+        self.before_the_path_carried
     }
 
     /// Packets reported as not received that a later feedback reported as received.
@@ -520,6 +573,65 @@ mod tests {
         assert!(reports.iter().all(|report| report.arrived), "{reports:?}");
         assert_eq!(None, reports[0].arrival, "0 is out of send order now");
         assert_eq!(1, history.recovered());
+    }
+
+    /// After a path was left, packets sent on the new one before the first that arrived over
+    /// it, and reported as not received, have no verdict: the path did not carry media yet
+    /// (the other end had not selected it). A packet lost after the first arrival is a loss.
+    #[test]
+    fn a_loss_before_anything_arrived_on_a_new_path_is_not_reported() {
+        let now = Instant::now();
+        let mut history = history_with_three_packets(now);
+        history.forget_sent();
+        // 10, 11: before the path carried anything. 12 arrives, 13 is lost, 14 arrives.
+        for sequence_number in 10..15u16 {
+            history.add_outgoing(1, 100 + sequence_number, true, sequence_number, 1200, now);
+        }
+        history.on_twcc_feedback(now, Acknowledgement::lost(10));
+        history.on_twcc_feedback(now, Acknowledgement::lost(11));
+        history.on_twcc_feedback(now, Acknowledgement::received(12, None, Ecn::NotEct));
+        history.on_twcc_feedback(now, Acknowledgement::lost(13));
+        history.on_twcc_feedback(now, Acknowledgement::received(14, None, Ecn::NotEct));
+        let verdicts = |reports: Vec<PacketReport>| -> Vec<(u16, bool)> {
+            reports
+                .iter()
+                .map(|report| (report.rtp_sequence_number, report.arrived))
+                .collect()
+        };
+        assert_eq!(
+            vec![(112, true), (114, true)],
+            verdicts(history.take_reports())
+        );
+        // The losses were held for one more feedback (they may only have been overtaken).
+        history.add_outgoing(1, 115, true, 15, 1200, now);
+        history.on_twcc_feedback(now, Acknowledgement::received(15, None, Ecn::NotEct));
+        assert_eq!(
+            vec![(113, false), (115, true)],
+            verdicts(history.take_reports()),
+            "10 and 11 have no verdict, 13 is a loss"
+        );
+        assert_eq!(2, history.before_the_path_carried());
+        assert!(history.is_empty());
+    }
+
+    /// Without a path change the first packets lost are losses as ever.
+    #[test]
+    fn a_loss_before_the_first_arrival_of_a_call_is_reported() {
+        let now = Instant::now();
+        let mut history = history_with_three_packets(now);
+        history.on_twcc_feedback(now, Acknowledgement::lost(0));
+        history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
+        history.take_reports();
+        history.on_twcc_feedback(now, Acknowledgement::received(2, None, Ecn::NotEct));
+        let reports = history.take_reports();
+        assert_eq!(
+            vec![false, true],
+            reports
+                .iter()
+                .map(|report| report.arrived)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(0, history.before_the_path_carried());
     }
 
     /// The feedback packet count is how a lost feedback packet is told from a quiet receiver

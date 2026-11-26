@@ -208,10 +208,16 @@ jobs:
         run: python3 scripts/open-must.py --check
       - name: The behaviour profile table is what the code says (docs/behaviour-profiles.md)
         run: python3 scripts/behaviour-profiles.py --check
-      - name: Released CHANGELOG sections equal the latest release tag's
+      - name: Released CHANGELOG sections equal the latest release tag's (the newest tag that is an ancestor)
         run: python3 scripts/check-changelog-released.py
+      - name: The released-sections gate's unit tests (which tag it compares with)
+        run: python3 scripts/test_check_changelog_released.py
       - name: The committed nested Cargo.lock files resolve their manifests (--locked)
         run: python3 scripts/check-nested-locks.py
+      - name: The performance ledger names its CHANGELOG tags, files and tests (docs/performance.md)
+        run: python3 scripts/test_check_performance_ledger.py && python3 scripts/check-performance-ledger.py
+      - name: No test talks to the public internet (public STUN/TURN servers, off-machine addresses)
+        run: python3 scripts/test_check_no_public_network_in_tests.py && python3 scripts/check-no-public-network-in-tests.py
 
   # The `chrome-defaults` feature makes `BehaviourProfile::default()` Chrome, and with it every
   # default of the setting engine, media engine and interceptor options. One job, not a test
@@ -534,7 +540,7 @@ jobs:
         run: cargo check --workspace --all-features --verbose
 
   # What a call's user sees when the path's capacity collapses (tests/capacity_instrument.rs):
-  # the pull-request ensemble in a release build, on GitHub's runners only: 606 runs, about
+  # the pull-request ensemble in a release build, on GitHub's runners only: 630 runs, about
   # twelve minutes with the build (up to twice that on a slow runner). Its tripwires hold
   # every cell against the recorded baseline and its requirement tests are sized for a stated
   # power (the test file's doc). The fine comparison of a congestion-control, pacing,

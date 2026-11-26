@@ -363,6 +363,12 @@ pub struct DefaultInterceptorOptions {
     /// resume at a key frame. See
     /// [`PacerBuilder::with_backlog`](interceptor::PacerBuilder::with_backlog) and
     /// `docs/capacity-collapse.md`.
+    ///
+    /// `Keep` means "keep and repair everything" for the whole chain: it also switches off
+    /// the NACK responder's two rules that decline repairs
+    /// ([`nack_max_repair_age`](Self::nack_max_repair_age),
+    /// [`nack_repair_backlog_bound`](Self::nack_repair_backlog_bound)), whatever those are
+    /// set to, so nothing sent is ever given up for a key frame.
     pub pacer_backlog: interceptor::PacerBacklog,
     /// Whether the path is probed for capacity above the target with short clusters of
     /// packets, as libwebrtc does. `true` by default: RFC 8836 section 2 asks that a
@@ -374,6 +380,18 @@ pub struct DefaultInterceptorOptions {
     /// (none without RTX negotiated). `false` sends only what the application writes. See
     /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
     pub bandwidth_probing: bool,
+    /// With [`Self::bandwidth_probing`], what is probed for after a large drop of the target
+    /// ([`AfterDropProbe`](interceptor::AfterDropProbe)): the engine's repeated probe, or
+    /// libwebrtc's single one (the `Chrome` profile). See
+    /// [`CongestionControlBuilder::with_after_drop_probe`](interceptor::CongestionControlBuilder::with_after_drop_probe).
+    pub probe_after_drop: interceptor::AfterDropProbe,
+    /// Whether, with [`Self::bandwidth_probing`], the path is probed back towards the rate it
+    /// carried before a large drop of the target for a minute after it (a cluster at twice
+    /// the target every five seconds while the target is below 85% of that rate and the
+    /// estimator does not read over-use). Off by default and in every behaviour profile: it
+    /// is tuning, no specification asks for it and Chrome does not do it. See
+    /// [`CongestionControlBuilder::with_recovery_probing`](interceptor::CongestionControlBuilder::with_recovery_probing).
+    pub recovery_probing: bool,
     /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
     /// extension on audio and video, stamped on a stream's first packets and a frame a
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
@@ -517,6 +535,23 @@ pub struct DefaultInterceptorOptions {
     /// target (RFC 4588 section 7). See
     /// [`NackResponderBuilder::with_rate_limit`](interceptor::NackResponderBuilder::with_rate_limit).
     pub nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit,
+    /// How old a packet may be and still be retransmitted: a NACK for a packet sent longer
+    /// ago is declined, and for a video stream everything sent so far is given up and a key
+    /// frame asked for (`RTCPeerConnectionEvent::OnKeyFrameRequest`). Two seconds by default
+    /// (RFC 8834 section 6.1: the likelihood of a retransmission "arriving in time to be
+    /// useful need[s] to be considered"); `None`: no bound, also what
+    /// [`pacer_backlog`](Self::pacer_backlog) `Keep` and the `Chrome` profile give. See
+    /// [`NackResponderBuilder::with_max_repair_age`](interceptor::NackResponderBuilder::with_max_repair_age)
+    /// and `docs/capacity-collapse.md`.
+    pub nack_max_repair_age: Option<Duration>,
+    /// The backlog of retransmissions given up, with a key-frame request, when the target has
+    /// fallen to half or less within two seconds: what would take this long or more to send
+    /// at the target. Two seconds by default (RFC 4588 section 7: "If congestion is not kept
+    /// under control, then retransmission SHOULD NOT be used"); `None`: every request is
+    /// served in order, also what [`pacer_backlog`](Self::pacer_backlog) `Keep` and the
+    /// `Chrome` profile give. See
+    /// [`NackResponderBuilder::with_repair_backlog_bound`](interceptor::NackResponderBuilder::with_repair_backlog_bound).
+    pub nack_repair_backlog_bound: Option<Duration>,
     /// The wall-clock anchor the NTP times of the interceptors derive from (the RTCP sessions'
     /// sender reports and receiver reference times, the RFC 8888 report timestamps, the RFC
     /// 6051 NTP timestamp header extension): the process-wide
@@ -537,6 +572,8 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("pacer_queue_overflow", &self.pacer_queue_overflow)
             .field("pacer_backlog", &self.pacer_backlog)
             .field("bandwidth_probing", &self.bandwidth_probing)
+            .field("probe_after_drop", &self.probe_after_drop)
+            .field("recovery_probing", &self.recovery_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
             .field(
@@ -600,6 +637,8 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 "nack_retransmission_rate_limit",
                 &self.nack_retransmission_rate_limit,
             )
+            .field("nack_max_repair_age", &self.nack_max_repair_age)
+            .field("nack_repair_backlog_bound", &self.nack_repair_backlog_bound)
             .field(
                 "rtcp_random",
                 &self.rtcp_random.as_ref().map(|provider| provider.name()),
@@ -619,6 +658,8 @@ impl DefaultInterceptorOptions {
             pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
             pacer_backlog: interceptor::PacerBacklog::default(),
             bandwidth_probing: true,
+            probe_after_drop: interceptor::AfterDropProbe::Repeated,
+            recovery_probing: false,
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
@@ -644,6 +685,8 @@ impl DefaultInterceptorOptions {
             rtcp_random: None,
             nack_max_nacks_per_packet: 0,
             nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit::default(),
+            nack_max_repair_age: Some(interceptor::NACK_MAX_REPAIR_AGE),
+            nack_repair_backlog_bound: Some(interceptor::NACK_REPAIR_BACKLOG_BOUND),
             wall_clock: None,
         }
     }
@@ -789,6 +832,8 @@ pub fn register_default_interceptors_with_options(
         let transports = transports.clone();
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
+        let probe_after_drop = options.probe_after_drop;
+        let recovery_probing = options.recovery_probing;
         let threshold_time_base = options.gcc_threshold_time_base;
         let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
         let received_rate_bound = options.gcc_received_rate_bound;
@@ -802,6 +847,8 @@ pub fn register_default_interceptors_with_options(
                 .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
+                .with_after_drop_probe(probe_after_drop)
+                .with_recovery_probing(recovery_probing)
                 .with_send_rate_told_to_rtcp(send_rate_told_to_rtcp)
         }
     };
@@ -1279,6 +1326,20 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
     )
 }
 
+/// The NACK responder's bounds on the repairs it makes (the age of a packet, the backlog after
+/// a collapse) under `options`: its own two settings, or none at all with
+/// [`PacerBacklog::Keep`](interceptor::PacerBacklog::Keep), which keeps and repairs
+/// everything.
+fn nack_repair_bounds(options: &DefaultInterceptorOptions) -> (Option<Duration>, Option<Duration>) {
+    match options.pacer_backlog {
+        interceptor::PacerBacklog::Keep => (None, None),
+        _ => (
+            options.nack_max_repair_age,
+            options.nack_repair_backlog_bound,
+        ),
+    }
+}
+
 /// [`configure_nack`] with the NACK limits of `options`.
 fn configure_nack_with(
     registry: Registry,
@@ -1301,12 +1362,14 @@ fn configure_nack_with(
     );
 
     registry
-        .with(
-            Slot::NackResponder,
+        .with(Slot::NackResponder, {
+            let (max_repair_age, repair_backlog_bound) = nack_repair_bounds(options);
             NackResponderBuilder::new()
                 .with_rate_limit(options.nack_retransmission_rate_limit)
-                .build(),
-        )
+                .with_max_repair_age(max_repair_age)
+                .with_repair_backlog_bound(repair_backlog_bound)
+                .build()
+        })
         .with(
             Slot::NackGenerator,
             NackGeneratorBuilder::new()
@@ -2061,7 +2124,36 @@ pub(crate) fn create_stream_info(
         })
         .collect();
 
-    let feedbacks: Vec<_> = codec
+    // A redundancy stream (RFC 2198 `red`) is the media of another format of its section in
+    // RED blocks, and the `red` format itself is described without `a=rtcp-fb` lines (the
+    // engine's own registrations, Chromium's offers): what was negotiated for the format it
+    // carries is what applies to the stream. libwebrtc configures a stream's NACK and
+    // transport feedback from its first media codec whatever payload type a packet arrives
+    // under (media/engine/webrtc_video_engine.cc, `HasNack(recv_codecs.front().codec)`).
+    // Without this a receiver that learns a stream from a RED packet binds it with no
+    // feedback at all: no RFC 8888 reports about it (`ack ccfb` is read from here), so the
+    // sender's congestion controller hears of its audio only and never raises its estimate.
+    let carried = (crate::rtp_transceiver::rtp_sender::rtp_codec::repair_family(codec) == "red")
+        .then(|| {
+            let named = codec
+                .sdp_fmtp_line
+                .split('/')
+                .next()
+                .and_then(|primary| primary.trim().parse::<PayloadType>().ok());
+            let media = |c: &&RTCRtpCodecParameters| {
+                !crate::rtp_transceiver::rtp_sender::rtp_codec::is_repair_codec(&c.rtp_codec)
+                    && !crate::peer_connection::handler::endpoint::is_auxiliary_mime_type(
+                        &c.rtp_codec.mime_type,
+                    )
+            };
+            section_codecs
+                .iter()
+                .filter(media)
+                .find(|c| named == Some(c.payload_type))
+                .or_else(|| section_codecs.iter().find(media))
+        })
+        .flatten();
+    let mut feedbacks: Vec<_> = codec
         .rtcp_feedback
         .iter()
         .map(|f| interceptor::RTCPFeedback {
@@ -2069,6 +2161,15 @@ pub(crate) fn create_stream_info(
             parameter: f.parameter.clone(),
         })
         .collect();
+    for f in carried.iter().flat_map(|c| &c.rtp_codec.rtcp_feedback) {
+        let feedback = interceptor::RTCPFeedback {
+            typ: f.typ.clone(),
+            parameter: f.parameter.clone(),
+        };
+        if !feedbacks.contains(&feedback) {
+            feedbacks.push(feedback);
+        }
+    }
 
     interceptor::StreamInfo {
         ssrc,
@@ -2229,9 +2330,15 @@ pub const VIDEO_ULPFEC_PAYLOAD_TYPE: PayloadType = 43;
 /// - the encoder at [`Slot::FecEncoder`] with its wire tap at [`Slot::FecWireImage`], so the
 ///   FEC protects each packet as it leaves: FEC in RED packets of its own in the media's
 ///   sequence space (`RedPlacement::OwnPacket`, the form libwebrtc sends and the only one it
-///   reads), after each frame or five packets, in the amount the receiver's reported loss
-///   asks for (`FecRate`);
-/// - the decoder at [`Slot::FecDecoder`].
+///   reads), one block for every five packets of a frame and one for what is left at its
+///   end, all of them sent behind the frame's last packet
+///   (`UlpfecSendBuilder::with_fec_after_frame`: no FEC packet lies inside a frame), in the
+///   amount the receiver's reported loss asks for (`FecRate`);
+/// - the decoder at [`Slot::FecDecoder`]. A FEC packet received reaches the application as
+///   an RTP packet without a payload under the media's payload type: its sequence number is
+///   one of the stream's, and the application's frame assembly must see it as received
+///   (`interceptor::UlpfecRepair`; `rtci-media`'s `SampleBuilder` and `rtci-video`'s
+///   receiver take such a packet as present and no media).
 ///
 /// A stream is protected only when its section negotiated both `red` and `ulpfec` (RFC 5109
 /// section 14.2), under the payload types the section has (an answer keeps the offerer's).
@@ -2479,6 +2586,151 @@ mod ulpfec_tests {
             ],
             info.section_fmtp_lines
         );
+    }
+
+    /// A stream bound under the `red` format (a receiver learns it from a RED packet) has the
+    /// RTCP feedback negotiated for the format it carries: the `red` format has no
+    /// `a=rtcp-fb` lines of its own, and a stream bound without them gets no RFC 8888
+    /// reports, no NACK and no key frame requests. The primary format is the one the `red`
+    /// fmtp names (RFC 2198 section 5: `a=fmtp:63 111/111`), else the section's first media
+    /// format; a media format's own stream is as it was.
+    #[test]
+    fn a_red_stream_has_the_feedback_of_the_format_it_carries() {
+        let feedback = |typ: &str, parameter: &str| {
+            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCPFeedback {
+                typ: typ.to_owned(),
+                parameter: parameter.to_owned(),
+            }
+        };
+        let format = |payload_type: PayloadType,
+                      mime_type: &str,
+                      fmtp: &str,
+                      rtcp_feedback: Vec<
+            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCPFeedback,
+        >| {
+            crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: mime_type.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: fmtp.to_owned(),
+                    rtcp_feedback,
+                },
+                payload_type,
+            }
+        };
+        let negotiated = |info: &interceptor::StreamInfo| -> Vec<(String, String)> {
+            info.rtcp_feedback
+                .iter()
+                .map(|f| (f.typ.clone(), f.parameter.clone()))
+                .collect()
+        };
+        let pair = |typ: &str, parameter: &str| (typ.to_owned(), parameter.to_owned());
+
+        let video = [
+            format(
+                96,
+                "video/VP8",
+                "",
+                vec![feedback("nack", ""), feedback("ack", "ccfb")],
+            ),
+            format(97, "video/rtx", "apt=96", vec![]),
+            format(98, "video/VP9", "", vec![feedback("nack", "pli")]),
+            format(116, "video/red", "", vec![]),
+            format(117, "video/ulpfec", "", vec![]),
+        ];
+        let red = create_stream_info(
+            1,
+            None,
+            None,
+            116,
+            None,
+            None,
+            &video[3].rtp_codec,
+            &[],
+            &video,
+        );
+        assert_eq!(
+            vec![pair("nack", ""), pair("ack", "ccfb")],
+            negotiated(&red)
+        );
+        assert_eq!("video/red", red.mime_type);
+        // The media format's own stream is unchanged, and a repair format gains nothing.
+        let vp9 = create_stream_info(
+            1,
+            None,
+            None,
+            98,
+            None,
+            None,
+            &video[2].rtp_codec,
+            &[],
+            &video,
+        );
+        assert_eq!(vec![pair("nack", "pli")], negotiated(&vp9));
+        let fec = create_stream_info(
+            1,
+            None,
+            None,
+            117,
+            None,
+            None,
+            &video[4].rtp_codec,
+            &[],
+            &video,
+        );
+        assert!(fec.rtcp_feedback.is_empty());
+
+        // The fmtp names the primary encoding; a line of the red format's own is kept.
+        let audio = [
+            format(9, "audio/G722", "", vec![feedback("nack", "")]),
+            format(111, "audio/opus", "", vec![feedback("transport-cc", "")]),
+            format(63, "audio/red", "111/111", vec![feedback("ack", "ccfb")]),
+        ];
+        let red = create_stream_info(
+            2,
+            None,
+            None,
+            63,
+            None,
+            None,
+            &audio[2].rtp_codec,
+            &[],
+            &audio,
+        );
+        assert_eq!(
+            vec![pair("ack", "ccfb"), pair("transport-cc", "")],
+            negotiated(&red)
+        );
+    }
+}
+
+#[cfg(test)]
+mod nack_repair_bounds_tests {
+    use super::*;
+
+    /// `PacerBacklog::Keep` is "keep and repair everything": the NACK responder is built
+    /// without its age bound and without its backlog bound, whatever the two settings say;
+    /// with the default (`Flush`) it gets the settings as they are.
+    #[test]
+    fn pacer_backlog_keep_also_switches_off_the_nack_responders_repair_bounds() {
+        let mut options = DefaultInterceptorOptions::for_profile(BehaviourProfile::Rfc);
+        assert_eq!(
+            (
+                Some(interceptor::NACK_MAX_REPAIR_AGE),
+                Some(interceptor::NACK_REPAIR_BACKLOG_BOUND)
+            ),
+            nack_repair_bounds(&options)
+        );
+        options.nack_max_repair_age = Some(Duration::from_secs(5));
+        options.nack_repair_backlog_bound = None;
+        assert_eq!(
+            (Some(Duration::from_secs(5)), None),
+            nack_repair_bounds(&options)
+        );
+        options.nack_repair_backlog_bound = Some(Duration::from_secs(3));
+        options.pacer_backlog = interceptor::PacerBacklog::Keep;
+        assert_eq!((None, None), nack_repair_bounds(&options));
     }
 }
 

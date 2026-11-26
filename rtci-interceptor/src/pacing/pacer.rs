@@ -13,6 +13,10 @@ pub const MIN_BURST_BITS: f64 = 8.0 * 1500.0;
 /// (draft-ietf-rmcat-gcc-02 section 4).
 pub const BURST_TIME: Duration = Duration::from_millis(5);
 
+/// What the budget may be short of a packet by and still release it: the bits the rate adds
+/// in this long, twice the clock's nanosecond (a wait is rounded to a nanosecond either way).
+const CLOCK_RESOLUTION: Duration = Duration::from_nanos(2);
+
 /// A token bucket in bits, refilled from elapsed time.
 ///
 /// Unlike upstream's `rate.Limiter`, nothing here reads a clock: the budget is a pure function of
@@ -103,7 +107,18 @@ impl Pacer {
 
     /// Whether `bits` can be sent now.
     pub fn can_afford(&self, bits: f64) -> bool {
-        self.budget_bits >= bits
+        self.covers(bits)
+    }
+
+    /// Whether the budget holds `bits`, to within what the rate adds in
+    /// [`CLOCK_RESOLUTION`]. The instant a packet becomes affordable is a whole number of
+    /// nanoseconds, the wait it is worked out from is not (12 000 bits at 840 kbit/s are
+    /// 14 285 714.28 ns): refilled to that instant the budget can be a fraction of a
+    /// nanosecond's worth short, and the wait that is then left rounds to nothing. Without
+    /// this allowance the packet does not leave at the deadline the pacer named and the next
+    /// deadline is that same instant: a driver that follows `poll_timeout` spins.
+    fn covers(&self, bits: f64) -> bool {
+        self.budget_bits + self.bitrate * CLOCK_RESOLUTION.as_secs_f64() >= bits
     }
 
     /// Spend `bits` from the budget.
@@ -120,7 +135,7 @@ impl Pacer {
     /// `Duration::ZERO` when it already is. At a zero rate nothing ever becomes affordable, which
     /// the caller must treat as "no deadline" rather than waiting forever.
     pub fn time_until_affordable(&self, bits: f64) -> Option<Duration> {
-        if self.budget_bits >= bits {
+        if self.covers(bits) {
             return Some(Duration::ZERO);
         }
         if self.bitrate <= 0.0 {
@@ -152,9 +167,9 @@ impl Pacer {
     pub fn can_release(&self, bits: f64) -> bool {
         let burst_bits = self.burst_bits();
         if bits > burst_bits {
-            return self.budget_bits >= burst_bits;
+            return self.covers(burst_bits);
         }
-        self.budget_bits >= bits
+        self.covers(bits)
     }
 
     /// The instant `bits` may be released, per [`Pacer::can_release`].
@@ -413,5 +428,44 @@ mod tests {
             pacer.budget_bits(),
             "and recovers to the burst"
         );
+    }
+
+    /// At the instant the pacer names for a packet, the packet may leave, whatever the rate:
+    /// the wait is rounded to a nanosecond, and a budget short by less than that is enough.
+    /// (12 000 bits at 840 kbit/s: 14 285 714.28 ns.)
+    #[test]
+    fn a_packet_is_releasable_at_the_instant_named_for_it() {
+        let epoch = Instant::now();
+        for bitrate in [
+            840_000.0,
+            333_333.0,
+            123_457.3,
+            30_000.0,
+            2_499_999.0,
+            7_000_001.0,
+        ] {
+            let mut pacer = Pacer::new(bitrate).with_burst_bits(12_000.0);
+            pacer.refill(epoch);
+            let mut now = epoch;
+            for packet in 0..2_000 {
+                let bits = 9_000.0 + f64::from(packet % 7) * 431.0;
+                let at = pacer.releasable_at(bits).expect("a rate, so an instant");
+                assert!(at >= now);
+                now = at;
+                pacer.refill(now);
+                assert!(
+                    pacer.can_release(bits),
+                    "at {bitrate} bit/s packet {packet} of {bits} bits cannot leave at the \
+                     instant named for it (budget {})",
+                    pacer.budget_bits()
+                );
+                assert_eq!(
+                    Some(now),
+                    pacer.releasable_at(bits),
+                    "and the instant named does not move"
+                );
+                pacer.consume(bits);
+            }
+        }
     }
 }

@@ -15,7 +15,7 @@ use shared::error::Result;
 fn test_set_get_configuration() -> Result<()> {
     let initial = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();

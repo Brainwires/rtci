@@ -5,6 +5,7 @@
 
 use crate::peer_connection::configuration::RTCIceTransportPolicy;
 use ice::candidate::Candidate;
+use ice::tcp_type::TcpType;
 use std::net::IpAddr;
 
 /// The Fetch standard's "bad port" list (fetch.spec.whatwg.org, "block bad port"), which
@@ -20,11 +21,17 @@ pub(crate) const BAD_PORTS: [u16; 83] = [
 /// Whether a remote candidate is administratively prohibited: its port is a bad port, or,
 /// under the "relay" policy, its address needs external resolution (an mDNS `.local` name or
 /// another DNS name: anything that is not an IP literal).
+///
+/// A `tcptype active` candidate's port is not a destination: RFC 6544 section 4.5 has it
+/// "set to 9 (i.e., Discard)", and section 3 "the port is meaningless [...] and is ignored by
+/// the peer"; no connection is attempted to it (the peer dials us). The bad-port rule ("The UA
+/// MUST prohibit connections to addresses on the [Fetch] block bad port list") does not
+/// apply to it.
 pub(crate) fn is_administratively_prohibited(
     candidate: &Candidate,
     policy: RTCIceTransportPolicy,
 ) -> bool {
-    if BAD_PORTS.contains(&candidate.port()) {
+    if BAD_PORTS.contains(&candidate.port()) && candidate.tcp_type() != TcpType::Active {
         return true;
     }
     policy == RTCIceTransportPolicy::Relay && candidate.address().parse::<IpAddr>().is_err()
@@ -38,6 +45,22 @@ mod tests {
     fn candidate(address: &str, port: u16) -> Candidate {
         unmarshal_candidate(&format!("1 1 udp 2130706431 {address} {port} typ host"))
             .expect("a candidate")
+    }
+
+    /// RFC 6544 section 4.5: an active TCP candidate is signalled with port 9, a bad port,
+    /// which no connection is made to: it is not prohibited for it. A passive one on port 9
+    /// is a destination, and is.
+    #[test]
+    fn an_active_tcp_candidates_discard_port_is_not_a_bad_port() {
+        let all = RTCIceTransportPolicy::All;
+        let tcp = |tcp_type: &str| {
+            unmarshal_candidate(&format!(
+                "1 1 tcp 2130706431 192.0.2.1 9 typ host tcptype {tcp_type}"
+            ))
+            .expect("a candidate")
+        };
+        assert!(!is_administratively_prohibited(&tcp("active"), all));
+        assert!(is_administratively_prohibited(&tcp("passive"), all));
     }
 
     #[test]

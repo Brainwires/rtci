@@ -307,9 +307,12 @@ impl IceTransport {
         // cannot check for network yet because it might not be applied
         // when mDNS hostame is used.
         if c.tcp_type() == TcpType::Active {
-            // TCP Candidates with tcptype active will probe server passive ones, so
-            // no need to do anything with them.
+            // TCP Candidates with tcptype active will probe server passive ones: the agent
+            // pairs nothing with them, but notes that the peer may dial (its checklist does
+            // not fail at end-of-candidates while that connection may still come). Kept for
+            // the statistics either way.
             log::info!("Ignoring remote candidate with tcpType active: {c}");
+            self.agent.add_remote_candidate(c)?;
             return Ok(true);
         }
 

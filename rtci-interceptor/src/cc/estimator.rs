@@ -1,5 +1,6 @@
 //! The seam a congestion control algorithm plugs into.
 
+use crate::Usage;
 use crate::rtpfb::acknowledgement::PacketReport;
 use std::time::Instant;
 
@@ -82,6 +83,21 @@ pub trait BandwidthEstimator: Send + Sync {
     /// (RFC 4588 section 7).
     fn min_bitrate(&self) -> Option<f64> {
         None
+    }
+
+    /// The ceiling of the estimate, when the estimator has one: probing asks for nothing
+    /// above it (a cluster above what the estimate can ever be measures nothing of use).
+    fn max_bitrate(&self) -> Option<f64> {
+        None
+    }
+
+    /// The estimator's reading of the path at the last feedback: over-used (more is sent than
+    /// it carries: a growing queue, or loss out of a full one), under-used (the queue is
+    /// draining) or normal. The probe controller reads it
+    /// ([`ProbeController::set_usage`](crate::ProbeController::set_usage)). `Normal` for an
+    /// estimator that has no such state.
+    fn usage(&self) -> Usage {
+        Usage::Normal
     }
 
     /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over

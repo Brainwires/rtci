@@ -196,6 +196,13 @@ pub struct Setup {
     /// Per cent of the datagrams the callee sends (its media and all its feedback: the
     /// caller's reverse path) that are lost, drawn from the run's seed. Zero: none.
     pub reverse_loss: u32,
+    /// Whether the chain probes for bandwidth (`GccInterceptorBuilder::with_bandwidth_probing`
+    /// in ParolNet's chain, `DefaultInterceptorOptions::bandwidth_probing` in the default
+    /// ones); the chain's own default (on) when `None`.
+    pub bandwidth_probing: Option<bool>,
+    /// Whether the default chains probe back towards the rate before a large drop
+    /// (`DefaultInterceptorOptions::recovery_probing`; off as the engine has it).
+    pub recovery_probing: bool,
 }
 
 /// What a run may change that no call's quality should depend on: the length of the ICE
@@ -257,6 +264,8 @@ impl Setup {
             perturbation: Perturbation::None,
             gap_wait: None,
             reverse_loss: 0,
+            bandwidth_probing: None,
+            recovery_probing: false,
         }
     }
 
@@ -269,6 +278,21 @@ impl Setup {
     /// The receivers give a gap up after `wait` and ask for a key frame.
     pub fn gap_wait(mut self, wait: Duration) -> Self {
         self.gap_wait = Some(wait);
+        self
+    }
+
+    /// The chain does not probe for bandwidth: the estimate climbs from its 300 kbit/s as the
+    /// delay-based controller raises it (8% a second, draft-ietf-rmcat-gcc-02 section 5.5),
+    /// which is how a call meets a cap at a chosen rate below the path's.
+    pub fn without_bandwidth_probing(mut self) -> Self {
+        self.bandwidth_probing = Some(false);
+        self
+    }
+
+    /// The default chains with recovery probing
+    /// (`DefaultInterceptorOptions::recovery_probing`).
+    pub fn recovery_probing(mut self) -> Self {
+        self.recovery_probing = true;
         self
     }
 
@@ -361,6 +385,10 @@ pub const ANCHORS: [Duration; 3] = [
 
 pub const VP8_PT: u8 = 96;
 pub const RTX_PT: u8 = 97;
+/// The retransmission format of `video/red` the engine registers with video RED / ULPFEC
+/// (`VIDEO_RED_RTX_PAYLOAD_TYPE`, `apt=116`).
+pub const RED_RTX_PT: u8 =
+    rtci::peer_connection::configuration::interceptor_registry::VIDEO_RED_RTX_PAYLOAD_TYPE;
 pub const OPUS_PT: u8 = 111;
 /// Payload size of an outgoing RTP packet (ParolNet's `RTP_OUTBOUND_MTU`).
 pub const RTP_MTU: usize = 1200;
@@ -758,8 +786,14 @@ impl Peer {
             if let Some(bound) = setup.received_rate_bound {
                 options.gcc_received_rate_bound = bound;
             }
+            if setup.recovery_probing {
+                options.recovery_probing = true;
+            }
             if let Some(immediate) = setup.immediate_congestion_feedback {
                 options.rtcp_immediate_congestion_feedback = immediate;
+            }
+            if let Some(probing) = setup.bandwidth_probing {
+                options.bandwidth_probing = probing;
             }
             let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),
@@ -819,6 +853,10 @@ impl Peer {
         let (gcc, handle) = GccInterceptorBuilder::new();
         let gcc = match setup.received_rate_bound {
             Some(bound) => gcc.with_received_rate_bound(bound),
+            None => gcc,
+        };
+        let gcc = match setup.bandwidth_probing {
+            Some(probing) => gcc.with_bandwidth_probing(probing),
             None => gcc,
         };
         let registry = configure_twcc(registry, &mut media_engine)?.with(
@@ -1177,6 +1215,9 @@ pub struct World {
     /// [`Setup::reverse_loss`] and the generator its losses are drawn from.
     pub reverse_loss: u32,
     pub loss_rng: Rng,
+    /// Per cent of the datagrams the caller sends that are lost while this is not zero (the
+    /// instrument's forward-loss scenario), drawn from the same generator.
+    pub forward_loss: u32,
     /// A peer connection that fails does not end the run ([`Peer::failed`] records it): for
     /// a measurement that reports the failure as a figure. Off: the run ends with an error.
     pub tolerate_failure: bool,
@@ -1231,7 +1272,11 @@ impl World {
                         && self.feedback_outage_until.is_some_and(|t| self.now < t)
                         && is_rtcp(&msg.message);
                     self.feedback_outage_lost += u32::from(in_outage);
-                    let lost = lost || in_outage;
+                    let lost = lost
+                        || in_outage
+                        || (i == 0
+                            && self.forward_loss > 0
+                            && self.loss_rng.next_u64() % 100 < u64::from(self.forward_loss));
                     let arrives = if lost {
                         None
                     } else {
@@ -1241,7 +1286,9 @@ impl World {
                     // header's padding bit (RFC 3550 section 5.1), in the clear under SRTP, is
                     // set on it and never on a retransmission (RFC 4588 section 4 carries no
                     // padding).
-                    if payload_type == Some(RTX_PT) {
+                    // (The RTX of red too: video sent in RED, the `Chrome` profile, is
+                    // retransmitted under it.)
+                    if payload_type == Some(RTX_PT) || payload_type == Some(RED_RTX_PT) {
                         let link = &mut self.uplinks[i];
                         if msg.message[0] & 0x20 != 0 {
                             link.padding_sent += 1;
@@ -1660,6 +1707,7 @@ impl World {
             sampling: false,
             samples: Vec::new(),
             reverse_loss: setup.reverse_loss,
+            forward_loss: 0,
             tolerate_failure: false,
             loss_rng: Rng(setup.seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xfeed_beef),
         };

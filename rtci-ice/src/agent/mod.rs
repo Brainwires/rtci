@@ -192,6 +192,55 @@ pub(crate) struct EarlyRequest {
     pub(crate) remote_addr: SocketAddr,
 }
 
+/// A candidate the peer signalled that the agent holds no pair for, but whose own checks can
+/// still reach the agent and teach it a peer-reflexive candidate (RFC 8445 Section 7.3.1.3): a
+/// `tcptype active` candidate (RFC 6544 Section 7.2: "STUN requests received on a passive TCP
+/// candidate will typically produce a remote peer reflexive candidate"), or a `.local` name
+/// the agent did not resolve (draft-ietf-mmusic-mdns-ice-candidates Section 5.3: "Through the
+/// process of learning peer-reflexive candidates [...] allowing ICE to succeed even though the
+/// legacy endpoint cannot resolve the mDNS names"). What the checklist's failure looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnpairedRemote {
+    /// The candidate's network type; its address family is known only when `family_known`.
+    pub(crate) network_type: NetworkType,
+    /// The candidate's address is an IP address (not an unresolved name).
+    pub(crate) family_known: bool,
+    pub(crate) tcp_type: TcpType,
+}
+
+impl UnpairedRemote {
+    fn of(c: &Candidate) -> Self {
+        Self {
+            network_type: c.network_type(),
+            family_known: c.address().parse::<IpAddr>().is_ok(),
+            tcp_type: c.tcp_type(),
+        }
+    }
+
+    /// Adds `c`'s kind to `list` unless it is there already (the list stays a handful long).
+    fn note(list: &mut Vec<Self>, c: &Candidate) {
+        let kind = Self::of(c);
+        if !list.contains(&kind) {
+            list.push(kind);
+        }
+    }
+
+    /// Whether this remote candidate's checks can arrive on `local`: same transport (and
+    /// family, when known), and over TCP a candidate that dials one that listens (RFC 6544
+    /// Section 6.2: an active candidate pairs with a passive one, S-O with S-O).
+    fn can_reach(&self, local: &Candidate) -> bool {
+        let local_type = local.network_type();
+        local_type.to_protocol() == self.network_type.to_protocol()
+            && (!self.family_known || local_type == self.network_type)
+            && matches!(
+                (self.tcp_type, local.tcp_type()),
+                (TcpType::Unspecified, TcpType::Unspecified)
+                    | (TcpType::Active, TcpType::Passive)
+                    | (TcpType::SimultaneousOpen, TcpType::SimultaneousOpen)
+            )
+    }
+}
+
 /// What an ICE restart keeps of the generation it replaces, for as long as data still flows on
 /// that generation's selected pair ([`Agent::media_path`]).
 ///
@@ -460,6 +509,9 @@ pub struct Agent {
     pub(crate) remote_end_of_candidates: bool,
     /// Local gathering is complete for this generation (RFC 8838 Section 13).
     pub(crate) local_gathering_complete: bool,
+    /// The peer's signalled candidates of this generation that are not paired but whose
+    /// checks can still create a pair (each kind once).
+    pub(crate) unpaired_remotes: Vec<UnpairedRemote>,
     /// Requests answered before the peer's credentials arrived, to finish processing then.
     pub(crate) early_requests: Vec<EarlyRequest>,
 
@@ -834,6 +886,7 @@ impl Agent {
                 .max(1),
             remote_end_of_candidates: false,
             local_gathering_complete: false,
+            unpaired_remotes: vec![],
             early_requests: vec![],
 
             candidate_types,
@@ -1657,12 +1710,16 @@ impl Agent {
         // A signalled TCP active candidate has no listening port (RFC 6544 §4.5: port 9): it
         // initiates connections and is reached as the peer-reflexive candidate its checks
         // create on one of our passive candidates. That peer-reflexive one, which carries the
-        // connection's real source port, is kept.
+        // connection's real source port, is kept. (RFC 6544 Section 6.2 pairs it with a passive
+        // candidate and then prunes "any pair for which the local candidate is a passive TCP
+        // candidate".) The agent notes that the peer may dial: its checklist does not fail
+        // while that connection may still come.
         if c.tcp_type() == TcpType::Active && c.candidate_type() != CandidateType::PeerReflexive {
             debug!(
                 "Ignoring remote candidate with tcptype active: {}",
                 c.address()
             );
+            self.note_unpaired_remote(&c);
             return Ok(false);
         }
 
@@ -1673,6 +1730,12 @@ impl Agent {
                     "remote mDNS candidate added, but mDNS is disabled: ({})",
                     c.address()
                 );
+                // Ignored (draft Section 3.2.1, step 5), but the peer's checks from behind
+                // the name still teach a peer-reflexive candidate (Section 5.3). (Not with
+                // the relay-only policy: see below.)
+                if self.candidate_types != [CandidateType::Relay] {
+                    self.note_unpaired_remote(&c);
+                }
                 return Ok(false);
             }
 
@@ -1699,6 +1762,8 @@ impl Agent {
                     self.get_name(),
                     c.address()
                 );
+                // Not resolved (Section 3.2.2), but its checks may come (Section 5.3).
+                self.note_unpaired_remote(&c);
                 return Ok(false);
             }
 
@@ -1709,12 +1774,16 @@ impl Agent {
                     c.address(),
                     MAX_PENDING_MDNS_QUERIES
                 );
+                self.note_unpaired_remote(&c);
                 return Ok(false);
             }
 
             if let Some(mdns_conn) = &mut self.mdns {
                 let query_id = mdns_conn.schedule_query(c.address());
                 self.mdns_queries.insert(query_id, c);
+            } else {
+                // No mDNS connection: the name is never resolved.
+                self.note_unpaired_remote(&c);
             }
 
             return Ok(false);
@@ -1855,6 +1924,9 @@ impl Agent {
                     MdnsEvent::QueryTimeout(id) => {
                         if let Some(c) = self.mdns_queries.remove(&id) {
                             error!("mDNS Query {} timed out for {}", id, c.address());
+                            // Unresolved, and ignored (draft Section 3.2.1, step 5); the
+                            // peer's checks may still come (Section 5.3).
+                            UnpairedRemote::note(&mut self.unpaired_remotes, &c);
                         }
                     }
                     MdnsEvent::LocalNameConflict(name) => lost.push(name),
@@ -1925,10 +1997,32 @@ impl Agent {
         self.mdns_queries.values()
     }
 
+    /// Notes a candidate the peer signalled that is not paired but whose checks may still
+    /// arrive (see [`UnpairedRemote`]).
+    fn note_unpaired_remote(&mut self, c: &Candidate) {
+        UnpairedRemote::note(&mut self.unpaired_remotes, c);
+    }
+
+    /// Whether a pair can still be formed by a check from the peer (RFC 8445 Section 7.3.1.3)
+    /// although every signalled candidate is in: the peer signalled a candidate that is not
+    /// paired but can reach one of the local candidates it knows, a `tcptype active` one that
+    /// dials a local passive candidate, or a `.local` name the agent did not resolve. RFC 8838
+    /// Section 8: "a Trickle ICE agent MUST keep each checklist in the Running state as long as
+    /// it expects candidate pairs to be incrementally added to the checklist."
+    pub(crate) fn pair_may_come_from_a_peer_check(&self) -> bool {
+        self.unpaired_remotes.iter().any(|remote| {
+            self.local_candidates
+                .iter()
+                .any(|local| !local.held_from_pairing() && remote.can_reach(local))
+        })
+    }
+
     /// The peer has no more candidates for this generation (an end-of-candidates indication,
     /// RFC 8838 Section 14). Remote candidates signalled after it are ignored, and a checking
-    /// agent whose pairs have all failed fails without waiting for its timeout, once local
-    /// gathering is complete too. An ICE restart starts a new generation.
+    /// agent whose pairs have all failed (or that has none) fails without waiting for its
+    /// timeout, once local gathering is complete too, unless a check from the peer may still
+    /// form a pair (a `tcptype active` candidate of the peer that dials ours, a `.local` name
+    /// not resolved): then its timeout ends it. An ICE restart starts a new generation.
     pub fn set_remote_end_of_candidates(&mut self) {
         self.remote_end_of_candidates = true;
         self.request_connectivity_check();
@@ -2283,6 +2377,7 @@ impl Agent {
         self.declined_nominations.clear();
         self.triggered_queue.clear();
         self.remote_candidates.clear();
+        self.unpaired_remotes.clear();
         self.remote_end_of_candidates = false;
         self.trigger_request_connectivity_check(candidates);
         self.request_connectivity_check();
@@ -3413,6 +3508,7 @@ impl Agent {
                 .retain(|c| c.candidate_type() != CandidateType::PeerReflexive);
         }
         self.remote_candidates.clear();
+        self.unpaired_remotes.clear();
         self.triggered_queue.clear();
 
         // Candidate pairs reference candidates by index, so once the candidates are

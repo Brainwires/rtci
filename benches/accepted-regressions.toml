@@ -1,0 +1,58 @@
+# Micro-benchmark regressions that were measured and accepted.
+#
+# The pull-request job "Benchmarks compared with the base" of .github/workflows/bench.yml
+# (scripts/bench-compare.sh, scripts/bench-compare.py) fails when a benchmark is slower than its
+# base in every round by more than the measured noise allows. A branch that makes a benchmark
+# slower ON PURPOSE adds, in the same branch:
+#
+#   1. a row to the ledger in docs/performance.md (what moved, before -> after, why accepted);
+#   2. an entry here naming that row:
+#
+#        [[accepted]]
+#        bench = "DTLS/Setup/*"        # a benchmark name as the job prints it, or a glob
+#        max_ratio = 60.0              # head / base the entry accepts; beyond it the job fails
+#        ledger = "zeroize-1"          # the ledger row's id (the job refuses an unknown id)
+#        note = "scrub_stack() after building keyed objects"
+#
+# An entry expires when the branch is merged: from then on the base already has the cost, the
+# entry matches nothing, and the job lists it as stale. Remove it in the next branch that touches
+# this file (scripts/check-performance-ledger.py keeps every entry pointing at a ledger row).
+
+[[accepted]]
+bench = "DTLS/Setup/AES-128-GCM/*"
+max_ratio = 5.0
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x3.92 in one job against master (45665836618)"
+
+[[accepted]]
+bench = "DTLS/Setup/AES-256-CBC/*"
+max_ratio = 7.5
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x5.65 in one job against master (45665836618)"
+
+# zeroize-1's SRTP AEAD context-setup cost, on the job's 20 % line: per-round ratios on train 34's
+# pull-request job (srtp-dtls-interceptor shard, base master 6939a3e8): round 8 1.198 / 1.171,
+# round 9 1.177 / 1.214, round 10 1.185 / 1.182, round 11 1.232 / 1.219 (base 710 -> head 870 ns,
+# flagged). SRTP/Setup/AES-128-CM-HMAC-SHA1-80 stayed at or under 1.087 in every round: no entry.
+[[accepted]]
+bench = "SRTP/Setup/AEAD-AES-128-GCM/*"
+max_ratio = 1.5
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() after building the SRTP AEAD contexts; x1.17-1.23 per round on train 34 rounds 8-11 (round 11: 710 -> 870 ns, run 45768113498)"
+
+# The next two are documentation entries: these benches came with perf-1, so master (the pull
+# request's base) has none of them and the pull-request job reports them as new, never compared.
+# Ratios measured against the tree before key erasure with the benches (train 34 round 7,
+# 58ba8a93), 3 rounds, run 45707098937: CCM x8.21 (rounds 7.83-8.34), CCM-8 x6.77 (6.39-6.88),
+# ChaCha20-Poly1305 x11.27 (10.95-11.71).
+[[accepted]]
+bench = "DTLS/Setup/AES-128-CCM*"
+max_ratio = 11.0
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x8.21 (CCM) / x6.77 (CCM-8) against 58ba8a93 in run 45707098937"
+
+[[accepted]]
+bench = "DTLS/Setup/CHACHA20-POLY1305/*"
+max_ratio = 15.0
+ledger = "zeroize-1"
+note = "crypto::scrub_stack() (32 KiB) after each DTLS record-cipher key schedule; x11.27 against 58ba8a93 in run 45707098937"

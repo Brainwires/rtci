@@ -39,7 +39,6 @@ use rtci::shared::error::Error;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine as WebrtcMediaEngine;
-use webrtc::ice_transport::ice_server::RTCIceServer as WebrtcIceServer;
 use webrtc::interceptor::registry::Registry as WebrtcRegistry;
 use webrtc::peer_connection::RTCPeerConnection as WebrtcPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfiguration;
@@ -106,7 +105,7 @@ async fn test_custom_interceptor_registry_with_rtcp_reports() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -433,7 +432,7 @@ async fn test_sender_report_generation_on_rtp_send() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -713,7 +712,7 @@ async fn test_register_default_interceptors_helper() -> Result<()> {
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -959,13 +958,9 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
         .with_interceptor_registry(registry)
         .build();
 
-    let config = WebrtcRTCConfiguration {
-        ice_servers: vec![WebrtcIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    // No STUN server: both peers are on this machine and connect over host candidates; a
+    // public server would only make the test depend on the internet.
+    let config = WebrtcRTCConfiguration::default();
 
     Ok(Arc::new(api.new_peer_connection(config).await?))
 }

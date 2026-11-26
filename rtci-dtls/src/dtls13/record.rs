@@ -167,38 +167,37 @@ pub(crate) fn reconstruct_sequence_number(truncated: u64, bits: u32, expected: u
 }
 
 /// The keys that protect one direction of one epoch.
+///
+/// The IV is held in the heap, in a zeroizing buffer: the epochs that own these keys live in
+/// vectors, and a vector that grows or shifts moves its elements by copying them, which would
+/// leave copies of an inline IV in memory the vector frees. The AEAD and mask keys are the
+/// provider's objects, boxed likewise.
 pub(crate) struct RecordKeys {
     aead: Box<dyn AeadCipher>,
-    iv: [u8; 12],
+    iv: crypto::SecretVec,
     mask: Box<dyn HeaderMask>,
     tag_len: usize,
-}
-
-impl Drop for RecordKeys {
-    fn drop(&mut self) {
-        // The AEAD and mask keys are the provider's to clear; the IV is ours.
-        drop(crypto::SecretVec::new(self.iv.to_vec()));
-        self.iv = [0; 12];
-    }
 }
 
 impl RecordKeys {
     pub(crate) fn new(crypto: &dyn RTCCrypto, suite: Suite13, keys: &TrafficKeys) -> Result<Self> {
         let crypto_error = |error: crypto::CryptoError| Error::Crypto(error.to_string());
+        crypto::scrub_stack();
         let aead = crypto
             .new_aead(suite.aead(), keys.key.as_ref())
             .map_err(crypto_error)?;
         let mask = crypto
             .new_header_mask(suite.header_mask(), keys.sequence_number_key.as_ref())
             .map_err(crypto_error)?;
-        let mut iv = [0u8; 12];
-        if keys.iv.len() != iv.len() {
+        // The key schedules were built on the stack before they were boxed: see
+        // `scrub_stack`.
+        crypto::scrub_stack();
+        if keys.iv.len() != 12 {
             return Err(Error::ErrInvalidPacketLength);
         }
-        iv.copy_from_slice(keys.iv.as_ref());
         Ok(Self {
             aead,
-            iv,
+            iv: keys.iv.clone(),
             mask,
             tag_len: suite.tag_len(),
         })
@@ -212,7 +211,8 @@ impl RecordKeys {
     /// left to the IV's length, XORed with the IV. The epoch is not part of it (RFC 9147
     /// section 4): each epoch has its own keys.
     fn nonce(&self, sequence: u64) -> [u8; 12] {
-        let mut nonce = self.iv;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(self.iv.as_ref());
         for (byte, sequence_byte) in nonce[4..].iter_mut().zip(sequence.to_be_bytes()) {
             *byte ^= sequence_byte;
         }

@@ -7,8 +7,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Key material left in freed memory by rtci-dtls, rtci-srtp and rtci-crypto is now erased**
+  (`conf/zeroize-1-dtls-srtp-key-erasure`; RFC 5246 section 8.1, RFC 8446 section 7.1, RFC 3711
+  section 9.3, RFC 7714 section 13.1; docs/key-erasure.md). In 0.1.0 (and on master until this
+  change) these stayed in heap memory after it was freed, until the allocator reused it:
+  DTLS 1.2: the PRF (`prf_p_hash`) built its output and intermediate values in plain vectors, so
+  the master secret, the key block (every record key and IV) and the DTLS-SRTP exporter output
+  (the SRTP master keys and salts) were left behind; `State` held the master and premaster
+  secrets in plain vectors (replaced or dropped without erasure; the ECDHE shared secret was
+  unwrapped from its `SecretVec`); a PSK returned by the application's callback was not erased;
+  `EncryptionKeys` printed every key through `Display` and `Debug`; the record ciphers' write
+  IVs were plain; the serialized `State` and ticket plaintexts left copies while being built;
+  the previous cookie secret of an endpoint (after a rotation) was never erased, and cookie
+  secrets, like ticket keys and the DTLS 1.3 HelloRetryRequest cookie secret, stayed in the
+  buffered generator's output buffer.
+  DTLS 1.3: record IVs held inline in epochs that live in vectors were copied into memory the
+  vectors freed. SRTP and DTLS with the ring provider: the RustCrypto HMAC-SHA1 states (the
+  AES-CM and NULL profiles' authentication keys, the AES-CBC suite's MAC keys) were not erased;
+  RustCrypto `aes` was built without `zeroize`, so AES-CBC and AES-CCM key schedules and the
+  per-packet AES-CM ones were not erased. With the ring provider, ring's own key objects were
+  freed as they were: the SRTP AES-GCM session keys and every AES round key
+  (`ring::aead::LessSafeKey`), the DTLS record keys of the AES-GCM and ChaCha20-Poly1305 suites,
+  the DTLS 1.3 record-number keys (`aead::quic::HeaderProtectionKey`) and the HMAC-SHA-2 states
+  of the PRF, HKDF and cookie keys (`hmac::Key`); the ECDHE private key, left in the freed
+  key-exchange object (`agreement::EphemeralPrivateKey`), and the certificate's Ed25519 and
+  ECDSA P-256 key pairs. Key schedules and shared secrets also left copies in
+  dead stack frames that later moves carried into heap padding. All of these are now erased:
+  `SecretVec` everywhere (it implements `Zeroize` and `ZeroizeOnDrop`), structs that hold keys
+  derive both, buffers are sized up front, `aes`/`ctr` are built with `zeroize`, the HMAC-SHA1
+  state is overwritten on drop, ring's key objects live in an allocation of the provider's own
+  that is overwritten after ring has dropped them (`ErasedOnDrop`; ring declines to erase them
+  itself, ring issue #15), `crypto::scrub_stack` runs after keyed objects and shared
+  secrets are built, and secrets are drawn with the new `RTCRandom::fill_secret` (the built-in
+  providers read the operating system for it). Tests: `tests/dtls_secret_erasure.rs` (every
+  freed heap block and every block still allocated, all platforms; the whole process on Linux
+  outside dead stack frames, see Known limits),
+  the DTLS 1.2 exporter test of `tests/dtls_srtp_keying_material_erasure.rs` (was a known
+  limit), `with_ring_no_key_*` in `rtci-srtp/tests/key_schedule_erasure.rs` and
+  `key_erasure_process_memory.rs` (were the `known_limit_*` tests),
+  `rtci-crypto/tests/ring_key_object_erasure.rs` (each ring key object, the ECDHE private key
+  drawn from a known seed through the new test-support seam `ring_key_exchange_with_seed`, the
+  signing key pairs). What remains: a ring RSA key pair keeps its private limbs in ring's own
+  heap allocations (not reachable, not measured); stack copies left while key objects are built
+  are scrubbed but not observed by any test (a copy moved onto the stack is not caught), so
+  their absence is not guaranteed (docs/key-erasure.md); RFC7714-13.1-3 stays `partial`
+  (class E) for that. No wire or handshake behaviour changes. Additions to the API:
+  `RTCRandom::fill_secret` (default: `fill`), `crypto::scrub_stack`, `Zeroize`/`ZeroizeOnDrop`
+  for `SecretVec` and `SessionKeys`. Cost (`rtci-srtp` and `rtci-dtls` criterion benchmarks
+  against master 6939a3e8 on the same runner, run 45660052237; master figures in brackets):
+  DTLS record-cipher setup 1.07 µs AES-128-GCM (0.39 µs) and 1.38 µs AES-256-CBC (0.47 µs),
+  of which about 0.7 µs is the 32 KiB stack overwrite (`crypto::scrub_stack`, one bulk fill;
+  the first form, a volatile write per byte, took 13.8 µs and 22.5 µs, run 45654600978);
+  SRTP context setup 1.48 µs AES-CM (1.43 µs) and 1.31 µs AES-128-GCM (1.12 µs: ring's key
+  object in an allocation of its own); per packet SRTP AES-CM RTP 1.52 µs / 1.23 µs encrypt /
+  decrypt (1.53 / 1.26 µs), RTCP 271 ns / 307 ns (264 / 279 ns), SRTP AES-128-GCM RTP 625 ns
+  / 330 ns (627 / 337 ns), DTLS records 258 / 270 ns AES-128-GCM and 3.16 / 2.89 µs
+  AES-256-CBC (within 1-4 % of master, faster). That `scrub_stack` still overwrites is
+  tested: emptied, or with its fill left unobservable to the optimiser, the DTLS erasure
+  tests fail in a release build (the second case cannot be told apart in a debug build,
+  where nothing is optimised away).
+
 ### Breaking changes
 
+- **interceptor, peer connection** (`conf/nack-11-decline-useless-repairs`): **the NACK
+  responder declines repairs that cannot be useful, and asks for a key frame instead.** Two
+  rules, on by default in every chain (RFC 8834 section 6.1: "It is not appropriate to
+  blindly retransmit RTP packets in response to a NACK. The importance of lost packets and
+  the likelihood of them arriving in time to be useful need to be considered"; RFC 4588
+  section 7: "If congestion is not kept under control, then retransmission SHOULD NOT be
+  used"): (1) a NACK for a packet written more than 2 s ago is not answered
+  (`NackResponderBuilder::with_max_repair_age`, `NACK_MAX_REPAIR_AGE`); (2) when the requests
+  waiting would take 2 s or more to send at the target and the target has fallen to half or
+  less within 2 s, they are given up (`with_repair_backlog_bound`,
+  `NACK_REPAIR_BACKLOG_BOUND`). Giving a video stream up forgets everything sent on it so far,
+  releases the retransmission reserve at once and asks the application for one key frame of
+  it (a PLI with sender SSRC 0 on `poll_read`, `OnKeyFrameRequest`: the pacer's flush has the
+  same request); the targets from before a give-up no longer count, so the key frame that
+  answers is given up in its turn only if the target halves again. Audio is only declined by
+  age. **An `rtx-time` takes the place of the age bound** (RFC 4588 section 8.1: "the maximum
+  time a sender will keep an original RTP packet in its buffers available for
+  retransmission"): where one is in force for a stream (`NackControl::LocalRtxTime` from the
+  session description or the application, `NackResponderBuilder::with_max_packet_age`), a
+  packet of the stream is repaired for that long, shorter or longer than 2 s, and past it the
+  packet is not retransmitted and nothing else happens, as before (no give-up, no key-frame
+  request); the 2 s are the sender's own judgement where no time was set. The `rtx-time` is
+  that of the packet's own retransmission format (RFC 4588 section 8.6: a parameter of each
+  RTX payload type; with red-2 a RED packet goes under the RTX of `red`), and the same value
+  governs all three uses for that packet: the age cut, the 2 s rule and the give-up. So a RED
+  packet whose RTX of `red` announces no `rtx-time` falls under the 2 s rule and gives the
+  stream up, whatever the media format's RTX announces, and the reverse. A NACK entry that
+  would never be answered (a FEC packet in RED on a stream without RTX, a payload type with
+  no RTX format on a stream that has RTX) never gives the stream up by its age: the receiver
+  is not waiting for a picture because of it (conf/red-2r; tests `rtci-interceptor/tests/
+  nack_rtx_red.rs::an_old_red_packet_is_held_to_the_repair_age_when_only_the_media_rtx_announces_a_time`,
+  `a_red_packet_is_repaired_for_the_rtx_time_of_the_rtx_of_red_and_a_plain_packet_is_not`,
+  `an_old_packet_that_is_never_answered_does_not_give_the_stream_up`,
+  `the_backlog_counts_red_packets_at_the_size_of_their_answers`). Ordinary loss at a steady target is repaired as before and asks for
+  no key frame. Before, every NACK for a packet still in the 1024-packet buffer was served in
+  order: a call without a pacer that met a capacity drop from 2.5 Mbit/s to 300 kbit/s sent
+  142 retransmissions (38 dropped again) with its target held at the reserve's floor, now 18
+  (16), median target under the cap 229 -> 257 kbit/s (behind a 100 ms queue 142 -> 252); a
+  receiver without a bound in time showed a picture 7.5 s old, now 1.1 s; after a 4 s outage
+  the default chain resumed later than 2 s in 66 of 200 calls with such a receiver, now in
+  none (`docs/capacity-collapse.md`, "The NACK responder": the figures by cell, why 2 s).
+  `DefaultInterceptorOptions` has two new public fields, `nack_max_repair_age` and
+  `nack_repair_backlog_bound` (a struct literal without `..Default::default()` no longer
+  compiles), governed by the behaviour profiles (`nack.max-repair-age`,
+  `nack.repair-backlog-bound`: `None` in the `Chrome` profile, whose sender never asks itself
+  for a key frame). **`PacerBacklog::Keep` now also switches both rules off** in the default
+  interceptor set: the option means "keep and repair everything" (its name is unchanged).
+  Migration, for a receiver that plays strictly in order and cannot resume at a key frame:
+  `options.pacer_backlog = PacerBacklog::Keep`, or on a chain built by hand
+  `NackResponderBuilder::with_max_repair_age(None).with_repair_backlog_bound(None)`. An
+  application must answer a key-frame request with a key frame, as for a remote PLI. No
+  `rtx-time` is announced for the age bound. `DELIVERED_MEMORY` (4 s) is unchanged: under the
+  default age bound a packet's memory is unreachable once the packet is 2 s old, and it is
+  the bound where a packet is repaired longer (an `rtx-time` over 2 s, the age rule off).
+  Known small effect: a give-up does not tell the pacer, so a retransmission of a forgotten
+  packet already queued there still leaves (counted in 700 paced calls with 247 give-ups: 3 in
+  all, at one give-up). A small cost, accepted: in a chain without a pacer behind a 100 ms
+  queue the climb back after the cap is slightly slower (seconds to 1000 kbit/s median
+  17.85 -> 18.30, 90th percentile 19.10 -> 20.40, per seed +0.26 +-0.24 s; target 15-25 s after
+  the cap 1215 -> 1195 kbit/s; 200 calls), and calls over 20 s go from 3 to 31 of 200 since the
+  climb clusters at 17-21 s; with both directions capped the 15-25 s target is 44-66 kbit/s
+  lower (not significant) against 89-90 kbit/s more target while the cap holds. Paced chains
+  move too on the tree this landed on (train 34 round 7, 58ba8a93, against round 6's rows; the
+  branch's own base showed the paced cells identical): the rules decline repairs there as well,
+  a declined repair leaving an unusable frame that a key frame answers. Both directions capped
+  (`cap/paced/gap300/both/q300/rl0`, 111 of 200 calls move): unusable frames 1.07 -> 2.75 a
+  call, key frames 4.9 -> 5.1, target 15-25 s after the cap 1375 -> 1369 kbit/s, against
+  retransmissions 4.8 -> 2.7 and an oldest picture 2.49 -> 2.44 s; 5 % loss on the reverse path
+  (`cap/paced/gap300/up/q300/rl5`, 107 of 200): target 15-25 s after 1367 -> 1354 kbit/s,
+  seconds to 1000 kbit/s 16.44 -> 16.53, a peer outside `connected` at the end 1 -> 2 of 200;
+  the 4 s outage (`outage/paced/gap300/up/q300/rl0`, 66 of 200: the calls whose picture the
+  restart of probing at a path change had made older) gains: oldest picture 4.76 -> 4.32 s,
+  retransmissions 133 -> 36, first picture after the new pair 0.71 -> 0.26 s. The reference
+  cells (1000 calls each) and the 100 ms queue are identical; the 1000 ms queue moves in 2 of
+  200 (instrument runs 45695138492 / 45695149408 against 45686735759 / 45686744374; the
+  merge-point rule holds, nothing flagged). Fixed with it: a probe cluster asked for while
+  the responder's buffer is empty (after a give-up or the pacer's flush, before the next
+  packet is written) is still padded, under the header of the newest packet the buffer held;
+  before, no padding left, and a chain without a pacer stopped probing.
+- **peer connection, interceptor, media** (`conf/red-3-fec-sequence-holes`): **a ULPFEC packet
+  received in a RED stream is delivered to the application as an RTP packet without a
+  payload**, under the payload type of the stream's media, with the FEC packet's sequence
+  number and timestamp (`RTCMessage::RtpPacket` with an empty `payload`; the peer connection
+  used to drop it). ULPFEC in RED packets of its own (the form browsers send, and the `Chrome`
+  behaviour profile's) takes sequence numbers of the media stream, so an application that
+  puts frames together saw a missing packet at each of them: a frame of more than five
+  packets was never complete, and each hole between frames waited out the gap bound and
+  cost a key-frame request. Between two engines of the `Chrome` profile at 2 Mbit/s no
+  frame was usable while FEC was sent. Migration: give every packet of the stream to the
+  frame assembly, empty ones included (`SampleBuilder::push` and `rtci-video`'s receiver take
+  them as present and no media); code that reads `payload[0]` of every packet must skip an
+  empty payload. The receive interceptor's emptied packet (`UlpfecRepair`) now has the
+  media's payload type instead of the `ulpfec` one (the `ulpfec` one only before any media
+  of the stream arrived).
+- **interceptor** (`conf/red-3-fec-sequence-holes`): **with `RedPlacement::OwnPacket` the FEC
+  packets follow the last packet of a frame** (the one with the marker bit) instead of each
+  block's last packet: `UlpfecSendBuilder::with_fec_after_frame`, on by default, as libwebrtc
+  places them (`ulpfec_generator.cc:134,157-159` at a222406d). A receiver, libwebrtc's
+  included, finds a frame only over consecutive sequence numbers, so a FEC packet inside a
+  frame left it incomplete. Each FEC packet protects the same media packets as before; only
+  the order on the wire changes (RFC 5109 and RFC 2198 say nothing about it). At most
+  `ULPFEC_MAX_HELD_FEC_PACKETS` (128) FEC packets wait for a marker bit. Migration: none for
+  video with marker bits; `with_fec_after_frame(false)` restores the old order. The other
+  placements and carriages are unchanged.
+- **media** (`conf/red-3-fec-sequence-holes`): `SampleBuilder` takes **a packet without a
+  payload as present and no media**. It is left out of the sample it lies in (a sample with
+  one inside it used to be lost to a depacketizer error); it starts no sample, so a sample
+  followed by such packets waits for the next packet with a payload and has its real
+  `duration` (it used to come out at once with a duration of zero); between samples it is
+  counted in `prev_padding_packets` whatever its timestamp (only one with the last sample's
+  timestamp was); and `pop` goes on to the next sample after dropping packets that belong
+  to none (it used to return `None` once for each such run). Migration: none needed; code
+  that relied on a zero duration to spot padding reads `prev_padding_packets`.
 - **interceptor, peer connection** (`conf/flush-1r-backlog-flush-at-collapse`): **the default
   pacer discards queued video when the path's capacity collapses.** When what waits in the
   pacer would take a second or more to leave and the target is half or less of what it was
@@ -25,6 +200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PacerBuilder::with_backlog(PacerBacklog::Keep)`. `DefaultInterceptorOptions` has a new
   public field, `pacer_backlog`: a struct literal without `..Default::default()` no longer
   compiles.
+  Performance: flush-1r
 - **media** (`conf/flush-2-receiver-gap-bound`): `SampleBuilder` gives a gap up by default.
   A builder of a video format (`Depacketizer::has_key_frames`: VP8, VP9, AV1, H.264, H.265)
   (1) waits for a missing packet at most `DEFAULT_MAX_GAP_WAIT`, 300 ms from the arrival of the
@@ -42,6 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured best of 300, 600 and 1000 ms, and libwebrtc's receiver (3 s without a decodable
   frame, 200 ms while waiting for a key frame) is `rtci-video`'s `ReceiveConfig::chrome()`:
   `docs/receiver-gap-policy.md`.
+  Performance: flush-2
 
 - **interceptor, peer connection** (breaker-1): `DefaultInterceptorOptions` has two new public
   fields, `circuit_breaker` and `circuit_breaker_automatic_restart` (both `true`; see "Fixed"
@@ -61,6 +238,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's `ice` group. **Migration**: a struct literal of either adds `..Default::default()`
   or `consent_response_wait: ConsentResponseWait::Rto`. `stun::timer::RtoEstimator` is now
   `Copy` (an addition).
+  Performance: ice-26-consent
 
 - **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
@@ -143,6 +321,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
     data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
     a lost DTLS ClientHello retransmitted after its timer).
+- **stream-driver** (runtime-1, `conf/runtime-1-trait`, on master since train 25): **`StreamDriver`
+  is no longer `Sync`, `Unpin`, `UnwindSafe` or `RefUnwindSafe`**, and `PeerDriver` no longer
+  `Unpin`; `Accepted`, `SharedAccept` and `DriverInput` are no longer `UnwindSafe` /
+  `RefUnwindSafe` (cargo-semver-checks `auto_trait_impl_removed` against v0.1.0). The driver
+  holds the injected runtime and its tasks as trait objects (`Arc<dyn Runtime>`,
+  `Box<dyn runtime::JoinHandle>`, which is `Send` but not `Sync`; TCP streams as
+  `Arc<dyn runtime::AsyncTcpStream>`) and its input queue is an `async_channel` channel, whose
+  receiver is not `Unpin`. `Send` is kept everywhere. Migration: share a driver across threads
+  behind a `Mutex` (or keep it on one task and talk to it through its handles), pin it
+  (`Box::pin` / `pin!`) where a future that owns it must be `Unpin`, and wrap it in
+  `AssertUnwindSafe` for `catch_unwind`.
 - **`StreamTransmit` has a new public field, `dscp`** (rtci-shared): the codepoint the driver
   sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
   flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
@@ -169,6 +358,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `match` on `Fate` adds an arm for `Fate::SendError`.
 
 ### Behaviour changes
+
+- **The session bandwidth an RTCP session measures counts UDP and IP** (RFC 3550 section 6.2:
+  "Bandwidth calculations for control and data traffic include lower-layer transport and
+  network protocols (e.g., UDP and IP)"). Where no `b=AS` / `b=TIAS` gives the session
+  bandwidth, the session measures the RTP sent and received over the last two seconds; each
+  packet now counts with 28 octets of UDP and IPv4, as the RTCP packets always did in the
+  average packet size. Before, the RTP header and payload alone were counted, which
+  understated the session (and so its 5 % of RTCP) by 28 octets a packet: 2 to 3 % beside
+  video, a quarter for 20 ms Opus packets. Test
+  `the_measured_session_bandwidth_counts_udp_and_ip`. Audit: RFC3550-6.2-1 (note).
+- **`GccInterceptorBuilder` probes for bandwidth by default** (`with_bandwidth_probing(false)`
+  turns it off). The pull-style GCC interceptor (a chain without a pacer) never probed: its
+  estimate climbed from 300 kbit/s at 8% a second. It now sends the start-up clusters and the
+  others the default interceptors send (RFC 8836 section 2, requirement 4, SHOULD), as bursts
+  of padding on the RTX stream, when the chain has a NACK responder and RTX is negotiated;
+  without them nothing changes. Probing asks for nothing above the estimator's own maximum
+  (`BandwidthEstimator::max_bitrate`, new, default none).
+  WHAT CHANGES FOR A CALL: a chain without a pacer now reaches the path's rate at the start
+  (2.5 Mbit/s 0.5 s into the call, where it was at 1.4 Mbit/s after 20 s), and so meets a
+  later capacity collapse from a higher rate, as a call through the default interceptors
+  always has. Measured with the capacity instrument (200 calls a cell, the path drops from
+  2.5 Mbit/s to 300 kbit/s for 20 s; train 32 round 3 with `conf/instrument-4`, hosted runs
+  45568561644 / 45568566803 before, 45568576304 after, and round 4 with the sender's flush,
+  45574610547 / 45574618542: the same figures to the digit), ParolNet's chain with the reference
+  receiver (a gap given up after 300 ms, the default since the receiver's bounded wait): the
+  three requirements are met before and after (a picture over 2 s old for more than 0.5 s,
+  over 2 s without a new picture, over 1 s without audio: 0 of 200 calls each); the target
+  under the cap 249 -> 229 kbit/s, retransmissions 67 -> 142 a call, audio packets lost 28 ->
+  39, the oldest picture 1.09 -> 1.18 s; 1000 kbit/s is reached 17.5 s after the capacity
+  returns (18.2 s before). With a receiver that waits without a bound in time the oldest
+  picture is 7.9 s where it was 3.6 s: the repairs of a
+  collapse from 2.5 Mbit/s take that much longer than from 1.4. Behind a short queue (100 ms
+  at the capped rate) the repairs take about 12 s instead of 5.5 s and more than half of
+  them are dropped at the queue again (263 retransmissions a call against 145), during
+  which the encoder's target is at its floor: a known limit of a chain without a pacer at a
+  collapse from full rate (nothing pauses or flushes; the NACK responder repairs in order).
+  With both directions capped, 25 of 200 calls of ParolNet's chain show a picture over 2 s
+  old for more than 0.5 s where 3 did (the same limit: the feedback path is capped too).
+  One seeded call of `rtci-video/tests/receive_rtc2rtc.rs` rendered nothing for 1.13 s at
+  such a collapse (bound 1 s): that file's calls keep a sender without probes, and the same
+  call with the builder as it comes stands beside it as the ignored
+  `known_limit_a_capacity_drop_from_the_paths_rate_leaves_no_long_freeze`
+  (`docs/test-exclusions.md`), which fails until the limit is gone.
+  (`conf/nack-11-decline-useless-repairs` removes the repair tail and the unbounded
+  receiver's old picture named above, see "Breaking changes"; that one seeded call still
+  renders nothing for 1.15 s with 2 retransmissions: the collapse itself, not the repairs.)
+  THE WAY BACK: `GccInterceptorBuilder::with_bandwidth_probing(false)` gives the old start
+  (8% a second) and the old figures.
+  A chain without a pacer probes at the start and while the application sends less than the
+  target allows, not after a large drop of the target (`ProbeController::set_unpaced`, set
+  by the congestion controller when it measures a cluster that left as one burst): a burst
+  is padding on top of the media into the queue that caused the drop, where a paced cluster
+  is mostly the media itself (measured, same instrument: with such bursts 7 of 200 calls
+  were over 2 s without a new picture against 3, and behind a 1000 ms queue the audio paused
+  for over a second in 72 of 200 calls against 21). A chain with the pacer probes after a
+  drop as before.
 
 - **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
   section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
@@ -343,6 +588,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feedback naming every number, requests and lost reports without end against the rate
   limit, and the sizes of what is remembered (`nack_repeat_repairs.rs`,
   `nack::responder::tests`, `twcc::sender::tests`); each rule has a mutation a test catches.
+  Performance: rtx-1r2
 
 - **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
   6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
@@ -383,6 +629,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells of 100 ms reordering at 2 Mbit/s, higher (1 %: 331 -> 340 kbit/s, 5 %: 100 -> 218);
   the rate-limited link 574 / 539 / 535 kbit/s (574 / 538 / 535). Audit row GCC-5.4-4 is
   `tested`.
+  Performance: gcc-9
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
@@ -880,6 +1127,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptor / bandwidth probing: recovery probing, an opt-in** (off by default and in
+  every behaviour profile; ungoverned: it is tuning, no specification asks for it and Chrome
+  does not do it): `ProbeController::with_recovery_probing`,
+  `CongestionControlBuilder::with_recovery_probing`,
+  `DefaultInterceptorOptions::recovery_probing`. A sender that keeps up with its target is
+  asked nothing once the probes after a drop have ended (five seconds after it), so when a
+  capacity that fell comes back, the climb is the delay-based controller's 8% a second. With
+  the setting the highest rate before a large drop is remembered for a minute
+  (`PROBE_DROP_MEMORY`); while the target is below 85% of it and the estimator does not read
+  over-use (`BandwidthEstimator::usage`), a cluster at twice the target is asked for every
+  five seconds (`PROBE_RECOVERY_INTERVAL`), with follow-ons at twice the result while the
+  path carries what is asked. Paced chains only: clusters that leave as bursts are not sent
+  for it, and a path change forgets the remembered rate. WHAT A CALL GAINS AND PAYS, measured
+  on the capacity instrument (default chain, a 2.5 Mbit/s path that drops to 300 kbit/s for
+  20 s, 200 calls a cell, hosted runs 45607015088 without and 45607025736 with the setting,
+  on master f9242b4d with the two probing branches before this one): the target is back at
+  1 Mbit/s 4.9 s after the limit went (5.4 s at most) instead of 17.3 s, and at the
+  2.5 Mbit/s maximum 15 to 25 s after it instead of 1283 kbit/s on average; the same behind
+  a 100 ms queue (17.6 -> 5.0 s) and with both directions limited (16.2 -> 4.8 s); behind a
+  1000 ms queue in nine calls of ten (median 17.6 -> 5.0 s, the slowest tenth 17.5 s). It
+  costs 3% of the target under the limit (238 against 246 kbit/s), and behind a 100 ms queue
+  11 more audio packets lost a call (52 against 41) and a quarter more packets dropped at
+  the queue (201 against 159; with the pacer's backlog kept, `PacerBacklog::Keep`, behind the
+  300 ms queue 149 against 121 in the two-peer test's call); the counts of calls with an old
+  picture, a freeze or an audio gap do not move in any cell. After a limit that outlasts the minute (held 60 s) it gains
+  nothing: 17.6 s against 16.9 s, the rate not back within 20 s in 33 of 200 calls against
+  14. Sent as bursts in a chain without a pacer the gain was the same and the calls with an
+  old picture rose in every cell that had any (both directions limited: 25 -> 31 of 200), so
+  the setting does not act there. The default's figures do not move. Tests: seven in
+  `cc::probe::tests` (`recovery_probing_…`, `a_recovery_cluster_the_path_carries_is_followed_up`,
+  `without_recovery_probing_a_sender_at_its_target_is_not_probed_after_the_drop`),
+  `rtci-interceptor/tests/recovery_probing.rs`, `tests/recovery_probe_requests.rs`,
+  `tests/capacity_cap_video_rtc2rtc.rs::with_recovery_probing_a_call_is_back_at_full_rate_when_the_capacity_returns`.
+- **interceptor / bandwidth probing: the probe after a large drop has three forms**
+  (`AfterDropProbe`: `Repeated`, `Libwebrtc`, `Off`), set with
+  `ProbeController::with_after_drop_probe`, `CongestionControlBuilder::with_after_drop_probe`
+  and `DefaultInterceptorOptions::probe_after_drop`; the behaviour row `cc.probe-after-drop`
+  governs it (`Rfc` and `StrictRfc`: `Repeated`; `Chrome`: `Libwebrtc`).
+  `with_probe_after_drop(bool)` stays (`true` is `Repeated`, `false` is `Off`). THE DEFAULT
+  DOES NOT CHANGE: `Repeated` is what the engine did (from a second after the target fell
+  below two thirds of its 2 s high, once a second for five seconds, a cluster at 85% of that
+  high); on the capacity instrument 1400 calls in seven cells of the default chain are
+  identical to the tree before, figure for figure (hosted run 45607015088 against
+  45582695439). `Libwebrtc` is libwebrtc's `ProbeController::RequestProbe`: a drop is one
+  update of the estimate below 0.66 of the one before it, and one cluster at 0.85 of the
+  estimate before it is asked when the delay detector has returned from under-use to normal,
+  only for a sender that is application limited or was within 3 s, within 5 s of the drop, at
+  most once in 5 s, and only when 95% of it is above the estimate. For it the estimator
+  says how it reads the path: `BandwidthEstimator::usage() -> Usage` (new, default
+  `Usage::Normal`; `Gcc`: the reading of the last feedback), passed on with
+  `ProbeController::set_usage`. No specification says how to probe after a drop (RFC 8836
+  section 2, 1f, asks that a flow regain its share quickly), so the default is the form that
+  measured best. Four forms, the default chain, a 2.5 Mbit/s path that drops to 300 kbit/s
+  for 20 s, 1000 calls in each of the two reference cells and 200 in six others, each form
+  against the default by the merge-point rule of `docs/capacity-instrument.md`: without a
+  probe and with libwebrtc's (which never fires for a sender that keeps up with its target:
+  the two measure alike) seven figures are worse (both directions limited: oldest picture
+  3.07 s against 2.64 s; 5% of the feedback lost: the rate not back within 20 s in 30 and 24
+  of 200 calls against 2; target 15 to 25 s after the limit 1205 against 1278 kbit/s); the
+  repeated probe aimed at the highest rate of the last minute instead of the last drop's own
+  high makes fifteen worse (audio packets lost 27 -> 35 a call; behind a 1000 ms queue over
+  2 s without a new picture in 33 of 200 calls against 6) and was not taken. What the default
+  costs against no probe: behind a 1000 ms queue 96 audio packets lost a call against 66,
+  under a limit that lasts a minute 74 against 45. Tests:
+  `cc::probe::tests::libwebrtcs_probe_after_a_drop_is_one_cluster_once_overuse_has_ended`,
+  `libwebrtcs_probe_after_a_drop_has_its_conditions`,
+  `gcc::estimator::tests::usage_follows_the_last_feedback`,
+  `rtci-interceptor/tests/after_drop_probe_requests.rs`, `tests/default_probe_after_drop.rs`.
 - **congestion control feedback cadence as a setting** (rtcpbudget-2):
   `CongestionFeedbackCadence` (`ReceivedMedia`, `PerFrame`, `SendEstimate`),
   `TwccReceiverBuilder::with_cadence`, `Rfc8888Builder::with_cadence`,
@@ -1295,6 +1610,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ICE: a peer that can only reach us by its own checks is not failed at end-of-candidates**
+  (ice-27, reported by a consumer's ICE-TCP tests). Since the RFC 8445 checklist (first
+  released in 0.1.0 and v0.22.0+brainwires.6), an agent failed at once when both sides had
+  signalled end-of-candidates and its checklist had no pair. Two kinds of peer have no pair
+  until their own check arrives: one whose only candidates are `tcptype active` (it dials our
+  passive TCP candidate; the agent pairs nothing with an active candidate) and one whose only
+  candidates are `.local` names the agent does not resolve (mDNS off, or the query timed
+  out). Against either the connection failed before the peer's first check could arrive, so
+  a peer that could only dial our passive ICE-TCP candidate never connected once both sides
+  sent `a=end-of-candidates`. Now the agent notes such signalled candidates, and while one of
+  them can reach a local candidate (an active one, a local passive TCP candidate of its
+  family; a `.local` name, a local candidate of its transport) the checklist stays Running
+  (RFC 8838 section 8: "MUST keep each checklist in the Running state as long as it expects
+  candidate pairs to be incrementally added"): the peer's check forms the peer-reflexive pair
+  and the agent connects, and if no check comes the checking timeout fails it as before
+  (`disconnected_timeout + failed_timeout`, 30 s by default). The peer connection now hands
+  remote active candidates to the agent instead of dropping them itself, and no longer takes
+  an active candidate for administratively prohibited because of its port: RFC 6544 section
+  4.5 sets that port to 9, a Fetch bad port, but no connection is ever made to it (the W3C
+  rule prohibits connections to bad ports). A checklist with no
+  remote candidate at all, or whose pairs have all failed with nothing that could still dial
+  in, fails at once as before. Tests: `agent_checklist_test.rs::
+  a_peer_reached_only_by_its_own_checks_keeps_the_empty_checklist_running_and_connects`,
+  `a_peer_reached_only_by_its_own_checks_that_never_checks_fails_by_the_timeout`,
+  `an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_at_once`,
+  `an_ice_restart_forgets_the_candidates_that_could_only_dial_us`, `tests/ice_tcp_active_passive.rs::
+  test_ice_tcp_passive_side_connects_when_the_peer_signals_only_active_and_end_of_candidates`.
+- **congestion control: packets sent before a new path carried anything are not the new
+  path's loss.** At a path change (the peer connection's `PathChanged`, or packets from new
+  addresses) the estimate starts over and the packets sent into the path that was left are
+  forgotten. The two ends do not take the new path into use at the same instant, though: what
+  an endpoint sends between its own change and the moment the path carries media to the other
+  end goes nowhere, and those packets were reported as the new path's loss. With bandwidth
+  probing on, a probe cluster asked for at the instant of the change (23 padding packets in
+  a chain without a pacer) is among them: after an ICE restart whose controlled side learned
+  of the pair 10 ms before the controlling side, 24 of the first 47 packets it sent were
+  counted lost and the estimate that had just started over at 300 kbit/s was cut to 298.9
+  (`tests/capacity_cap_video_rtc2rtc.rs::
+  an_estimate_started_over_on_a_new_path_does_not_fall_without_evidence`, which only held
+  while retransmissions of old packets watered the fraction down to under 10 %). Now a packet
+  sent on a new path earlier than every packet reported received over it, and reported as
+  not received, is released without a verdict (the send history, `before_the_path_carried`),
+  as the packets of the old path are; a packet lost after one that arrived is a loss as
+  ever. Tests: `rtpfb::history::tests::
+  a_loss_before_anything_arrived_on_a_new_path_is_not_reported`,
+  `a_loss_before_the_first_arrival_of_a_call_is_reported`, `gcc::twcc_gcc::tests::
+  packets_sent_before_a_new_path_carried_anything_are_not_its_loss`.
+- **without a retransmission format, a NACK was never answered on the wire with the default
+  interceptors** (nortx-1). When no `rtx` format is negotiated (a peer that does not support
+  RFC 4588, an application that registers none) the NACK responder answers a request with
+  the packet again as it was sent: the media SSRC, the same sequence number, and so the SRTP
+  packet index of the first transmission. A packet index protects one packet (RFC 3711
+  section 3.3.1; RFC 7714 section 8.1): the SRTP sender protects the same packet again and
+  refuses a different one. The default set stamps the abs-send-time extension (offered on
+  video since it joined the default set) and, where negotiated, the RFC 6051 timestamp,
+  wire-ward of the responder, at the instant a packet leaves: the retransmission got a new
+  stamp, was a different packet under a used index, and was dropped below the interceptors
+  (`unsent_index_reused`), silently. No lost packet was repaired (a receiver waited for a
+  key frame), while the responder had lowered the media target to make room for each
+  retransmission (RFC 4588 section 7) and the congestion controller had recorded each as
+  sent. Both stampers now give a packet that passes again, marked a retransmission under an
+  SSRC and sequence number they have seen, what its first transmission left with (the stamp,
+  or no timestamp), as the TWCC sender already kept its transport-wide number: the packet
+  reaches the SRTP sender byte for byte as it first left. An RTX retransmission is a new
+  packet and is stamped as it passes, as before. Also in 0.1.0. Not affected: a stream with
+  RTX (every default codec has it), and a chain without those stampers. Tests
+  `tests/nack_without_rtx_rtc2rtc.rs::a_lost_packet_is_sent_again_as_it_was_and_arrives_when_no_rtx_is_negotiated`,
+  `a_packet_sent_again_as_it_was_keeps_its_abs_send_time`,
+  `a_packet_sent_again_as_it_was_leaves_as_its_first_transmission_did`.
+- **video sent as RED was never repaired by retransmission** (red-2; the `Chrome` profile's
+  `fec.video-red-ulpfec`). Two defects, either of which made every retransmission of a RED
+  packet useless:
+  - The NACK responder sent every retransmission of a stream under the one RTX payload type
+    of the format the stream was bound with. RFC 4588 section 8.1 ties a retransmission
+    format to one original payload type (`apt`: "the payload type of the associated original
+    stream"), and a receiver restores the payload type from the `apt` of the format the
+    retransmission arrives under: a RED packet (payload type 116) retransmitted under the
+    RTX of VP8 (97, `apt=96`) came back as VP8 with the RED header in front of it (traced
+    call: 87 retransmissions, none usable). The responder now takes the RTX format whose
+    `apt` is the payload type the packet left under, among the formats of the stream's
+    section and the stream's own pair, as libwebrtc does (`rtp_sender.cc`, `BuildRtxPacket`).
+    A packet whose payload type has no RTX format, on a stream that negotiated RTX, is not
+    retransmitted at all (libwebrtc sends nothing either): never as a second copy on the
+    media SSRC. A stream that negotiated no RTX is repaired with the packet again as it was
+    sent, as before. This also holds for a source that switches between the formats of its
+    section (RFC 7160): each packet goes under its own format's RTX.
+  - An offerer dropped `rtx apt=<red>` when it applied the answer: entering the answer's
+    formats under its own payload type numbers counted only media and FEC formats as the
+    primary of an RTX format, so the RTX of a RED format was left out of the negotiated list,
+    and the offerer could neither send nor read a retransmitted RED packet (between two
+    engines only the answerer's direction had the format).
+  - The FEC data of a FEC packet in RED (ULPFEC in a RED packet of its own, in the media's
+    sequence space) is not retransmitted when the packet is asked for: the media's own
+    retransmission answers the loss. Its sequence number is answered, with three octets
+    under the RTX of `red`: the original sequence number and the RED block header. A
+    receiver that puts frames together in sequence-number order cannot tell a lost FEC
+    packet from a lost one-packet frame, and would wait for it and ask for a key frame;
+    restored, the answer is a FEC packet with nothing in it, which reaches the application
+    as any FEC packet does, without a payload. libwebrtc keeps no FEC packet for
+    retransmission (`ulpfec_generator.cc:233`, `set_allow_retransmission(false)`) and
+    ignores a NACK for one (`rtp_sender.cc:348-351`); its receiver finds frames without the
+    number. Without an RTX stream a FEC packet is not sent again.
+
+  Tests `rtci-interceptor/tests/nack_rtx_red.rs`,
+  `in_the_chrome_profile_a_lost_red_packet_is_retransmitted_under_the_rtx_of_red`,
+  `an_rtx_format_whose_primary_is_a_red_format_is_numbered_with_it`. Not affected: streams
+  not sent in RED with one media format (the default profile).
+
+- **media** (`conf/red-3-fec-sequence-holes`): `SampleBuilder` gave a sample a duration of
+  zero when the packet that follows it had the last sequence number before the wrap (65535):
+  the search for the next packet's timestamp ran over a range that does not wrap. It walks
+  the sequence numbers as they wrap now.
+- **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
+  profile) two engines never raised their send rate** (red-1). A receiver learns a
+  stream's format from the payload type of its first packet; when that is the `red` format
+  (RFC 2198), which is described without `a=rtcp-fb` lines, the stream was bound to the
+  interceptors with no feedback at all, while the sender, which knows the stream by its
+  media codec, expected the feedback negotiated for that codec. With RFC 8888 congestion
+  control feedback (`ack ccfb`, what two engines negotiate) the receiver therefore reported
+  the audio stream only: the sender's congestion controller saw a path that carried 50
+  kbit/s, its estimate stopped at the first step above the start value (315 kbit/s) and
+  after a capacity collapse stayed at the floor; NACK and key frame requests about the video
+  were not bound either. A stream bound under `red` now has the feedback of the format it
+  carries (the one its fmtp names, else the section's first media format) beside any of its
+  own, as libwebrtc configures a stream from its first media codec whatever payload type
+  arrives. Found with the capacity instrument's `chrome` chain (send target 90 kbit/s for
+  the whole call); the row at fault was `fec.video-red-ulpfec`, alone. Not affected: the
+  default profile (no video RED), and a peer whose feedback is transport-wide (bound by
+  the header extension: Chromium). Test `a_red_stream_has_the_feedback_of_the_format_it_carries`.
+  Still open after this entry: a RED packet retransmitted over RTX is not usable by the
+  receiver (it leaves under the media format's RTX payload type); see red-2.
+
 - **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
   (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
   it receives, so a peer that follows it (this engine with
@@ -1308,6 +1755,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its SSRC). With a peer that reports once (the default, libwebrtc) nothing changes. Tests
   `every_ssrc_of_the_receiver_reporting_counts_as_one_report`,
   `another_reporting_ssrc_is_followed_once_the_first_has_been_silent_for_the_rtcp_timeout`.
+- **interceptor / pacer** (pacing-3): the deadline the pacer names is an instant at which the
+  packet leaves, at every rate. Where a packet's wait is not a whole number of nanoseconds
+  (12 000 bits at 840 kbit/s) the budget, refilled to the named instant, could be a fraction
+  of a nanosecond's worth short: the packet stayed, and `poll_timeout` named the same instant
+  again, so a driver that follows the deadlines exactly span (the test worlds hid it by
+  pushing their clock on). The budget now covers a packet to within what the rate adds in
+  two nanoseconds. `pacer::tests::a_packet_is_releasable_at_the_instant_named_for_it`,
+  `pacer_deadline.rs::every_deadline_the_pacer_names_releases_a_packet_and_the_next_is_later`.
+  Known effect, measured with the capacity instrument (1000 seeds each way, a capacity drop
+  from 2.5 Mbit/s to 300 kbit/s behind a 300 ms drop-tail queue): with packets leaving at
+  the named instants, a STUN consent datagram (RFC 7675) meets the full link queue in the
+  overload after the drop in 30.6 % of calls instead of 25.2 %, and a peer reports
+  `disconnected` for a moment in 17.4 % instead of 12.8 % (behind a 1000 ms queue 21.2 %
+  instead of 14.0 % of 400). Most are the transient that one lost consent check gives (in that
+  cell: median 0.5 s, longest 1.1 s of 1000 calls; no peer stayed disconnected, none failed),
+  and the picture, audio and recovery figures do not move. Not every episode is that short:
+  over the six paced cells of the instrument's record on the landing tree (train 34 round 1,
+  629 calls with an episode, median 0.6 s) 10 calls had one longer than 2 s, the longest 6.58 s
+  behind a 100 ms queue and 9.20 s with 5 % loss on the reverse path, where 2 of 200 calls were
+  still outside `connected` at the end of the run; long single episodes and those 2 of 200 are
+  there without this change too (5.92 s and 6.31 s the longest, 2 of 200). STUN does not pass
+  the pacer; the drop is the link's.
+- **Bandwidth probing in a chain without a pacer never got a result** (in 0.1.0 too). A probe
+  cluster was measured on the packets the pacer marked as the cluster's; with the pacer taken
+  out of the default interceptors (or in any chain built without one) nothing marked a packet,
+  so the congestion controller asked for clusters, the NACK responder sent each one's padding
+  as a burst, and no result ever came: the start-up clusters among them, so an open 2.5 Mbit/s
+  path was reached at the 8% a second of draft-ietf-rmcat-gcc-02 section 5.5 (about 1.4 Mbit/s
+  after 20 s from the 300 kbit/s start) instead of within a second (RFC 8836 section 2,
+  requirement 4). Now the responder's padding carries the cluster's mark (`ProbePacket`) when no
+  pacer took the request, and a cluster whose packets left in one instant is measured by how
+  far apart the path delivered it (`burst_estimate`: the narrowest link's rate, never above the
+  rate the cluster was asked for at). Where no cluster can be sent at all (no pacer and no RTX
+  stream to pad on) the controller stops asking after the first cluster no packet left for,
+  until another stream is bound or starts to send: a request that can have no result is not
+  repeated. The start is now 1 Mbit/s after 0.37 s and the 2.5 Mbit/s maximum after 0.47 s
+  in both chains without a pacer (`tests/capacity_cap_video_rtc2rtc.rs::
+  an_open_link_is_found_within_a_second_without_a_pacer`). A known limit of the burst
+  measurement: a path that delivers a burst as one aggregate shows no spread and is credited
+  with the rate asked for; the delay-based controller corrects it once the media follows
+  (`burst_estimate`). Tests: `rtci-interceptor/tests/probe_without_pacer.rs`.
+
+- **After an ICE restart onto a new path the default chain climbed at 8% a second** (in 0.1.0
+  too): bandwidth probing was told nothing of a path change. The estimator starts over at its
+  starting rate on a new selected pair (`PathChanged`, or
+  `CongestionControlHandle::notify_path_change`), but the probe controller kept what it had
+  noted of the old path. During an outage the estimator halves at every feedback timeout, and
+  each halving is a "large drop" that the probe after a drop asks about a second later: the
+  cluster for the rate before the last halving (133 kbit/s), asked into the dead path, still
+  awaited its result when the new pair was selected, held the controller's one slot through
+  the half second in which a cluster for an application-limited sender would have been due,
+  and no start-up cluster followed. On the capacity instrument's outage cell (a 4 s outage
+  ended by an ICE restart, the new path open at 2.5 Mbit/s, 200 calls) the target was back at
+  1 Mbit/s 15.1 s after the new pair and averaged 1504 kbit/s 15 to 25 s after it; with the
+  probe after a drop turned off, 1.0 s in 134 of the 200 calls and 12 to 13 s in the others. Now a
+  path change starts probing over as at the start of the call
+  (`ProbeController::on_path_change`, new): the start-up clusters again, at three and six
+  times the rate the estimator starts over at and on while the new path carries what is
+  asked, and the target's recent high, the drop below it and the cluster awaiting its result
+  are dropped with the old path (the fall to the starting rate is not a capacity drop).
+  libwebrtc does the same (`GoogCcNetworkController::OnNetworkRouteChange`:
+  `ProbeController::Reset`, then the exponential probes again). MEASURED on the same cell
+  (200 calls, hosted runs 45609964155 against 45607015088): 1 Mbit/s 0.8 s after the new pair
+  (1.02 s at most; no call slower) and the 2.5 Mbit/s maximum through the 15 to 25 s window;
+  with a receiver that has no bound on a gap the first new picture comes 2.3 s earlier in two
+  thirds of the calls (0.74 s after the new pair against 3.08 s on average). WHAT IT COSTS:
+  with the reference receiver (a gap given up after 300 ms) the first new picture comes
+  0.12 s later in those calls (0.70 s after the new pair against 0.58 s): the start-up
+  clusters share the first moments of the new path with the key frame. The chains without a
+  pacer were at 1 Mbit/s 0.5 s after the new pair before and are now (their probe after a
+  drop is off, so no cluster was outstanding). The OTHER direction gains in every chain:
+  the callee's target over the ten seconds after the new pair averages 1521 kbit/s against
+  507 with the pacer, and 1345 to 1367 against 395 without one. There the callee, which
+  selects the new pair 10 ms before the caller, loses its first cluster whole (nothing but
+  STUN crosses until both have switched); it used to ask for that one cluster only, and now
+  the next start-up cluster follows when the first is given up a second later. Every other
+  cell of the instrument is unchanged (4600 calls in fifteen cells, 0 differ). Tests:
+  `cc::probe::tests::a_path_change_starts_probing_over_and_forgets_the_drop`,
+  `the_fall_to_the_starting_rate_at_a_path_change_is_not_a_drop`,
+  `rtci-interceptor/tests/probing_across_a_path_change.rs`,
+  `libwebrtcs_probe_after_a_drop_is_not_asked_across_a_path_change`,
+  `tests/capacity_cap_video_rtc2rtc.rs::an_ice_restart_onto_an_open_path_finds_its_rate_within_a_second_in_the_default_chain`,
+  `::the_peer_that_selects_the_new_pair_first_finds_the_path_though_its_first_cluster_is_lost`.
 
 - **interceptor / GCC** (collapse-1): over-use that lasts through several feedback reports
   while a probe's measurement is held no longer multiplies the estimate by 0.85 on every
@@ -1441,6 +1971,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   green). The pacer now keeps the minimum that rode with the controller's last target and
   attaches it to its own announcements.
   `pacing.rs::the_target_the_pacer_announces_carries_the_controllers_minimum`.
+  Performance: breaker-2
 
 - **rtci (statistics): `availableOutgoingBitrate` survives `set_parameters` during a pacer
   pause** (`conf/breaker-2-pacer-ceased-flow`). `RTCRtpSender::set_parameters` divides the
@@ -1579,6 +2110,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 
+- **Stack copies of key material with either provider** (`conf/zeroize-1-dtls-srtp-key-erasure`;
+  RFC 7714 section 13.1): building a key object leaves copies in dead stack frames, and the
+  providers' own stack temporaries are not erased by them. The engine scrubs 32 KiB of stack
+  after building keyed objects (DTLS); the tests catch stack residue where it reaches the heap
+  (DTLS), and a copy deliberately moved onto the stack is not caught, so this is a measure,
+  not a tested guarantee (RFC7714-13.1-3 `partial`, class E). CORRECTED (this entry first
+  said the Linux process scan found none in dead worker stacks): building SRTP contexts DOES
+  leave keys in the dead stack frames of the thread that built them. Train 34's test
+  environment (rustc 1.99.1, run 45714962513) found, after the contexts were dropped, the
+  SRTCP encryption key and its AES round keys, the SRTCP HMAC-SHA1 states and the master key
+  (all ten profiles, ring; 120 key forms), in that thread's stack only, none in the heap; the
+  same sources fail in 20 of 20 runs inside the test-environment image and in 0 of 40 directly
+  on GitHub's Ubuntu runners (rustc 1.99.1 and 1.100.0): environment-dependent, the reason not
+  identified (`conf/zeroize-2b-claim-matches-proof`). The
+  copies stay until later calls on that thread overwrite them, or, after the thread ends,
+  until its cached stack is given to another thread. An application can build contexts on a
+  long-lived thread or call `crypto::scrub_stack()` from the frame that built them (it reaches
+  the 32 KiB below that frame only). The process-memory tests now fail on any key outside those
+  dead frames and print what they find inside them; the ignored
+  `known_limit_with_{ring,aws_lc}_building_an_srtp_context_leaves_keys_in_dead_stack_frames`
+  are the limit as tests (docs/test-exclusions.md). With the ring provider an RSA signing key keeps its
+  private limbs in ring's own heap allocations, which ring frees without erasure (not
+  measured). Until this branch, ring's AEAD, header-protection, HMAC, ECDHE and Ed25519/P-256
+  signing key objects were also left in freed memory; they are now erased (Security).
+
+- **the `Chrome` profile shows a stale picture after a capacity collapse** (red-2;
+  docs/capacity-collapse.md, "The Chrome profile keeps its backlog"). Its pacer row is
+  libwebrtc's (`pacer.queue-overflow` `Drain`): the backlog is never flushed, the source is
+  paused and the queued repairs are delivered in order. One direction of a 2.5 Mbit/s call
+  capped at 300 kbit/s, 1000 seeds, with the profile's RED video repaired (red-1, red-3,
+  red-2): oldest picture 5.5 s, older than 2 s for more than half a second in every call
+  (the default: 1.3 s, none); both directions capped 11.5 s against 2.6 s. Not a defect: the
+  profile with that one row set to `Drop` is at 1.46 s, the default with `Drain` at 6.6 s
+  (200 seeds). An application that wants the profile's other rows and a fresh picture sets
+  `DefaultInterceptorOptions::pacer_queue_overflow` to `Drop`. The four-profile table of
+  docs/capacity-instrument.md has the profile's column measured with the repairs.
 - **a sudden capacity drop, with the backlog flushed** (`conf/flush-1r-backlog-flush-at-collapse`,
   docs/capacity-collapse.md; 200 seeds per cell; this supersedes the default-chain figures of
   the entry below): the default chain now meets the picture and freeze requirements in the
@@ -1651,6 +2218,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **The SRTP process-memory tests use keys of their own per test and classify every hit by its
+  address** (`rtci-srtp/tests/key_erasure_process_memory.rs`, `conf/zeroize-2b-claim-matches-proof`).
+  A test thread computes the keys it looks for on its own stack; two tests looking for the same
+  keys could find each other's computations in a dead thread stack the C library had handed to
+  a later worker (10 of 50 runs with two tests per provider, runs 45726164797, 45726174061,
+  45726181744, 45726197738), the likely source of the one after-drop finding zeroize-1 left
+  unexplained (45641590609). The worker is given its master key in zeroizing heap buffers; a
+  hit in the worker's stack below its live frame is reported (`STACK RESIDUE`), any other
+  (heap, other mappings, the worker's live frame and TLS) fails the test, and the live-key
+  check now requires the key outside those dead frames. No engine code changed.
+
+- **The released-sections gate compares with the newest release tag that is an ancestor of the
+  commit**, not the newest tag in the repository (`scripts/check-changelog-released.py`). A
+  maintenance release of an earlier line, tagged on its own branch after this line's last
+  release (`v0.22.0+brainwires.5.1`, 2026-11-25), made the gate ask every tree of this line for
+  a section its history never had. In a shallow checkout the script fetches the history first;
+  `--tag` still names a tag outright. Tests: `scripts/test_check_changelog_released.py` (a
+  throwaway repository with a release on main and a newer tag on a side branch), run in CI
+  beside the gate.
+- **RFC 4585 section 4.2: receivers do not rely on a reaction to feedback; RFC 7714 section 13.1:
+  every key form searched for after the drop** (`conf/must-2-feedback-reliance-and-key-erasure`;
+  tests and audit only, no engine behaviour change). `tests/feedback_not_negotiated_rtc2rtc.rs`
+  and `sample_builder_gap_wait_test.rs::a_receiver_does_not_wait_for_feedback_the_sender_never_answers`:
+  with no feedback negotiated and a sender that reacts to nothing, the receiving engine sends no
+  feedback, audio is delivered in the `handle_read` that brought it, video after a loss is
+  delivered within `DEFAULT_MAX_GAP_WAIT` and decoding resumes at the sender's next scheduled key
+  frame (RFC4585-4.2-7 `tested`, out of class E). `rtci-srtp/tests/key_schedule_erasure.rs`
+  (freed Rust heap, every platform), `rtci-srtp/tests/key_erasure_process_memory.rs` (the whole
+  process, Linux) and `tests/dtls_srtp_keying_material_erasure.rs`: every key an SRTP context
+  derives, its AES round keys, GHASH key and HMAC-SHA1 states, computed by the tests themselves,
+  are found while alive and searched for after the drop (RFC7714-13.1-3 stays `partial`; class E
+  after `conf/zeroize-1-dtls-srtp-key-erasure`: see Security and Known limits).
+- **benchmarks compared on every pull request; a performance ledger**
+  (`conf/perf-1-ledger-and-bench-gate`): the pull-request job "Benchmarks compared with the
+  base" of `bench.yml` builds the pull request and its base on one runner and runs every
+  criterion bench of both in alternating rounds (`scripts/bench-compare.sh`), and fails when a
+  bench is slower in every round than the measured noise allows unless
+  `benches/accepted-regressions.toml` accepts it with a ledger row (`scripts/bench-compare.py`).
+  New benches: every DTLS 1.2 record cipher (AES-CCM, AES-CCM-8 and ChaCha20-Poly1305 added) and
+  a whole in-memory DTLS 1.2 handshake (`rtci-dtls/benches/record_protection.rs`); the pacer, the
+  NACK responder, GCC feedback handling and ULPFEC encoding (`rtci-interceptor/benches/interceptor.rs`).
+  The once-per-merge run that feeds the published history runs on pushes to master only and now
+  includes `rtci-dtls` and `rtci-interceptor`. `docs/performance.md` records every measured
+  performance decision (accepted, queued or refused) with its figures, guard and runs; a CHANGELOG
+  entry that moves a measured figure carries a line `Performance: <row id>`, and
+  `scripts/check-performance-ledger.py` holds the tags, the allowlist and the rows' files and
+  tests to the tree.
+  Performance: perf-1
+- **No test needs the public internet** (`conf/test-1-no-public-network`): on train 34
+  `rtci-turn`'s `test_client_with_stun_send_binding_request` sent a STUN Binding request to a
+  public Google server and blocked in `recv_from` with no timeout until CI cancelled the macOS
+  job after 90 minutes. It and `test_client_with_stun_send_binding_request_to_parallel` now ask a
+  STUN server on a loopback socket of the same process, which answers with the address it saw;
+  the tests still check that the client sends a Binding request and reads the server-reflexive
+  address from the response, now that it is the client's own address, and every read waits at
+  most 5 s, then fails naming what did not arrive. In all, 17 default tests sent packets to a
+  public STUN server: those two and fifteen `tests/*_interop.rs` files, whose upstream `webrtc`
+  peer resolved `stun.l.google.com`, sent Binding requests to it and waited for them in its
+  gathering. That peer has no STUN server now; both peers connect over host candidates on this
+  machine. The two QueryOnly tests of `tests/mdns_query_and_gather_interop.rs` had connected on
+  Windows only through that public server (the upstream server-reflexive socket, bound to the
+  unspecified address, was the one path to the rtc peer's loopback candidate): on Windows and
+  macOS their rtc peer now binds the mDNS egress address, as the QueryAndGather tests' already did
+  on Windows. The engine-side ICE server of the rtc2rtc and interop tests (configured, never
+  resolved: no test driver answers the engine's resolve command) is now `stun:stun.invalid:3478`
+  (RFC 6761), so nothing could be looked up even by a driver that answered. Two loopback TCP
+  reads in `tests/ice_tcp_active_passive.rs` are bounded. New gate `scripts/check-no-public-network-in-tests.py` (with its unit tests,
+  `cargo.yml` Test inventory job) fails on a test source that names a public STUN/TURN server or
+  connects, sends or resolves to an address off the machine; lines that only parse or configure
+  such a name are rows of `scripts/check-no-public-network-in-tests.allow`, each with its reason
+  and an exact count. Test and CI only; no engine change.
 
 - **capacity instrument: the recovery as an absolute figure, the start-up, a cap that stays**
   (`conf/instrument-4-absolute-recovery-and-long-cap`): new figures `to1000` (seconds from the

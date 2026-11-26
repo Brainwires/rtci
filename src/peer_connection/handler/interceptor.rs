@@ -2554,15 +2554,14 @@ impl<'a>
                 }
 
                 // A RED packet that held only ULPFEC travels the read leg emptied, so the
-                // interceptors that count sequence numbers see its number. It is not media, and
-                // an application has no use for a packet with nothing in it.
-                if packet
-                    .message
-                    .custom::<interceptor::UlpfecRepair>()
-                    .is_some()
-                {
-                    continue;
-                }
+                // interceptors that count sequence numbers see its number, and it is delivered
+                // so for the same reason: it took a sequence number of the media stream (RFC
+                // 5109 section 14.2 as browsers send it), and the receiver that puts frames
+                // together must not take that number for a missing media packet. A packet
+                // without a payload is present and is no media, as padding in the stream is
+                // (libwebrtc's receiver does the same with a FEC packet:
+                // `NotifyReceiverOfEmptyPacket`, video/rtp_video_stream_receiver2.cc:1603-1637
+                // at a222406d).
 
                 // What was read on a FEC session's transport (RFC 5109 section 14.1) and no
                 // interceptor took: FEC with no decoder in the chain, or that session's RTCP.
@@ -2930,9 +2929,11 @@ mod boundary_tests {
     }
 
     /// A FEC-only RED packet reaches the end of the chain as an emptied RTP packet marked
-    /// `UlpfecRepair`; media, marked or not, is delivered.
+    /// `UlpfecRepair`, and is delivered so: it has a sequence number of the media stream,
+    /// which the application's frame assembly must see as received. Media, marked or not, is
+    /// delivered.
     #[test]
-    fn a_fec_only_packet_does_not_reach_the_application() {
+    fn a_fec_only_packet_reaches_the_application_without_a_payload() {
         let mut ctx = connected();
         let mut chain = FakeChain::default();
         let mut stats = RTCStatsAccumulator::default();
@@ -2981,7 +2982,7 @@ mod boundary_tests {
                 delivered.push(packet.header.sequence_number);
             }
         }
-        assert_eq!(vec![1, 3], delivered);
+        assert_eq!(vec![1, 2, 3], delivered);
     }
 
     /// A per-packet attribute is chain business. `RecoveredByFec` tells the NACK generator not to

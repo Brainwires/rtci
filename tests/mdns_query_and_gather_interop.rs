@@ -40,7 +40,6 @@ use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine as WebrtcSettingEngine;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::ice::mdns::MulticastDnsMode as WebrtcMulticastDnsMode;
-use webrtc::ice_transport::ice_server::RTCIceServer as WebrtcIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection as WebrtcPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfiguration;
@@ -61,20 +60,24 @@ const MDNS_LOCAL_NAME: &str = "webrtc-rs-test-mdns.local";
 // the form browsers publish.
 const WEBRTC_MDNS_LOCAL_NAME: &str = "3f1c2b7e-9a4d-4e6f-8b21-5c0d7a9e1f34.local";
 
-/// The address the rtc peer binds, and hides behind its `.local` name, in the QueryAndGather
-/// tests.
+/// The address the rtc peer binds: in the QueryAndGather tests it hides it behind its `.local`
+/// name, in the QueryOnly tests it is the plain host candidate the upstream peer checks.
 ///
 /// The upstream ICE agent resolves a `.local` candidate to the source address of the mDNS answer
 /// (not its A record), and the upstream responder's A record is the address of its interface
 /// toward the querier. Both are the interface multicast to the mDNS group leaves by, which is a
-/// LAN interface, never loopback. On Linux a socket bound to 127.0.0.1 can still exchange
-/// datagrams with the host's own LAN addresses, so binding loopback works there. Windows refuses
-/// it (WSAENETUNREACH, os error 10051): the rtc peer could not reach the upstream peer's resolved
-/// candidates, and the upstream peer sent its checks to the rtc peer's name resolved to the LAN
-/// address, where nothing listened. On Windows the rtc peer therefore binds that interface's own
-/// address: the one a UDP socket connected to the mDNS group sends from.
-fn query_and_gather_bind_ip() -> std::net::IpAddr {
-    #[cfg(windows)]
+/// LAN interface, never loopback; the upstream peer gathers on that interface only (see
+/// `create_webrtc_peer`). On Linux a socket bound to 127.0.0.1 can still exchange datagrams with
+/// the host's own LAN addresses, so binding loopback works there. Windows refuses it
+/// (WSAENETUNREACH, os error 10051) and macOS too (EADDRNOTAVAIL): the rtc peer could not reach
+/// the upstream peer's candidates, and the upstream peer's checks to loopback could not leave
+/// its LAN-bound socket. There the rtc peer therefore binds that interface's own address: the
+/// one a UDP socket connected to the mDNS group sends from. (The QueryOnly tests bound loopback
+/// and connected on those systems only while the upstream peer had a public STUN server: its
+/// server-reflexive gathering socket, bound to the unspecified address, reached loopback. Without
+/// the internet that path is gone.)
+fn rtc_bind_ip() -> std::net::IpAddr {
+    #[cfg(any(windows, target_os = "macos"))]
     {
         match mdns_egress_ip() {
             Some(ip) => {
@@ -132,13 +135,9 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
         .with_setting_engine(setting_engine)
         .build();
 
-    let config = WebrtcRTCConfiguration {
-        ice_servers: vec![WebrtcIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    // No STUN server: both peers are on this machine and connect over host candidates; a
+    // public server would only make the test depend on the internet.
+    let config = WebrtcRTCConfiguration::default();
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
     Ok(peer_connection)
@@ -177,7 +176,7 @@ fn create_rtc_peer_with_mdns(
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.invalid:3478".to_owned()],
             ..Default::default()
         }])
         .build();
@@ -448,7 +447,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
     )?;
 
     // Create RTC peer (answerer) with QueryOnly mode
-    let pc_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
     let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
     log::info!("RTC peer bound to {}", local_addr);
@@ -609,7 +608,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
     )?;
 
     // Create RTC peer with QueryAndGather mode
-    let pc_socket = UdpSocket::bind((query_and_gather_bind_ip(), 0)).await?;
+    let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
     let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
 
@@ -717,7 +716,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
     log::info!("Starting mDNS QueryOnly test: sansio RTC (offerer) -> webrtc (answerer)");
 
     // Create RTC peer (offerer) with QueryOnly mode
-    let pc_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
     let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
 
@@ -893,7 +892,7 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
     log::info!("Starting mDNS QueryAndGather test: sansio RTC (offerer) -> webrtc (answerer)");
 
     // Create RTC peer (offerer) with QueryAndGather mode
-    let pc_socket = UdpSocket::bind((query_and_gather_bind_ip(), 0)).await?;
+    let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
     let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
 

@@ -135,6 +135,9 @@ pub struct Gcc {
     loss_at_queue_limit_is_overuse: bool,
     queue_limit: QueueLimitDetector,
     threshold_time_base: ThresholdTimeBase,
+    /// How the last feedback read the path (the detector's signal, over-use too for a loss
+    /// out of a queue at its limit).
+    usage: Usage,
 }
 
 impl Default for Gcc {
@@ -197,6 +200,7 @@ impl Gcc {
             loss_at_queue_limit_is_overuse: true,
             queue_limit: QueueLimitDetector::new(),
             threshold_time_base: ThresholdTimeBase::default(),
+            usage: Usage::Normal,
         }
     }
 
@@ -389,6 +393,7 @@ impl BandwidthEstimator for Gcc {
         if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
             usage = Usage::Over;
         }
+        self.usage = usage;
         let delay_target = self.delay_control.update(now, usage, received);
 
         // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
@@ -452,6 +457,14 @@ impl BandwidthEstimator for Gcc {
 
     fn min_bitrate(&self) -> Option<f64> {
         Some(self.min)
+    }
+
+    fn max_bitrate(&self) -> Option<f64> {
+        Some(self.max)
+    }
+
+    fn usage(&self) -> Usage {
+        self.usage
     }
 
     fn set_external_bounds(&mut self, min: Option<f64>, max: Option<f64>) {
@@ -524,6 +537,7 @@ impl BandwidthEstimator for Gcc {
         self.newest_arrival = None;
         self.queue_limit = QueueLimitDetector::new();
         self.delay_control.reset_convergence();
+        self.usage = Usage::Normal;
         self.feedback_deadline = None;
         self.target = self.initial.clamp(self.min, self.max);
         self.delay_control.set_target(self.target);
@@ -610,6 +624,57 @@ mod tests {
         assert!((twelve - 1_000_000.0).abs() < 1.0, "{twelve}");
         let long = resumed_after(Duration::from_secs(120));
         assert_eq!(long, 300_000.0, "down to the starting estimate, not below");
+    }
+
+    /// `usage` is the reading of the last feedback: normal at the start, over-use while
+    /// packets sent 10 ms apart arrive 40 ms apart (a growing queue, which lowers the target),
+    /// and not over-use once they arrive as they left.
+    #[test]
+    fn usage_follows_the_last_feedback() {
+        let epoch = Instant::now();
+        let mut gcc = Gcc::new(1_000_000.0, 100_000.0, 10_000_000.0);
+        assert_eq!(Usage::Normal, gcc.usage());
+        let mut id = 0u64;
+        let mut arrival_ms = 50u64;
+        let mut seen = false;
+        // Two seconds of a growing queue, a batch of ten packets every 100 ms.
+        for batch in 0..20u64 {
+            let reports: Vec<PacketReport> = (0..10u64)
+                .map(|n| {
+                    id += 1;
+                    arrival_ms += 40;
+                    report(
+                        id,
+                        epoch + Duration::from_millis(100 * batch + 10 * n),
+                        Some(arrival_ms),
+                    )
+                })
+                .collect();
+            gcc.on_reports(epoch + Duration::from_millis(100 * (batch + 1)), &reports);
+            seen |= gcc.usage() == Usage::Over;
+        }
+        assert!(seen, "a growing queue reads as over-use");
+        assert!(gcc.target_bitrate() < 1_000_000.0, "and lowers the target");
+        // Five seconds in which packets arrive as far apart as they left.
+        for batch in 20..70u64 {
+            let reports: Vec<PacketReport> = (0..10u64)
+                .map(|n| {
+                    id += 1;
+                    arrival_ms += 10;
+                    report(
+                        id,
+                        epoch + Duration::from_millis(100 * batch + 10 * n),
+                        Some(arrival_ms),
+                    )
+                })
+                .collect();
+            gcc.on_reports(epoch + Duration::from_millis(100 * (batch + 1)), &reports);
+        }
+        assert_ne!(
+            Usage::Over,
+            gcc.usage(),
+            "a queue that no longer grows does not"
+        );
     }
 
     /// Empty feedback says nothing and must not move anything.
