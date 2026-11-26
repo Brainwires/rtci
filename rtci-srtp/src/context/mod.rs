@@ -851,6 +851,26 @@ fn new_cipher(
     }
     profile.ensure_crypto_supported(crypto)?;
 
+    let cipher = crate::cipher::in_own_frames(|| {
+        build_cipher(profile, master_key, master_salt, crypto, rate, provider)
+    });
+    // Deriving the session keys and building their ciphers and MACs left the master key, the
+    // session keys, the AES key schedules and the HMAC-SHA1 states in the dead stack frames
+    // below this one (values moved out of a frame are not dropped there, and the providers'
+    // temporaries are not erased): overwrite them before returning (`crypto::scrub_stack`).
+    // Found after the drop in the worker thread's stack with rustc 1.99 (test-env, train 34).
+    crypto::scrub_stack();
+    cipher
+}
+
+fn build_cipher(
+    profile: ProtectionProfile,
+    master_key: &[u8],
+    master_salt: &[u8],
+    crypto: &dyn RTCCrypto,
+    rate: KeyDerivationRate,
+    provider: Option<Arc<dyn RTCCryptoProvider>>,
+) -> Result<Box<dyn Cipher>> {
     Ok(if profile.is_aead() {
         // `CipherAeadAesGcm::new` selects AES-128 vs AES-256 from the profile itself.
         Box::new(CipherAeadAesGcm::new(

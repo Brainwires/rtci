@@ -98,12 +98,26 @@ impl KeySource {
         let retained = self.retained.as_ref().ok_or_else(|| {
             Error::Other("SRTP session keys cannot be derived again: no master key retained".into())
         })?;
-        derive(
-            retained.provider.crypto(),
-            retained.master_key.as_ref(),
-            retained.master_salt.as_ref(),
-        )
+        let keys = in_own_frames(|| {
+            derive(
+                retained.provider.crypto(),
+                retained.master_key.as_ref(),
+                retained.master_salt.as_ref(),
+            )
+        });
+        // The derivation left the master key, the session keys and their schedules in the
+        // dead frames below this one: see `crypto::scrub_stack`.
+        crypto::scrub_stack();
+        keys
     }
+}
+
+/// Runs `build` in a frame of its own (never inlined into the caller), so that what building
+/// keyed objects leaves on the stack lies below the caller's frame, where
+/// [`crypto::scrub_stack`] called by the caller afterwards reaches it.
+#[inline(never)]
+pub(crate) fn in_own_frames<T>(build: impl FnOnce() -> T) -> T {
+    build()
 }
 
 /// The session keys of the key derivation epochs (`index DIV kdr`) in use: the latest one and
