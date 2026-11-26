@@ -322,3 +322,67 @@ fn a_remote_answer_while_answering_is_an_invalid_state_error() -> TestResult {
     }
     assert_refused_for_their_state(&cases)
 }
+
+/// W3C webrtc-pc 4.6.1 (`RTCSdpType` "rollback"): "An "answer" or "pranswer" cannot be rolled
+/// back." Once the answer is applied, on either side and through either method, a rollback is
+/// an `InvalidStateError` (RFC 9429 section 5.7: "once the answerer has performed
+/// setLocalDescription with its answer, this cannot be rolled back") and the descriptions the
+/// answer completed stay current. The pranswer half is
+/// `set_description_atomic_test.rs::a_rollback_is_refused_outside_the_offer_states`.
+#[test]
+fn an_applied_answer_cannot_be_rolled_back() -> TestResult {
+    use jsep_common::exchange;
+    use rtci::peer_connection::state::RTCSignalingState;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+
+    let mut wrong = vec![];
+    for (side, local) in [
+        ("offerer", true),
+        ("offerer", false),
+        ("answerer", true),
+        ("answerer", false),
+    ] {
+        let mut offerer = default_peer()?;
+        offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+        let mut answerer = default_peer()?;
+        exchange(&mut offerer, &mut answerer)?;
+        let pc = if side == "offerer" {
+            &mut offerer
+        } else {
+            &mut answerer
+        };
+        let before = (
+            pc.current_local_description().map(|d| d.sdp),
+            pc.current_remote_description().map(|d| d.sdp.clone()),
+        );
+        let rollback = RTCSessionDescription::rollback(None)?;
+        let result = if local {
+            pc.set_local_description(Instant::now(), rollback)
+        } else {
+            pc.set_remote_description(Instant::now(), rollback)
+        };
+        let after = (
+            pc.current_local_description().map(|d| d.sdp),
+            pc.current_remote_description().map(|d| d.sdp.clone()),
+        );
+        let how = if local { "local" } else { "remote" };
+        match result {
+            Ok(()) => wrong.push(format!("{side}, {how} rollback: accepted")),
+            Err(error) if error.dom_exception_name() != Some("InvalidStateError") => {
+                wrong.push(format!("{side}, {how} rollback: {error}"));
+            }
+            Err(_) => {}
+        }
+        if pc.signaling_state() != RTCSignalingState::Stable
+            || after != before
+            || before.0.is_none()
+        {
+            wrong.push(format!(
+                "{side}, {how} rollback: state {} or the current descriptions changed",
+                pc.signaling_state()
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    Ok(())
+}
