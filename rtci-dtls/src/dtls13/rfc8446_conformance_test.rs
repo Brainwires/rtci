@@ -635,7 +635,8 @@ fn a_second_client_hello_that_changes_the_suite_is_an_illegal_parameter() -> Res
 
 /// RFC 8446 section 4.1.3: the session id echo is what the client sent (nothing), the suite
 /// one it offered, the compression method zero; anything else is an illegal_parameter. The
-/// same for a HelloRetryRequest (section 4.1.4), and its legacy_version too.
+/// same for a HelloRetryRequest (section 4.1.4). Its legacy_version is ignored (section 4.2.1,
+/// the next test).
 #[test]
 fn a_server_hello_or_retry_request_with_wrong_fixed_fields_is_an_illegal_parameter() -> Result<()> {
     let changes: Vec<(&str, Box<dyn Fn(&mut Answer)>)> = vec![
@@ -652,10 +653,6 @@ fn a_server_hello_or_retry_request_with_wrong_fixed_fields_is_an_illegal_paramet
         (
             "compression",
             Box::new(|answer: &mut Answer| answer.compression = 1),
-        ),
-        (
-            "legacy_version",
-            Box::new(|answer: &mut Answer| answer.legacy_version = 0xfeff),
         ),
     ];
     let client =

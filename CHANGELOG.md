@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A DTLS 1.3 client ignores the ServerHello's legacy_version**
+  (`conf/dtls-29-server-hello-legacy-version-ignored`; RFC 8446 section 4.2.1: with
+  "supported_versions" present, "clients MUST ignore the ServerHello.legacy_version value and
+  MUST use only the "supported_versions" extension to determine the selected version"). A
+  ServerHello or HelloRetryRequest selecting DTLS 1.3 whose legacy_version was not {254, 253}
+  was refused with illegal_parameter; it is now taken by its supported_versions (RFC 9147 section
+  5.4's {254, 253} binds the server, which this one still sends). Found by the audit sweep
+  (audit row RFC8446-4.2.1-12, which was `tested` while its test asserted the refusal). New test
+  `rfc8446_conformance_test.rs::a_server_hello_or_retry_request_with_another_legacy_version_is_taken`;
+  the legacy_version case of the wrong-fixed-fields test is removed. Not breaking.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
