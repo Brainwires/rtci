@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full compound (RFC 5506 4.1 and 4.2.3; rows RFC5506-4.1-1, RFC5506-4.2.3-1), in the RTCP
   session and between two connections; RTCP for a section a later offer adds reaches the
   offerer on the RTP port before the answer (RFC 5761 5.1.1; row RFC5761-5.1.1-6). Each
-  mutation-checked. Open MUST rows 15 -> 12.
+  mutation-checked. Open MUST rows (this branch alone) 15 -> 12.
 - **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
   owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
   initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
