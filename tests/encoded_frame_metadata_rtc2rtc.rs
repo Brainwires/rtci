@@ -1603,3 +1603,237 @@ fn a_forwarder_routes_sframe_frames_by_the_dependency_descriptor_alone() -> Resu
     );
     Ok(())
 }
+
+/// One spatial layer's frame of picture `picture`: VP9 a frame (its first byte the frame
+/// marker, its last not a superframe marker); AV1 the layer's OBUs (a temporal delimiter in
+/// front of layer 0) with extension headers naming the layer.
+fn svc_layer_frame(mime: &str, picture: usize, spatial_id: u8, temporal_id: u8) -> Bytes {
+    let body: Vec<u8> = (0..1200usize)
+        .map(|i| ((i * 7 + picture * 13 + spatial_id as usize * 29) % 251) as u8)
+        .collect();
+    if mime == "video/VP9" {
+        let mut frame = vec![0x80 | spatial_id];
+        frame.extend_from_slice(&body);
+        frame.push(0);
+        return Bytes::from(frame);
+    }
+    let mut obus = vec![];
+    if spatial_id == 0 {
+        obus.extend([2 << 3 | 0b010, 0]);
+    }
+    // OBU_FRAME with an extension header and a two-byte leb128 size.
+    obus.extend([6 << 3 | 0b110, temporal_id << 5 | spatial_id << 3]);
+    obus.extend([0x80 | (body.len() & 0x7f) as u8, (body.len() >> 7) as u8]);
+    obus.extend_from_slice(&body);
+    Bytes::from(obus)
+}
+
+/// RFC 9605 section 6.1.3: "In order to support the SFU selectively removing layers, the
+/// sender MUST encapsulate each layer in a different SFrame ciphertext." Eight pictures of
+/// `mode` (two spatial layers) come out of the encoder as access units (a VP9 superframe, an
+/// AV1 temporal unit); `transform` refuses them whole, `transform_access_unit` gives one
+/// ciphertext per layer, each sent as its own frame with its own Dependency Descriptor. The
+/// receiving peer, as a forwarder with no key, drops spatial layer 1 for a receiver of layer 0
+/// and forwards both for one of layer 1; the end receiver decrypts what it is forwarded and
+/// `join_layer_frames` gives it, for each picture, exactly the layer-0 access unit (a decodable
+/// lower layer) or the encoder's unit byte for byte.
+fn a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc(
+    mime: &str,
+    mode_name: &str,
+) -> Result<()> {
+    use rtci::rtp::codec::dependency_descriptor::{
+        DecodeTargetSelector, DependencyDescriptorReader,
+    };
+    use rtci::rtp::codec::opaque::{OpaqueDepacketizer, OpaquePayloader};
+    use rtci::rtp::codec::svc::{ScalabilityMode, ScalabilityPattern};
+    use rtci::rtp::packetizer::{Depacketizer, Payloader};
+    use rtci::rtp_transceiver::sframe_transform::{
+        RTCRtpSFrameDecryptor, RTCRtpSFrameEncryptor, RTCSFrameType, join_layer_frames,
+    };
+    use rtci::sframe::CipherSuite;
+    use std::collections::BTreeMap;
+
+    const PICTURES: usize = 8;
+    let suite = CipherSuite::Aes128GcmSha256_128;
+    let key = [3u8; 16];
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    let (ssrc, pt, dd_id) = sender_stream(&mut world, sender, DEPENDENCY_DESCRIPTOR_URI);
+    let mode: ScalabilityMode = mode_name.parse()?;
+    assert_eq!(mode.spatial_layers(), 2);
+    let structure = ScalabilityPattern::dependency_structure(mode, Some((640, 360)));
+    let mut writer = DependencyDescriptorWriter::new(structure, 9)?;
+    let mut pattern = ScalabilityPattern::new(mode);
+    let mut encryptor = RTCRtpSFrameEncryptor::new(suite, RTCSFrameType::PerFrame)?;
+    encryptor.set_encryption_key(&key, 2)?;
+    encryptor.set_scalability(mime, Some(mode))?;
+
+    // Per picture (RTP timestamp): the encoder's access unit and its layer frames.
+    let mut pictures: BTreeMap<u32, (Bytes, Vec<Bytes>)> = BTreeMap::new();
+    let mut seq = 700u16;
+    for n in 0..PICTURES {
+        let frames = pattern.next_picture(n == 0);
+        let layers: Vec<Bytes> = frames
+            .iter()
+            .map(|f| svc_layer_frame(mime, n, f.spatial_id, f.temporal_id))
+            .collect();
+        let unit = if mime == "video/VP9" {
+            rtci::rtp::codec::vp9::join_superframe(&layers)?
+        } else {
+            Bytes::from(layers.concat())
+        };
+        assert!(
+            matches!(encryptor.transform(&unit), Err(Error::TypeError(_))),
+            "a unit of two layers is not one ciphertext"
+        );
+        let encrypted = encryptor.transform_access_unit(&unit)?;
+        assert_eq!(encrypted.len(), frames.len(), "one ciphertext per layer");
+        let timestamp = 3000 * n as u32;
+        let now = world.now;
+        for (layer, frame) in encrypted.into_iter().zip(&frames) {
+            assert_eq!(layer.spatial_id, frame.spatial_id);
+            let descriptor =
+                writer.next_frame(&frame.dependencies(), frame.starts_coded_video_sequence())?;
+            let payloads = OpaquePayloader.payload(1000, &Bytes::from(layer.ciphertext))?;
+            for (i, payload) in payloads.iter().enumerate() {
+                let last = i + 1 == payloads.len();
+                let mut header = Header {
+                    version: 2,
+                    payload_type: pt,
+                    sequence_number: seq,
+                    timestamp,
+                    ssrc,
+                    marker: last && frame.end_of_picture,
+                    ..Default::default()
+                };
+                header.set_extension_upgrading(dd_id, descriptor.packet(i == 0, last)?)?;
+                seq = seq.wrapping_add(1);
+                world.peers[0]
+                    .pc
+                    .rtp_sender(sender)
+                    .expect("sender")
+                    .write_rtp(
+                        now,
+                        rtci::rtp::Packet {
+                            header,
+                            payload: payload.clone(),
+                        },
+                    )?;
+            }
+        }
+        pictures.insert(timestamp, (unit, layers));
+        world.pump()?;
+        let next = world.now + Duration::from_millis(33);
+        world.run_until(next)?;
+    }
+
+    let mut received: Vec<rtci::rtp::Packet> = world.peers[1]
+        .read_rtp
+        .iter()
+        .filter(|p| p.header.ssrc == ssrc)
+        .cloned()
+        .collect();
+    received.sort_by_key(|p| p.header.sequence_number);
+    received.dedup_by_key(|p| p.header.sequence_number);
+    assert_eq!(
+        received.len(),
+        seq.wrapping_sub(700) as usize,
+        "every packet arrived"
+    );
+
+    // The forwarder (headers only, no key) and the end receiver (the key, and a replay
+    // window of its own per pass): the access unit the receiver rebuilds for each picture.
+    let forward_and_decrypt = |target: (u8, u8)| -> Result<(usize, BTreeMap<u32, Bytes>)> {
+        let mut reader = DependencyDescriptorReader::new();
+        let mut selector = DecodeTargetSelector::new(target.0, target.1);
+        let mut decryptor = RTCRtpSFrameDecryptor::new(suite)?;
+        decryptor.add_decryption_key(&key, 2)?;
+        let mut depacketizer = OpaqueDepacketizer::default();
+        let mut layers: BTreeMap<u32, Vec<Bytes>> = BTreeMap::new();
+        let mut forwarded = 0;
+        for packet in &received {
+            let element = packet
+                .header
+                .get_extension(dd_id)
+                .expect("every packet carries the descriptor");
+            let descriptor = reader
+                .read(&element)?
+                .expect("the structure came with the key frame");
+            if !selector.forward(&descriptor, &reader) {
+                continue;
+            }
+            forwarded += 1;
+            let unit = depacketizer.depacketize(&packet.payload)?;
+            if !unit.is_empty() {
+                let plaintext = decryptor
+                    .transform(&unit)
+                    .map_err(|e| anyhow::anyhow!("a forwarded layer does not decrypt: {e:?}"))?;
+                layers
+                    .entry(packet.header.timestamp)
+                    .or_default()
+                    .push(Bytes::from(plaintext));
+            }
+        }
+        let mut units = BTreeMap::new();
+        for (timestamp, layers) in layers {
+            units.insert(timestamp, join_layer_frames(mime, &layers)?);
+        }
+        Ok((forwarded, units))
+    };
+
+    let top_temporal = mode.temporal_layers() - 1;
+    let (forwarded, units) = forward_and_decrypt((0, top_temporal))?;
+    assert!(forwarded < received.len(), "spatial layer 1 was dropped");
+    assert_eq!(
+        units.len(),
+        PICTURES,
+        "every picture's lower layer was forwarded"
+    );
+    for (timestamp, unit) in &units {
+        let (_, layers) = &pictures[timestamp];
+        assert_eq!(unit, &layers[0], "the lower layer alone, at {timestamp}");
+        // A decodable lower layer: one VP9 frame, or a temporal unit of layer 0's OBUs only.
+        if mime == "video/VP9" {
+            assert_eq!(rtci::rtp::codec::vp9::split_superframe(unit)?.len(), 1);
+        } else {
+            let split = rtci::rtp::codec::av1::split_temporal_unit(unit)?;
+            assert_eq!(split.len(), 1);
+            assert_eq!(split[0].spatial_id, 0);
+        }
+    }
+
+    let (forwarded, units) = forward_and_decrypt((1, top_temporal))?;
+    assert_eq!(
+        forwarded,
+        received.len(),
+        "a receiver of layer 1 gets everything"
+    );
+    assert_eq!(
+        units,
+        pictures
+            .iter()
+            .map(|(timestamp, (unit, _))| (*timestamp, unit.clone()))
+            .collect::<BTreeMap<_, _>>(),
+        "the encoder's access units, byte for byte"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_forwarder_drops_spatial_layer_1_of_sframe_encrypted_vp9_l2t1() -> Result<()> {
+    a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc("video/VP9", "L2T1")
+}
+
+#[test]
+fn a_forwarder_drops_spatial_layer_1_of_sframe_encrypted_vp9_l2t3() -> Result<()> {
+    a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc("video/VP9", "L2T3")
+}
+
+#[test]
+fn a_forwarder_drops_spatial_layer_1_of_sframe_encrypted_av1_l2t1() -> Result<()> {
+    a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc("video/AV1", "L2T1")
+}
+
+#[test]
+fn a_forwarder_drops_spatial_layer_1_of_sframe_encrypted_av1_l2t3() -> Result<()> {
+    a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc("video/AV1", "L2T3")
+}

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Each spatial layer of an SVC picture is its own SFrame ciphertext** (RFC 9605 section
+  6.1.3: "the sender MUST encapsulate each layer in a different SFrame ciphertext";
+  `conf/sframe-2-svc-layer-per-ciphertext`; API additions only, nothing changes for an
+  application that declares no scalability mode). `RTCRtpSFrameEncryptor::set_scalability(codec,
+  mode)` declares the stream; with a mode of more than one spatial layer (VP9, AV1) `transform`
+  refuses an access unit that holds several layers (TypeError), `transform_access_unit` splits a
+  VP9 superframe or an AV1 temporal unit into its layers and encrypts each on its own
+  (`RTCSFrameLayer`), and `transform_layer_frame` encrypts one layer frame checked against its
+  Dependency Descriptor template. A receiver rebuilds the decoder's access unit from the layers it
+  was forwarded with `sframe_transform::join_layer_frames`. New in rtci-rtp:
+  `codec::vp9::split_superframe` / `join_superframe` (VP9 bitstream specification Annex B) and
+  `codec::av1::split_temporal_unit` (`Av1LayerData`). Temporal layers need no split: a temporal
+  layer is a whole picture. Tests, rtc to rtc
+  (`tests/encoded_frame_metadata_rtc2rtc.rs::a_forwarder_drops_spatial_layer_1_of_sframe_encrypted_{vp9,av1}_{l2t1,l2t3}`):
+  a forwarder with no key drops spatial layer 1 by the Dependency Descriptor and the receiver
+  decrypts exactly the layer-0 access unit of every picture. RFC9605-6.1.3-1 `tested` (was
+  `missing`, open-must class D).
+
 ### Testing
 
 - **A forwarder routes SFrame-encrypted frames by the Dependency Descriptor alone** (RFC 9605

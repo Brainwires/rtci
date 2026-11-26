@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5752; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5089.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5083 of 5089 (99.9 %).
-- Tested as the default (`tested`): 5050 of 5089 (99.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 6: 1 untested, 3 partial, 2 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5084 of 5089 (99.9 %).
+- Tested as the default (`tested`): 5051 of 5089 (99.3 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 5: 1 untested, 3 partial, 1 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 1 | 0 |
 | C | partly implemented | 2 | 0 |
-| D | not implemented | 2 | 0 |
+| D | not implemented | 1 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 7 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 39 | 26 |
+| all | | 38 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 5 rows, 3 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 4 rows, 3 of size S, 1 of size M, 0 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -40,7 +40,6 @@ become `setting` only if such a cell is named, or close when the default changes
 | ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 
 ## Rows
 
@@ -78,7 +77,6 @@ Sorted by class, then owner, size and ID.
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)` | S | media (media-25) |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
-| RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Measured: every SRTP and DTLS key is left in no freed heap block (Linux, macOS, Windows; both providers, ring's key objects in ErasedOnDrop) and nowhere in process memory on Linux outside the dead stack frames of the thread that built the contexts. Not met: stack copies left by the compiler or provider. Found in train 34's test environment (rustc 1.99.1, run 45714962513): SRTCP encryption key, its round keys, SRTCP HMAC-SHA1 states and the master key in the dead stack frames of the thread that built the contexts (20 of 20 runs in the test-env image, 0 of 40 on GitHub's Ubuntu runners: environment-dependent); reported, not asserted; known_limit_*_building_an_srtp_context_leaves_keys_in_dead_stack_frames (ignored). scrub_stack runs where DTLS builds keys (zeroize m13); a copy moved onto the stack is seen by no test (zeroize2 m3, m5 survive): not guaranteed. Closes by an engine-side observation of stack residue, or the owner reading the clause as not binding stack temporaries | M | dtls-srtp / crypto |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
