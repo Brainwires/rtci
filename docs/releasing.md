@@ -167,6 +167,14 @@ expected before the first publish and says nothing about the crate. The dry runs
 finish without errors; warnings about example and test targets "not included in the published
 package" are the root crate's `include` at work.
 
+The version is on the wire: the engine's default STUN SOFTWARE is `rtci-ice <version>`
+(`rtci-ice/src/agent/mod.rs`, `DEFAULT_SOFTWARE`), so a version change changes the size of every
+STUN packet and can move capacity figures. It did at the rename (train 18) and at
+0.2.0: `rtci-ice 0.2.0-dev` (18 bytes, 20 padded) became `rtci-ice 0.2.0` (14 bytes, 16 padded),
+which re-drew 2931 of the instrument's 3200 rows (capacity-compare run 45690259846; every
+requirement met on both sides). The release pull request re-records
+`tests/fixtures/capacity-instrument-baseline.tsv` on the bumped tree (ledger row `release-0.2.0`).
+
 ## Publish
 
 Either the whole workspace in one command, in dependency order, stopping at the first failure:

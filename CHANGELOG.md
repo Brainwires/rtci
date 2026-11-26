@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
+clause-by-clause conformance work (the audit's open MUST rows down to 7, none a violation, and
+no SHOULD row marked violated), and defaults of the congestion and repair path under which, in
+the capacity instrument's measured cells (`tests/capacity_instrument.rs`, figures in
+`docs/performance.md`), a call through a sudden capacity drop, an outage or a slow path keeps a
+recent picture and its audio.
+
+- **Breaking changes** (below, each with its migration): the NACK responder declines repairs
+  that cannot be useful and gives a video stream up after a halving of the target; the default
+  pacer discards queued video at a collapse; `SampleBuilder` gives a gap up after 300 ms; the
+  RTP circuit breaker restarts a ceased flow; a ULPFEC packet in a RED stream reaches the
+  application without a payload; new public fields on several configuration structs; the stream
+  driver runs on an injected async runtime and loses some auto traits.
+- **Security**: key material in rtci-dtls, rtci-srtp and rtci-crypto is erased when no longer
+  needed, with both providers; `Display` and `Debug` no longer print keys.
+- **Known limits** (below): both directions capped at once, a deep queue on the path, copies of
+  SRTP keys in the dead stack frames of the thread that built the context, the `Chrome`
+  profile's picture after a collapse, and the recovery after a deep cap without the opt-in
+  probing.
+- The engine's STUN SOFTWARE text is `rtci-ice 0.2.0`, 4 bytes shorter than master's
+  `rtci-ice 0.2.0-dev`: every STUN packet is 4 bytes shorter, which re-draws the capacity
+  instrument's seeds (performance ledger row `release-0.2.0`).
+
 ### Security
 
 - **Key material left in freed memory by rtci-dtls, rtci-srtp and rtci-crypto is now erased**
@@ -244,8 +269,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
   `new_tie_breaker_on_restart` (both off by default, see "Added"). A struct literal of either
   adds `..Default::default()` or the field set to `false`.
-- **workspace**: the version on `master` is `0.2.0-dev` (every crate, and every requirement on
-  a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
+- **workspace**: this release is 0.2.0 (every crate, and every requirement on a workspace
+  crate; `master` carried `0.2.0-dev` until the release): it takes changes that 0.1.0 users
   cannot take without a change of their own. Each such change is listed here. Git dependents
   that need the 0.1 API pin the tag `v0.1.0` or use the crates.io release.
 - **interceptor** (fec-1): `StreamInfo` has a new public field, `fec_session` (ULPFEC in an RTP
