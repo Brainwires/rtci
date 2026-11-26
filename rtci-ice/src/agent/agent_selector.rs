@@ -2105,6 +2105,7 @@ impl Agent {
     pub(crate) fn update_checklist_failure(&mut self, now: Instant) {
         if self.connection_state != ConnectionState::Checking
             || self.selected_pair.is_some()
+            || self.pac_running(now)
             || !self.remote_end_of_candidates
             || !self.local_gathering_complete
             || !self.mdns_queries.is_empty()
@@ -2125,6 +2126,26 @@ impl Agent {
             );
             self.update_connection_state(Some(now), ConnectionState::Failed);
         }
+    }
+
+    /// Whether the PAC timer (RFC 8863 Section 4, "Patiently Awaiting Connectivity") of a full
+    /// agent is running at `now`. It starts when ICE processing begins (`start`: the peer's
+    /// credentials are in, candidates or not), and "while the timer is still running, the ICE
+    /// agent MUST NOT update a checklist state from Running to Failed, even if there are no
+    /// pairs left in the checklist to check": a check from the peer can still make a
+    /// peer-reflexive pair (RFC 8445 Section 7.3.1.3) when the agent has no pair (the peer
+    /// signalled no candidate, or none the agent can use; RFC 8863 Sections 3.1, 3.2) or only
+    /// failed ones (Section 3.3), and Section 5 keeps it so after end-of-candidates. Its
+    /// length is the RECOMMENDED one, "equal to the agent's connectivity check transaction
+    /// timeout, including all retransmissions": `Rc` requests from the 500 ms RTO and `Rm`
+    /// RTOs after the last, 39.5 s with the defaults.
+    pub(crate) fn pac_running(&self, now: Instant) -> bool {
+        if self.lite {
+            return false;
+        }
+        let rc = u32::from(self.max_binding_requests.clamp(1, 16));
+        let pac = MIN_RTO * ((1u32 << (rc - 1)) - 1 + STUN_RM);
+        now < self.start_time + pac
     }
 
     /// A lite agent's keepalive (RFC 8445 Section 11): it sends no Binding requests, so when

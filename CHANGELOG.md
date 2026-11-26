@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ICE waits for the peer's checks before failing a checklist: the PAC timer of RFC 8863**
+  (`conf/ice-29-pac-timer`; RFC 8863 sections 4 and 5, updating RFC 8445 section 7.2.5.4 and
+  RFC 8838 section 8; reported from code reading by a consumer, deno_webrtc). A full agent
+  whose checklist was empty (the peer signalled no candidate, or none it could use) or whose
+  pairs had all failed at once failed the moment both sides had signalled end-of-candidates,
+  although the peer, which has our candidates, could still check us and form a peer-reflexive
+  pair (RFC 8445 section 7.3.1.3); the check then reached a failed agent. RFC 8863: "While the
+  timer is still running, the ICE agent MUST NOT update a checklist state from Running to
+  Failed, even if there are no pairs left in the checklist to check", and the session is not
+  failed either. The timer starts with the checks and lasts the transaction timeout (the
+  RECOMMENDED length: `Rc` requests and `Rm` RTOs, 39.5 s with the defaults; 8 s with one
+  request). **Behaviour change**: a session that never finds a pair fails at 39.5 s instead of
+  at once (nothing usable) or at 30 s (the checking timeout); a lite agent is unchanged. No API
+  change. Tests `agent_checklist_test.rs::an_empty_checklist_after_end_of_candidates_waits_for_the_peers_check_and_connects`,
+  `an_empty_checklist_that_no_check_fills_fails_when_the_pac_timer_expires`; the ice-27 tests
+  now expect the failures at the timer (`an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_with_the_pac_timer`,
+  renamed from `..._at_once`).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

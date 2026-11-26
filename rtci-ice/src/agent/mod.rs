@@ -2020,7 +2020,8 @@ impl Agent {
     /// The peer has no more candidates for this generation (an end-of-candidates indication,
     /// RFC 8838 Section 14). Remote candidates signalled after it are ignored, and a checking
     /// agent whose pairs have all failed (or that has none) fails without waiting for its
-    /// timeout, once local gathering is complete too, unless a check from the peer may still
+    /// timeout, once local gathering is complete too and the PAC timer has expired (RFC 8863:
+    /// 39.5 s after checking began, with the defaults), unless a check from the peer may still
     /// form a pair (a `tcptype active` candidate of the peer that dials ours, a `.local` name
     /// not resolved): then its timeout ends it. An ICE restart starts a new generation.
     pub fn set_remote_end_of_candidates(&mut self) {
@@ -2916,13 +2917,15 @@ impl Agent {
             // only once nothing is left that may still produce a selected pair (RFC 8445
             // Sections 6.1.4.2 and 8.1.2: the checklist fails when every pair has failed). A
             // pair that is still being checked fails by its own transaction (Section 14.3), a
-            // nomination by `expire_unanswered_nomination`.
+            // nomination by `expire_unanswered_nomination`. Nor while the PAC timer runs (RFC
+            // 8863 Section 4: no Failed checklist, no Failed session, before it expires).
             if self.failed_timeout != ZERO_DURATION
                 && now
                     .checked_duration_since(self.checking_duration)
                     .unwrap_or_else(|| Duration::from_secs(0))
                     > self.disconnected_timeout + self.failed_timeout
                 && !self.checks_in_progress(now)
+                && !self.pac_running(now)
             {
                 self.update_connection_state(Some(now), ConnectionState::Failed);
                 self.last_connection_state = self.connection_state;
