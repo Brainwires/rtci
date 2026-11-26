@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `Chrome` profile offers the audio level header extensions in the clear**
+  (`conf/profile-4-chrome-rows-audio-level-and-ice-completed`; governed row
+  `rtp.audio-level-encryption`, RFC 8834 sections 5.2.2 and 5.2.3, RFC 6904 section 4.1). New
+  `DefaultInterceptorOptions::audio_level_encryption` (additive: the struct is
+  `#[non_exhaustive]`): `BestEffort` under `Rfc`, `StrictRfc` and `Performance` (unchanged:
+  RFC 8834 makes the encryption RECOMMENDED unless disabled through API or signalling),
+  `Clear` under `Chrome`, as libwebrtc offers an extension encrypted only when the application
+  sets its capability's `preferred_encrypt` (pc/media_session.cc @ a222406d). The reason
+  `docs/behaviour-profiles.md` gave was wrong: Chromium's `kWebRtcEncryptedRtpHeaderExtensions`
+  is enabled by default (peer_connection_features.cc @ Chromium 8dafa8bc), so encryption is
+  available in Chrome, only not asked for by default. Answers are unchanged in every profile
+  (the encrypted form an offer has is taken, RFC 6904 section 4.1).
+- `docs/behaviour-profiles.md` section 3 (not expressible): ICE `completed`. Chrome never
+  reports it for RTCIceTransport and reports it for iceConnectionState only on the
+  controlling side by libwebrtc's own criterion, always after `connected`; the engine follows
+  W3C webrtc 5.6.4 (selected pair, fresh consent, both ends of candidates).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
