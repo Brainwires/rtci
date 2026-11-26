@@ -755,8 +755,28 @@ fn late(world: &World) -> Vec<(String, Option<Duration>)> {
 /// released (`OnTurnAllocationReleased` for the first socket), again without loss.
 #[test]
 fn a_rolled_back_rotation_keeps_the_old_allocation_and_a_later_restart_releases_it() -> Result<()> {
+    rolled_back_rotation(true)
+}
+
+/// The same with both sockets bound from the start: the engine starts the new generation's
+/// links only once the restart offer is applied, so it withdraws the old relayed candidate
+/// from the new session, after the agent took its snapshot for a rollback. The rollback
+/// restores the old session without that withdrawal, and the engine has to withdraw the
+/// candidate again (on its next `start_turn_links`), or the later restart carries it into its
+/// session, nominates it again, and never releases the old allocation.
+#[test]
+fn a_rotation_rolled_back_after_its_links_started_still_releases_the_old_allocation_later()
+-> Result<()> {
+    rolled_back_rotation(false)
+}
+
+fn rolled_back_rotation(second_socket_while_staged: bool) -> Result<()> {
     use rtci::peer_connection::sdp::RTCSessionDescription;
-    let (mut world, _) = connected(&[A_HOST])?;
+    let (mut world, _) = if second_socket_while_staged {
+        connected(&[A_HOST])?
+    } else {
+        connected(&[A_HOST, A_HOST_2])?
+    };
     let first_relay = world
         .server
         .allocations
@@ -777,10 +797,12 @@ fn a_rolled_back_rotation_keeps_the_old_allocation_and_a_later_restart_releases_
         .rotate_ice_servers(now, vec![turn_server(&user)?])?;
     world.trickle = false;
     let offer = world.peers[0].pc.create_offer(None)?;
-    world.peers[0].addrs.push(a(A_HOST_2));
-    world.peers[0]
-        .pc
-        .add_local_candidate(Peer::host(a(A_HOST_2))?)?;
+    if second_socket_while_staged {
+        world.peers[0].addrs.push(a(A_HOST_2));
+        world.peers[0]
+            .pc
+            .add_local_candidate(Peer::host(a(A_HOST_2))?)?;
+    }
     world
         .log
         .push((world.now, "step: A applies the restart offer".to_owned()));
