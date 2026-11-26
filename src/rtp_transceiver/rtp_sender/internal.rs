@@ -534,6 +534,30 @@ impl RTCRtpSenderInternal {
     /// what was negotiated: one of the send codecs, or any before negotiation. A coding that
     /// names no codec, or one that was not negotiated, leaves the encoding's codec alone (the
     /// envelope `replaceTrack` stays in). The SSRCs and rids are the sender's and stay.
+    /// W3C `replaceTrack`: whether a track with `codings` "can be sent immediately by the
+    /// sender without violating the sender's already-negotiated envelope". The engine encodes
+    /// nothing, so what it can see of the envelope is the codec each coding says its source
+    /// produces: every coding that names one must name a codec of [[SendCodecs]] by mime type,
+    /// clock rate and channel count (webrtc-pc: "Sources that also encode ... might be unable
+    /// to produce the negotiated codec", "An audio track having a different number of
+    /// channels"). A coding without a codec, or a sender with nothing negotiated, is within it.
+    pub(crate) fn within_negotiated_envelope(&self, codings: &[RTCRtpEncodingParameters]) -> bool {
+        if self.send_codecs.is_empty() {
+            return true;
+        }
+        let same = |a: u32, b: u32| a == 0 || b == 0 || a == b;
+        codings.iter().all(|coding| {
+            let codec = &coding.codec;
+            codec.mime_type.is_empty()
+                || self.send_codecs.iter().any(|negotiated| {
+                    let n = &negotiated.rtp_codec;
+                    n.mime_type.eq_ignore_ascii_case(&codec.mime_type)
+                        && same(n.clock_rate, codec.clock_rate)
+                        && same(u32::from(n.channels), u32::from(codec.channels))
+                })
+        })
+    }
+
     pub(crate) fn adopt_coding_codecs(&mut self, codings: &[RTCRtpEncodingParameters]) {
         for (i, encoding) in self.send_encodings.iter_mut().enumerate() {
             let rid = &encoding.rtp_coding_parameters.rid;

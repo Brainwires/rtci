@@ -137,6 +137,19 @@ impl RTCPeerConnection {
         if transceiver.stopped() {
             return Err(Error::InvalidStateError);
         }
+        // "If sending is true, and withTrack is not null, determine if withTrack can be sent
+        // immediately by the sender without violating the sender's already-negotiated
+        // envelope, and if it cannot ... InvalidModificationError" (W3C replaceTrack).
+        let sending = matches!(
+            transceiver.current_direction(),
+            RTCRtpTransceiverDirection::Sendrecv | RTCRtpTransceiverDirection::Sendonly
+        );
+        if sending
+            && let (Some(track), Some(sender)) = (track.as_ref(), transceiver.sender())
+            && !sender.within_negotiated_envelope(track.codings())
+        {
+            return Err(Error::InvalidModificationError);
+        }
 
         let Some(track) = track else {
             if let Some(sender) = self.rtp_transceivers[id].sender_mut()
