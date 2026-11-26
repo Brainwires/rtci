@@ -3,7 +3,7 @@
 use super::send_buffer::SendBuffer;
 use super::stream_supports_nack;
 use crate::Interceptor;
-use crate::cc::probe::{ProbePacket, ProbeRequest};
+use crate::cc::probe::{ProbePacket, ProbeRequest, ProbeUnsent};
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
@@ -1407,11 +1407,13 @@ impl NackResponderInterceptor {
             .filter(|stream| stream.last_sent.is_some())
             .max_by_key(|stream| stream.last_sent.map(|(_, at)| at))
         else {
+            self.probe_unsent(now, request, fill, session);
             return;
         };
         let (Some(ssrc_rtx), Some(pt_rtx), Some((newest, _))) =
             (stream.ssrc_rtx, stream.payload_type_rtx, stream.last_sent)
         else {
+            self.probe_unsent(now, request, fill, session);
             return;
         };
 
@@ -1424,6 +1426,7 @@ impl NackResponderInterceptor {
             .cloned()
             .or_else(|| stream.probe_template.clone())
         else {
+            self.probe_unsent(now, request, fill, session);
             return;
         };
 
@@ -1462,6 +1465,30 @@ impl NackResponderInterceptor {
                 transport: TransportContext::default(),
                 message,
             });
+        }
+    }
+
+    /// Tells the congestion controller that nothing here could pad `request`'s cluster, when
+    /// no pacer took it either (`fill` absent: the pacer adds [`ProbeFill`](crate::ProbeFill)
+    /// to every request and sends a cluster from the media it holds): no packet leaves for the
+    /// cluster ([`ProbeUnsent`]). The controller then counts it as never asked for and asks
+    /// again once a stream that can carry it has sent, instead of waiting a second for a
+    /// result and spending a start-up cluster on it (the first audio packet of a call asks
+    /// before the video, whose RTX stream carries the padding, has sent).
+    fn probe_unsent(
+        &mut self,
+        now: Instant,
+        request: &ProbeRequest,
+        fill: Option<usize>,
+        session: Option<usize>,
+    ) {
+        if fill.is_none() {
+            self.write_queue.push_back(
+                ProbeUnsent {
+                    cluster: request.cluster,
+                }
+                .into_packet(now, session),
+            );
         }
     }
 

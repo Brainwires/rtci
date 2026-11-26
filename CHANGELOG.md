@@ -25,6 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asked for. Paced chains are unchanged (their clusters are answered). Test:
   `rtci-interceptor/tests/probe_without_pacer.rs::
   a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing`.
+- **Probing without a pacer: a start-up cluster nothing could carry is not spent**
+  (`conf/probe-3-start-up-sequence-waits-for-a-carrier`). After the probe-1 fix above a call
+  whose audio sent first still lost its first start-up cluster: it was asked for with the
+  first audio packet, no packet left for it, and the next one was asked for only when its
+  result was given up a second later (1 Mbit/s after 1.07 s, against 0.37 s when the video
+  sends first). An audio-only call spent both start-up clusters that way and never probed
+  when video was added (RFC 8836 section 2, requirement 4: adapt "at the start of a flow").
+  Now the NACK responder, when no pacer took a cluster's request and it has no stream with an
+  RTX stream that has sent to pad on, tells the congestion controller so (a control message
+  on the write leg that the controller takes out of the chain), and the controller counts the
+  cluster as never asked for: its place in the start-up sequence and the spacing to the next
+  cluster are owed again, and nothing is asked for until a stream is bound or sends its first
+  packet. The video's first packet then asks for the first start-up cluster, which leaves as
+  padding on its RTX stream at once. A chain that never has a stream to pad on (video without
+  RTX) asks once and no more, as before. Paced chains are unchanged: the pacer adds `ProbeFill`
+  to every request, and the responder says nothing then. Tests:
+  `rtci-interceptor/tests/probe_without_pacer.rs::
+  a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing` (now: asked for again
+  at the video's first packet, 10 ms in) and
+  `video_added_to_an_audio_call_is_probed_for_with_its_first_packet`,
+  `cc::probe::tests::a_cluster_that_left_no_packet_is_asked_for_again_at_once`;
+  `tests/probe_start_order_rtc2rtc.rs` audio-first bounds tightened from 1.5 s / 2 s to
+  0.5 s / 1 s.
 
 ### Testing
 

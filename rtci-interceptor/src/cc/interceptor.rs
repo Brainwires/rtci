@@ -3,8 +3,8 @@
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::probe::{
-    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate,
-    probe_estimate,
+    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, ProbeUnsent,
+    burst_estimate, probe_estimate,
 };
 use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
@@ -1115,6 +1115,20 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         }
     }
 
+    /// `cluster` left no packet ([`ProbeUnsent`]): it is counted as never asked for, and no
+    /// cluster is asked for until a stream is bound or sends its first packet (one that can
+    /// carry it may then be there). A chain that never has one (video without an RTX stream,
+    /// no pacer) asks once and no more, as it does when a result times out.
+    fn on_probe_unsent(&mut self, cluster: u32) {
+        let Some(probing) = self.probing.as_mut() else {
+            return;
+        };
+        if probing.on_unsent(cluster) {
+            self.probe_asked = None;
+            self.probe_unanswered = true;
+        }
+    }
+
     /// The estimator's floor, to ride with an announced target ([`crate::MinimumTarget`]).
     fn minimum_attribute(&self) -> Option<Attribute> {
         self.estimator.min_bitrate().map(|bits_per_second| {
@@ -1248,6 +1262,12 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // The NACK responder had nothing to pad a cluster with, and no pacer sent it: the
+        // cluster was never sent. Taken out of the chain here, where it was asked for.
+        if let Some(unsent) = msg.message.custom::<ProbeUnsent>().copied() {
+            self.on_probe_unsent(unsent.cluster);
+            return Ok(());
+        }
         if let Some(control) = msg.message.custom::<TmmbrControl>().copied() {
             let own_ssrc = self.own_ssrc();
             self.tmmbr_requests.on_control(control, own_ssrc);
