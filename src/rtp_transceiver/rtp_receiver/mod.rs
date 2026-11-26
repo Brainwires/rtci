@@ -588,7 +588,12 @@ impl RTCRtpReceiver<'_> {
                         stream.remote_capture_instant(frame.rtp_timestamp, clock_rate, capture_ntp)
                     });
             };
+        // RFC 8834 section 10: only an extension the section negotiated for receiving is read.
+        let reads = |uri: &str| self.receiver().reads_header_extension(uri);
         let extension_payloads = |uri: &str| -> Vec<bytes::Bytes> {
+            if !reads(uri) {
+                return vec![];
+            }
             let (id, audio, video) = media_engine.get_header_extension_id(
                 crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
                     uri: uri.to_owned(),

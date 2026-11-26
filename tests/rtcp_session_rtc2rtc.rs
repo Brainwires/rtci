@@ -252,9 +252,19 @@ impl Peer {
     /// report in the two seconds around the end of a month, and the process's clock would
     /// make what the tap shows depend on when the test runs.
     fn tapped(addr: &str, every_ssrc: bool) -> Result<(Self, Tap)> {
+        Self::tapped_with(addr, |options| {
+            options.rtcp_report_from_every_ssrc = every_ssrc
+        })
+    }
+
+    /// [`tapped`](Self::tapped), the default interceptor options changed by `edit`.
+    fn tapped_with(
+        addr: &str,
+        edit: impl FnOnce(&mut DefaultInterceptorOptions),
+    ) -> Result<(Self, Tap)> {
         let mut media_engine = Self::media_engine(false)?;
         let mut options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
-        options.rtcp_report_from_every_ssrc = every_ssrc;
+        edit(&mut options);
         options.wall_clock = Some(SystemInstant::at(
             Instant::now(),
             Duration::from_secs(1_700_000_000),
@@ -1985,5 +1995,120 @@ fn every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_with
             }
         }
     }
+    Ok(())
+}
+
+/// RFC 8834 section 10 ("implementations are REQUIRED to ignore unknown RTCP packets and RTP
+/// header extensions"), RFC 8285 section 4.1.2: what the interceptors read from a received
+/// stream's header extensions is what its section signals. Transport-wide congestion control
+/// (both sides `CongestionFeedback::Twcc`) is negotiated and the receiver reports on the
+/// sender's transport-wide sequence numbers; a later offer leaves the extension out on its way
+/// to the receiver, whose answer then has none, and the sender (whose copy of the answer
+/// still lists it) keeps numbering its packets. The receiver no longer reads them: it sends no
+/// transport-wide feedback.
+#[test]
+fn transport_wide_feedback_stops_when_the_section_no_longer_signals_its_extension() -> Result<()> {
+    use rtci::peer_connection::configuration::interceptor_registry::CongestionFeedback;
+    use rtci::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+    use rtci::sdp::extmap::TRANSPORT_CC_URI;
+
+    let twcc = |options: &mut DefaultInterceptorOptions| {
+        options.congestion_feedback = CongestionFeedback::Twcc;
+    };
+    let (offerer, _) = Peer::tapped_with("10.0.0.1:5000", twcc)?;
+    let (answerer, tap) = Peer::tapped_with("10.0.0.2:5000", twcc)?;
+    let (mut world, sender) = World::connected_peers([offerer, answerer])?;
+    let feedback_since = |tap: &Tap, from: usize| -> usize {
+        let tap = tap.lock().expect("tap");
+        tap.iter()
+            .skip(from)
+            .filter_map(|left| match left {
+                Left::Rtcp(packets) => Some(packets),
+                Left::Rtp(_) => None,
+            })
+            .flatten()
+            .filter(|packet| packet.as_any().is::<TransportLayerCc>())
+            .count()
+    };
+    world.send_media(sender, FIRST_SEQ, 50)?;
+    assert!(
+        feedback_since(&tap, 0) > 0,
+        "the receiver sends transport-wide feedback while the extension is negotiated"
+    );
+    let id = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .find(|e| e.uri == TRANSPORT_CC_URI)
+        .map(|e| e.id)
+        .expect("the transport-wide sequence number is negotiated");
+
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    let without: String = offer
+        .sdp
+        .split("\r\n")
+        .filter(|line| !(line.starts_with("a=extmap:") && line.contains(TRANSPORT_CC_URI)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    world.peers[1].pc.set_remote_description(
+        now,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(without)?,
+    )?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    assert!(
+        !answer.sdp.contains(TRANSPORT_CC_URI),
+        "the receiver's answer leaves it out"
+    );
+    let with: String = answer
+        .sdp
+        .split("\r\n")
+        .flat_map(|line| {
+            let mut lines = vec![line.to_owned()];
+            if line.starts_with("a=mid:") {
+                lines.push(format!("a=extmap:{id} {TRANSPORT_CC_URI}"));
+            }
+            lines
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    world.peers[0].pc.set_remote_description(
+        now,
+        rtci::peer_connection::sdp::RTCSessionDescription::answer(with)?,
+    )?;
+    world.pump()?;
+    // Feedback on what arrived before is let go.
+    let settle = world.now + Duration::from_millis(500);
+    world.run_until(settle)?;
+    let mark = tap.lock().expect("tap").len();
+
+    world.send_media(sender, FIRST_SEQ + 50, 100)?;
+    assert!(
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .any(|e| e.uri == TRANSPORT_CC_URI),
+        "the sender still numbers its packets"
+    );
+    assert_eq!(
+        0,
+        feedback_since(&tap, mark),
+        "transport-wide feedback after the section stopped signalling the extension"
+    );
     Ok(())
 }

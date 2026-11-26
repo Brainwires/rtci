@@ -435,6 +435,7 @@ impl RTCRtpTransceiverInternal {
         }
         if let Some(receiver) = self.receiver.as_mut() {
             receiver.invalidate_parameters();
+            receiver.set_negotiated_header_extensions(self.negotiated_header_extensions.clone());
         }
     }
 
