@@ -411,8 +411,9 @@ over SRTP and is subject to none of SCTP's flow control.
   `configure_ulpfec` (opt-in, not in the default codecs)
 - **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
   encoder, decoder or playout are left out, not reported as 0)
-- **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
-  bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
+- **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC and RFC 8888 feedback,
+  bandwidth estimation (GCC) with a pacer, the RTP circuit breaker and key-frame requests by default; the jitter buffer, FlexFEC and ULPFEC are opt-in.
+  The encoder's target: `register_default_interceptors_with_handles` (`DefaultInterceptorHandles::congestion_control`) or `RTCRtpSender::target_bitrates`
 - **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
