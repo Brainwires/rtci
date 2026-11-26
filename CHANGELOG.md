@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Tests for three MUST rows the audit sweep found untested (`conf/must7-2-sdp-cname-msid-rtcp-mux-lines`;
+  no engine change): every SSRC of a generated description has one `cname` line (RFC 5576 6.1;
+  row RFC5576-6.1-4), the `a=msid` lines of a section carry one appdata, also when a repeated
+  pair is made unique (RFC 8830 2; row RFC8830-2-3), and every RTP section of a BUNDLE group
+  has `a=rtcp-mux` (RFC 8859 4.3; row RFC8859-4.3-2). Each mutation-checked. Open MUST rows (this branch alone)
+  15 -> 12.
 - **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
   owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
   initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
