@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5073 of 5088 (99.7 %).
-- Tested as the default (`tested`): 5041 of 5088 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 15: 8 untested, 4 partial, 3 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5071 of 5088 (99.7 %).
+- Tested as the default (`tested`): 5039 of 5088 (99.0 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 17: 8 untested, 6 partial, 3 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 8 | 2 |
-| C | partly implemented | 4 | 1 |
+| C | partly implemented | 6 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 47 | 28 |
+| all | | 49 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 14 rows, 12 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 16 rows, 12 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -38,6 +38,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
+| jsep | 0 | 2 | 0 | 0 | 0 | 2 | 0 | 2 | 0 |
 | jsep (running) | 2 | 1 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -86,6 +87,8 @@ Sorted by class, then owner, size and ID.
 | RFC8834-10-5 | `rfc8834.md` | Ignore unknown RTCP packets and header extensions not signalled | untested | B | A test that a received header extension that was not signalled is ignored (unknown RTCP is tested under RFC3550-6.1-12) (audit-2 sweep) | S | rtp |
 | RFC5576-6.1-4 | `rfc5576.md` | cname appears at most once per ssrc-id in a media stream | untested | B | A test counting cname lines per ssrc-id in a generated description (audit-2 sweep) | S | sdp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
+| RFC9429-5.2.2-15 | `rfc9429.md` | a=rid lines of present transceivers stay the same | partial | C | W3C webrtc-pc 4.4.1.6 removes the encodings of rids an answer rejected, so the next offer drops their a=rid lines (JSEP: MUST stay the same); the W3C form is the default. Closes as conflict with a setting that keeps offering the rejected rids, and its mutation-checked test (jsep5 follow-up 3) | M | jsep |
+| RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | partial | C | As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3) | M | jsep |
 | RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
@@ -101,7 +104,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-53 rows: 15 of class B, 17 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+51 rows: 13 of class B, 17 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -114,8 +117,6 @@ Sorted by class, then owner, size and ID.
 | RFC8852-5-2 | `rfc8852.md` | The identifiers have integrity and source authentication | B | tested |
 | RFC9335-4-5 | `rfc9335.md` | Subsequent offers / answers use the same procedure for including the ... | B | tested |
 | RFC9335-5-2 | `rfc9335.md` | With two-byte extensions, the id carried in "appbits" (value 256) is ... | B | tested |
-| RFC9429-5.2.2-15 | `rfc9429.md` | a=rid lines of present transceivers stay the same | B | tested |
-| RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | B | tested |
 | RFC9429-5.5-1 | `rfc9429.md` | setLocal(offer) only in stable or have-local-offer | B | tested |
 | RFC9429-5.5-2 | `rfc9429.md` | setLocal(pranswer or answer) only in have-remote-offer or ... | B | tested |
 | RFC9429-5.5-3 | `rfc9429.md` | Wrong type for the state: stop with an error | B | tested |

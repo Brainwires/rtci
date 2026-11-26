@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have-remote-offer and have-local-pranswer (5.6-2, which stays `tested`). Each is refused with
   the state check's InvalidStateError and the signaling state unchanged. No violation found. Open
   MUST rows 20 -> 15. No engine change.
+- RFC9429-5.2.2-15 / 5.2.2-16 `tested` -> `partial` (`conf/jsep-82-narrowed-rids-and-answer-rollback`):
+  a specification conflict without a setting. An answer that rejects a rid makes the sender drop
+  that encoding (W3C webrtc-pc "set the RTCSessionDescription": "remove the dictionaries that
+  correspond to the missing layers"; the simulcast envelope "may be narrowed"), so the next offer
+  has no a=rid line for it and a narrower a=simulcast line, where RFC 9429 section 5.2.2 says both
+  "MUST stay the same". The W3C form is the default; until a setting re-offers the rejected rids
+  the rows cannot be `conflict` (open-must class C). WEBRTC-4.6.1-5 ("An answer or pranswer
+  cannot be rolled back") now names its tests, with a new one for the answer half
+  (`jsep_w3c_errors.rs::an_applied_answer_cannot_be_rolled_back`). Open MUST rows 15 -> 17. No
+  engine change.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
