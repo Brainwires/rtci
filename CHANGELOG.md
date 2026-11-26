@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Re-send local candidates after an ICE restart; a re-sent packet keeps its transport-wide
+  number** (`conf/docs-4-ice-restart-candidates-twcc-note`; docs only). README "Feeding ICE
+  Candidates": the restarted generation keeps its local candidates by default and does not
+  announce them again, so the application signals them to the peer again (a peer reached only
+  through a relay otherwise selects no pair in the new generation). Audit row TWCC-2.2-3
+  (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 2, "+1 for each packet"): notes
+  the deliberate exception that a byte-identical re-send keeps its number, for SRTP's one
+  packet per index (RFC 3711 3.3.1, RFC 7714 8.1).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

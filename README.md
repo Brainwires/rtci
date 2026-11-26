@@ -359,6 +359,11 @@ Remote candidates arrive over your signaling channel and go in through `add_remo
 description to have been set first. For `srflx` and `relay` candidates, set `RTCIceCandidateInit::url` to the
 STUN/TURN server the candidate was gathered from so it is attributed correctly in `getStats`.
 
+After an ICE restart, send your local candidates to the peer again: a candidate the engine kept across the restart is
+not announced again, and without them a peer reached only through a relay never selects a pair in the new generation.
+(The restarted generation keeps its local candidates by default;
+`SettingEngineBuilder::with_discard_local_candidates_during_ice_restart(true)` drops them instead.)
+
 ## Back-Pressure
 
 `poll_read` is the throttle. Undrained data-channel messages leave bytes in SCTP's reassembly queue, which lowers the
