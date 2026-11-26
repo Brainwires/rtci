@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
+clause-by-clause conformance work (the audit's open MUST rows down to 7, none a violation, and
+no SHOULD row marked violated), and defaults of the congestion and repair path under which, in
+the capacity instrument's measured cells (`tests/capacity_instrument.rs`, figures in
+`docs/performance.md`), a call through a sudden capacity drop, an outage or a slow path keeps a
+recent picture and its audio.
+
+- **Breaking changes** (below, each with its migration): the NACK responder declines repairs
+  that cannot be useful and gives a video stream up after a halving of the target; the default
+  pacer discards queued video at a collapse; `SampleBuilder` gives a gap up after 300 ms; the
+  RTP circuit breaker restarts a ceased flow; a ULPFEC packet in a RED stream reaches the
+  application without a payload; new public fields on several configuration structs; the stream
+  driver runs on an injected async runtime and loses some auto traits.
+- **Security**: key material in rtci-dtls, rtci-srtp and rtci-crypto is erased when no longer
+  needed, with both providers; `Display` and `Debug` no longer print keys.
+- **Known limits** (below): both directions capped at once, a deep queue on the path, copies of
+  SRTP keys in the dead stack frames of the thread that built the context, the `Chrome`
+  profile's picture after a collapse, and the recovery after a deep cap without the opt-in
+  probing.
+- The engine's STUN SOFTWARE text is `rtci-ice 0.2.0`, 4 bytes shorter than master's
+  `rtci-ice 0.2.0-dev`: every STUN packet is 4 bytes shorter, which re-draws the capacity
+  instrument's seeds (performance ledger row `release-0.2.0`).
+
 ### Security
 
 - **Key material left in freed memory by rtci-dtls, rtci-srtp and rtci-crypto is now erased**
@@ -244,8 +269,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
   `new_tie_breaker_on_restart` (both off by default, see "Added"). A struct literal of either
   adds `..Default::default()` or the field set to `false`.
-- **workspace**: the version on `master` is `0.2.0-dev` (every crate, and every requirement on
-  a workspace crate): the next release is 0.2.0, and `master` takes changes that 0.1.0 users
+- **workspace**: this release is 0.2.0 (every crate, and every requirement on a workspace
+  crate; `master` carried `0.2.0-dev` until the release): it takes changes that 0.1.0 users
   cannot take without a change of their own. Each such change is listed here. Git dependents
   that need the 0.1 API pin the tag `v0.1.0` or use the crates.io release.
 - **interceptor** (fec-1): `StreamInfo` has a new public field, `fec_session` (ULPFEC in an RTP
@@ -2218,6 +2243,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outage without the pacer meets the resume requirement (0 of 200).
 
 ### Testing
+
+- **The browser loss-recovery cells no longer depend on who wins a NACK race**
+  (`scripts/test-env/interop/scenarios.spec.mjs`, `common.mjs`, `examples/interop-peer`;
+  `conf/test-2-firefox-loss-cells-count-repairs-without-the-race`; test harness only, no engine
+  change). "loss recovery: NACK and RTX repair a browser's video under netem" asserted that the
+  browser received RTX from Rust while netem dropped only the browser-to-Rust leg. The reflecting
+  peer sends back the browser's packets under their own sequence numbers, so each such loss is a
+  gap toward the browser too, and the browser's NACK for it crosses the same netem as the
+  browser's own RTX of it: about 93% of those NACKs reached Rust before the packet did, so there
+  was nothing to resend and the packet reached the browser as a late original. Firefox then
+  counted no retransmission in about 1 run in 40, on the 0.2.0 release head and before nack-11
+  alike (test-env run 45796440553; 40-run loops 45805447289 and 45805457083: 0 give-ups, 2337 of
+  the 2338 NACKed packets Rust held answered). The cell now also drops what Rust sends
+  (`impairFromRust`, netem on the Rust host), and asserts Rust's `retransmittedPacketsSent` as
+  well as the browser's `retransmittedBytesReceived`. The reflecting peer now passes key-frame
+  requests for what it sends back on to the browser's encoder (a PLI for the source SSRC, at
+  most one per 200 ms), as a forwarder does: "loss recovery with the browser's SSRCs
+  unsignalled" failed in 3 of 80 Firefox loop runs (and in 45796440553) with its decoder waiting, after one late packet,
+  for the encoder's own next key frame (29 requests reached Rust, none went on).
 
 - **The SRTP process-memory tests use keys of their own per test and classify every hit by its
   address** (`rtci-srtp/tests/key_erasure_process_memory.rs`, `conf/zeroize-2b-claim-matches-proof`).

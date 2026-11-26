@@ -71,7 +71,7 @@ in the repository's [issues](https://github.com/Brainwires/rtci/issues), securit
 
 ```toml
 [dependencies]
-rtci = "0.1"
+rtci = "0.2"
 ```
 
 The crates use Rust edition 2024; the minimum supported Rust version is 1.89 (`rust-version` in the manifests,
@@ -84,10 +84,10 @@ Cargo features are **additive**: enabling both builds, and `ring` is preferred w
 
 ```toml
 # Default: the ring provider, no C toolchain required.
-rtci = "0.1"
+rtci = "0.2"
 
 # aws-lc-rs instead (pulls in the aws-lc-sys C toolchain).
-rtci = { version = "0.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtci = { version = "0.2", default-features = false, features = ["crypto-aws-lc-rs"] }
 ```
 
 There is **no process-global provider to install**. The provider is selected per peer connection through
@@ -531,7 +531,7 @@ The engine is the root crate, `rtci`; each protocol is a crate of its own, usabl
 
 These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
 `rtci-signal`, the examples' signalling helper; `rtci-video`, the video pipeline (in development, not part of
-the 0.1.0 release); the fuzz crates, the benchmark and the test environment's peers.
+the 0.2.0 release); the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 

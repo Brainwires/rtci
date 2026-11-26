@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "rtci-crypto"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "aes 0.8.4",
  "ccm 0.5.0",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "rtci-dtls"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "bytecheck",
  "byteorder",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "rtci-ice"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "rtci-mdns"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "log",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "rtci-shared"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "bitflags 1.3.2",
  "bytes",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "rtci-stun"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
