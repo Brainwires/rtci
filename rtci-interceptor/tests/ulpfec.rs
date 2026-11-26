@@ -21,8 +21,14 @@ const FEC_PT: u8 = 127;
 /// The RED carriage with FEC in RED packets of its own (libwebrtc's form), which most of these
 /// tests are about. The builder's default is the form of RFC 5109 14.2 (FEC with the next media
 /// packet); tests of that say so with `with_red_placement`.
+///
+/// These tests are about blocks, written with packets that seldom carry a marker bit, so the
+/// FEC follows each block (`with_fec_after_frame(false)`); the default, FEC behind the frame's
+/// last packet, has tests of its own below.
 fn red_builder() -> UlpfecSendBuilder {
-    UlpfecSendBuilder::red(RED_PT, FEC_PT).with_red_placement(RedPlacement::OwnPacket)
+    UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        .with_red_placement(RedPlacement::OwnPacket)
+        .with_fec_after_frame(false)
 }
 
 fn stream_info(mime_type: &str, separate_fec: bool) -> StreamInfo {
@@ -516,10 +522,163 @@ fn a_fec_only_packet_goes_on_emptied_and_marked_so_its_sequence_number_is_seen()
         wire[4].header.sequence_number,
         packet.header.sequence_number
     );
-    assert_eq!(FEC_PT, packet.header.payload_type);
+    assert_eq!(
+        MEDIA_PT, packet.header.payload_type,
+        "under the payload type of the stream's media, as padding in the stream would be"
+    );
     assert!(
         packet.payload.is_empty(),
         "no FEC octets travel on as media"
+    );
+    assert!(!packet.header.marker);
+}
+
+/// Before any media of the stream arrived there is no media payload type to go under: the
+/// emptied packet keeps the FEC payload type.
+#[test]
+fn a_fec_only_packet_ahead_of_any_media_goes_on_under_the_fec_payload_type() {
+    let now = Instant::now();
+    let mut sender = red_sender(red_builder().with_num_media_packets(2));
+    let wire = send(
+        &mut sender,
+        now,
+        &[media(1, 0, false, 10), media(2, 0, false, 10)],
+    );
+    let mut receiver = red_receiver(UlpfecReceiveBuilder::red(RED_PT, FEC_PT));
+    let delivered = receive(&mut receiver, now, &wire[2..]);
+    let repair: Vec<_> = delivered
+        .iter()
+        .filter(|message| message.custom::<UlpfecRepair>().is_some())
+        .collect();
+    assert_eq!(1, repair.len());
+    assert_eq!(FEC_PT, rtp_of(repair[0]).header.payload_type);
+    assert!(rtp_of(repair[0]).payload.is_empty());
+}
+
+// --- FEC packets of their own follow the frame's last packet ---
+
+/// A frame of `count` packets from `first`, the marker bit on the last.
+fn frame(first: u16, count: u16, timestamp: u32) -> Vec<rtp::Packet> {
+    (0..count)
+        .map(|index| media(first + index, timestamp, index + 1 == count, 60))
+        .collect()
+}
+
+/// What is on the wire, as `M` (a RED packet whose block is media) and `F` (FEC).
+fn shape(wire: &[rtp::Packet]) -> String {
+    wire.iter()
+        .map(|packet| {
+            if packet.payload[0] & 0x7F == FEC_PT {
+                'F'
+            } else {
+                'M'
+            }
+        })
+        .collect()
+}
+
+/// libwebrtc's placement (`ulpfec_generator.cc:134,157-159` at a222406d: FEC is produced at a
+/// packet that completes a frame): a frame of seven packets in blocks of three gets its three
+/// FEC packets behind its last packet, in the next sequence numbers, with the frame's
+/// timestamp and no marker; no sequence number inside the frame is a FEC packet's. Each FEC
+/// packet protects the block it would have followed.
+#[test]
+fn fec_packets_of_their_own_follow_the_last_packet_of_the_frame() {
+    let builder = || {
+        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+            .with_red_placement(RedPlacement::OwnPacket)
+            .with_num_media_packets(3)
+            .with_num_fec_packets(1)
+            .with_flush_on_marker(true)
+    };
+    let mut packets = frame(100, 7, 3000);
+    packets.extend(frame(107, 2, 6000));
+    let mut chain = red_sender(builder());
+    let wire = send(&mut chain, Instant::now(), &packets);
+
+    assert_eq!("MMMMMMMFFFMMF", shape(&wire));
+    assert_eq!(
+        (100..113).collect::<Vec<u16>>(),
+        wire.iter()
+            .map(|p| p.header.sequence_number)
+            .collect::<Vec<_>>(),
+        "one sequence space, without a gap or a repeat"
+    );
+    assert!(wire[6].header.marker, "the frame's last media packet");
+    for (fec, (sn_base, mask)) in wire[7..10]
+        .iter()
+        .zip([(100, 0b111), (103, 0b111), (106, 0b1)])
+    {
+        assert_eq!(3000, fec.header.timestamp);
+        assert!(!fec.header.marker);
+        let parsed = UlpfecPacket::parse(&fec.payload[1..]).unwrap();
+        assert_eq!(sn_base, parsed.sn_base);
+        assert_eq!(mask, parsed.levels[0].mask);
+    }
+    let last = UlpfecPacket::parse(&wire[12].payload[1..]).unwrap();
+    assert_eq!(110, last.sn_base, "the second frame, numbered past the FEC");
+    assert_eq!(6000, wire[12].header.timestamp);
+
+    // The same FEC packets, block by block, when they follow their blocks instead.
+    let mut interleaved = red_sender(builder().with_fec_after_frame(false));
+    let wire = send(&mut interleaved, Instant::now(), &packets);
+    assert_eq!("MMMFMMMFMFMMF", shape(&wire));
+}
+
+/// Any single loss of the frame is still rebuilt from the FEC behind it.
+#[test]
+fn a_frame_with_its_fec_behind_it_is_rebuilt_whatever_packet_is_lost() {
+    let packets = frame(100, 7, 3000);
+    for lost in 0..7 {
+        let now = Instant::now();
+        let mut sender = red_sender(
+            UlpfecSendBuilder::red(RED_PT, FEC_PT)
+                .with_red_placement(RedPlacement::OwnPacket)
+                .with_num_media_packets(3)
+                .with_flush_on_marker(true),
+        );
+        let wire = send(&mut sender, now, &packets);
+        let arriving: Vec<rtp::Packet> = wire
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != lost)
+            .map(|(_, packet)| packet.clone())
+            .collect();
+        let mut receiver = red_receiver(UlpfecReceiveBuilder::red(RED_PT, FEC_PT));
+        let delivered = receive(&mut receiver, now, &arriving);
+        let media: Vec<_> = delivered
+            .iter()
+            .filter(|message| !rtp_of(message).payload.is_empty())
+            .collect();
+        assert_eq!(7, media.len(), "packet {lost} lost");
+        let rebuilt: Vec<_> = media
+            .iter()
+            .filter(|message| message.has(&Attribute::RecoveredByFec))
+            .collect();
+        assert_eq!(1, rebuilt.len());
+        assert_same_packet(&packets[lost], rtp_of(rebuilt[0]));
+    }
+}
+
+/// A stream that never sets the marker bit is still protected: the FEC held back leaves once
+/// `ULPFEC_MAX_HELD_FEC_PACKETS` packets of it have gathered.
+#[test]
+fn a_stream_without_marker_bits_gets_its_fec_when_enough_has_gathered() {
+    let mut chain = red_sender(
+        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+            .with_red_placement(RedPlacement::OwnPacket)
+            .with_num_media_packets(1)
+            .with_num_fec_packets(1),
+    );
+    let held = rtci_interceptor::ULPFEC_MAX_HELD_FEC_PACKETS;
+    let packets: Vec<_> = (0..held as u16)
+        .map(|index| media(100 + index, 3000, false, 20))
+        .collect();
+    let wire = send(&mut chain, Instant::now(), &packets);
+    assert_eq!(2 * held, wire.len());
+    assert_eq!(
+        format!("{}{}", "M".repeat(held), "F".repeat(held)),
+        shape(&wire)
     );
 }
 
@@ -1313,7 +1472,10 @@ fn the_carriage_is_the_one_the_description_negotiated() {
     );
 
     let mut chain = negotiated_sender(
-        UlpfecSendBuilder::stream().with_red_placement(RedPlacement::OwnPacket),
+        UlpfecSendBuilder::stream()
+            .with_red_placement(RedPlacement::OwnPacket)
+            // The packets carry no marker bit: the FEC follows its block.
+            .with_fec_after_frame(false),
         false,
         &[
             (MEDIA_PT, "video/VP8"),

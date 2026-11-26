@@ -15,13 +15,22 @@ use std::time::Instant;
 
 /// Marks an RTP packet that carried only FEC in a RED stream.
 ///
-/// Such a packet has a sequence number of the media stream. The interceptors application-ward of
-/// the FEC decoder (the NACK generator, the receiver report, the arrival recorders) count
-/// sequence numbers, so the packet is passed on to them, with its payload removed and this
-/// attached as [`Attribute::Custom`], instead of being swallowed: swallowed, it would read as a
-/// lost media packet and be asked for again. It is not media. Whatever sits at the end of the
-/// chain drops it: `rtci`'s peer connection does, and an application driving a chain itself checks
-/// `message.custom::<UlpfecRepair>()`.
+/// Such a packet has a sequence number of the media stream. Whoever counts the stream's
+/// sequence numbers must see that number as received: the interceptors application-ward of the
+/// FEC decoder (the NACK generator, the receiver report, the arrival recorders), and the
+/// receiver that puts frames together, for which a number that never arrives is a missing
+/// media packet (a frame with one inside it is never complete; one between two frames is
+/// waited for). So the packet is passed on, with its payload removed and this attached as
+/// [`Attribute::Custom`], instead of being swallowed. It is not media: it goes on as a packet
+/// **without a payload**, under the payload type of the stream's media (the primary block of
+/// the last media packet; the FEC payload type before any media arrived), with the FEC
+/// packet's sequence number, timestamp and no marker. That is what a padding packet of
+/// libwebrtc's looks like, and what libwebrtc's own receiver makes of a FEC packet
+/// (`video/rtp_video_stream_receiver2.cc:1603-1612` at a222406d, "Notify video_receiver about
+/// received FEC packets to avoid NACKing these packets": `NotifyReceiverOfEmptyPacket`, which
+/// is `PacketBuffer::InsertPadding` and the NACK module's `OnReceivedPacket`, `:1622-1637`).
+/// `rtci`'s peer connection delivers it to the application so; an application driving a chain
+/// itself can tell it by `message.custom::<UlpfecRepair>()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UlpfecRepair;
 
@@ -143,8 +152,9 @@ impl UlpfecReceiveBuilder {
     }
 
     /// Whether a RED packet that held only FEC is passed on, emptied and marked
-    /// [`UlpfecRepair`], so the interceptors behind this one see its sequence number (the
-    /// default), or swallowed here.
+    /// [`UlpfecRepair`], so the interceptors behind this one and the receiver that puts frames
+    /// together see its sequence number (the default), or swallowed here: its sequence number
+    /// is then a missing packet to them.
     pub fn with_repair_forwarding(mut self, forward_repair: bool) -> Self {
         self.forward_repair = forward_repair;
         self
@@ -187,6 +197,7 @@ impl UlpfecReceiveBuilder {
             reported: HashMap::new(),
             repair_to_media: HashMap::new(),
             media_transport: HashMap::new(),
+            media_payload_type: HashMap::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
         }
@@ -237,6 +248,9 @@ pub struct UlpfecReceiveInterceptor {
     /// packet is media of that stream, and the FEC may have come over another transport (a
     /// FEC session of its own, RFC 5109 section 14.1).
     media_transport: HashMap<u32, shared::TransportContext>,
+    /// The payload type of each protected stream's last media packet, which a FEC-only packet
+    /// of the stream goes on under, emptied ([`UlpfecRepair`]).
+    media_payload_type: HashMap<u32, u8>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -396,7 +410,13 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
                     }
                     None => {
                         if self.forward_repair {
-                            rtp_packet.header.payload_type = fec_payload_type;
+                            // Present, and no media: no payload, under the media's payload
+                            // type, as padding in the stream would be.
+                            rtp_packet.header.payload_type = self
+                                .media_payload_type
+                                .get(&ssrc)
+                                .copied()
+                                .unwrap_or(fec_payload_type);
                             rtp_packet.payload = Bytes::new();
                             msg.message.add(Attribute::Custom(Arc::new(UlpfecRepair)));
                             self.read_queue.push_back(msg);
@@ -418,6 +438,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
             None => recovered.extend(decoder.push_media(rtp_packet)),
         }
         self.media_transport.insert(ssrc, transport);
+        self.media_payload_type
+            .insert(ssrc, rtp_packet.header.payload_type);
         self.read_queue.push_back(msg);
         self.queue_recovered(now, transport, recovered);
         self.report(now, transport, ssrc);
@@ -515,6 +537,7 @@ impl Interceptor for UlpfecReceiveInterceptor {
         self.in_red.remove(&info.ssrc);
         self.reported.remove(&info.ssrc);
         self.media_transport.remove(&info.ssrc);
+        self.media_payload_type.remove(&info.ssrc);
         self.zeroed_extensions.remove(&info.ssrc);
         self.repair_to_media
             .retain(|_, (media, _)| *media != info.ssrc);

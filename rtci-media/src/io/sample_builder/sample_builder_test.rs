@@ -921,7 +921,8 @@ pub fn test_sample_builder() {
                 Sample {
                     // First sample
                     data: bytes!(1, 2, 3),
-                    duration: Duration::from_secs(0),
+                    // Until the next media: the packets without a payload start no sample.
+                    duration: Duration::from_secs(1),
                     packet_timestamp: 1,
                     prev_dropped_packets: 0,
                     ..Sample::new(now)
@@ -1035,7 +1036,8 @@ pub fn test_sample_builder() {
                 Sample {
                     // First sample
                     data: bytes!(1, 2, 3),
-                    duration: Duration::from_secs(0),
+                    // Until the next media: the packets without a payload start no sample.
+                    duration: Duration::from_secs(2),
                     packet_timestamp: 1,
                     prev_dropped_packets: 0,
                     ..Sample::new(now)
@@ -1170,7 +1172,8 @@ pub fn test_sample_builder() {
                 Sample {
                     // First sample
                     data: bytes!(1, 2),
-                    duration: Duration::from_secs(0),
+                    // Until the next media: the packets without a payload start no sample.
+                    duration: Duration::from_secs(1),
                     packet_timestamp: 1,
                     prev_dropped_packets: 0,
                     ..Sample::new(now)
