@@ -64,12 +64,25 @@ fn selected(a: &Agent) -> Option<SocketAddr> {
 // --- RFC 8445 Sections 6.1.1, 6.2, 8.2: two lite agents ---
 
 fn lite_agent(now: Instant, controlling: bool, remotes: &[Candidate]) -> Agent {
+    lite_agent_with(now, controlling, &[], remotes)
+}
+
+/// [`lite_agent`] with the local candidates `locals` beside its UDP one.
+fn lite_agent_with(
+    now: Instant,
+    controlling: bool,
+    locals: &[Candidate],
+    remotes: &[Candidate],
+) -> Agent {
     let cfg = AgentConfig {
         lite: true,
         candidate_types: vec![CandidateType::Host],
         ..config(controlling)
     };
     let mut a = bare_agent(now, cfg);
+    for local in locals {
+        assert!(a.add_local_candidate(local.clone()).unwrap());
+    }
     a.set_remote_lite(true);
     for remote in remotes {
         a.add_remote_candidate(remote.clone()).unwrap();
@@ -82,6 +95,49 @@ fn lite_agent(now: Instant, controlling: bool, remotes: &[Candidate]) -> Agent {
     )
     .unwrap();
     a
+}
+
+/// RFC 6544 Section 4.4: "In the lite mode, for TCP candidates, only passive host candidates
+/// are gathered, unless active candidates are needed as the default candidates. Otherwise,
+/// the procedures described for lite mode in [RFC5245] also apply to TCP candidates." A lite
+/// agent that has a UDP host candidate on an address takes a passive TCP candidate on it, and
+/// an active one (the default candidate of the updated offer of two lite agents whose offerer
+/// connects, Section 6.1; a lite agent cannot add it later without a restart, RFC 8839
+/// Section 4.4.1.3): one of each per address, as RFC 8445 Section 5.2 has one UDP candidate
+/// per address. A second of a kind and a simultaneous-open candidate are not taken.
+#[test]
+fn test_a_lite_agent_takes_one_passive_and_one_active_tcp_candidate_per_address() {
+    let now = Instant::now();
+    let mut a = lite_agent(now, false, &[]);
+    let tcp = |port, tcp_type| candidate("tcp", "192.168.0.2", port, 0, tcp_type);
+    assert!(a.add_local_candidate(tcp(2000, TcpType::Passive)).unwrap());
+    assert!(a.add_local_candidate(tcp(9, TcpType::Active)).unwrap());
+    assert!(
+        !a.add_local_candidate(tcp(2001, TcpType::SimultaneousOpen))
+            .unwrap(),
+        "no simultaneous-open candidate"
+    );
+    assert!(
+        !a.add_local_candidate(tcp(2002, TcpType::Passive)).unwrap(),
+        "a second passive candidate on the address"
+    );
+    assert!(
+        !a.add_local_candidate(udp("192.168.0.2", 1001, 0)).unwrap(),
+        "a second UDP candidate on the address"
+    );
+    let kinds: Vec<(bool, TcpType)> = a
+        .get_local_candidates()
+        .iter()
+        .map(|c| (c.network_type().is_tcp(), c.tcp_type()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            (false, TcpType::Unspecified),
+            (true, TcpType::Passive),
+            (true, TcpType::Active)
+        ]
+    );
 }
 
 /// Section 6.1.1, both lite: "no connectivity checks are ever sent. Rather, once the
