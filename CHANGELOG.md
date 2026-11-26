@@ -302,6 +302,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fragments). Citations corrected for about 12 rows, one paraphrase that read as the opposite of
   its MUST NOT (RFC8839-4.3.1-5), ten stale notes replaced. No violation found. Open MUST rows
   57 -> 67. No engine change.
+- Sixth audit sweep (`conf/audit-7-tested-must-sweep-6`): every `tested` MUST row of RFC 9147,
+  8446, 6347 and 5246 not read before (353 rows), RFC 9260's 22 sample rows, and a second-stage
+  sample (one in five of the rows left) of RFC 3264, 5764, 4588, 8888, 8831, 8832 and 7714 (26
+  rows). 21 `tested` -> `untested` and 2 `tested` -> `partial`. DTLS 1.3: the plaintext sequence
+  limit, the replay window against a far-ahead forgery, the 240 s answer to a repeated last
+  flight, epochs near 2^48 on receipt, and four alerts whose description no test asserts (the
+  alert is protected): RFC9147-9-8, RFC8446-4.6.2-6, 4.6.3-4, 4.1.2-3 (no ClientHello case at
+  all). RFC 8446: 4.1.3-3 (ServerHello.random), 4.2.2-3, 4.2.7-1, 4.2.10-15 (early data resent as
+  application data), 4.6.1-7, 4.6.1-9 / 4.6.1-10 (both sides cap the ticket lifetime, so the one
+  test shows neither cap), 5-5 / 5.4-5 (conn-level unexpected_message never reached). RFC 5246
+  7.3-5 and 8422-5.1-1, RFC9260-3.3.1-8 (PPID of every fragment), RFC3264-8.1-1. Partial (class
+  C): RFC6347-4.2.1-8 (the HelloVerifyRequest says DTLS 1.0 by default while the ServerHello says
+  1.2: RFC 6347 4.2.1's MUST against its own SHOULD, for the coordinator) and RFC6347-4.2.4-5 (a
+  repeated last flight is answered at most seven times, not for 2 MSL). RFC4733-2.3.4-1 set to
+  `n/a` (the application chooses the event and its volume). Three citations added. Open MUST rows
+  67 -> 89. No engine change.
 
 ### Testing
 
