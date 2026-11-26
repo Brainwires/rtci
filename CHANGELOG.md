@@ -59,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is no `fn`, module, fuzz target or field in the tree, with its unit tests
   (`scripts/test_check_test_inventory.py`). No violation found. Open MUST rows 20 -> 27. No
   engine change.
+- Fourth audit sweep (`conf/audit-5-tested-must-sweep-4`): receive-side `tested` MUST rows of
+  files no sweep had read (W3C webrtc-pc, RFC 8446, 8489, webrtc-extensions, RFC 7728, 3611,
+  5246, webrtc-stats, RFC 6762, 8260: 251 rows), each test body read against the specification's
+  sentence. Two rows `tested` -> `violated`: RFC8446-4.2.1-12 (a DTLS 1.3 client refused a
+  ServerHello whose legacy_version was not {254, 253}, which RFC 8446 4.2.1 says it MUST ignore,
+  and a test asserted the refusal; fixed on `conf/dtls-29-server-hello-legacy-version-ignored`)
+  and RFC8489-9.2.5-14 (an unsigned 400 answering the anonymous first TURN request is taken, not
+  discarded; the cited test has no 400). Three `tested` -> `partial`: WEBRTC-4.5.1-1
+  (`Error::dom_exception_name` gives no name for the setConfiguration, ICE server, certificate
+  and addIceCandidate errors), WEBRTC-5.6.4-2 / 5.6.4-9 (ICE "failed" is reached by the checking
+  timeout without the end-of-candidates indication W3C requires). Twenty-five `tested` ->
+  `untested`, a half of the clause or the refused case without a test (webrtc-pc 7, RFC 8446 10,
+  RFC 7728 4, RFC 3611 3 reserved-field rows, RFC 5246 1). Citations corrected for about 15
+  rows, five stale notes fixed. Open MUST rows 27 -> 57. No engine change on this branch.
 - RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
