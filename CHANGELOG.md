@@ -1606,6 +1606,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/nack_without_rtx_rtc2rtc.rs::a_lost_packet_is_sent_again_as_it_was_and_arrives_when_no_rtx_is_negotiated`,
   `a_packet_sent_again_as_it_was_keeps_its_abs_send_time`,
   `a_packet_sent_again_as_it_was_leaves_as_its_first_transmission_did`.
+- **a stream received as RED had no RTCP feedback: with video RED / ULPFEC (the `Chrome`
+  profile) two engines never raised their send rate** (red-1). A receiver learns a
+  stream's format from the payload type of its first packet; when that is the `red` format
+  (RFC 2198), which is described without `a=rtcp-fb` lines, the stream was bound to the
+  interceptors with no feedback at all, while the sender, which knows the stream by its
+  media codec, expected the feedback negotiated for that codec. With RFC 8888 congestion
+  control feedback (`ack ccfb`, what two engines negotiate) the receiver therefore reported
+  the audio stream only: the sender's congestion controller saw a path that carried 50
+  kbit/s, its estimate stopped at the first step above the start value (315 kbit/s) and
+  after a capacity collapse stayed at the floor; NACK and key frame requests about the video
+  were not bound either. A stream bound under `red` now has the feedback of the format it
+  carries (the one its fmtp names, else the section's first media format) beside any of its
+  own, as libwebrtc configures a stream from its first media codec whatever payload type
+  arrives. Found with the capacity instrument's `chrome` chain (send target 90 kbit/s for
+  the whole call); the row at fault was `fec.video-red-ulpfec`, alone. Not affected: the
+  default profile (no video RED), and a peer whose feedback is transport-wide (bound by
+  the header extension: Chromium). Test `a_red_stream_has_the_feedback_of_the_format_it_carries`.
+  Still open after this entry: a RED packet retransmitted over RTX is not usable by the
+  receiver (it leaves under the media format's RTX payload type); see red-2.
 
 - **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
   (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
