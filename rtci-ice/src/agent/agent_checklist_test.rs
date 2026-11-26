@@ -1975,26 +1975,31 @@ fn test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from() {
 /// The bound of [`test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from`]: with
 /// `FailedNomination::Retry` and the peer silent, the nomination is given up 30 seconds (the
 /// consent expiry, RFC 7675 Section 5.1) after the peer was last heard from or the nomination
-/// started, the pair fails with it, and with no pair left the agent fails: not before.
+/// started, and the pair fails with it. With no pair left the checklist fails, but not while
+/// the PAC timer runs (RFC 8863 Section 4: "MUST NOT update a checklist state from Running to
+/// Failed, even if there are no pairs left in the checklist to check"): at 39.5 s, not at the
+/// give-up 30 s after the nomination.
 #[test]
 fn test_a_nomination_is_given_up_when_the_peer_is_not_heard_from_for_thirty_seconds() {
     let start = Instant::now();
     let (a, out, seen) = nominating_over_loss(
         start,
         retrying(config(true)),
-        Duration::from_secs(40),
+        Duration::from_secs(45),
         None,
         |_| false,
     );
     let (nominated_at, _) = nominations(&out)[0];
+    let given_up = nominated_at + Duration::from_secs(30);
+    assert!(given_up < PAC, "the give-up comes inside the PAC timer");
     let failed_at = seen
         .iter()
         .find(|(_, s)| *s == ConnectionState::Failed)
         .map(|(at, _)| *at)
         .expect("the agent fails");
+    // `seen` is sampled once a second.
     assert!(
-        failed_at >= nominated_at + Duration::from_secs(30)
-            && failed_at <= nominated_at + Duration::from_secs(32),
+        failed_at >= PAC && failed_at <= PAC + Duration::from_secs(1),
         "failed at {failed_at:?}, nominated at {nominated_at:?}"
     );
     assert_eq!(a.state(), ConnectionState::Failed);
