@@ -776,6 +776,11 @@ impl Endpoint {
         if remote.port() == 0 {
             return Err(ConnectError::InvalidRemoteAddress(remote));
         }
+        // RFC 9260 3.1: "The Source Port Number 0 MUST NOT be used" and "The Destination Port
+        // Number 0 MUST NOT be used". Every packet of the association would carry these two.
+        if config.transport.sctp_port() == 0 || config.transport.remote_sctp_port() == 0 {
+            return Err(ConnectError::ZeroSctpPort);
+        }
 
         let remote_aid = self.endpoint_config.random.nonzero_u32();
         let local_aid = self.new_aid();
@@ -1030,4 +1035,10 @@ pub enum ConnectError {
     /// Use `Endpoint::connect_with` to specify a client configuration.
     #[error("no default client config")]
     NoDefaultClientConfig,
+    /// The transport configuration names port 0 as this endpoint's SCTP port
+    /// ([`with_sctp_port`](crate::TransportConfig::with_sctp_port)) or the peer's
+    /// ([`with_remote_sctp_port`](crate::TransportConfig::with_remote_sctp_port)): RFC 9260
+    /// section 3.1, port 0 MUST NOT be used as a source or destination port.
+    #[error("SCTP port 0 must not be used (RFC 9260 section 3.1)")]
+    ZeroSctpPort,
 }
