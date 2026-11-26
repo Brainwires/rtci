@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **ICE-TCP between two lite agents (RFC 6544 section 6.1)** (`conf/ice-30-lite-lite-tcp`, a
+  re-cut of the parked `conf/ice-22-lite-tcp` on 0.2.0). Before, two lite agents could not use a
+  TCP pair at all: nothing opened its connection, since neither sends connectivity checks. Now
+  the side whose candidate of the selected pair is `tcptype active` opens the connection (the
+  TCP role; 6.1's `a=setup:active` is read as that, `a=setup` being the DTLS role in WebRTC):
+  the controlling agent as soon as it selects the pair, in parallel with its updated offer
+  (6.1's MAY), the controlled one once its pair is final. The answerer carries the pair on the
+  connection it accepted on the pair's passive candidate from the active candidate's IP,
+  closes nothing while the updated offer is awaited, keeps the matching connection once the
+  offer is applied, and closes a connection that does not match and restarts ICE (6.1's MUST
+  and SHOULD), whether the connection came before the offer or after it. On the way: a lite
+  agent takes one UDP, one passive TCP and one active TCP candidate per address, no
+  simultaneous-open one (section 4.4; before, its UDP candidate shut every TCP one on the
+  address out); two lite agents keep each other's active TCP candidates as remote candidates
+  (a full agent, or a lite one with a full peer, still drops them and notes that the peer may
+  dial); the peer's `a=ice-lite` reaches the agent before the first description's candidate
+  lines; and between two lite agents a first non-STUN message on a connection the agent opened
+  does not reset it. Only when both sides are lite (`with_lite(true)` and the peer's
+  `a=ice-lite`); full mode stays the default, as 6.1 RECOMMENDS. New `Agent::is_remote_lite`,
+  `Agent::awaits_lite_update` (additive). Conformance rows RFC6544-4.4-1, RFC6544-6.1-1,
+  RFC6544-6.1-2 and RFC6544-6.1-3 (the last open MUST of RFC 6544) are `tested`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
