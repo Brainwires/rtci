@@ -13,8 +13,11 @@
 //! (`docs/key-erasure.md`).
 
 mod algorithm;
+mod erased_stack;
 mod error;
 mod hkdf;
+#[cfg(feature = "crypto-ring")]
+mod hmac_sha1;
 #[cfg(feature = "openssl")]
 mod openssl_ctr;
 mod provider;
@@ -38,6 +41,7 @@ pub mod conformance;
 pub mod fuzzing;
 
 pub use algorithm::*;
+pub use erased_stack::{ERASED_STACK_IS_PRIVATE, on_erased_stack};
 pub use error::CryptoError;
 pub use hkdf::{hkdf_expand, hkdf_expand_label, hkdf_extract};
 #[cfg(feature = "openssl")]

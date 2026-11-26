@@ -9,7 +9,8 @@
 #   features    rtci-srtp features to add, e.g. crypto-aws-lc-rs (default: none: ring only)
 #
 # Environment: OUT (directory for the logs, default a new temporary one), REPEAT (how often the
-# ignored known_limit_ tests are run to compare digests, default 3).
+# tests are run again to compare digests, default 3), PROFILE=release (an optimised build: the
+# one in which the packet path is asserted).
 # Exit status: that of the tests that are not ignored; 2 when the build fails.
 set -u
 toolchain=
@@ -23,15 +24,16 @@ mkdir -p "$out"
 # shellcheck disable=SC2206
 cargo_test=(cargo $toolchain test -p rtci-srtp --test key_residue)
 [ -n "$features" ] && cargo_test+=(--features "$features")
+[ "${PROFILE:-}" = release ] && cargo_test+=(--release)
 
 # shellcheck disable=SC2086
-echo "== $(rustc $toolchain --version), $(uname -srm), features: ${features:-default}"
+echo "== $(rustc $toolchain --version), $(uname -srm), features: ${features:-default}, profile: ${PROFILE:-dev}"
 "${cargo_test[@]}" --no-run > "$out/build.log" 2>&1 || { tail -30 "$out/build.log"; exit 2; }
 "${cargo_test[@]}" -- --nocapture > "$out/live.log" 2>&1
 status=$?
 "${cargo_test[@]}" -- --ignored investigate_ --nocapture > "$out/investigate.log" 2>&1
 for i in $(seq "$repeat"); do
-  "${cargo_test[@]}" -- --ignored known_limit_ --nocapture > "$out/known-limit-$i.log" 2>&1
+  "${cargo_test[@]}" -- --include-ignored key_handling the_packet_path --nocapture > "$out/known-limit-$i.log" 2>&1
 done
 
 echo "== tests"
@@ -40,7 +42,7 @@ echo "== thread stacks on this system"
 grep -h '^ENV\|^ROUND\|^OWNED' "$out/investigate.log"
 echo "== controls, notes, anything left outside dead stack frames"
 grep -h '^CONTROL\|^NOTE\|^LEFT' "$out/live.log" "$out/known-limit-1.log" | sort -u
-echo "== inventory digests (not ignored, then each known_limit_ run)"
+echo "== inventory digests (not ignored, then each repeat with the known limits included)"
 grep -h '^INVENTORY' "$out/live.log"
 grep -h '^INVENTORY' "$out"/known-limit-*.log | sort | uniq -c
 echo "== per key, over the ten profiles"

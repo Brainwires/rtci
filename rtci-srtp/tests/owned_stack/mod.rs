@@ -1,13 +1,25 @@
 //! A thread that runs on a stack the test owns, so that what code leaves in dead stack frames
 //! can be read byte for byte: the measurement of `key_residue.rs`.
 //!
-//! Why not an ordinary thread. The stack of a thread the C library made is the C library's:
-//! when the thread ends, glibc gives the pages below its last frame back to the kernel
-//! (`madvise(MADV_DONTNEED)`, all but a few pages), keeps or unmaps the mapping as its cache
-//! decides, and since glibc 2.42 its guard is no mapping of its own, so `/proc/self/maps` shows
-//! neighbouring stacks as one region. A search of such a stack after the thread has ended sees
-//! what those decisions left, which differs between C library versions
-//! (`investigate_how_the_c_library_treats_thread_stacks` prints them). Here instead:
+//! Why not an ordinary thread. The stack of a thread the C library made is the C library's,
+//! and what a search of it sees after the thread has ended is decided there. Measured
+//! (`investigate_how_the_c_library_treats_thread_stacks`, runs 45873633642 and 45873641664):
+//!
+//! * glibc 2.39 and 2.43 both give an ended thread's stack back to the kernel except for a
+//!   few pages near its top: of 256 marks written down the first mebibyte, 4 are left (about
+//!   10 to 22 KiB below the top) and 506 of 512 pages read as zeros. Residue deeper than that
+//!   is gone, whatever the code under test did.
+//! * With glibc 2.39 a thread's guard is a mapping of its own, so each stack is one line of
+//!   `/proc/self/maps`. With glibc 2.43 (kernel 7.0) it is not: a worker's stack and the stack
+//!   of the thread that started it are one mapping (4104 KiB), and reading it through
+//!   `/proc/self/mem` in 1 MiB pieces fails for the pieces holding a guard page (2 of 5). A
+//!   search that leaves out "the mapping holding my own stack", or drops a piece it cannot
+//!   read, never looks at the worker's stack there. That is why the search this replaced
+//!   found key residue in 20 of 20 runs in one environment and in 0 of 40 in the other.
+//! * glibc leaves a stack the caller supplied alone when its thread ends (all marks left, no
+//!   page zeroed).
+//!
+//! Here instead:
 //!
 //! * the stack is a mapping the test makes ([`OwnedStack`]: `mmap`, a guard on each side),
 //!   filled with [`FILL`] before the thread starts, so every byte that differs afterwards was

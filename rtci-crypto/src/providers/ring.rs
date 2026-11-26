@@ -1,5 +1,5 @@
 use crate::common;
-use crate::common::check_tag_len;
+use crate::hmac_sha1::HmacSha1;
 use crate::{
     ActiveKeyExchange, AeadAlgorithm, AeadCipher, BlockCipherAlgorithm, CbcAlgorithm, CbcCipher,
     CryptoAlgorithm, CryptoError, HEADER_MASK_LEN, HEADER_MASK_SAMPLE_LEN, HashAlgorithm,
@@ -7,15 +7,13 @@ use crate::{
     PublicKeyEncoding, RTCCrypto, RTCCryptoProvider, RTCRandom, SecretVec, SignatureScheme,
     SigningKey, StreamCipher, StreamCipherAlgorithm, constant_time_eq,
 };
-use ::hmac::Mac as RustCryptoMac;
 use ring::aead;
 use ring::agreement;
 use ring::digest;
 use ring::hmac;
 use ring::rand::SystemRandom;
 use ring::signature::{self, KeyPair};
-use sha1::Sha1;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{Ordering, compiler_fence};
 
@@ -154,9 +152,9 @@ impl RTCCrypto for RingCrypto {
     fn new_hmac(&self, algorithm: HmacAlgorithm, key: &[u8]) -> Result<Box<dyn Mac>, CryptoError> {
         match algorithm {
             // ring's SHA-1 is a software implementation and measures 3.3x slower than
-            // RustCrypto's; see common::RustCryptoHmacSha1. SHA-256 stays on ring, which uses
+            // RustCrypto's `sha1`; see `crate::hmac_sha1`. SHA-256 stays on ring, which uses
             // the hardware instructions.
-            HmacAlgorithm::Sha1 => Ok(Box::new(RustCryptoHmacSha1::new(key))),
+            HmacAlgorithm::Sha1 => Ok(HmacSha1::boxed(key)),
             HmacAlgorithm::Sha256 | HmacAlgorithm::Sha384 | HmacAlgorithm::Sha512 => {
                 Ok(Box::new(RingHmac {
                     key: ErasedOnDrop::new(hmac::Key::new(hmac_algorithm(algorithm), key)),
@@ -259,7 +257,7 @@ impl RTCCrypto for RingCrypto {
 }
 
 /// A ring key object kept in an allocation of this crate's own, overwritten with zeros when
-/// it is dropped (RFC 7714 section 13.1, RFC 3711 section 9.3, RFC 8446 section 7.1).
+/// it is dropped (RFC 7714 section 13.1, RFC 8446 section 7.1).
 ///
 /// ring keeps a key schedule inline in each key object (`aead::LessSafeKey`: the AES round
 /// keys and the GHASH table, or the ChaCha20 key; `aead::quic::HeaderProtectionKey`: the AES
@@ -745,77 +743,6 @@ fn verify_public_key_encoding(
         Ok(())
     } else {
         Err(CryptoError::InvalidPublicKey)
-    }
-}
-
-type HmacSha1 = ::hmac::Hmac<Sha1>;
-
-/// HMAC-SHA1 backed by RustCrypto, keyed once.
-///
-/// `ring` exposes SHA-1 only as `HMAC_SHA1_FOR_LEGACY_USE_ONLY` and does not use the ARMv8 SHA-1
-/// instructions, measuring 4469 ns against RustCrypto's 1373 ns over a 1212-byte SRTP packet —
-/// 3.3x, and the whole of the SRTP AES-CM/HMAC regression. The built-in providers are already
-/// composite (AES-CTR, CCM, CBC and MD5 come from RustCrypto too), so HMAC-SHA1 is composed the
-/// same way rather than making the slower backend the default. `aws-lc-rs` has fast SHA-1 and
-/// keeps its own.
-///
-/// The keyed state is the key in another form: the SHA-1 states after `key XOR ipad` and
-/// `key XOR opad` compute any MAC under it. RustCrypto `hmac` 0.12 has no `zeroize` support, so
-/// the state is overwritten here when this is dropped (RFC 7714 section 13.1; RFC 3711 section
-/// 9.3 for SRTP; the record MAC keys of the DTLS CBC suite).
-pub(crate) struct RustCryptoHmacSha1 {
-    keyed: ManuallyDrop<HmacSha1>,
-}
-
-impl RustCryptoHmacSha1 {
-    pub(crate) fn new(key: &[u8]) -> Self {
-        Self {
-            // HMAC accepts any key length: it hashes longer keys and zero-pads shorter ones.
-            keyed: ManuallyDrop::new(
-                <HmacSha1 as RustCryptoMac>::new_from_slice(key)
-                    .expect("HMAC accepts keys of any length"),
-            ),
-        }
-    }
-}
-
-impl Drop for RustCryptoHmacSha1 {
-    fn drop(&mut self) {
-        // SAFETY: the state is dropped once, here, and never used again: `ManuallyDrop` keeps
-        // the drop glue from touching it after the overwrite. `Hmac<Sha1>` is plain data (block
-        // buffers and hash words; no pointers, no heap), so overwriting its bytes once it has
-        // been dropped is a write to memory this value owns.
-        unsafe {
-            ManuallyDrop::drop(&mut self.keyed);
-            zeroize::zeroize_flat_type(&mut self.keyed as *mut ManuallyDrop<HmacSha1>);
-        }
-    }
-}
-
-impl Mac for RustCryptoHmacSha1 {
-    fn output_len(&self) -> usize {
-        20
-    }
-
-    fn sign(&mut self, input: &[&[u8]], output: &mut [u8]) -> Result<(), CryptoError> {
-        check_tag_len(20, output.len())?;
-        let mut mac = HmacSha1::clone(&self.keyed);
-        for part in input {
-            mac.update(part);
-        }
-        output.copy_from_slice(&mac.finalize().into_bytes());
-        Ok(())
-    }
-
-    fn verify(&mut self, input: &[&[u8]], expected: &[u8]) -> Result<(), CryptoError> {
-        check_tag_len(20, expected.len())?;
-        let mut actual = [0u8; 20];
-        self.sign(input, &mut actual)?;
-        if crate::constant_time_eq(&actual, expected) {
-            Ok(())
-        } else {
-            Err(CryptoError::AuthenticationFailed)
-        }
     }
 }
 

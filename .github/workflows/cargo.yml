@@ -266,6 +266,32 @@ jobs:
           cargo test --package rtci --features performance-defaults --lib behaviour_profile --verbose
           cargo test --package rtci --features performance-defaults --test behaviour_profiles --verbose
 
+  # RFC 7714 section 13.1, "All keys MUST be properly erased when no longer needed": the
+  # residue measurement (rtci-srtp/tests/key_residue.rs) in an OPTIMISED build, where it asserts
+  # that the ring provider's packet path leaves no key form in a dead stack frame (the ordinary
+  # test jobs run it unoptimised, where only building and tearing down are asserted:
+  # docs/key-erasure.md). x86-64 Linux, with the whole process searched, and AArch64 macOS.
+  key_residue:
+    timeout-minutes: 30
+    name: SRTP key residue, optimised build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ 'ubuntu-latest', 'macos-latest' ]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: No SRTP key is left in a dead stack frame
+        run: cargo test --release --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
+      - name: The erased stack and the HMAC-SHA1 that keeps its state in the heap
+        run: cargo test --release --package rtci-crypto --lib --verbose -- erased_stack hmac_sha1
+
   crypto_backend_baseline:
     timeout-minutes: 45
     name: Crypto baseline (${{ matrix.backend }})

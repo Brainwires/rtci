@@ -5,8 +5,9 @@ key material derives `Zeroize` and `ZeroizeOnDrop`, or holds each secret in a ty
 (`crypto::SecretVec`, `zeroize::Zeroizing`). Key material is never built in a buffer that
 grows: a `Vec` that grows moves to a new allocation and frees the old one as it is. Clauses:
 RFC 5246 section 8.1 (the premaster secret is deleted once the master secret exists), RFC 8446
-section 7.1 (a secret is erased once what derives from it is computed), RFC 3711 section 9.3
-and RFC 7714 section 13.1 (SRTP keys erased when no longer needed).
+section 7.1 (a secret is erased once what derives from it is computed), RFC 7714
+section 13.1 (SRTP keys, and a secret master salt, erased when no longer needed; RFC 3711 itself
+has no erasure clause: its section 3.2.1 has the master key "kept secret").
 
 ## What holds what
 

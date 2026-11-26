@@ -1,5 +1,4 @@
-//! RFC 7714 section 13.1 (and RFC 3711 section 9.3): "All keys MUST be properly erased when no
-//! longer needed", measured where the heap searches cannot look: the dead stack frames of the
+//! RFC 7714 section 13.1: "All keys MUST be properly erased when no longer needed", measured where the heap searches cannot look: the dead stack frames of the
 //! thread that handled the keys.
 //!
 //! Each step of a session's life runs on a worker thread of its own whose stack the test owns
@@ -21,11 +20,11 @@
 //! is the control: a key deliberately left on a stack, in the heap, in a freed block and in
 //! static data is found in each, and one that was erased, or never there, is not.
 //!
-//! What is asserted. `with_*_keys_outlive_their_contexts_only_in_dead_stack_frames`: the
-//! controls, the measurement's own conditions, the live keys found, and nothing left after the
-//! teardown outside the workers' dead frames; what IS in those frames is printed (`STAGE`,
-//! `FORM`, `SUMMARY`, `INVENTORY` lines). `known_limit_*_key_handling_leaves_keys_in_dead_stack_frames`
-//! (ignored, docs/test-exclusions.md) asserts that nothing is in them either.
+//! What is asserted (`check`, and each test's documentation): nothing outside dead stack frames
+//! after the teardown; nothing in them after building and tearing down, in any build, with
+//! either provider; with the ring provider nothing in them after any step in an optimised
+//! build. What the dead frames hold after each step is printed either way (`STAGE`, `FORM`,
+//! `SUMMARY`, `INVENTORY` lines; `scripts/key-residue-report.sh` collects them).
 
 #[cfg(unix)]
 mod key_material;
@@ -353,6 +352,23 @@ mod residue_tests {
                 "{} key forms were outside the workers' stacks while the contexts were alive",
                 outside.len()
             ));
+            // The contexts hold session keys, and the master key itself where a key derivation
+            // rate needs it again; nothing holds the master key's AES schedule once the keys
+            // are derived. Found here it would be what a derivation left on the stack, carried
+            // into the heap in the unused bytes of an object built over it.
+            for &needle in &outside {
+                let needle = &m.needles[needle];
+                if needle.key.ends_with("master key") && needle.form != "the key" {
+                    m.left.push(format!(
+                        "{} {:?} {}: {} outside the workers' stacks while the contexts were \
+                         alive",
+                        m.provider,
+                        m.profile,
+                        m.variant.name(),
+                        needle.describe()
+                    ));
+                }
+            }
         }
 
         /// After the teardown.
@@ -512,7 +528,20 @@ mod residue_tests {
     struct Inventory {
         /// Key forms found in dead stack frames, over every session and step.
         forms: usize,
+        /// The same per step: "build", "packets", "rekey", "teardown".
+        by_step: Vec<(&'static str, usize)>,
+        /// Found outside the workers' dead frames after the teardown, or where it must not be
+        /// while the contexts were alive.
         left: Vec<String>,
+    }
+
+    impl Inventory {
+        fn in_step(&self, step: &str) -> usize {
+            self.by_step
+                .iter()
+                .find(|(name, _)| *name == step)
+                .map_or(0, |(_, forms)| *forms)
+        }
     }
 
     /// Every profile and variant with the provider named `name`, printed.
@@ -521,6 +550,7 @@ mod residue_tests {
         check_local_primitives();
         let mut inventory = Inventory {
             forms: 0,
+            by_step: Vec::new(),
             left: Vec::new(),
         };
         // FNV-1a over the residue, to compare two runs at a glance.
@@ -566,6 +596,10 @@ mod residue_tests {
                             }
                         }
                         inventory.forms += stage.residue.len();
+                        match inventory.by_step.iter_mut().find(|(n, _)| *n == stage.name) {
+                            Some((_, forms)) => *forms += stage.residue.len(),
+                            None => inventory.by_step.push((stage.name, stage.residue.len())),
+                        }
                     }
                     for line in &m.left {
                         println!("LEFT {line}");
@@ -587,69 +621,100 @@ mod residue_tests {
             println!("NOTE {note}");
         }
         println!(
-            "INVENTORY {name}: {} key forms in dead stack frames, {} left elsewhere, digest {digest:016x}",
+            "INVENTORY {name}: {} key forms in dead stack frames {:?}, {} left elsewhere, digest {digest:016x}, {} build",
             inventory.forms,
-            inventory.left.len()
+            inventory.by_step,
+            inventory.left.len(),
+            if cfg!(debug_assertions) {
+                "unoptimised"
+            } else {
+                "optimised"
+            }
         );
         inventory
     }
 
-    /// With the ring provider, once a session is torn down no key it derived is left anywhere
-    /// in the process except in the dead stack frames of the threads that handled it, for
-    /// every profile, with and without an MKI and a key derivation rate; and what those dead
-    /// frames hold after each step is printed. The search is shown to see the live keys.
-    #[cfg(all(target_os = "linux", feature = "crypto-ring"))]
+    /// What every test here requires of a measurement: nothing outside dead stack frames after
+    /// the teardown, no master key schedule in the heap while the contexts are alive (Linux:
+    /// both need the process search), and nothing in dead stack frames after the steps that
+    /// run on the engine's erased stack whatever the build: building the contexts, and tearing
+    /// them down.
+    fn check(inventory: &Inventory) {
+        assert!(
+            inventory.left.is_empty(),
+            "found where no key may be: {:#?}",
+            inventory.left
+        );
+        for step in ["build", "teardown"] {
+            assert_eq!(
+                0,
+                inventory.in_step(step),
+                "key forms left in dead stack frames by the `{step}` step (the FORM lines above \
+                 name each)"
+            );
+        }
+    }
+
+    /// RFC 7714 section 13.1 with the ring provider (the default): handling a session's keys
+    /// leaves none of them behind. For every profile, with `Context::new` and with an MKI and
+    /// a key derivation rate, each step on a worker whose stack the test reads: after building
+    /// the contexts, protecting and unprotecting RTP and RTCP (with re-derivation on the
+    /// packet path), re-keying and tearing down, no key the session derives is found, in any
+    /// form, in the dead stack frames of the thread that did it; on Linux none is found
+    /// anywhere else in the process after the teardown either, and the search is shown to see
+    /// the live keys.
+    ///
+    /// The build and teardown steps are asserted in every build. The packet path (the
+    /// `packets` and `rekey` steps) is asserted in an OPTIMISED build, which is what CI runs
+    /// this test in besides the ordinary one (`cargo test --release`): the ciphers' key
+    /// schedules and the MAC states stay in the heap objects that own them and the code works
+    /// through references, but an unoptimised build stores every intermediate value of the
+    /// AES and SHA-1 routines in a stack slot, round keys included, whatever the source says.
+    /// There the count is printed and not asserted.
+    #[cfg(feature = "crypto-ring")]
     #[test]
-    fn with_ring_keys_outlive_their_contexts_only_in_dead_stack_frames() {
+    fn with_ring_key_handling_leaves_no_key_in_dead_stack_frames() {
         let inventory = measure(1, "ring");
-        assert!(
-            inventory.left.is_empty(),
-            "found after the teardown outside dead stack frames: {:#?}",
-            inventory.left
-        );
+        check(&inventory);
+        if cfg!(debug_assertions) {
+            println!(
+                "NOT ASSERTED in an unoptimised build: {} key forms left by the packet path",
+                inventory.in_step("packets") + inventory.in_step("rekey")
+            );
+        } else {
+            assert_eq!(
+                0, inventory.forms,
+                "key forms left in dead stack frames (the FORM lines above name each)"
+            );
+        }
     }
 
-    /// The same with the AWS-LC provider.
-    #[cfg(all(target_os = "linux", feature = "crypto-aws-lc-rs"))]
+    /// The same with the AWS-LC provider, for what holds with it: building the contexts and
+    /// tearing them down leave no key in dead stack frames, and (Linux) nothing is left
+    /// elsewhere in the process. Its packet path is the known limit below.
+    #[cfg(feature = "crypto-aws-lc-rs")]
     #[test]
-    fn with_aws_lc_keys_outlive_their_contexts_only_in_dead_stack_frames() {
-        let inventory = measure(2, "aws-lc-rs");
-        assert!(
-            inventory.left.is_empty(),
-            "found after the teardown outside dead stack frames: {:#?}",
-            inventory.left
-        );
+    fn with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames() {
+        check(&measure(2, "aws-lc-rs"));
     }
 
-    /// A KNOWN LIMIT (docs/test-exclusions.md, docs/key-erasure.md): handling SRTP keys leaves
-    /// copies of them in the dead stack frames of the thread that did it. This is the
-    /// requirement as a test: it fails while any key form is found in a worker's dead frames
-    /// after any step. Run with `-- --ignored known_limit_ --nocapture`.
-    fn key_handling_leaves_no_key_in_dead_stack_frames(test: u8, name: &str) {
-        let inventory = measure(test, name);
-        assert!(
-            inventory.left.is_empty(),
-            "found after the teardown outside dead stack frames: {:#?}",
-            inventory.left
-        );
+    /// A KNOWN LIMIT of the AWS-LC provider (docs/test-exclusions.md, docs/key-erasure.md):
+    /// AWS-LC computes each HMAC on a copy of the keyed context in its own stack frame and
+    /// its AES-GCM leaves a GHASH table entry in one, so protecting or unprotecting a packet
+    /// leaves the SRTP / SRTCP HMAC-SHA1 states and a form of the GCM key in dead stack
+    /// frames, in every build. The engine does not overwrite the stack after every packet.
+    /// This is the requirement as a test: it fails while any key form is found after any
+    /// step. Run with `-- --ignored known_limit_ --nocapture`.
+    #[cfg(feature = "crypto-aws-lc-rs")]
+    #[test]
+    #[ignore = "known limit: the AWS-LC provider's packet path leaves keys in dead stack frames (docs/test-exclusions.md)"]
+    fn known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames() {
+        let inventory = measure(4, "aws-lc-rs");
+        check(&inventory);
         assert_eq!(
             0, inventory.forms,
             "key forms left in dead stack frames (the FORM lines above name each)"
         );
-    }
-
-    #[cfg(feature = "crypto-ring")]
-    #[test]
-    #[ignore = "known limit: SRTP key handling leaves keys in dead stack frames (docs/test-exclusions.md)"]
-    fn known_limit_with_ring_key_handling_leaves_keys_in_dead_stack_frames() {
-        key_handling_leaves_no_key_in_dead_stack_frames(3, "ring");
-    }
-
-    #[cfg(feature = "crypto-aws-lc-rs")]
-    #[test]
-    #[ignore = "known limit: SRTP key handling leaves keys in dead stack frames (docs/test-exclusions.md)"]
-    fn known_limit_with_aws_lc_key_handling_leaves_keys_in_dead_stack_frames() {
-        key_handling_leaves_no_key_in_dead_stack_frames(4, "aws-lc-rs");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -846,9 +911,10 @@ mod residue_tests {
 
     /// AN INVESTIGATION TOOL, not a check (docs/test-exclusions.md): prints how this system's
     /// C library and kernel treat the stack of an ordinary thread, which is what decided
-    /// whether the earlier search (`key_erasure_process_memory.rs`: a `std::thread` worker,
-    /// searched through `/proc/self/maps` after it had ended) saw key residue: 20 of 20 runs
-    /// in the test-environment image, 0 of 40 on GitHub's runners.
+    /// whether the search this file replaced (`key_erasure_process_memory.rs`, in 0.2.0: a
+    /// `std::thread` worker, searched through `/proc/self/maps` after it had ended) saw key
+    /// residue: 20 of 20 runs in the test-environment image (glibc 2.39), 0 of 40 on GitHub's
+    /// runners (glibc 2.43), from the same sources.
     ///
     /// A worker thread writes a mark every 4 KiB down the first mebibyte of its stack and
     /// waits. Printed while it is alive: the C library's and the kernel's versions, the
