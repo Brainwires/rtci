@@ -2330,9 +2330,15 @@ pub const VIDEO_ULPFEC_PAYLOAD_TYPE: PayloadType = 43;
 /// - the encoder at [`Slot::FecEncoder`] with its wire tap at [`Slot::FecWireImage`], so the
 ///   FEC protects each packet as it leaves: FEC in RED packets of its own in the media's
 ///   sequence space (`RedPlacement::OwnPacket`, the form libwebrtc sends and the only one it
-///   reads), after each frame or five packets, in the amount the receiver's reported loss
-///   asks for (`FecRate`);
-/// - the decoder at [`Slot::FecDecoder`].
+///   reads), one block for every five packets of a frame and one for what is left at its
+///   end, all of them sent behind the frame's last packet
+///   (`UlpfecSendBuilder::with_fec_after_frame`: no FEC packet lies inside a frame), in the
+///   amount the receiver's reported loss asks for (`FecRate`);
+/// - the decoder at [`Slot::FecDecoder`]. A FEC packet received reaches the application as
+///   an RTP packet without a payload under the media's payload type: its sequence number is
+///   one of the stream's, and the application's frame assembly must see it as received
+///   (`interceptor::UlpfecRepair`; `rtci-media`'s `SampleBuilder` and `rtci-video`'s
+///   receiver take such a packet as present and no media).
 ///
 /// A stream is protected only when its section negotiated both `red` and `ulpfec` (RFC 5109
 /// section 14.2), under the payload types the section has (an answer keeps the offerer's).

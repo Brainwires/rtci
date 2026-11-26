@@ -79,6 +79,35 @@ with a depacketizer that does not say, waits by `max_late` alone, as it always d
   receiver should generally assess whether the retransmitted packet would still be useful at
   the time it is received").
 
+### Sequence numbers that are not media
+
+Not every sequence number of a video stream is a media packet. libwebrtc sends padding in the
+media stream's sequence numbers, and ULPFEC in RED as browsers send it (and as the `Chrome`
+behaviour profile sends it) puts each FEC packet in a RED packet of its own with the next
+sequence number of the media stream (RFC 2198 with RFC 5109 section 14.2). The engine
+delivers both to the application as RTP packets **without a payload** under the media's
+payload type: a FEC packet with its own sequence number and the timestamp of the frame it
+follows, emptied. A receiver must take every such packet as present: give it to the frame
+assembly with the rest of the stream. Filtered out, each is a missing packet: one between two
+frames is waited for as long as the bound and then costs a key-frame request, and one between
+two packets of a frame leaves the frame incomplete for good.
+
+`SampleBuilder` takes a packet without a payload as present and no media: it is no gap, it is
+left out of the sample it lies in, it starts no sample (the sample before it lasts until the
+next packet with a payload) and, between two samples, it is counted in
+`Sample::prev_padding_packets` (and in `prev_dropped_packets`, which includes padding).
+`rtci-video`'s packet buffer does what libwebrtc's does: such a packet closes a gap between
+two frames (`PacketBuffer::InsertPadding`, `modules/video_coding/packet_buffer.cc:168-174` at
+a222406d; `RtpVideoStreamReceiver2::NotifyReceiverOfEmptyPacket`,
+`video/rtp_video_stream_receiver2.cc:1622-1637`, called for a received FEC packet at
+`:1603-1612` and for an empty packet at `:1325-1335`), and a frame with one inside it is not
+found, there as here. That is why a sender places its FEC packets behind the last packet of a
+frame and never inside one (libwebrtc `modules/rtp_rtcp/source/ulpfec_generator.cc:134` and
+`:157-159`; `UlpfecSendBuilder::with_fec_after_frame`, on by default).
+
+A FEC packet that is lost on the way leaves a real hole between two frames, and the receiver
+cannot tell it from a lost one-packet frame: it waits for it as for any gap.
+
 ### Why 300 ms, and what a browser does
 
 No RFC gives a number. RFC 8834 section 6.1 has retransmission be useful only when "the
