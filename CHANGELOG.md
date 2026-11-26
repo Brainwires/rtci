@@ -36,11 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/jsep_voice_activity_detection.rs::a_bundle_only_audio_section_follows_the_option_too`.
 - **Cryptex was not negotiated for an offer whose RTP sections were all bundle-only**
   (`conf/bundle-2-bundle-only-rtp-section-is-live`; RFC 9335 section 4, RFC 9143 section 7.2):
-  Chromium's initial offer under `max-bundle` with the data channel created before the tracks
-  has the data section first (the BUNDLE-tagged one) and every audio / video section port zero
-  with `a=bundle-only`. Those sections were not counted as RTP sections, so the offer had none
-  and no Cryptex: the answer went without `a=cryptex` and the `Require` policy refused the
-  offer. Test: `tests/cryptex_require.rs::cryptex_applies_to_bundle_only_rtp_sections_of_a_data_tagged_offer`.
+  an offer whose BUNDLE-tagged section is the data section, every audio / video section port
+  zero with `a=bundle-only` (RFC 9143 7.2 allows it; no browser in the matrix writes it:
+  Chromium, WebKit and Firefox put an RTP section first even when the channel is created before
+  the tracks, browser-sdp of test-env run 45898141031), had no RTP section by that count, so no
+  Cryptex: the answer went without `a=cryptex` and the `Require` policy refused the offer. Test: `tests/cryptex_require.rs::cryptex_applies_to_bundle_only_rtp_sections_of_a_data_tagged_offer`.
 
 ### Testing
 
