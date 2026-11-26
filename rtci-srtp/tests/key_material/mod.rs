@@ -668,8 +668,8 @@ fn session_key_name(who: &str, epoch: Option<u64>, name: &str) -> String {
 /// epochs `epochs` (`index DIV kdr`; `[0]` with a zero rate), in every form
 /// ([`every_aes_form`], [`every_hmac_form`]): the SRTP and SRTCP encryption, authentication and
 /// salting keys, the RFC 6904 header extension keys k_he and k_hs (derived with the SRTP index
-/// whether or not an extension is encrypted), and the master key itself, which the key
-/// derivation keys AES with. `who` names the master key when a context has several.
+/// whether or not an extension is encrypted), the master key itself, which the key
+/// derivation keys AES with, and the master salt. `who` names the master key when a context has several.
 pub fn every_needle(
     profile: ProtectionProfile,
     master_key: &[u8],
@@ -755,6 +755,13 @@ pub fn every_needle(
         wipe(&mut buf);
     }
     every_aes_form(&mut out, &format!("{who}master key"), master_key, false);
+    // RFC 7714 section 13.1: "If the master salt is to be kept secret, it MUST be properly
+    // erased when no longer needed." DTLS-SRTP's is secret: it comes out of the exporter.
+    out.push(Needle::named(
+        format!("{who}master salt"),
+        "the key",
+        master_salt,
+    ));
     out
 }
 
