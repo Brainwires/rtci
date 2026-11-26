@@ -1015,6 +1015,36 @@ impl RTCRtpTransceiverInternal {
         }
     }
 
+    /// RFC 3264 sections 6.1 and 7, RFC 9429 section 5.3.1: the formats an answer of this
+    /// endpoint listed beyond the offer's (`local` is this transceiver's section of the answer,
+    /// `offer` the offer's) are formats it is willing to receive, which the offerer may send
+    /// with; the receiver takes them (a repair format, never added, is left out). `None`, an
+    /// answer of the peer's or a rejected section, leaves none.
+    pub(crate) fn take_answered_formats(
+        &mut self,
+        sections: Option<(&MediaDescription, &MediaDescription)>,
+    ) {
+        let mut formats = vec![];
+        if let Some((local, offer)) = sections
+            && let Ok(codecs) = codecs_from_media_description(local)
+        {
+            let offered = |codec: &RTCRtpCodecParameters| {
+                offer
+                    .media_name
+                    .formats
+                    .iter()
+                    .any(|format| format.parse::<u8>().ok() == Some(codec.payload_type))
+            };
+            formats = codecs
+                .into_iter()
+                .filter(|codec| !offered(codec) && !is_repair_codec(&codec.rtp_codec))
+                .collect();
+        }
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.set_answered_formats(formats);
+        }
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         self.rtcp_reduced_size = reduced_size;
         if let Some(sender) = self.sender.as_mut() {

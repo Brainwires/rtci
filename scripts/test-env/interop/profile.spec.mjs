@@ -46,16 +46,17 @@ test("chrome profile: audio and video both ways", async ({ page }) => {
       return a && a.packetsReceived > 100 && a;
     }, 20000, "100 audio packets").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
     const report = await s.report();
-    // What Rust received on a payload type the answer does not have (RFC 3264 section 6.1),
-    // which the engine ignores (RFC 3550 section 5.1): a browser sender that switched to one
-    // (WebKit, seen in the loss-recovery cells, common.mjs unlessUnnegotiatedPayloadType) is
-    // named rather than taken for video that stopped.
-    const wrongPt = Interop.unnegotiatedReceived(report, s.pc.remoteDescription.sdp);
+    // What Rust received on a payload type the browser's offer does not have: one the answer
+    // does not have either (RFC 3264 section 7), or a format the answer added (RFC 9429 section
+    // 5.3.1) that the browser switched to (WebKit, seen in the loss-recovery cells, common.mjs
+    // unlessOffFormat). Named rather than taken for video that stopped.
+    const offPt = Interop.receivedOutside(report, s.pc.localDescription.sdp);
+    const notInAnswer = Interop.receivedOutside(report, s.pc.remoteDescription.sdp);
     const answerVideo = Interop.codecLines(s.pc.remoteDescription.sdp, "video");
     const sending = (await Interop.codecView(s.pc)).sending;
     s.close();
     return {
-      video, audio, errors: report.errors, wrongPt, answerVideo, sending,
+      video, audio, errors: report.errors, offPt, notInAnswer, answerVideo, sending,
       wire: report.wireRtp?.received, engineIgnored: report.unnegotiatedPayloadTypeRtp,
     };
   }, CHROME);
@@ -64,8 +65,8 @@ test("chrome profile: audio and video both ways", async ({ page }) => {
       `the engine ignored ${r.engineIgnored} for an unnegotiated payload type; the browser sending ${JSON.stringify(r.sending)}`,
   );
   expect(
-    r.wrongPt,
-    `the browser sent media on a payload type the answer does not have (RFC 3264 section 6.1): ${JSON.stringify(r)}`,
+    r.offPt,
+    `the browser sent media on a payload type its offer does not have (${r.notInAnswer.length ? "nor the answer, RFC 3264 section 7" : "a format the answer added, RFC 9429 section 5.3.1"}): ${JSON.stringify(r)}`,
   ).toEqual([]);
   expect(r.video.error, JSON.stringify(r)).toBeUndefined();
   expect(r.audio.error, JSON.stringify(r)).toBeUndefined();

@@ -26,7 +26,7 @@ const walk = (suite, file) => {
       } else if (res.status === "passed" && (t.status === "expected" || t.status === undefined)) {
         cell.status = "pass";
         // A cell that passed on its second attempt after a known browser defect
-        // (common.mjs unlessUnnegotiatedPayloadType) says so in its cell.
+        // (common.mjs unlessOffFormat) says so in its cell.
         const notes = [...(t.annotations || []), ...(res.annotations || [])];
         const defect = notes.find((a) => a.type === "known-browser-defect");
         if (defect) cell.detail = defect.description;

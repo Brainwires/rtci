@@ -2183,6 +2183,11 @@ impl RTCPeerConnection {
                 self.rtp_transceivers[i].take_send_fmtp_from_remote(remote);
                 self.rtp_transceivers[i].take_receive_fmtp_from_local(local);
             }
+            // RFC 3264 sections 6.1 and 7: the formats this endpoint's answer added beyond the
+            // offer's are received (the offerer may send with any format of the answer).
+            self.rtp_transceivers[i].take_answered_formats(
+                (!we_offered && !is_rejected_media(answered)).then_some((answered, offered)),
+            );
             // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
             // the offer and the answer both have `a=extmap-allow-mixed`.
             let mixed = !is_rejected_media(answered)

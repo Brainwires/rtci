@@ -328,14 +328,16 @@
     return pts;
   }
 
-  // What the Rust side received on a payload type the answer `answerSdp` does not have
+  // What the Rust side received on a payload type description `sdp` does not have
   // (interop-peer's `wireRtp.received`, counted from the SRTP header before the engine looks
-  // at it): an offerer sends only formats of the answer (RFC 3264 section 6.1, RFC 8829 section
-  // 5.3.1) and the engine ignores the rest (RFC 3550 section 5.1). [{ payloadType, packets }].
-  function unnegotiatedReceived(report, answerSdp) {
-    const answered = sdpPayloadTypes(answerSdp);
+  // at it): [{ payloadType, packets }]. Against the answer: media an offerer must not send (RFC
+  // 3264 section 7: "It MUST send using a media format listed in the answer"), which the engine
+  // ignores (RFC 3550 section 5.1). Against the browser's own offer: also a format the answer
+  // added beyond the offer (RFC 9429 section 5.3.1), which the browser may send with.
+  function receivedOutside(report, sdp) {
+    const listed = sdpPayloadTypes(sdp);
     return Object.entries(report?.wireRtp?.received || {})
-      .filter(([pt]) => !answered.has(Number(pt)))
+      .filter(([pt]) => !listed.has(Number(pt)))
       .map(([pt, c]) => ({ payloadType: Number(pt), packets: c.packets }));
   }
 
@@ -442,7 +444,7 @@
 
   window.Interop = {
     open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
-    selectedPair, wrongFingerprint, mlines, transportLines, sdpPayloadTypes, unnegotiatedReceived, codecLines,
+    selectedPair, wrongFingerprint, mlines, transportLines, sdpPayloadTypes, receivedOutside, codecLines,
     codecView, defaultCodecLines,
   };
 })();

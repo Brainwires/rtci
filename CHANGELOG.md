@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A format this endpoint's answer added beyond the offer is now received**
+  (`conf/test-3-webkit-unnegotiated-pt-named`; RFC 3264 section 6.1, an answer "MAY indicate
+  additional media formats ... that the answerer is willing to send or receive", and section 7,
+  the offerer "MUST send using a media format listed in the answer"; RFC 9429 section 5.3.1
+  makes adding them a MUST). Since 606bb2fa (2026-11-22, in 0.2.0) the answer to an offer
+  without codec preferences lists the engine's other formats after the offered ones, but the
+  receiver kept only the formats both descriptions had and dropped packets of the added ones
+  as "not negotiated" (RFC 3550 section 5.1). Seen in the browser interop cells: WebKit,
+  whose offer `setCodecPreferences` had cut to VP8 and RTX, was answered with VP9 on 98 added,
+  sent about 35 VP8 packets and then everything on 98, and the engine dropped the rest of the
+  call (6 of 240 loss-recovery runs on one runner; red-2's one unexplained WebKit failure of
+  "chrome profile: audio and video both ways" has the same shape). The receiver now takes the
+  formats its applied answer added (repair formats are never added) and receives them until
+  the next answer. Engine behaviour change YES: media on an added format reaches the
+  application (its packets carry the added payload type; the receiver's W3C parameters still
+  list the negotiated codecs only). Not breaking; API unchanged. Tests
+  `tests/answer_added_formats_rtc2rtc.rs::a_format_the_answer_added_is_received_when_the_offerer_switches_to_it`,
+  `endpoint.rs::a_format_this_endpoints_answer_added_is_received`.
+
 ### Added
 
 - **`RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`**: how many RTP packets of a
@@ -23,21 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Testing
 
 - test-env interop: the two browser loss-recovery cells ("loss recovery: NACK and RTX repair a
-  browser's video under netem" and "... the browser's SSRCs unsignalled ...") check the payload
-  types Rust received against the answer before their loss checks
-  (`common.mjs unlessUnnegotiatedPayloadType`). A browser that sent media on a payload type the
-  answer does not have (RFC 3264 section 6.1) fails the cell with that payload type, its packet
-  count, the engine's `unnegotiatedPayloadTypeRtp` count and both descriptions' video format
-  lines, instead of an unexplained "span 0". For WebKit, which was seen switching its VP8
-  sender to payload type 98 mid-call in 6 of 240 runs, it is recorded as a
-  `known-browser-defect` annotation and the cell runs once more; the second attempt is checked
-  in full (a second switch fails the cell, named). Every attempt logs the answer's video
-  payload types, what was received per payload type and what the browser says it sends with
-  (`Interop.codecView`: RTCRtpSendParameters.codecs, outbound-rtp codecId). The interop peer's
-  report carries `unnegotiatedPayloadTypeRtp`; a failed cell's descriptions are saved under
-  `failed-cell-sdp/` in the artifacts; the matrix and gate show a pass after such a retry.
-  "chrome profile: audio and video both ways" logs the same payload types and names such a
-  switch as its failure (no retry there).
+  browser's video under netem" and "... the browser's SSRCs unsignalled ...") check, before
+  their loss checks, the payload types Rust received against the browser's own offer and the
+  answer (`common.mjs unlessOffFormat`). Media on a payload type the offer does not have fails
+  the cell with that payload type, its packet count, both descriptions' video format lines and
+  what the browser says it sends with (`Interop.codecView`: RTCRtpSendParameters.codecs,
+  outbound-rtp codecId), and says whether it is a format the answer added (RFC 9429 section
+  5.3.1, allowed by RFC 3264 section 7, not the format the cell measures) or one the answer
+  does not have either (RFC 3264 section 7; the engine's `unnegotiatedPayloadTypeRtp` count),
+  instead of an unexplained "span 0". For WebKit, seen switching its VP8 sender to the
+  answer's VP9 on 98 in 6 of 240 runs, it is recorded as a `known-browser-defect` annotation
+  and the cell runs once more, on that evidence only; the second attempt is checked in full (a
+  second switch fails the cell, named). Every attempt logs its payload types. The interop
+  peer's report carries `unnegotiatedPayloadTypeRtp`; a failed cell's descriptions are saved
+  under `failed-cell-sdp/` in the artifacts; the matrix and gate show a pass after such a
+  retry. "chrome profile: audio and video both ways" logs the same payload types and names such
+  a switch as its failure (no retry there).
 
 ## [0.2.0] - 2026-11-26
 
