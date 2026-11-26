@@ -228,9 +228,13 @@ fn video_added_run(setup: &Setup) -> Result<StartUp> {
 
 /// A call that starts with audio alone and gains video by renegotiation, on seeds 1 and 2 of
 /// `chain`. RFC 8836 section 2, requirement 4, at the start of the video's flow: the
-/// estimate should find the open link soon after the video starts. Held to 1 Mbit/s within
-/// three seconds of the renegotiation (a cluster nothing carries is waited for for one second)
-/// and the maximum within four.
+/// estimate should find the open link soon after the video starts. The video's first packet
+/// starts the start-up probing again (`conf/probe-4-a-new-media-flow-starts-the-probing`;
+/// before, the start-up clusters were spent on the audio and nothing asked again: 460 to 490
+/// kbit/s six seconds after the video started, in every chain). Held to 1 Mbit/s within
+/// 0.35 s of the renegotiation and the maximum within 0.5 s: about one and a half times what
+/// every chain and seed measured with the fix (0.14-0.24 s and 0.29-0.34 s, hosted run
+/// 45863858346).
 fn video_added(chain: Chain) -> Result<()> {
     let runs = (1..=2)
         .map(|seed| {
@@ -241,8 +245,8 @@ fn video_added(chain: Chain) -> Result<()> {
     check(
         runs,
         video_added_run,
-        Duration::from_secs(3),
-        Duration::from_secs(4),
+        Duration::from_millis(350),
+        Duration::from_millis(500),
     )
 }
 

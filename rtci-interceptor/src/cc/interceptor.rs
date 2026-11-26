@@ -1319,6 +1319,14 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                     if self.probe_senders.insert(rtp_packet.header.ssrc) {
                         self.probe_unanswered = false;
                         self.probe_chain_changed = true;
+                        // A media stream's first packet is the start of its flow (not one of
+                        // a repair stream: RTX, FEC).
+                        if self.local_ssrcs.contains(&rtp_packet.header.ssrc) {
+                            let target = self.estimator.target_bitrate();
+                            if let Some(probing) = self.probing.as_mut() {
+                                probing.on_new_flow(target);
+                            }
+                        }
                     }
                     self.sent.push_back((msg.now, size));
                     if self.sent.len() > 4096 {

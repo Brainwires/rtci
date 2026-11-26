@@ -825,6 +825,34 @@ impl ProbeController {
         true
     }
 
+    /// A media stream sent its first packet after the call's start, at a target of `target`:
+    /// the start of a flow. When the start-up sequence is over, it is owed again, at three
+    /// and six times `target`, and goes on while the path carries what is asked, as at the
+    /// call's start.
+    ///
+    /// RFC 8836 section 2, requirement 4: the algorithm "SHOULD adapt as quickly as possible to
+    /// initial network conditions at the start of a flow" (draft-ietf-rmcat-gcc-02 has no
+    /// probing). The start-up clusters of a call that began with audio alone were spent on the
+    /// audio, which carries no cluster at its rate (the pacer releases what it holds, and
+    /// audio is a packet every 20 ms); when video is added nothing else asks for one, since a
+    /// sender that follows its target is not application limited: the video climbed at 8 % a
+    /// second (461 kbit/s six seconds after it started, paced or not). While the start-up
+    /// sequence is still owed or under way (the sources of a call starting within a few
+    /// milliseconds of each other) nothing changes. libwebrtc probes on a growth of the
+    /// allocated maximum instead (`ProbeController::OnMaxTotalAllocatedBitrate`); this rule
+    /// needs no allocation, only the flow's first packet.
+    pub fn on_new_flow(&mut self, target: f64) {
+        if !self.started || !self.initial.is_empty() {
+            return;
+        }
+        self.initial = INITIAL_PROBES
+            .iter()
+            .rev()
+            .map(|multiple| target * multiple)
+            .collect();
+        self.further = None;
+    }
+
     /// The number of the cluster whose result is awaited.
     pub fn outstanding(&self) -> Option<u32> {
         self.outstanding.map(|(cluster, _, _)| cluster)
@@ -1057,6 +1085,55 @@ mod tests {
             .poll(at + Duration::from_millis(200), 900_000.0, 300_000.0, true)
             .expect("second cluster");
         assert_eq!(1_800_000.0, second.bits_per_second);
+    }
+
+    /// A flow that starts after the start-up sequence is over owes it again, at three and six
+    /// times the target then; one that starts while it is still owed changes nothing.
+    #[test]
+    fn a_flow_that_starts_later_starts_the_probing_again() {
+        let epoch = Instant::now();
+        let mut controller = ProbeController::new(300_000.0, 100_000_000.0);
+        controller.on_new_flow(300_000.0);
+        let first = controller
+            .poll(epoch, 300_000.0, 300_000.0, true)
+            .expect("first cluster");
+        controller.on_new_flow(300_000.0);
+        controller.on_result(first.cluster, 100_000.0);
+        let second = controller
+            .poll(
+                epoch + Duration::from_millis(200),
+                300_000.0,
+                300_000.0,
+                true,
+            )
+            .expect("second cluster");
+        assert_eq!(
+            1_800_000.0, second.bits_per_second,
+            "the sequence as it was"
+        );
+        controller.on_result(second.cluster, 100_000.0);
+        let later = epoch + Duration::from_millis(400);
+        assert_eq!(
+            None,
+            controller.poll(later, 300_000.0, 300_000.0, true),
+            "the start-up is over"
+        );
+
+        controller.on_new_flow(500_000.0);
+        let again = controller
+            .poll(later, 500_000.0, 500_000.0, true)
+            .expect("the start-up again");
+        assert_eq!(1_500_000.0, again.bits_per_second);
+        controller.on_result(again.cluster, 1_500_000.0);
+        let next = controller
+            .poll(
+                later + Duration::from_millis(200),
+                1_500_000.0,
+                500_000.0,
+                true,
+            )
+            .expect("its second cluster");
+        assert_eq!(3_000_000.0, next.bits_per_second);
     }
 
     /// A result that confirms the rate probed is followed by a cluster at twice the result; one
