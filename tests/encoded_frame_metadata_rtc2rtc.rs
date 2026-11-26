@@ -1726,9 +1726,43 @@ fn a_forwarder_drops_a_spatial_layer_of_sframe_encrypted_svc(
         world.run_until(next)?;
     }
     // Packets may still be queued after the last frame's 33 ms (run 45869567115 read 26 of
-    // the 32 without this): give the sender time to send them all.
+    // the 32 without this): give the sender time to send them all. What was on the wire and
+    // the sender's target at that point are printed (run with --nocapture to read them).
+    let wire_count = |world: &World| {
+        let mut seqs: Vec<u16> = world
+            .wire
+            .iter()
+            .filter(|h| h.ssrc == ssrc)
+            .map(|h| h.sequence_number)
+            .collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        seqs.len()
+    };
+    let before_drain = (
+        wire_count(&world),
+        world.peers[1]
+            .read_rtp
+            .iter()
+            .filter(|p| p.header.ssrc == ssrc)
+            .count(),
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .target_bitrates(),
+    );
     let drained = world.now + Duration::from_secs(2);
     world.run_until(drained)?;
+    eprintln!(
+        "{mime} {mode_name}: {} packets written; before the drain {} on the wire, {} read, \
+         target {:?} bit/s; after it {} on the wire",
+        seq.wrapping_sub(700),
+        before_drain.0,
+        before_drain.1,
+        before_drain.2,
+        wire_count(&world)
+    );
 
     let mut received: Vec<rtci::rtp::Packet> = world.peers[1]
         .read_rtp
