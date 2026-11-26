@@ -442,13 +442,8 @@ fn a_message_larger_than_the_mtu_is_sent_whole() -> Result<()> {
 #[test]
 fn a_client_offering_ecc_suites_sends_supported_groups_and_point_formats() -> Result<()> {
     for client in [dtls12(client_builder()), client_builder()] {
-        let mut pair = Pair::new(
-            client.with_cipher_suites(vec![
-                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
-                CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
-            ]),
-            server_builder(),
-        )?;
+        // The default suites, ECDHE ones among them.
+        let mut pair = Pair::new(client, server_builder())?;
         let hello = take(&mut pair.client);
         let datagram = &hello[0];
         assert_eq!((datagram[0], datagram[13]), (22, 1), "a ClientHello");

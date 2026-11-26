@@ -2402,13 +2402,20 @@ fn post_handshake_messages_out_of_place_draw_the_alert_their_rfc_names() -> Resu
 }
 
 /// RFC 9147 section 4: "Plaintext records MUST NOT be sent with sequence numbers that would
-/// exceed 2^48-1". A client whose plaintext counter is at 2^48-1 retransmits its ClientHello
-/// with that sequence number, and then sends no plaintext record again.
+/// exceed 2^48-1". The client's second ClientHello (the answer to a HelloRetryRequest, the
+/// first plaintext record its DTLS 1.3 association writes) is retransmitted with the counter
+/// at 2^48-1, so with that sequence number; after it no plaintext record is sent again.
 #[test]
 fn a_plaintext_record_never_takes_a_sequence_number_past_2_48_minus_1() -> Result<()> {
-    let mut pair = Pair::new(client_builder(), no_cookies())?;
-    let first = take(&mut pair.client);
-    assert_eq!(first_message(&first[0]).3, 0);
+    let mut pair = Pair::new(client_builder(), server_builder())?;
+    pair.round();
+    let second = take(&mut pair.client);
+    assert_eq!(
+        second.len(),
+        1,
+        "the ClientHello that answers the HelloRetryRequest"
+    );
+    assert!(first_message(&second[0]).3 < 16);
     pair.client_conn()
         .set_plaintext_send_sequence(MAX_SEQUENCE_NUMBER);
     let at = pair
@@ -2418,6 +2425,7 @@ fn a_plaintext_record_never_takes_a_sequence_number_past_2_48_minus_1() -> Resul
     let _ = pair.client.handle_timeout(server_addr(), at);
     let again = take(&mut pair.client);
     assert_eq!(again.len(), 1);
+    assert_eq!(first_message(&again[0]).0, messages::CLIENT_HELLO);
     assert_eq!(first_message(&again[0]).3, MAX_SEQUENCE_NUMBER);
     assert_eq!(
         pair.client_conn().plaintext_send_sequence(),
