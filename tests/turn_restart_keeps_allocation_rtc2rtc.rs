@@ -169,15 +169,27 @@ impl World {
             .map(|(t, al)| (t.0, al.username.clone(), al.relayed))
             .collect();
         let now = self.now;
-        let pairs: Vec<_> = self.peers[0]
-            .pc
-            .get_stats(now, StatsSelector::None)
+        let report = self.peers[0].pc.get_stats(now, StatsSelector::None);
+        let local = |id: &str| match report.get(id) {
+            Some(rtci::statistics::report::RTCStatsReportEntry::LocalCandidate(c)) => {
+                format!("{}:{}", c.address.clone().unwrap_or_default(), c.port)
+            }
+            _ => id.to_owned(),
+        };
+        let pairs: Vec<_> = report
             .candidate_pairs()
             .filter(|p| p.nominated)
-            .map(|p| (p.local_candidate_id.clone(), p.remote_candidate_id.clone()))
+            .map(|p| (local(&p.local_candidate_id), format!("{:?}", p.state)))
             .collect();
+        let mut through: Vec<(SocketAddr, bool, usize)> = vec![];
+        for (relay, _, out, _) in &self.server.relayed {
+            match through.iter_mut().find(|(r, o, _)| r == relay && o == out) {
+                Some(entry) => entry.2 += 1,
+                None => through.push((*relay, *out, 1)),
+            }
+        }
         format!(
-            "allocations {allocations:?}; rejections {:?}; deleted {:?}; A's nominated pairs {pairs:?}; lost {:?}",
+            "allocations {allocations:?}; rejections {:?}; deleted {:?}; A's nominated pairs (local, state) {pairs:?}; relayed (relay, A to B, count) {through:?}; lost {:?}",
             self.server.rejections,
             self.server.deleted,
             self.lost.iter().rev().take(4).collect::<Vec<_>>()
