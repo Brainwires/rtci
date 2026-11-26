@@ -16,8 +16,6 @@ mod algorithm;
 mod erased_stack;
 mod error;
 mod hkdf;
-#[cfg(feature = "crypto-ring")]
-mod hmac_sha1;
 #[cfg(feature = "openssl")]
 mod openssl_ctr;
 mod provider;
