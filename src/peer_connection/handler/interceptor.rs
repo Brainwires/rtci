@@ -1844,20 +1844,37 @@ impl<'a> InterceptorHandler<'a> {
     }
 
     /// webrtc-encoded-transform 6.4: a PLI or FIR for an SSRC a sender sends is a
-    /// `keyframerequest` for the encoding of that SSRC, with its RID.
-    fn announce_key_frame_requests(&mut self, now: Instant, packets: &[Box<dyn rtcp::Packet>]) {
+    /// `keyframerequest` for the encoding of that SSRC, with its RID; each is followed by
+    /// `OnKeyFrameRequestOrigin`, the same request with where it came from. `local` is the
+    /// [`interceptor::LocalKeyFrameRequest`] the packet carries when an interceptor of this
+    /// chain made it; without one it came from the remote peer, whatever its sender SSRC.
+    fn announce_key_frame_requests(
+        &mut self,
+        now: Instant,
+        packets: &[Box<dyn rtcp::Packet>],
+        local: Option<interceptor::LocalKeyFrameRequest>,
+    ) {
+        use crate::peer_connection::event::{RTCKeyFrameRequestEvent, RTCKeyFrameRequestOrigin};
         use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
         use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-        let mut requested: Vec<u32> = Vec::new();
+        let mut requested: Vec<(u32, RTCKeyFrameRequestOrigin)> = Vec::new();
         for packet in packets {
             let any = packet.as_any();
             if let Some(pli) = any.downcast_ref::<PictureLossIndication>() {
-                requested.push(pli.media_ssrc);
+                let origin = local.map_or(
+                    RTCKeyFrameRequestOrigin::RemotePictureLossIndication,
+                    RTCKeyFrameRequestOrigin::Local,
+                );
+                requested.push((pli.media_ssrc, origin));
             } else if let Some(fir) = any.downcast_ref::<FullIntraRequest>() {
-                requested.extend(fir.fir.iter().map(|entry| entry.ssrc));
+                let origin = local.map_or(
+                    RTCKeyFrameRequestOrigin::RemoteFullIntraRequest,
+                    RTCKeyFrameRequestOrigin::Local,
+                );
+                requested.extend(fir.fir.iter().map(|entry| (entry.ssrc, origin)));
             }
         }
-        for ssrc in requested {
+        for (ssrc, origin) in requested {
             let found = self
                 .rtp_transceivers
                 .iter()
@@ -1874,13 +1891,25 @@ impl<'a> InterceptorHandler<'a> {
                         .map(|e| (id, e.rtp_coding_parameters.rid.clone()))
                 });
             if let Some((id, rid)) = found {
+                let sender = crate::rtp_transceiver::RTCRtpSenderId::from(id);
+                let rid = (!rid.is_empty()).then_some(rid);
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now,
                     event: RTCEventInternal::RTCPeerConnectionEvent(
                         RTCPeerConnectionEvent::OnKeyFrameRequest {
-                            sender: crate::rtp_transceiver::RTCRtpSenderId::from(id),
-                            rid: (!rid.is_empty()).then_some(rid),
+                            sender,
+                            rid: rid.clone(),
                         },
+                    ),
+                });
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnKeyFrameRequestOrigin(RTCKeyFrameRequestEvent {
+                            sender,
+                            rid,
+                            origin,
+                        }),
                     ),
                 });
             }
@@ -2577,7 +2606,11 @@ impl<'a>
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packet) => {
                         trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
-                        self.announce_key_frame_requests(packet.now, rtcp_packet);
+                        let local = packet
+                            .message
+                            .custom::<interceptor::LocalKeyFrameRequest>()
+                            .copied();
+                        self.announce_key_frame_requests(packet.now, rtcp_packet, local);
                     }
                     // Media on its way to the application: its sources are the receiver's
                     // synchronization and contributing sources from now on.
@@ -2783,6 +2816,10 @@ mod interceptor_early_media_test;
 #[cfg(test)]
 #[path = "interceptor_circuit_breaker_test.rs"]
 mod interceptor_circuit_breaker_test;
+
+#[cfg(test)]
+#[path = "interceptor_key_frame_request_test.rs"]
+mod interceptor_key_frame_request_test;
 
 /// The octets SRTCP adds to a compound packet under `context`'s profile (RFC 3711 section
 /// 3.3 and 3.4, RFC 7714 section 9): the E flag and SRTCP index, and the HMAC or AEAD tag. No
