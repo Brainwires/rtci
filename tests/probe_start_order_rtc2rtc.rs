@@ -16,8 +16,8 @@
 //! Each call here is a few seconds on an open link (10 ms one way, no cap, no loss), audio and
 //! video with RTX each way, the video following the estimate. Both peers are held to what
 //! `an_open_link_is_found_within_a_second_without_a_pacer` (capacity_cap_video_rtc2rtc.rs)
-//! holds a call whose sources start together to: 1 Mbit/s within a second and the 2.5 Mbit/s
-//! maximum within two.
+//! holds a call whose sources start together to (1 Mbit/s within a second, the 2.5 Mbit/s
+//! maximum within two), except where a test says why its first bound is later.
 
 mod capacity_common;
 
@@ -70,94 +70,141 @@ fn open_link_run(setup: &Setup) -> Result<StartUp> {
     Ok(start_up(&world, Duration::ZERO, [0, 0]))
 }
 
-/// What a peer is held to: 1 Mbit/s within `to_1m`, the maximum within `to_max`, the
-/// maximum at the end, and (without a pacer, where the responder's padding is the probe)
-/// padding on its uplink.
-fn assert_found(setup: &Setup, outcome: &StartUp, to_1m: Duration, to_max: Duration) {
+/// Whether a peer found the open link: 1 Mbit/s within `to_1m`, the maximum within
+/// `to_max`, the maximum at the end, and (without a pacer, where the responder's padding is
+/// the probe) padding on its uplink. Every failure, for every peer.
+fn misses(setup: &Setup, outcome: &StartUp, to_1m: Duration, to_max: Duration) -> Vec<String> {
+    let mut misses = Vec::new();
     for (i, who) in ["caller", "callee"].into_iter().enumerate() {
-        assert!(
-            outcome.reached_1m[i].is_some_and(|at| at <= to_1m),
-            "{setup:?} {who}: 1 Mbit/s at {:?}, not within {to_1m:?}: {outcome:?}",
-            outcome.reached_1m[i]
-        );
-        assert!(
-            outcome.reached_max[i].is_some_and(|at| at <= to_max),
-            "{setup:?} {who}: the maximum at {:?}, not within {to_max:?}: {outcome:?}",
-            outcome.reached_max[i]
-        );
-        assert_eq!(
-            Some(MAX_BPS),
-            outcome.last[i],
-            "{setup:?} {who}: at the maximum at the end: {outcome:?}"
-        );
-        if setup.chain != Chain::Default {
-            assert!(
-                outcome.padding[i] > 0,
-                "{setup:?} {who}: no probe padding left: {outcome:?}"
-            );
+        let mut miss = |what: String| misses.push(format!("{setup:?} {who}: {what}: {outcome:?}"));
+        if !outcome.reached_1m[i].is_some_and(|at| at <= to_1m) {
+            miss(format!(
+                "1 Mbit/s at {:?}, not within {to_1m:?}",
+                outcome.reached_1m[i]
+            ));
+        }
+        if !outcome.reached_max[i].is_some_and(|at| at <= to_max) {
+            miss(format!(
+                "the maximum at {:?}, not within {to_max:?}",
+                outcome.reached_max[i]
+            ));
+        }
+        if outcome.last[i] != Some(MAX_BPS) {
+            miss(format!("{:?} at the end, not the maximum", outcome.last[i]));
+        }
+        if setup.chain != Chain::Default && outcome.padding[i] == 0 {
+            miss("no probe padding left".to_owned());
         }
     }
+    misses
+}
+
+/// Every run of `runs` (what it is, its setup) through `run`, each printed, then every
+/// miss at once: one CI run gives the figures of all of them.
+fn check(
+    runs: Vec<(String, Setup)>,
+    run: fn(&Setup) -> Result<StartUp>,
+    to_1m: Duration,
+    to_max: Duration,
+) -> Result<()> {
+    let mut all = Vec::new();
+    for (what, setup) in runs {
+        let outcome = run(&setup)?;
+        println!("{what}, {:?} seed {}: {outcome:?}", setup.chain, setup.seed);
+        all.extend(misses(&setup, &outcome, to_1m, to_max));
+    }
+    assert!(all.is_empty(), "{}", all.join("\n"));
+    Ok(())
 }
 
 /// The audio leads by these: under a frame of video, and over one audio frame.
 const AUDIO_LEADS_MS: [u64; 2] = [10, 25];
 
-fn audio_first(chain: Chain, to_max: Duration) -> Result<()> {
+fn audio_first(chain: Chain) -> Vec<(String, Setup)> {
+    let mut runs = Vec::new();
     for lead in AUDIO_LEADS_MS {
         for seed in 1..=2 {
             let setup = Setup::new(seed, None)
                 .chain(chain)
                 .anchor(ANCHORS[0])
                 .start_order(StartOrder::AudioFirst(Duration::from_millis(lead)));
-            let outcome = open_link_run(&setup)?;
-            println!("audio first by {lead} ms, {chain:?} seed {seed}: {outcome:?}");
-            assert_found(&setup, &outcome, Duration::from_secs(1), to_max);
+            runs.push((format!("audio first by {lead} ms"), setup));
         }
     }
-    Ok(())
+    runs
 }
+
+/// How long a call whose audio starts first takes to 1 Mbit/s without a pacer: the first
+/// start-up cluster, asked for by the first audio packet, cannot be carried and its result is
+/// waited for (`PROBE_RESULT_TIMEOUT`, 1 s); the next one is carried, and its result comes as
+/// it does for a call whose sources start together (0.37 s to 1 Mbit/s there). Measured
+/// 1.07 s on the fix (hosted run 45859028514); never within the 5 s on 0.2.0 (45859034615:
+/// one cluster, no padding, 447 kbit/s at the end).
+const AUDIO_FIRST_1M_BY: Duration = Duration::from_millis(1_500);
 
 /// The default interceptors with the pacer's slot passed through: the first audio packet
 /// asks for the first start-up cluster before the video has sent, and nothing can be padded
 /// for it. The video starts while it awaits its result, so its going unanswered does not stop
-/// the probing: the next start-up cluster leaves as padding on the video's RTX stream.
+/// the probing: the next start-up cluster leaves as padding on the video's RTX stream
+/// ([`AUDIO_FIRST_1M_BY`]).
 #[test]
 fn audio_before_video_still_probes_without_a_pacer() -> Result<()> {
-    audio_first(Chain::DefaultWithoutPacer, Duration::from_secs(2))
+    check(
+        audio_first(Chain::DefaultWithoutPacer),
+        open_link_run,
+        AUDIO_FIRST_1M_BY,
+        Duration::from_secs(2),
+    )
 }
 
 /// The same in ParolNet's chain (the TWCC-driven GCC, no pacer): the chain of the consumer's
 /// report (`the_estimate_climbs_on_an_open_link`: the caller at 1 Mbit/s after 15.61 s).
 #[test]
 fn audio_before_video_still_probes_in_parolnets_chain() -> Result<()> {
-    audio_first(Chain::ParolNet, Duration::from_secs(2))
+    check(
+        audio_first(Chain::ParolNet),
+        open_link_run,
+        AUDIO_FIRST_1M_BY,
+        Duration::from_secs(2),
+    )
 }
 
 /// The engine's default interceptors: the pacer sends its clusters itself, from what it holds
-/// and padding, so the order the sources start in never mattered; held here so that it stays
-/// so.
+/// and padding, so the order the sources start in does not matter (0.37 s to 1 Mbit/s and
+/// 0.47 s to the maximum, as a call whose sources start together); held here so that it
+/// stays so.
 #[test]
 fn audio_before_video_still_probes_with_the_pacer() -> Result<()> {
-    audio_first(Chain::Default, Duration::from_secs(3))
+    check(
+        audio_first(Chain::Default),
+        open_link_run,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )
 }
 
 /// The other order: the video's first frame 10 ms before the audio's. The first packet that
-/// leaves is the video's, so the first cluster is asked for with a stream that can carry it.
+/// leaves is the video's, so the first cluster is asked for with a stream that can carry it
+/// (0.27 to 0.37 s to 1 Mbit/s, 0.47 s to the maximum, in every chain, with the fix and
+/// without).
 #[test]
 fn video_before_audio_probes_in_every_chain() -> Result<()> {
+    let mut runs = Vec::new();
     for chain in [Chain::DefaultWithoutPacer, Chain::ParolNet, Chain::Default] {
         for seed in 1..=2 {
             let setup = Setup::new(seed, None)
                 .chain(chain)
                 .anchor(ANCHORS[0])
                 .start_order(StartOrder::VideoFirst(Duration::from_millis(10)));
-            let outcome = open_link_run(&setup)?;
-            println!("video first by 10 ms, {chain:?} seed {seed}: {outcome:?}");
-            let to_max = Duration::from_secs(if chain == Chain::Default { 3 } else { 2 });
-            assert_found(&setup, &outcome, Duration::from_secs(1), to_max);
+            runs.push(("video first by 10 ms".to_owned(), setup));
         }
     }
-    Ok(())
+    check(
+        runs,
+        open_link_run,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )
 }
 
 /// Three seconds of audio alone, then both cameras on by renegotiation (the caller's, then the
@@ -179,30 +226,40 @@ fn video_added_run(setup: &Setup) -> Result<StartUp> {
     Ok(start_up(&world, on, padding_before))
 }
 
-/// A call that starts with audio alone and gains video by renegotiation. While only audio is
-/// sent nothing can carry a start-up cluster in a chain without a pacer (no stream with an RTX
-/// stream has sent), and the probing waits; the video's stream, bound by the renegotiation,
-/// is a stream that can, so the start-up clusters that were left are asked for again and the
-/// estimate finds the open link soon after the video starts (RFC 8836 section 2,
-/// requirement 4, at the start of the video's flow). The cluster asked for when the stream is
-/// bound is asked before its first packet has left, the same window as a call whose audio
-/// starts first; the next one is carried. Held to 1 Mbit/s within three seconds of the
-/// renegotiation (a cluster's result is given up after one second) and the maximum within
-/// four.
-#[test]
-fn video_added_to_an_audio_call_is_probed_for_in_every_chain() -> Result<()> {
-    for chain in [Chain::DefaultWithoutPacer, Chain::ParolNet, Chain::Default] {
-        for seed in 1..=2 {
+/// A call that starts with audio alone and gains video by renegotiation, on seeds 1 and 2 of
+/// `chain`. RFC 8836 section 2, requirement 4, at the start of the video's flow: the
+/// estimate should find the open link soon after the video starts. Held to 1 Mbit/s within
+/// three seconds of the renegotiation (a cluster nothing carries is waited for for one second)
+/// and the maximum within four.
+fn video_added(chain: Chain) -> Result<()> {
+    let runs = (1..=2)
+        .map(|seed| {
             let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
-            let outcome = video_added_run(&setup)?;
-            println!("video added after 3 s of audio, {chain:?} seed {seed}: {outcome:?}");
-            assert_found(
-                &setup,
-                &outcome,
-                Duration::from_secs(3),
-                Duration::from_secs(4),
-            );
-        }
-    }
-    Ok(())
+            ("video added after 3 s of audio".to_owned(), setup)
+        })
+        .collect();
+    check(
+        runs,
+        video_added_run,
+        Duration::from_secs(3),
+        Duration::from_secs(4),
+    )
+}
+
+/// [`video_added`] in the default interceptors without the pacer.
+#[test]
+fn video_added_to_an_audio_call_is_probed_for_without_a_pacer() -> Result<()> {
+    video_added(Chain::DefaultWithoutPacer)
+}
+
+/// [`video_added`] in ParolNet's chain.
+#[test]
+fn video_added_to_an_audio_call_is_probed_for_in_parolnets_chain() -> Result<()> {
+    video_added(Chain::ParolNet)
+}
+
+/// [`video_added`] in the engine's default interceptors.
+#[test]
+fn video_added_to_an_audio_call_is_probed_for_with_the_pacer() -> Result<()> {
+    video_added(Chain::Default)
 }
