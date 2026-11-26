@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtci-interceptor/tests/probe_without_pacer.rs::
   a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing`.
 
+### Testing
+
+- **Calls whose audio and video do not start in the same instant**
+  (`conf/probe-2-staggered-start-tests`; tests only, no engine change). Every two-peer call of
+  the capacity world (`tests/capacity_common`) and every instrument cell wrote its first audio
+  and video frames in the same instant, so none ever sent a call's first packet before the
+  video had: the window of the probe-1 fix above, which only an interceptor-level test reached.
+  `Setup::start_order` (audio or video first by N ms; the same instant by default, with the
+  old arithmetic exactly; byte-identical rows not yet shown) and an optional seventh part of an instrument cell's name (`aN`, `vN`).
+  New `tests/probe_start_order_rtc2rtc.rs`, two peer connections on an open link, both peers
+  held to 1 Mbit/s and the 2.5 Mbit/s maximum (RFC 8836 section 2, requirement 4):
+  audio first by 10 and 25 ms in the chains without a pacer (1 Mbit/s after 1.07 s with the
+  probe-1 fix, never in the 5 s on 0.2.0, which stays at 450 kbit/s) and with the pacer
+  (0.37 s, either engine); video first by 10 ms in every chain (0.27 to 0.37 s, either
+  engine); and an audio-only call that gains video by renegotiation after 3 s. That last one
+  FAILS in every chain, with the pacer too, on 0.2.0 and with the probe-1 fix alike: no
+  cluster is ever carried after the video starts (no padding; 460 to 490 kbit/s six seconds
+  later, the controller's 8 % a second). Its three tests fail until `probe-3`, which also
+  shortens the audio-first start-up (1.07 s against 0.37 s when the video sends first).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
