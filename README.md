@@ -115,6 +115,17 @@ The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnecti
 | `handle_write(TaggedRTCMessage)` | in | Queue an outbound RTP/RTCP/data-channel message |
 | `close()` | in | Shut the connection down |
 
+After `close()` keep the loop running for the connection until `poll_timeout()` returns `None`:
+drain `poll_write` onto the socket, feed what arrives with `handle_read`, call `handle_timeout`
+at `poll_timeout`. A closed connection does nothing else, but the engine's TURN allocations over
+UDP are deleted with a Refresh of LIFETIME 0 that is an ordinary STUN transaction (RFC 8656
+section 8, RFC 8489 section 6.2.1): it is retransmitted, a 438 is answered with the new nonce,
+and an Allocate still under way is followed and its allocation deleted. Each one done raises
+`OnTurnAllocationReleased` with the local address it used; when `poll_timeout()` is `None` the
+socket is free for another connection, whose Allocate on the same 5-tuple would otherwise be
+refused with 437 while the old allocation lives (up to its lifetime, 10 minutes by default).
+Dropping a connection without `close()` sends nothing.
+
 `handle_event` is also part of the trait, but `RTCEvent` is currently uninhabited: no value of it can be constructed,
 so there is nothing to call it with. It exists so the signature is already right when the first inbound event variant
 is added.

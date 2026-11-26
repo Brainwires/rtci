@@ -102,6 +102,8 @@ enum Carrier {
 /// An unauthenticated Allocate racing to one address of a `turn:` server over UDP (RFC 8656
 /// section 3.9), from a UDP base of the transport.
 pub(crate) struct UdpAttempt {
+    /// The link's URL (`TurnLink::url_string`).
+    url: String,
     remote: SocketAddr,
     base: SocketAddr,
     client: turn::client::Client,
@@ -119,6 +121,24 @@ pub enum RelayGathering {
     Engine,
     /// The application: the engine sends nothing to a `turn:` server over UDP.
     Application,
+}
+
+/// An allocation over UDP the engine is letting go, or an Allocate still under way when it
+/// stopped needing it: its client runs on until the transaction is done (RFC 8656 section 8
+/// with RFC 8489 section 6.2.1: the Refresh of LIFETIME 0 is retransmitted, a 438 answered with
+/// the new nonce), after `close()` too.
+pub(crate) struct UdpRelease {
+    url: String,
+    base: SocketAddr,
+    server: SocketAddr,
+    client: turn::client::Client,
+    /// The allocation being deleted; `None` while an Allocate is under way.
+    relay: Option<SocketAddr>,
+    /// The Allocate under way carries the credential (its success is an allocation, which is
+    /// deleted at once); otherwise it is the first, unauthenticated one: a 401 to it ends it,
+    /// and the request it asks for is not sent.
+    signed: bool,
+    done: bool,
 }
 
 /// A DTLS association to one address of a `turns:...?transport=udp` server, from a UDP base.
@@ -290,6 +310,12 @@ pub(crate) struct EngineTurn {
     /// The relayed candidates the application added itself over UDP: the transport and the
     /// `url` it gave (`None`: any server).
     application_relays: Vec<(TransportId, Option<String>)>,
+    /// Allocations being let go and Allocates nobody needs any more (`UdpRelease`).
+    releases: Vec<UdpRelease>,
+    /// 5-tuples an Allocate was refused with 437 on (RFC 8656 section 7.4): (base, server,
+    /// until). A link does not allocate from such a base to that server again for two
+    /// minutes.
+    mismatched: Vec<(SocketAddr, SocketAddr, Instant)>,
 }
 
 impl EngineTurn {
@@ -311,6 +337,8 @@ impl EngineTurn {
             relay_gathering: RelayGathering::Engine,
             udp_losers: vec![],
             application_relays: vec![],
+            releases: vec![],
+            mismatched: vec![],
         }
     }
 
@@ -330,6 +358,14 @@ impl EngineTurn {
             && self.application_relays.iter().any(|(t, url)| {
                 *t == link.transport && url.as_deref().is_none_or(|u| same_server(u, &link.url))
             })
+    }
+
+    /// Whether an Allocate from `base` to `server` was refused with 437 less than two minutes
+    /// before `now`.
+    fn is_mismatched(&self, base: SocketAddr, server: SocketAddr, now: Instant) -> bool {
+        self.mismatched
+            .iter()
+            .any(|(b, s, until)| *b == base && *s == server && now < *until)
     }
 
     /// Whether `server` is held back at `now`.
@@ -513,24 +549,44 @@ impl EngineTurn {
     }
 }
 
-/// Deletes the allocation a UDP link holds (a Refresh of LIFETIME 0, RFC 8656 section 8).
+/// Lets go of what a UDP link holds: its allocation is deleted with a Refresh of LIFETIME 0
+/// (RFC 8656 section 8), run as a transaction of its own (`UdpRelease`), and an Allocate still
+/// under way (one racing, or the request with the credential) is followed to its answer, a
+/// success deleted. The link keeps no client.
 fn release_udp_allocation(
     link: &mut TurnLink,
     now: Instant,
     out: &mut std::collections::VecDeque<TaggedBytesMut>,
+    releases: &mut Vec<UdpRelease>,
 ) {
-    if link.carrier != Carrier::Udp || link.state != LinkState::OpenUdp {
+    if link.carrier != Carrier::Udp {
         return;
     }
-    let (Some(relay), Some(client), Some(base), Some(server)) = (
-        link.relay,
-        link.client.as_mut(),
-        link.link_local,
-        link.server,
-    ) else {
+    let url = link.url_string();
+    for a in link.udp_attempts.drain(..) {
+        releases.push(UdpRelease {
+            url: a.url,
+            base: a.base,
+            server: a.remote,
+            client: a.client,
+            relay: None,
+            signed: false,
+            done: false,
+        });
+    }
+    if link.state != LinkState::OpenUdp {
+        return;
+    }
+    let (Some(base), Some(server)) = (link.link_local, link.server) else {
         return;
     };
-    if let Ok(mut r) = client.relay(relay) {
+    let Some(mut client) = link.client.take() else {
+        return;
+    };
+    let relay = link.relay;
+    if let Some(relay) = relay
+        && let Ok(mut r) = client.relay(relay)
+    {
         let _ = r.close(now);
     }
     while let Some(t) = client.poll_write() {
@@ -540,6 +596,15 @@ fn release_udp_allocation(
             message: t.message,
         });
     }
+    releases.push(UdpRelease {
+        url,
+        base,
+        server,
+        client,
+        relay,
+        signed: true,
+        done: false,
+    });
 }
 
 fn udp_context(local: SocketAddr, peer: SocketAddr) -> TransportContext {
@@ -1089,8 +1154,64 @@ impl RTCPeerConnection {
         use stun::error_code::ErrorCode;
         let link = &mut self.streams.turn.links[index];
         let server = link.server;
+        let base = link.link_local;
         let code = err.code();
+        let (url, carrier, transport) = (link.url_string(), link.carrier, link.transport);
+        if let Some(ErrorCode(437)) = code {
+            self.pipeline_context.event_outs.push_back(
+                crate::peer_connection::event::RTCPeerConnectionEvent::OnTurnRequestRejected {
+                    url,
+                    relay: None,
+                    method: "Allocate",
+                    error_code: 437,
+                },
+            );
+        }
+        // RFC 8656 section 7.4, 437: "The client SHOULD pick another client transport address
+        // and retry the Allocate request [...] The client SHOULD try three different client
+        // transport addresses before giving up on this server." Over UDP the engine has the
+        // application's sockets only: another UDP base of the transport, if there is one.
+        if code == Some(ErrorCode(437))
+            && carrier == Carrier::Udp
+            && let (Some(base), Some(server)) = (base, server)
+        {
+            self.streams
+                .turn
+                .mismatched
+                .retain(|(_, _, until)| now < *until);
+            self.streams
+                .turn
+                .mismatched
+                .push((base, server, now + Duration::from_secs(120)));
+            let tried = self
+                .streams
+                .turn
+                .mismatched
+                .iter()
+                .filter(|(_, s, _)| *s == server)
+                .count();
+            let other = self
+                .streams
+                .turn
+                .udp_base(transport, server, |b| {
+                    self.turn_base_usable(transport, b)
+                        && !self.streams.turn.is_mismatched(b, server, now)
+                })
+                .is_some();
+            if other && tried < 3 {
+                debug!("{server}: 437 on {base}; allocating from another base");
+                let link = &mut self.streams.turn.links[index];
+                link.client = None;
+                link.server = None;
+                link.link_local = None;
+                link.race = Some(HappyEyeballs::new(vec![server], CONNECTION_ATTEMPT_DELAY));
+                link.state = LinkState::Connecting;
+                self.drive_turn_races(now);
+                return;
+            }
+        }
         // The connection (or association) to the refusing server is of no further use.
+        let link = &mut self.streams.turn.links[index];
         if let LinkState::Open(id) = link.state {
             self.streams.table.close(id);
         }
@@ -1458,6 +1579,7 @@ impl RTCPeerConnection {
         let transport = self.pipeline_context.transports.active_id();
         let mut ended = vec![];
         let out = &mut self.pipeline_context.write_outs;
+        let releases = &mut self.streams.turn.releases;
         for l in self
             .streams
             .turn
@@ -1474,7 +1596,7 @@ impl RTCPeerConnection {
                 let _ = a.endpoint.close(now);
                 a.flush(out);
             }
-            release_udp_allocation(l, now, out);
+            release_udp_allocation(l, now, out, releases);
             if let LinkState::Open(id) = l.state {
                 ended.push(id);
             }
@@ -1502,6 +1624,7 @@ impl RTCPeerConnection {
     fn close_turn_links(&mut self, mut links: Vec<TurnLink>) {
         let now = self.pipeline_context.now;
         let out = &mut self.pipeline_context.write_outs;
+        let releases = &mut self.streams.turn.releases;
         let mut ended = vec![];
         for l in links.iter_mut() {
             ended.extend(l.attempts.iter().copied());
@@ -1510,7 +1633,7 @@ impl RTCPeerConnection {
                 let _ = a.endpoint.close(now);
                 a.flush(out);
             }
-            release_udp_allocation(l, now, out);
+            release_udp_allocation(l, now, out, releases);
         }
         for id in ended {
             self.streams.table.close(id);
@@ -1523,6 +1646,7 @@ impl RTCPeerConnection {
         let mut ended = vec![];
         let now = self.pipeline_context.now;
         let out = &mut self.pipeline_context.write_outs;
+        let releases = &mut self.streams.turn.releases;
         self.streams.turn.links.retain_mut(|l| {
             let kept = ids.contains(&l.transport);
             if !kept {
@@ -1533,7 +1657,7 @@ impl RTCPeerConnection {
                     let _ = a.endpoint.close(now);
                     a.flush(out);
                 }
-                release_udp_allocation(l, now, out);
+                release_udp_allocation(l, now, out, releases);
             }
             kept
         });
@@ -1590,6 +1714,9 @@ impl RTCPeerConnection {
         if let Some(t) = self.turn_data_poll_timeout() {
             next = Some(next.map_or(t, |n| n.min(t)));
         }
+        if let Some(t) = self.turn_releases_poll_timeout() {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
         next
     }
 
@@ -1597,6 +1724,7 @@ impl RTCPeerConnection {
     pub(crate) fn turn_handle_timeout(&mut self, now: Instant) {
         // A DTLS link whose base was added before the local description starts now.
         self.start_turn_links();
+        self.turn_releases_handle_timeout(now);
         if self.streams.turn.links.is_empty() {
             return;
         }
@@ -1710,7 +1838,7 @@ impl RTCPeerConnection {
             let _ = a.endpoint.close(now);
             a.flush(out);
         }
-        release_udp_allocation(link, now, out);
+        release_udp_allocation(link, now, out, &mut self.streams.turn.releases);
         link.client = None;
         link.relay = None;
         link.dtls = None;
@@ -1743,8 +1871,11 @@ impl RTCPeerConnection {
                     && l.server == Some(server)
             })
         };
+        let now = self.pipeline_context.now;
         if let Some(base) = self.streams.turn.udp_base(transport, server, |base| {
-            self.turn_base_usable(transport, base) && !taken(&self.streams.turn.links, base)
+            self.turn_base_usable(transport, base)
+                && !taken(&self.streams.turn.links, base)
+                && !self.streams.turn.is_mismatched(base, server, now)
         }) {
             return Some(base);
         }
@@ -2090,8 +2221,152 @@ impl RTCPeerConnection {
                 let _ = a.endpoint.close(now);
                 a.flush(&mut self.pipeline_context.write_outs);
             }
-            release_udp_allocation(link, now, &mut self.pipeline_context.write_outs);
+            release_udp_allocation(
+                link,
+                now,
+                &mut self.pipeline_context.write_outs,
+                &mut self.streams.turn.releases,
+            );
         }
+        // The Allocates that lost a race and are still unanswered: an answer that is an
+        // allocation has it deleted.
+        for loser in std::mem::take(&mut self.streams.turn.udp_losers) {
+            self.streams.turn.releases.push(UdpRelease {
+                url: loser.url,
+                base: loser.base,
+                server: loser.remote,
+                client: loser.client,
+                relay: None,
+                signed: false,
+                done: false,
+            });
+        }
+        self.pump_turn_releases(now);
+    }
+
+    /// Moves the releases on (`UdpRelease`): what their clients send leaves from their base,
+    /// an Allocate success is deleted at once, and a release that is done is dropped with an
+    /// `OnTurnAllocationReleased`: its Refresh of LIFETIME 0 was answered (or 437) or timed
+    /// out, or the Allocate was answered without an allocation, refused, or timed out.
+    pub(crate) fn pump_turn_releases(&mut self, now: Instant) {
+        for r in self.streams.turn.releases.iter_mut() {
+            while let Some(event) = r.client.poll_event() {
+                match event {
+                    turn::client::Event::AllocateResponse(_, relay) => {
+                        debug!("{}: an allocation nobody needs ({relay}): deleted", r.url);
+                        if let Ok(mut x) = r.client.relay(relay) {
+                            let _ = x.close(now);
+                        }
+                        r.relay = Some(relay);
+                        r.signed = true;
+                    }
+                    turn::client::Event::AllocationReleased(_) => r.done = true,
+                    turn::client::Event::AllocateError(..)
+                    | turn::client::Event::TransactionTimeout(_)
+                        if r.relay.is_none() =>
+                    {
+                        r.done = true
+                    }
+                    _ => {}
+                }
+            }
+            while let Some(t) = r.client.poll_write() {
+                if r.done {
+                    continue;
+                }
+                self.pipeline_context.write_outs.push_back(TaggedBytesMut {
+                    now,
+                    transport: udp_context(r.base, r.server),
+                    message: t.message,
+                });
+            }
+            // Nothing under way any more (no allocation was ever asked with the credential).
+            if r.relay.is_none() && r.client.poll_timeout().is_none() {
+                r.done = true;
+            }
+        }
+        let mut i = 0;
+        while i < self.streams.turn.releases.len() {
+            if !self.streams.turn.releases[i].done {
+                i += 1;
+                continue;
+            }
+            let r = self.streams.turn.releases.remove(i);
+            debug!("{}: released from {}", r.url, r.base);
+            self.pipeline_context.event_outs.push_back(
+                crate::peer_connection::event::RTCPeerConnectionEvent::OnTurnAllocationReleased {
+                    url: r.url,
+                    local_address: r.base,
+                    relayed_address: r.relay,
+                },
+            );
+        }
+    }
+
+    /// The releases' next timer (all a closed peer connection still has).
+    pub(crate) fn turn_releases_poll_timeout(&mut self) -> Option<Instant> {
+        self.streams
+            .turn
+            .releases
+            .iter_mut()
+            .filter_map(|r| r.client.poll_timeout())
+            .min()
+    }
+
+    /// Fires the releases' timers (retransmissions, transaction timeouts).
+    pub(crate) fn turn_releases_handle_timeout(&mut self, now: Instant) {
+        for r in self.streams.turn.releases.iter_mut() {
+            if r.client.poll_timeout().is_some_and(|t| t <= now)
+                && let Err(err) = r.client.handle_timeout(now)
+            {
+                debug!("TURN release timer: {err}");
+            }
+        }
+        self.pump_turn_releases(now);
+    }
+
+    /// An answer to one of the releases' transactions (taken out of `handle_read` before
+    /// anything else sees it), or `msg` back.
+    pub(crate) fn take_turn_release(&mut self, msg: TaggedBytesMut) -> Option<TaggedBytesMut> {
+        if self.streams.turn.releases.is_empty() || !matches!(stun_class(&msg.message), Some(2 | 3))
+        {
+            return Some(msg);
+        }
+        let (base, remote) = (msg.transport.local_addr, msg.transport.peer_addr);
+        let mut id = [0u8; 12];
+        id.copy_from_slice(&msg.message[8..20]);
+        let tid = stun::message::TransactionId(id);
+        let now = msg.now;
+        let Some(r) = self.streams.turn.releases.iter_mut().find(|r| {
+            !r.done && r.base == base && r.server == remote && r.client.has_transaction(&tid)
+        }) else {
+            return Some(msg);
+        };
+        if let Err(err) = r.client.handle_read(msg) {
+            debug!("TURN message from {remote}: {err}");
+        }
+        if !r.signed {
+            // The answer to the unauthenticated Allocate. A 401 made nothing: the request with
+            // the credential it asks for is not sent. A success (a server that does not
+            // authenticate) is an allocation, deleted (`pump_turn_releases`).
+            while r.client.poll_write().is_some() {}
+            let made = std::iter::from_fn(|| r.client.poll_event()).find_map(|e| match e {
+                turn::client::Event::AllocateResponse(_, relay) => Some(relay),
+                _ => None,
+            });
+            match made {
+                Some(relay) => {
+                    if let Ok(mut x) = r.client.relay(relay) {
+                        let _ = x.close(now);
+                    }
+                    r.relay = Some(relay);
+                    r.signed = true;
+                }
+                None => r.done = true,
+            }
+        }
+        self.pump_turn_releases(now);
+        None
     }
 
     /// Starts an unauthenticated Allocate to `addr` for the UDP link `index`, from the
@@ -2106,6 +2381,7 @@ impl RTCPeerConnection {
             return false;
         };
         let link = &self.streams.turn.links[index];
+        let url = link.url_string();
         let config = turn::client::ClientConfig {
             stun_serv_addr: addr.to_string(),
             turn_serv_addr: addr.to_string(),
@@ -2141,6 +2417,7 @@ impl RTCPeerConnection {
         self.streams.turn.links[index]
             .udp_attempts
             .push(UdpAttempt {
+                url,
                 remote: addr,
                 base,
                 client,
@@ -2197,10 +2474,13 @@ impl RTCPeerConnection {
     /// the socket).
     pub(crate) fn take_turn_udp(&mut self, msg: TaggedBytesMut) -> Option<TaggedBytesMut> {
         if msg.transport.transport_protocol != TransportProtocol::UDP
-            || (self.streams.turn.links.is_empty() && self.streams.turn.udp_losers.is_empty())
+            || (self.streams.turn.links.is_empty()
+                && self.streams.turn.udp_losers.is_empty()
+                && self.streams.turn.releases.is_empty())
         {
             return Some(msg);
         }
+        let msg = self.take_turn_release(msg)?;
         let class = stun_class(&msg.message);
         let channel_data = msg.message.len() >= 4 && (0x40..=0x4f).contains(&msg.message[0]);
         if class.is_none() && !channel_data {
@@ -2365,8 +2645,12 @@ impl RTCPeerConnection {
                 link.url
             );
             let link = &mut self.streams.turn.links[index];
-            link.udp_attempts.clear();
-            release_udp_allocation(link, now, &mut self.pipeline_context.write_outs);
+            release_udp_allocation(
+                link,
+                now,
+                &mut self.pipeline_context.write_outs,
+                &mut self.streams.turn.releases,
+            );
             link.client = None;
             link.relay = None;
             link.race = None;
