@@ -2244,6 +2244,25 @@ recent picture and its audio.
 
 ### Testing
 
+- **The browser loss-recovery cells no longer depend on who wins a NACK race**
+  (`scripts/test-env/interop/scenarios.spec.mjs`, `common.mjs`, `examples/interop-peer`;
+  `conf/test-2-firefox-loss-cells-count-repairs-without-the-race`; test harness only, no engine
+  change). "loss recovery: NACK and RTX repair a browser's video under netem" asserted that the
+  browser received RTX from Rust while netem dropped only the browser-to-Rust leg. The reflecting
+  peer sends back the browser's packets under their own sequence numbers, so each such loss is a
+  gap toward the browser too, and the browser's NACK for it crosses the same netem as the
+  browser's own RTX of it: about 93% of those NACKs reached Rust before the packet did, so there
+  was nothing to resend and the packet reached the browser as a late original. Firefox then
+  counted no retransmission in about 1 run in 40, on the 0.2.0 release head and before nack-11
+  alike (test-env run 45796440553; 40-run loops 45805447289 and 45805457083: 0 give-ups, 2337 of
+  the 2338 NACKed packets Rust held answered). The cell now also drops what Rust sends
+  (`impairFromRust`, netem on the Rust host), and asserts Rust's `retransmittedPacketsSent` as
+  well as the browser's `retransmittedBytesReceived`. The reflecting peer now passes key-frame
+  requests for what it sends back on to the browser's encoder (a PLI for the source SSRC, at
+  most one per 200 ms), as a forwarder does: "loss recovery with the browser's SSRCs
+  unsignalled" failed in 3 of 80 Firefox loop runs (and in 45796440553) with its decoder waiting, after one late packet,
+  for the encoder's own next key frame (29 requests reached Rust, none went on).
+
 - **The SRTP process-memory tests use keys of their own per test and classify every hit by its
   address** (`rtci-srtp/tests/key_erasure_process_memory.rs`, `conf/zeroize-2b-claim-matches-proof`).
   A test thread computes the keys it looks for on its own stack; two tests looking for the same
