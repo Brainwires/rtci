@@ -101,6 +101,9 @@ pub(crate) struct TimerTable {
     /// RTO.Max in milliseconds when it is not the default, bounding the backoff of the timers
     /// that double their own interval.
     rto_max: Option<u64>,
+    /// T1-init and T1-cookie run on the path's RTO, which their expiries back off (RFC 9260
+    /// 5.1 and 6.3.3 E2), instead of doubling an interval of their own.
+    t1_follows_rto: bool,
 }
 
 impl TimerTable {
@@ -127,6 +130,14 @@ impl TimerTable {
             .unwrap_or(u64::MAX)
             .max(1);
         self.rto_max = Some(max);
+        self
+    }
+
+    /// T1-init and T1-cookie are started with the RTO the caller passes, which their
+    /// expiries back off (`TransportConfig::with_handshake_timers_back_off_rto`), instead of
+    /// doubling that interval by themselves.
+    pub fn with_t1_following_rto(mut self, value: bool) -> Self {
+        self.t1_follows_rto = value;
         self
     }
 
@@ -166,7 +177,10 @@ impl TimerTable {
         } else if matches!(
             timer,
             Timer::Ack | Timer::T3RTX | Timer::HalfOpen | Timer::T5ShutdownGuard
-        ) {
+        ) || (self.t1_follows_rto && matches!(timer, Timer::T1Init | Timer::T1Cookie))
+        {
+            // T1-init and T1-cookie following RFC 9260 6.3: the RTO passed is the path's,
+            // already backed off by their expiries (E2).
             interval
         } else {
             self.backoff(interval, self.retrans[timer as usize])

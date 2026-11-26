@@ -532,6 +532,9 @@ pub struct SettingEngine {
     pub(crate) sctp_rto: Option<sctp::RtoConfig>,
     /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
     pub(crate) sctp_max_retransmissions: Option<usize>,
+    /// [`SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto`]. `true` (the
+    /// default) is RFC 9260 5.1's.
+    pub(crate) sctp_handshake_timers_back_off_rto: bool,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
@@ -703,6 +706,7 @@ impl SettingEngine {
             sctp_max_streams: Default::default(),
             sctp_rto: Default::default(),
             sctp_max_retransmissions: Default::default(),
+            sctp_handshake_timers_back_off_rto: true,
             sctp_message_size_limit_without_interleaving: Default::default(),
             data_channel_max_buffer_size: Default::default(),
             data_channel_send_before_ack: Default::default(),
@@ -3037,6 +3041,21 @@ impl SettingEngineBuilder {
     /// [`Self::with_sctp_max_retransmissions`] (or a profile that set it).
     pub fn without_sctp_max_retransmissions(mut self) -> Self {
         self.0.sctp_max_retransmissions = None;
+        self
+    }
+
+    /// Whether an expiry of the SCTP handshake timers (T1-init, T1-cookie) backs off the
+    /// association's RTO, as a retransmission timeout of DATA does. On by default: RFC 9260
+    /// section 5.1, "The T1-init timer and T1-cookie timer SHOULD follow the same rules given
+    /// in Section 6.3" (rule E2: "set RTO = RTO * 2"), so after a handshake that lost packets
+    /// the first DATA waits the backed-off RTO until a round trip is measured.
+    ///
+    /// `false` is libwebrtc's (dcSCTP's `t1_init_` and `t1_cookie_` in
+    /// `net/dcsctp/socket/dcsctp_socket.cc` double their own 1 s), the `Chrome` behaviour
+    /// profile's value: each handshake timer starts at RTO.Initial and doubles by itself,
+    /// and the RTO is left alone. See `sctp::TransportConfig::with_handshake_timers_back_off_rto`.
+    pub fn with_sctp_handshake_timers_back_off_rto(mut self, enabled: bool) -> Self {
+        self.0.sctp_handshake_timers_back_off_rto = enabled;
         self
     }
 

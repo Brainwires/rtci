@@ -207,12 +207,10 @@ fn data_written_when_the_cookie_ack_arrives_leaves_at_once() {
     assert!(link.run_until(deadline, |l| !l.server.received.is_empty()));
 }
 
-/// RFC 9260 5.1, 6.3 and 16: T1-init and T1-cookie start at RTO.Initial (1 s) and double on
-/// each expiry by themselves; T1-cookie starts over at RTO.Initial, whatever T1-init went
-/// through. Their expiries are not T3-rtx expiries: they back off no RTO, and the first DATA
-/// after the handshake has its T3-rtx an RTO.Initial ahead.
-#[test]
-fn handshake_timers_back_off_on_their_own_and_leave_the_rto_alone() {
+/// Runs a handshake that loses three INITs and three COOKIE ECHOs, then writes the first DATA.
+/// Returns the intervals each of T1-init's and T1-cookie's expiries came after (in seconds),
+/// the RTO once ESTABLISHED (ms), and how far ahead the first DATA's T3-rtx was started.
+fn lossy_handshake_timers(config: TransportConfig) -> (Vec<u64>, Vec<u64>, u64, Duration) {
     let mut endpoint = crate::endpoint::Endpoint::new(
         remote(),
         TransportProtocol::UDP,
@@ -223,27 +221,27 @@ fn handshake_timers_back_off_on_their_own_and_leave_the_rto_alone() {
     let (_, mut a) = endpoint
         .connect(
             start,
-            crate::ClientConfig::new(TransportConfig::default()),
+            crate::ClientConfig::new(config),
             "10.0.0.2:5000".parse().unwrap(),
         )
         .unwrap();
-    let second = Duration::from_secs(1);
     let expiries = |a: &mut Association, timer: Timer, typ: u8, from: Instant| {
         let mut at = from;
-        for backoff in [1, 2, 4] {
+        let mut intervals = Vec::new();
+        for _ in 0..3 {
             let due = a.timers.get(timer).expect("the timer runs");
-            assert_eq!(at + second * backoff, due, "{timer:?}, expiry {backoff}");
+            intervals.push((due - at).as_secs());
             a.handle_timeout(due);
             assert_eq!(1, chunks_of_type(&sent_datagrams(a, due), typ).len());
             at = due;
         }
-        at
+        (at, intervals)
     };
     assert_eq!(
         1,
         chunks_of_type(&sent_datagrams(&mut a, start), CT_INIT.0).len()
     );
-    let now = expiries(&mut a, Timer::T1Init, CT_INIT.0, start);
+    let (now, init) = expiries(&mut a, Timer::T1Init, CT_INIT.0, start);
 
     let init_ack = init_chunk(CT_INIT_ACK.0, 4242, 9000, &[raw_tlv(7, b"cookie")]);
     let raw = packet_to(&a, &[init_ack]);
@@ -253,18 +251,59 @@ fn handshake_timers_back_off_on_their_own_and_leave_the_rto_alone() {
         1,
         chunks_of_type(&sent_datagrams(&mut a, now), CT_COOKIE_ECHO.0).len()
     );
-    let now = expiries(&mut a, Timer::T1Cookie, CT_COOKIE_ECHO.0, now);
+    let (now, cookie) = expiries(&mut a, Timer::T1Cookie, CT_COOKIE_ECHO.0, now);
 
     let raw = packet_to(&a, &[raw_chunk(CT_COOKIE_ACK.0, 0, &[])]);
     inject(&mut a, now, raw);
     assert_eq!(AssociationState::Established, a.state());
-    assert_eq!(1000, a.rto_mgr.get_rto(), "no backoff carried over");
+    let rto = a.rto_mgr.get_rto();
     a.open_stream(1, PPI)
         .unwrap()
         .write_sctp(now, &Bytes::from_static(b"first"), PPI)
         .unwrap();
     assert_eq!(1, transmitted_data(&a.gather_outbound(now).0).len());
-    assert_eq!(Some(now + second), a.timers.get(Timer::T3RTX));
+    let t3 = a.timers.get(Timer::T3RTX).expect("T3-rtx runs") - now;
+    (init, cookie, rto, t3)
+}
+
+/// RFC 9260 5.1: "The T1-init timer and T1-cookie timer SHOULD follow the same rules given in
+/// Section 6.3." T1-init starts at RTO.Initial (1 s, C1); each expiry backs off the path's RTO
+/// (6.3.3 E2: "set RTO = RTO * 2"), which the timer starts again with. T1-cookie starts with
+/// that RTO (8 s after three lost INITs), backs it off in turn up to RTO.Max (60 s), and the
+/// first DATA's T3-rtx starts with it too: no round trip was measured (C2).
+#[test]
+fn handshake_timer_expiries_back_off_the_rto_of_the_path() {
+    let (init, cookie, rto, t3) = lossy_handshake_timers(TransportConfig::default());
+    assert_eq!(vec![1, 2, 4], init, "T1-init");
+    assert_eq!(
+        vec![8, 16, 32],
+        cookie,
+        "T1-cookie starts where T1-init left the RTO"
+    );
+    assert_eq!(60_000, rto, "backed off to RTO.Max");
+    assert_eq!(
+        Duration::from_secs(60),
+        t3,
+        "the first DATA waits the backed-off RTO"
+    );
+}
+
+/// `TransportConfig::with_handshake_timers_back_off_rto(false)`, libwebrtc dcSCTP's form:
+/// T1-init and T1-cookie each start at RTO.Initial and double by themselves; their expiries
+/// back off no RTO, and the first DATA after the handshake has its T3-rtx an RTO.Initial ahead.
+#[test]
+fn handshake_timers_can_back_off_on_their_own_and_leave_the_rto_alone() {
+    let (init, cookie, rto, t3) = lossy_handshake_timers(
+        TransportConfig::default().with_handshake_timers_back_off_rto(false),
+    );
+    assert_eq!(vec![1, 2, 4], init, "T1-init");
+    assert_eq!(
+        vec![1, 2, 4],
+        cookie,
+        "T1-cookie starts over at RTO.Initial"
+    );
+    assert_eq!(1000, rto, "no backoff carried over");
+    assert_eq!(Duration::from_secs(1), t3);
 }
 
 /// RFC 9260 5.1 C: "until the COOKIE ACK chunk is returned, the sender MUST NOT send any other

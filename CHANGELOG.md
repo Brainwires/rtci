@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **sctp** (`conf/sctp-22-t1-rto-backoff`): an expiry of T1-init or T1-cookie backs off the
+  association's RTO, as RFC 9260 5.1 says ("The T1-init timer and T1-cookie timer SHOULD follow
+  the same rules given in Section 6.3", rule E2: "set RTO = RTO * 2"). Each handshake timer
+  restarts with the backed-off RTO; T1-cookie starts with what T1-init's expiries left, and the
+  first DATA after the handshake starts T3-rtx with it until a round trip is measured. Before,
+  each timer doubled its own interval from RTO.Initial and the RTO was left alone. That form is
+  libwebrtc dcSCTP's and stays as `TransportConfig::with_handshake_timers_back_off_rto(false)`
+  and `SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto(false)`, the `Chrome`
+  behaviour profile's value (row `sctp.handshake-timers-back-off-rto`). What a peer sees: after
+  a handshake that lost packets the first DATA is retransmitted later (after three lost INITs
+  and three lost COOKIE ECHOs, 60 s instead of 1 s) unless the round trip is measured first.
+  Engine behaviour change: yes (SCTP timers).
 - **sctp** (`conf/sctp-21-cwnd-chunk-bytes`): the congestion control counts DATA chunks with
   their header and padding (RFC 9260 7.2: "the length of the DATA chunk, including the padding,
   SHOULD be used"): the flight size compared with cwnd and Max.Burst, and the bytes a SACK

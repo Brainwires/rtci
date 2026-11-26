@@ -374,6 +374,7 @@ impl RTCPeerConnection {
         .with_inbound_reassembly_limit(setting_engine.sctp_inbound_reassembly_limit)
         .with_rto(setting_engine.sctp_rto)
         .with_max_retransmissions(setting_engine.sctp_max_retransmissions)
+        .with_handshake_timers_back_off_rto(setting_engine.sctp_handshake_timers_back_off_rto)
         .with_path_mtu_discovery(setting_engine.sctp_path_mtu_discovery.unwrap_or(Some(
             crate::peer_connection::transport::sctp::SctpPath::DEFAULT_MAX_IP_PACKET,
         )))
