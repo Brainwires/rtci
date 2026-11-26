@@ -1070,7 +1070,7 @@ governed_behaviours! {
         rfc: interceptor::PacerQueueOverflow::Drop => "Drop",
         chrome: interceptor::PacerQueueOverflow::Drain => "Drain",
         strict_rfc: interceptor::PacerQueueOverflow::Drop => "Drop",
-        chrome_source: "libwebrtc modules/pacing/pacing_controller.cc::PacingController::MaybeUpdateMediaRateDueToLongQueue @ a222406d (lines 706-728): with drain_large_queues (on by default, pacing_controller.h line 98, unless the WebRTC-Pacer-DrainQueue trial is disabled, pacing_controller.cc lines 62-63) the media rate is raised to queue size / (queue_time_limit - average queue time) when that exceeds the pacing rate, queue_time_limit kMaxExpectedQueueLength 2 s (pacing_controller.h lines 92, 104); nothing is dropped. Performance: same as Rfc",
+        chrome_source: "libwebrtc modules/pacing/pacing_controller.cc::PacingController::MaybeUpdateMediaRateDueToLongQueue @ a222406d (lines 706-728): with drain_large_queues (on by default, pacing_controller.h line 98, unless the WebRTC-Pacer-DrainQueue trial is disabled, pacing_controller.cc lines 62-63) the media rate is raised to queue size / (queue_time_limit - average queue time) when that exceeds the pacing rate, queue_time_limit kMaxExpectedQueueLength 2 s (pacing_controller.h lines 92, 104); nothing is dropped. Performance: same as Rfc. Cost: under Drain the backlog is never flushed at a capacity collapse (pacer_backlog applies with Drop only): the source is paused and the queued repairs are delivered in order, as libwebrtc does. Measured (docs/capacity-collapse.md, 2.5 Mbit/s to 300 kbit/s, 200 seeds): oldest picture 5.5 s under Chrome against 1.3 s under Rfc; the Chrome profile with this one row set to Drop 1.5 s. An application that wants Chrome's other rows and a fresh picture after a collapse sets pacer_queue_overflow to Drop",
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.pacer_queue_overflow = v,
         read: |o: &DefaultInterceptorOptions| o.pacer_queue_overflow,
@@ -1650,7 +1650,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "DefaultInterceptorOptions::pacer_backlog",
         class: NotGovernedClass::EngineOnly,
-        note: "the pacer's queue is flushed, with a key-frame request, when the target collapses (RFC 8834 section 6.1, RFC 8836 section 2); libwebrtc has no counterpart: it drops frames before they are numbered and drains its pacer above the target (modules/pacing/pacing_controller.cc MaybeUpdateMediaRateDueToLongQueue @ a222406d), which is pacer_queue_overflow Drain, the Chrome profile's value, under which nothing is flushed",
+        note: "the pacer's queue is flushed, with a key-frame request, when the target collapses (RFC 8834 section 6.1, RFC 8836 section 2); libwebrtc has no counterpart: it drops frames before they are numbered and drains its pacer above the target (modules/pacing/pacing_controller.cc MaybeUpdateMediaRateDueToLongQueue @ a222406d), which is pacer_queue_overflow Drain, the Chrome profile's value, under which nothing is flushed: the picture is about 5 s old after a sharp capacity drop where the flush leaves it about 1 s old (docs/capacity-collapse.md, \"The Chrome profile keeps its backlog\")",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::bandwidth_probing",

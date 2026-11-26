@@ -36,7 +36,8 @@ At a collapse, with `PacerBacklog::Flush` (the default):
 `PacerBuilder::with_backlog`) is the behaviour before this change: the source is paused, the
 queue and every retransmission asked for are delivered in order. It is for a receiver that
 plays strictly in order and cannot resume at a key frame. `QueueOverflow::Drain` (libwebrtc's
-form, the `Chrome` profile) never discards and is unchanged.
+form, the `Chrome` profile) never discards and is unchanged: see "The Chrome profile keeps its
+backlog" below for what that costs.
 
 ### Why half, and why a flush does not repeat
 
@@ -134,6 +135,26 @@ shorter or longer than two seconds, and the two seconds do nothing for the strea
 up and no key frame is asked for, since the receiver was told the time and gives the gap up
 by its own rule. The backlog rule is not changed by an `rtx-time` (the time is the most a
 packet is kept; a collapse ends the repairs of what was sent before it, as the flush does).
+
+**The `rtx-time` is the packet's, not the stream's.** RFC 4588 section 8.6 maps each
+retransmission payload type to one original payload type with `apt`, and `rtx-time` is a
+parameter of that retransmission format (section 8.1), so one stream can carry formats with
+different times: video sent as RED (the `Chrome` profile's `fec.video-red-ulpfec`) goes under
+the RTX of `red`, plain media under the RTX of its codec. The responder takes, for each packet,
+the time of the format the packet is sent again in (`LocalStream::repair_form`; the stream's
+own for a packet sent again as it was), and that one value decides everything for the packet:
+the cut at the time, the two seconds where there is none, and whether its age gives the stream
+up. A RED packet whose RTX of `red` announces no time is declined at two seconds and gives the
+stream up, whatever the codec's RTX announces; a RED packet whose RTX of `red` announces five
+seconds is repaired at three, while a plain packet of the same stream with no time of its own
+is declined.
+
+**Only a packet that would be answered can give the stream up.** A NACK can name a packet the
+responder never sends again: a FEC packet in RED on a stream without RTX, or a packet whose
+payload type has no RTX format on a stream that has RTX. Such an entry is skipped silently, by
+the give-up's age test as by the repair itself: the receiver is not waiting for a picture
+because a FEC packet was lost. On a stream without RTX every other packet is answered (the
+packet again as it was), so the give-up there is as above.
 
 What the responder remembers of a repair (`DELIVERED_MEMORY`, four seconds from the report
 that a retransmission arrived; four seconds for a retransmission a pacer never reports on)
@@ -280,6 +301,62 @@ probing: the call stands at 2.5 Mbit/s when the cap comes).
 | default chain, outage, receiver without a bound | resume later than 2 s | 66 | 0 |
 | default chain, the capacity cells above | every figure | | unchanged or within noise (the flush fires first) |
 | 3 % loss at the full rate, no collapse (either chain) | retransmissions / key frames / requests | 149 / 3 / 1 | 149 / 3 / 1, row for row |
+
+## The Chrome profile keeps its backlog
+
+The flush applies with `QueueOverflow::Drop` only. The `Chrome` behaviour profile sets
+`pacer_queue_overflow` to `Drain`, libwebrtc's form (`drain_large_queues`): its pacer never
+discards. At a collapse the source is paused (a target of zero) and what is queued, the
+retransmissions of what the path dropped at the drop, is delivered in order; the key frame
+the receiver asks for is written only when the pause ends. The profile does what it says, and
+after a sharp capacity drop its picture is about 5 s old where the default's is about 1 s.
+This is not a defect of the profile; it is what libwebrtc's sender-side form costs with a
+receiver that plays in order.
+
+One call (seed 1, the cap at 20.0 s; run 45608112012): both chains cut the estimate first at
+20.3 s. Under `Chrome` the target is zero from 20.8 to 24.3 s, 73 retransmissions leave
+meanwhile at 110 to 240 kbit/s, and the next usable frame arrives at 25.4 s. The default
+flushes once, is never paused, and has frames again at 21.3 s.
+
+`tests/capacity_instrument.rs`, cell `cap/<chain>/gap300/up/q300/rl0`, seeds 1 to 200, means
+(run 45615240747; tree: train 32 at ff4d06af with `conf/rtcpbudget-4`, `conf/red-1`, `-3`, `-2`
+and two chain tokens made for this measurement and not kept: the `Chrome` profile with
+`pacer_queue_overflow = Drop`, and the default with `Drain`). In brackets the difference per
+seed from the chain the row varies, with its 95 % half-width.
+
+| | `Chrome` | `Chrome` with `Drop` | default | default with `Drain` |
+|---|---|---|---|---|
+| oldest picture, s | 5.50 | 1.46 (-4.04 +-0.09) | 1.32 | 6.60 (+5.28 +-0.13) |
+| freeze, s | 5.18 | 1.14 (-4.04 +-0.09) | 1.01 | 6.29 (+5.28 +-0.13) |
+| picture older than 2 s for over 0.5 s (runs of 200) | 200 | 0 | 0 | 200 |
+| time the source was paused, s | 4.87 | 0.02 | 0.00 | 5.12 |
+| pacer flushes | 0 | 1.0 | 1.2 | 0 |
+| retransmissions | 176 | 35 | 1.9 | 102 |
+| key frames sent; requests received | 8.7; 7.2 | 5.4; 2.4 | 5.1; 2.1 | 5.2; 3.3 |
+| target under the cap, kbit/s | 196 | 274 (+78 +-4) | 246 | 231 (-15 +-1) |
+| time to detect, s | 0.588 | 0.588 | 0.590 | 0.590 |
+| time to recover, s | 14.5 | 14.2 (-0.3 +-0.3) | 17.2 | 17.7 (+0.4 +-0.3) |
+| audio packets lost | 27.8 | 26.8 (-1.0 +-0.7) | 27.2 | 32.0 (+4.8 +-1.1) |
+| flows ceased by the circuit breaker | 0 | 0 | 0 | 0 |
+
+Both directions capped (`cap/<chain>/gap300/both/q300/rl0`, 200 seeds): `Chrome` oldest picture
+11.52 s, paused 9.6 s, target under the cap 117 kbit/s; with `Drop` 2.66 s (-8.86 +-0.53),
+0.3 s and 201 kbit/s (the default: 2.64 s and 271 kbit/s).
+
+The whole difference follows the one setting, in both directions: the `Chrome` profile with
+`Drop` is within 0.14 +-0.05 s of the default, and the default with `Drain` is as stale as
+`Chrome`. What it is not: the estimator reacts at the same instant in every column (0.59 s);
+the circuit breaker, off under `Chrome`, ceases no flow in any; the FEC of the profile's RED
+video takes 42 to 100 kbit/s of the stream under the cap in the traced calls (run 45615247297) (so the media target is 196 against
+246 kbit/s) without overloading the path, and is the same in the `Drop` column; and answering
+a NACK for a lost FEC packet (`conf/red-2`) halved the gaps the receiver gave up on (353 to
+156 a call) and did not move the freeze.
+
+**An application that wants the `Chrome` profile's other rows and a fresh picture after a
+collapse** sets `DefaultInterceptorOptions::pacer_queue_overflow` to
+`PacerQueueOverflow::Drop` on the options `DefaultInterceptorOptions::for_profile` returns
+(`pacer_backlog` is `Flush` already). It then also takes `Drop`'s rule for a source that
+writes above the target: the excess is discarded at the pacer, not put on the path.
 
 ## Known limits
 

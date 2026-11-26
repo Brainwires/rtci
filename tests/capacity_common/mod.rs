@@ -385,6 +385,10 @@ pub const ANCHORS: [Duration; 3] = [
 
 pub const VP8_PT: u8 = 96;
 pub const RTX_PT: u8 = 97;
+/// The retransmission format of `video/red` the engine registers with video RED / ULPFEC
+/// (`VIDEO_RED_RTX_PAYLOAD_TYPE`, `apt=116`).
+pub const RED_RTX_PT: u8 =
+    rtci::peer_connection::configuration::interceptor_registry::VIDEO_RED_RTX_PAYLOAD_TYPE;
 pub const OPUS_PT: u8 = 111;
 /// Payload size of an outgoing RTP packet (ParolNet's `RTP_OUTBOUND_MTU`).
 pub const RTP_MTU: usize = 1200;
@@ -1282,7 +1286,9 @@ impl World {
                     // header's padding bit (RFC 3550 section 5.1), in the clear under SRTP, is
                     // set on it and never on a retransmission (RFC 4588 section 4 carries no
                     // padding).
-                    if payload_type == Some(RTX_PT) {
+                    // (The RTX of red too: video sent in RED, the `Chrome` profile, is
+                    // retransmitted under it.)
+                    if payload_type == Some(RTX_PT) || payload_type == Some(RED_RTX_PT) {
                         let link = &mut self.uplinks[i];
                         if msg.message[0] & 0x20 != 0 {
                             link.padding_sent += 1;
