@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **A remote SSRC whose RTCP SDES CNAME contradicts its `a=ssrc ... cname:` is no longer taken
+  to be the source the description declares** (`conf/cname-1-sdes-cname-mismatch-undeclares-ssrc`).
+  RFC 5576 section 6.1: a receiver of "an RTCP SDES packet associating this SSRC with a
+  different CNAME ... SHOULD assume there has been an SSRC collision and that the description
+  of the source that was carried in the SDP description is not applicable to the actual source
+  being received"; section 5: such packets "SHOULD be handled in the same manner as packets from
+  additional sources would be handled had the endpoint not received any a=ssrc: attributes at
+  all". The engine threw the declared CNAME away when it read the remote description, so it
+  never compared. It now keeps it per SSRC and compares it with each SDES CNAME. On a mismatch:
+  the new event `RTCPeerConnectionEvent::OnRemoteCnameMismatch(ssrc)` (once per SSRC and
+  declared CNAME); a declared stream that no packet has established yet and is its receiver's
+  only stream is taken off the receiver, so that its media opens the same track as a stream of
+  an undeclared SSRC (by the single section, its MID or its payload type; without the
+  description's `a=ssrc-group` repair pairing, an RTX stream then associated by its `apt`), where
+  the packets can be placed that way (one media section, or the MID header extension
+  negotiated); a stream already flowing, or declared beside others (`a=ssrc-group:SIM`, beside
+  `a=rid`), keeps its place: the media keeps flowing and no track is unbound or ended. A later
+  description declaring the SSRC with the same contradicted CNAME is not applied to it again.
+  This is a collision between remote sources: no local SSRC moves (RFC 3550 8.2 collisions with
+  a local SSRC are unchanged, `OnSsrcCollision`) and nothing asks for negotiation. API: one new
+  variant of the non-exhaustive `RTCPeerConnectionEvent`. A peer whose descriptions name another
+  CNAME than its RTCP SDES gets this treatment for all its declared SSRCs. Tests
+  `rtcp_session_rtc2rtc.rs::an_sdes_cname_other_than_the_declared_one_leaves_the_ssrc_undeclared`,
+  `a_flowing_stream_whose_sdes_contradicts_its_declared_cname_keeps_flowing`,
+  `an_sdes_cname_that_matches_the_declared_one_changes_nothing`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

@@ -4136,6 +4136,34 @@ pub(crate) fn described_ssrcs(desc: &SessionDescription) -> HashSet<SSRC> {
     ssrcs
 }
 
+/// The CNAME each SSRC of a description is declared with (`a=ssrc:<ssrc> cname:<cname>`, RFC
+/// 5576 section 6.1), in any section: "This MUST be the CNAME value that the media sender will
+/// place in its RTCP SDES packets". An SSRC declared twice keeps its first one (section 6.1:
+/// the attribute "MUST NOT occur more than once for the same ssrc-id within a given media
+/// stream"). At most [`MAX_REMOTE_CNAMES`](crate::peer_connection::handler::interceptor::MAX_REMOTE_CNAMES).
+pub(crate) fn declared_cnames(desc: &SessionDescription) -> HashMap<SSRC, String> {
+    use crate::peer_connection::handler::interceptor::MAX_REMOTE_CNAMES;
+    let mut cnames = HashMap::new();
+    for media in &desc.media_descriptions {
+        for a in &media.attributes {
+            if a.key != ATTR_KEY_SSRC {
+                continue;
+            }
+            let Some((id, attribute)) = a.value.as_deref().and_then(|v| v.split_once(' ')) else {
+                continue;
+            };
+            let (Ok(ssrc), Some(cname)) = (id.parse::<SSRC>(), attribute.strip_prefix("cname:"))
+            else {
+                continue;
+            };
+            if cnames.len() < MAX_REMOTE_CNAMES {
+                cnames.entry(ssrc).or_insert_with(|| cname.to_owned());
+            }
+        }
+    }
+    cnames
+}
+
 /// The decoding dependencies of a description (RFC 5583): for each media section in an
 /// `a=group:DDP` group, its mid and its `a=depend` (section 5.2.2). A group whose sections do
 /// not all state the same dependency type ("In a DDP group, all media streams MUST have the

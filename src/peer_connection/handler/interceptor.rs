@@ -65,6 +65,14 @@ pub(crate) struct InterceptorHandlerContext {
     /// The CNAME each remote SSRC named in its SDES (RFC 3550 6.5.1), which is what binds the
     /// streams of one remote endpoint together for synchronisation.
     pub(crate) remote_cnames: HashMap<SSRC, String>,
+    /// The CNAME each SSRC of the remote description is declared with (`a=ssrc:<ssrc>
+    /// cname:`, RFC 5576 section 6.1), set with each remote description
+    /// ([`Self::set_declared_cnames`]).
+    pub(crate) declared_cnames: HashMap<SSRC, String>,
+    /// The declared SSRCs whose RTCP SDES named another CNAME than the description, with the
+    /// CNAME the description declared: the description of the source is not applicable to
+    /// the source received (RFC 5576 section 6.1; `declared_cname.rs`).
+    pub(crate) contradicted_declarations: HashMap<SSRC, String>,
     /// The MID each remote SSRC named in an RTCP SDES MID item (RFC 9143 sections 9.2 and
     /// 15.1): the m= section of a stream whose packets carry no MID header extension and whose
     /// SSRC no description declares.
@@ -176,6 +184,8 @@ impl Default for InterceptorHandlerContext {
             event_outs: Default::default(),
             cname: interceptor::generate_rtcp_cname(),
             remote_cnames: Default::default(),
+            declared_cnames: Default::default(),
+            contradicted_declarations: Default::default(),
             sdes_mids: Default::default(),
             ssrcs_replaced: false,
             placed_ssrcs: Default::default(),
@@ -905,6 +915,25 @@ impl<'a> InterceptorHandler<'a> {
                     || self.ctx.remote_cnames.contains_key(ssrc)
                 {
                     self.ctx.remote_cnames.insert(*ssrc, cname.clone());
+                }
+                // RFC 5576 section 6.1: an SDES CNAME other than the description's for a
+                // declared SSRC (`declared_cname.rs`).
+                if self.ctx.declaration_contradicted(*ssrc) {
+                    let mid_negotiated = self
+                        .media_engine
+                        .receive_header_extension_id(::sdp::extmap::SDES_MID_URI)
+                        != 0;
+                    for ssrc in self
+                        .ctx
+                        .withdraw_contradicted_declarations(self.rtp_transceivers, mid_negotiated)
+                    {
+                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::RTCPeerConnectionEvent(
+                                RTCPeerConnectionEvent::OnRemoteCnameMismatch(ssrc),
+                            ),
+                        });
+                    }
                 }
             }
             RtcpSessionEvent::SsrcCollision { ssrc, replacement } => {
