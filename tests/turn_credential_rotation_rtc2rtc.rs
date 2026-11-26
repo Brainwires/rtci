@@ -134,6 +134,8 @@ struct World {
     /// Send times of the messages, by text.
     sent: HashMap<String, Instant>,
     next: u64,
+    /// What happened when, for a failure message: signalling steps and the events of note.
+    log: Vec<(Instant, String)>,
 }
 
 impl World {
@@ -183,6 +185,7 @@ impl World {
                 }
             }
             for i in 0..2 {
+                let mut notes = vec![];
                 let peer = &mut self.peers[i];
                 while let Some(event) = peer.pc.poll_event() {
                     moved = true;
@@ -206,6 +209,34 @@ impl World {
                         }
                         _ => {}
                     }
+                    let note = match &event {
+                        RTCPeerConnectionEvent::OnSelectedCandidatePairChange(pair) => {
+                            Some(format!("selected {pair:?}"))
+                        }
+                        RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state) => {
+                            Some(format!("ice {state:?}"))
+                        }
+                        RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
+                            Some(format!("connection {state:?}"))
+                        }
+                        RTCPeerConnectionEvent::OnTurnAllocationReleased { .. }
+                        | RTCPeerConnectionEvent::OnTurnAllocationReplacedInPlace { .. }
+                        | RTCPeerConnectionEvent::OnTurnRequestRejected { .. }
+                        | RTCPeerConnectionEvent::OnIceCandidateErrorEvent(_) => {
+                            Some(format!("{event:?}"))
+                        }
+                        RTCPeerConnectionEvent::OnIceCandidateEvent(ev) => Some(format!(
+                            "candidate {:?}",
+                            ev.candidate
+                                .as_ref()
+                                .and_then(|c| c.to_json().ok())
+                                .map(|c| c.candidate)
+                        )),
+                        _ => None,
+                    };
+                    if let Some(note) = note {
+                        notes.push((now, format!("peer {i}: {note}")));
+                    }
                     peer.events.push(event);
                 }
                 while let Some(message) = peer.pc.poll_read() {
@@ -214,6 +245,7 @@ impl World {
                             .push((String::from_utf8_lossy(&m.data).into_owned(), now));
                     }
                 }
+                self.log.extend(notes);
             }
             if self.trickle {
                 for i in 0..2 {
@@ -324,6 +356,56 @@ impl World {
         out
     }
 
+    /// The log, the server's deletions and relaying, the late messages: times from `t0`.
+    fn timeline(&self, t0: Instant) -> String {
+        let at = |t: Instant| format!("{:.3}", t.saturating_duration_since(t0).as_secs_f64());
+        let mut lines: Vec<(Instant, String)> = self.log.clone();
+        for (client, _, relayed, t) in &self.server.deleted {
+            lines.push((*t, format!("server: deleted {relayed} of {client}")));
+        }
+        let mut spans: Vec<(SocketAddr, bool, Instant, Instant, usize)> = vec![];
+        for (relay, _, out, t) in &self.server.relayed {
+            if *t < t0 {
+                continue;
+            }
+            match spans.iter_mut().find(|s| s.0 == *relay && s.1 == *out) {
+                Some(s) => {
+                    s.3 = *t;
+                    s.4 += 1;
+                }
+                None => spans.push((*relay, *out, *t, *t, 1)),
+            }
+        }
+        for (relay, out, first, last, n) in spans {
+            lines.push((
+                first,
+                format!(
+                    "server: relayed {n} {} via {relay}, {} to {}",
+                    if out { "A->B" } else { "B->A" },
+                    at(first),
+                    at(last)
+                ),
+            ));
+        }
+        let mut late: Vec<(Instant, String)> = self
+            .delays()
+            .into_iter()
+            .filter(|(_, d)| d.is_none_or(|d| d > MAX_DELAY))
+            .map(|(text, d)| (self.sent[&text], format!("late {text} {d:?}")))
+            .collect();
+        late.sort();
+        if let (Some(first), Some(last)) = (late.first().cloned(), late.last().cloned()) {
+            lines.push((first.0, format!("first {}", first.1)));
+            lines.push((last.0, format!("last {}", last.1)));
+        }
+        lines.sort_by_key(|(t, _)| *t);
+        lines
+            .into_iter()
+            .map(|(t, l)| format!("{} {l}", at(t)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn released(&self) -> Vec<(SocketAddr, Option<SocketAddr>)> {
         self.peers[0]
             .events
@@ -367,6 +449,7 @@ fn connected(hosts: &[&str]) -> Result<(World, String)> {
         trickle: true,
         sent: HashMap::new(),
         next: 0,
+        log: vec![],
     };
     world.peers[0].pc.create_data_channel("rotation", None)?;
     let offer = world.peers[0].pc.create_offer(None)?;
@@ -415,24 +498,39 @@ fn rotate(world: &mut World, second_base: bool) -> Result<String> {
             .add_local_candidate(Peer::host(a(A_HOST_2))?)?;
     }
     let now = world.now;
+    world
+        .log
+        .push((world.now, "step: A applies the restart offer".to_owned()));
     world.peers[0]
         .pc
         .set_local_description(now, offer.clone())?;
     world.stream(Duration::from_millis(500))?;
     let now = world.now;
+    world
+        .log
+        .push((world.now, "step: B applies the restart offer".to_owned()));
     world.peers[1].pc.set_remote_description(now, offer)?;
     world.stream(Duration::from_millis(500))?;
     let answer = world.peers[1].pc.create_answer(None)?;
     let now = world.now;
+    world
+        .log
+        .push((world.now, "step: B applies its answer".to_owned()));
     world.peers[1]
         .pc
         .set_local_description(now, answer.clone())?;
     world.stream(Duration::from_millis(500))?;
     let now = world.now;
+    world
+        .log
+        .push((world.now, "step: A applies the answer".to_owned()));
     world.peers[0].pc.set_remote_description(now, answer)?;
     world.stream(Duration::from_millis(500))?;
     // The new generation's candidates; B kept its host candidate across the restart and
     // announces nothing, so the application re-sends it.
+    world
+        .log
+        .push((world.now, "step: candidates trickled".to_owned()));
     world.trickle = true;
     world.peers[0]
         .pc
@@ -464,6 +562,7 @@ fn a_relayed_session_outlives_its_rest_credential_rotated_with_a_second_socket()
     }
     let states_before: Vec<usize> = world.peers.iter().map(|p| p.states.len()).collect();
     world.sent.clear();
+    let t0 = world.now;
 
     let second_user = rotate(&mut world, true)?;
     let mut waited = Duration::ZERO;
@@ -492,10 +591,10 @@ fn a_relayed_session_outlives_its_rest_credential_rotated_with_a_second_socket()
         .collect();
     assert!(
         late.is_empty(),
-        "{} of {} messages lost or late: {:?}",
+        "{} of {} messages lost or late; timeline from the rotation (s):\n{}",
         late.len(),
         delays.len(),
-        late.iter().take(8).collect::<Vec<_>>()
+        world.timeline(t0)
     );
 
     assert_eq!(world.released(), vec![(a(A_HOST), Some(first_relay))]);

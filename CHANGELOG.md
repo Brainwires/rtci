@@ -37,11 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`icecandidateerror` for the servers the engine gathers from itself** (W3C webrtc-pc 4.8.3):
   a TURN Allocate refused with a code, a TURN or STUN server no address of which answered (701,
   once per URL), a STUN error response. Nothing was raised before. turn-7.
-- **`set_configuration` with new STUN / TURN servers or a new ICE candidate policy after a local
-  description sets the 'needs-ice-restart' bit** (RFC 9429 section 4.1.18): the next
-  `create_offer` restarts ICE and `negotiationneeded` fires, as in libwebrtc. Before, the new
-  list waited for a restart the application had to ask for. turn-7.
-
 - **`close()` releases the engine's TURN allocations reliably** (RFC 8656 section 8, RFC 8489
   section 6.2.1). It sent one Refresh of LIFETIME 0 per established UDP allocation and never
   drove the TURN client again: a lost datagram or a 438 left the allocation for its lifetime, an
