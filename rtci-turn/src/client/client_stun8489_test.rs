@@ -854,10 +854,11 @@ fn test_response_whose_nonce_cookie_promises_algorithms_it_lacks_is_ignored() ->
     client.close()
 }
 
-/// RFC 8489 §9.2.5: over an unreliable transport a response that is not authentic (here a 400
-/// without an integrity attribute, the RFC's own example) is discarded as if it had never
-/// been received and the retransmissions go on; when nothing better arrives, the transaction
-/// ends as an integrity violation, not as a timeout.
+/// RFC 8489 §9.2.5: over an unreliable transport a response that is not authentic (here a 403
+/// without an integrity attribute) is discarded as if it had never been received and the
+/// retransmissions go on; when nothing better arrives, the transaction ends as an integrity
+/// violation, not as a timeout. (A 400 without one has its own rule and ends in a timeout:
+/// `test_an_unsigned_400_to_a_signed_request_is_never_received`.)
 #[test]
 fn test_discarded_responses_end_the_transaction_as_an_integrity_violation() -> Result<()> {
     let now = Instant::now();
@@ -870,7 +871,7 @@ fn test_discarded_responses_end_the_transaction_as_an_integrity_violation() -> R
     let unsigned = respond(
         &refresh,
         CLASS_ERROR_RESPONSE,
-        vec![error(CODE_BAD_REQUEST)],
+        vec![error(CODE_FORBIDDEN)],
         &Sign::Nothing,
         vec![],
     )?;
@@ -1311,4 +1312,168 @@ fn test_every_stun_message_the_client_sends_ends_with_a_valid_fingerprint() -> R
     );
     assert!(stun_messages >= 11);
     Ok(())
+}
+
+/// An error response with `code` and no integrity attribute, to `request`.
+fn unsigned_error(request: &Message, code: ErrorCode) -> Result<Vec<u8>> {
+    respond(
+        request,
+        CLASS_ERROR_RESPONSE,
+        vec![error(code)],
+        &Sign::Nothing,
+        vec![],
+    )
+}
+
+/// RFC 8489 §9.2.5: "If the response is an error response with an error code of 400 (Bad
+/// Request) and does not contain either the MESSAGE-INTEGRITY or MESSAGE-INTEGRITY-SHA256
+/// attribute, then the response MUST be discarded, as if it were never received." The rule
+/// names no exception for the first Allocate, which carries no credential: the 400 does not
+/// end it, and the server's 401 to it is still taken, over UDP and over TCP.
+#[test]
+fn test_an_unsigned_400_to_the_first_allocate_is_never_received() -> Result<()> {
+    for transport in [TransportProtocol::UDP, TransportProtocol::TCP] {
+        let now = Instant::now();
+        let server = TestServer::new()?;
+        let mut client = new_client(transport)?;
+        client.allocate(now)?;
+        let first = server.next_request(&mut client);
+        assert!(!first.contains(ATTR_MESSAGE_INTEGRITY), "{transport:?}");
+
+        deliver(&mut client, now, &unsigned_error(&first, CODE_BAD_REQUEST)?)?;
+        assert!(
+            client.poll_event().is_none(),
+            "{transport:?}: the 400 reached the application"
+        );
+        assert!(
+            client.has_transaction(&first.transaction_id),
+            "{transport:?}: the 400 ended the Allocate"
+        );
+
+        server.challenge(&mut client, now, &first)?;
+        let authenticated = server.next_request(&mut client);
+        assert_ne!(authenticated.transaction_id, first.transaction_id);
+        assert!(
+            authenticated.contains(ATTR_MESSAGE_INTEGRITY),
+            "{transport:?}: the 401 after the 400 is answered with the credential"
+        );
+        client.close()?;
+    }
+    Ok(())
+}
+
+/// RFC 8489 §9.2.5, the note to the 400 rule: "the 400 response will never reach the
+/// application, resulting in a timeout." A first Allocate answered by nothing but an unsigned
+/// 400 is retransmitted and ends as a timeout, not as the 400.
+#[test]
+fn test_a_first_allocate_answered_only_by_an_unsigned_400_times_out() -> Result<()> {
+    let now = Instant::now();
+    let server = TestServer::new()?;
+    let mut client = new_client(TransportProtocol::UDP)?;
+    let tid = client.allocate(now)?;
+    let first = server.next_request(&mut client);
+    deliver(&mut client, now, &unsigned_error(&first, CODE_BAD_REQUEST)?)?;
+
+    let (requests, events) = drive_until(&server, &mut client, now + Duration::from_secs(60))?;
+    assert!(
+        !requests.is_empty()
+            && requests
+                .iter()
+                .all(|r| r.transaction_id == first.transaction_id),
+        "the retransmissions continue: {requests:?}"
+    );
+    assert!(
+        matches!(events.as_slice(), [Event::TransactionTimeout(id)] if *id == tid),
+        "expected the timeout alone, got {events:?}"
+    );
+    client.close()
+}
+
+/// RFC 8489 §9.2.5: an unsigned 400 to a request that carried the credential is discarded "as
+/// if it were never received" too, by the 400 rule rather than by the general one for
+/// responses that are not authentic: it is not counted as a discarded response (the request
+/// ends in a timeout, as the rule's note says, not in an integrity violation) and over TCP it
+/// does not end the transaction at once.
+#[test]
+fn test_an_unsigned_400_to_a_signed_request_is_never_received() -> Result<()> {
+    for transport in [TransportProtocol::UDP, TransportProtocol::TCP] {
+        let now = Instant::now();
+        let server = TestServer::new()?;
+        let mut client = new_client(transport)?;
+        let (tid, _, authenticated) =
+            server.begin_allocate(&mut client, now, AllocateOptions::default())?;
+        assert!(authenticated.contains(ATTR_MESSAGE_INTEGRITY));
+
+        deliver(
+            &mut client,
+            now,
+            &unsigned_error(&authenticated, CODE_BAD_REQUEST)?,
+        )?;
+        assert!(
+            client.poll_event().is_none(),
+            "{transport:?}: the 400 reached the application"
+        );
+        assert!(
+            client.has_transaction(&authenticated.transaction_id),
+            "{transport:?}: the 400 ended the Allocate"
+        );
+
+        let (requests, events) =
+            drive_until(&server, &mut client, now + Duration::from_secs(120))?;
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.transaction_id == authenticated.transaction_id),
+            "{transport:?}: {requests:?}"
+        );
+        if transport == TransportProtocol::UDP {
+            assert!(!requests.is_empty(), "the retransmissions continue");
+        }
+        assert!(
+            matches!(events.as_slice(), [Event::TransactionTimeout(id)] if *id == tid),
+            "{transport:?}: expected the timeout alone, got {events:?}"
+        );
+        client.close()?;
+    }
+    Ok(())
+}
+
+/// RFC 8489 §9.2.5: "For all other responses [than 401 and 438], if the NONCE attribute starts
+/// with the "nonce cookie" with the STUN Security Feature "Password algorithms" bit set to 1
+/// but PASSWORD-ALGORITHMS is not present, the response MUST be ignored." That holds for the
+/// response to the first Allocate as well: such a 403 does not end it (one without the cookie
+/// does: `test_an_error_to_the_first_allocate_keeps_its_code`).
+#[test]
+fn test_an_error_to_the_first_allocate_whose_nonce_cookie_promises_algorithms_is_ignored()
+-> Result<()> {
+    let now = Instant::now();
+    let server = TestServer::new()?;
+    let mut client = new_client(TransportProtocol::UDP)?;
+    client.allocate(now)?;
+    let first = server.next_request(&mut client);
+    let tampered = respond(
+        &first,
+        CLASS_ERROR_RESPONSE,
+        vec![
+            error(CODE_FORBIDDEN),
+            text(
+                ATTR_NONCE,
+                &nonce_with(SecurityFeatures::PASSWORD_ALGORITHMS, "x"),
+            ),
+            text(ATTR_REALM, REALM),
+        ],
+        &Sign::Nothing,
+        vec![],
+    )?;
+    deliver(&mut client, now, &tampered)?;
+    assert!(
+        client.poll_event().is_none(),
+        "the 403 reached the application"
+    );
+    assert!(client.has_transaction(&first.transaction_id));
+
+    server.challenge(&mut client, now, &first)?;
+    let authenticated = server.next_request(&mut client);
+    assert!(authenticated.contains(ATTR_MESSAGE_INTEGRITY));
+    client.close()
 }
