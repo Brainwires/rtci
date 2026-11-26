@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 664; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4998 of 5087 (98.3 %).
-- Tested as the default (`tested`): 4966 of 5087 (97.6 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 89: 73 untested, 11 partial, 3 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4999 of 5087 (98.3 %).
+- Tested as the default (`tested`): 4967 of 5087 (97.6 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 88: 73 untested, 11 partial, 3 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 73 | 2 |
-| C | partly implemented | 13 | 1 |
+| C | partly implemented | 12 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 121 | 28 |
+| all | | 120 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 88 rows, 83 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 87 rows, 82 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -36,7 +36,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 35 | 3 | 0 | 0 | 0 | 38 | 37 | 1 | 0 |
+| dtls-srtp | 35 | 2 | 0 | 0 | 0 | 37 | 36 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
 | jsep | 12 | 1 | 0 | 0 | 0 | 13 | 13 | 0 | 0 |
@@ -155,7 +155,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep) | S | sctp |
 | RFC5576-6.1-4 | `rfc5576.md` | cname appears at most once per ssrc-id in a media stream | untested | B | A test counting cname lines per ssrc-id in a generated description (audit-2 sweep) | S | sdp |
 | RFC6347-4.2.1-8 | `rfc6347.md` | Server uses the same version in HelloVerifyRequest as in ServerHello | partial | C | Coordinator decision between RFC 6347 4.2.1 MUST (same version as the ServerHello) and its SHOULD (1.0); with the MUST as default, a test that the HVR and the ServerHello carry the same version (audit-7 sweep6) | S | dtls-srtp |
-| RFC8446-4.2.1-12 | `rfc8446.md` | If this extension is present, clients MUST ignore the ... | violated | C | conf/dtls-29-server-hello-legacy-version-ignored: on_server_hello no longer checks legacy_version; the wrong-fixed-fields test then takes it (audit-5 sweep) | S | dtls-srtp |
 | RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |
