@@ -329,6 +329,10 @@ impl World {
 
 /// Connects A (relay policy, credentials `u1`) and B over the in-memory server.
 fn connected_world() -> Result<World> {
+    connected_world_with(&[A_HOST, A_HOST_2])
+}
+
+fn connected_world_with(hosts: &[&str]) -> Result<World> {
     common::install_crypto_provider();
     let now = Instant::now();
     let server = TurnServer::new(
@@ -342,7 +346,7 @@ fn connected_world() -> Result<World> {
     );
     let mut world = World {
         peers: vec![
-            Peer::new(&[A_HOST, A_HOST_2], turn_config("u1", "p1"))?,
+            Peer::new(hosts, turn_config("u1", "p1"))?,
             Peer::new(&[B_HOST], RTCConfigurationBuilder::new().build())?,
         ],
         server,
@@ -382,7 +386,26 @@ fn connected_world() -> Result<World> {
 #[test]
 fn a_restart_with_new_turn_credentials_keeps_the_previous_allocation_until_it_selects() -> Result<()>
 {
-    let mut world = connected_world()?;
+    restart_with_new_credentials(false)
+}
+
+/// The same with the second socket bound for the restart: its host candidate is added after
+/// `create_offer` and before the restart offer is applied (while the restart is staged). The
+/// engine starts the new generation's links then (the staged credentials are the new
+/// generation's), and the relayed candidate it keeps out of the new session must stay the
+/// current session's until the restart is applied: taking it out of the current session
+/// dropped the selected pair, and data stopped until the new pair was selected.
+#[test]
+fn a_second_socket_added_while_the_restart_is_staged_keeps_the_path_too() -> Result<()> {
+    restart_with_new_credentials(true)
+}
+
+fn restart_with_new_credentials(second_socket_while_staged: bool) -> Result<()> {
+    let mut world = if second_socket_while_staged {
+        connected_world_with(&[A_HOST])?
+    } else {
+        connected_world()?
+    };
     let first = world.last_relay().expect("data relayed");
     assert_eq!(world.server.allocations.len(), 1);
     let ufrag = world.peers[0].ufrag();
@@ -393,6 +416,13 @@ fn a_restart_with_new_turn_credentials_keeps_the_previous_allocation_until_it_se
     world.peers[0].pc.restart_ice();
     world.trickle = false;
     let offer = world.peers[0].pc.create_offer(None)?;
+    if second_socket_while_staged {
+        world.peers[0].addrs.push(a(A_HOST_2));
+        world.peers[0]
+            .pc
+            .add_local_candidate(Peer::host(a(A_HOST_2))?)?;
+        world.ping_pong("the second socket was added")?;
+    }
     let now = world.now;
     world.peers[0]
         .pc

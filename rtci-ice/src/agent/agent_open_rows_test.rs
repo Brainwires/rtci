@@ -766,6 +766,39 @@ fn test_a_withdrawn_local_candidate_is_neither_paired_nor_signalled() {
     );
 }
 
+/// Withdrawn while a restart is staged: the current session keeps the candidate and its pairs
+/// (its selected pair among them), and the session the restart begins does not have it.
+#[test]
+fn test_a_candidate_withdrawn_while_a_restart_is_staged_leaves_the_current_session() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(a.add_local_candidate(udp("192.168.0.20", 1000, 0)).unwrap());
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    let selected = a.get_selected_candidate_pair().expect("selected");
+    let withdrawn = addr("192.168.0.20:1000");
+    assert_eq!(selected.0.addr(), withdrawn);
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    assert!(a.withdraw_local_candidate(now, withdrawn, shared::TransportProtocol::UDP));
+    assert!(
+        a.get_selected_candidate_pair()
+            .is_some_and(|(l, _)| l.addr() == withdrawn),
+        "the current session keeps its selected pair"
+    );
+    assert!(a.media_path().is_some_and(|p| p.local_addr == withdrawn));
+    a.apply_restart(now, true).unwrap();
+    assert!(
+        !a.get_local_candidates()
+            .iter()
+            .any(|c| c.addr() == withdrawn),
+        "the new session does not have it"
+    );
+    assert!(
+        a.media_path().is_some_and(|p| p.local_addr == withdrawn),
+        "the previous path stays until the restart selects a pair"
+    );
+}
+
 /// The same rule binds the session the nomination was made in, not the one a staged restart
 /// begins: a candidate gathered while the restart is staged is taken, but not paired with the
 /// current session's remote candidates, and the restart keeps it even when it discards the
