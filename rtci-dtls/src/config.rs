@@ -762,12 +762,12 @@ impl ConfigBuilder {
     /// certificates unless insecure_skip_verify is given, and a client sends it as SNI
     /// (RFC 6066 section 3) unless it is an IP address.
     ///
-    /// A client with no server name takes the remote address `build` is given. With neither
-    /// it sends no server_name extension, and `build` refuses a configuration that would
-    /// verify the server's certificate by name (no `with_insecure_skip_verify(true)`, no PSK):
-    /// there is no name to verify against. (In 0.2.0 such a client sent and verified against
-    /// "localhost", with a warning.) A WebRTC peer connection verifies the certificate by
-    /// its fingerprint in the session description (RFC 8122, RFC 8827) and sends none.
+    /// A client with no server name takes the remote address `build` is given. With neither,
+    /// a client that verifies nothing by name (`with_insecure_skip_verify(true)` or a PSK)
+    /// sends no server_name extension (in 0.2.0 it sent "localhost"); one that verifies the
+    /// certificate by name still uses "localhost", with a warning. A WebRTC peer connection
+    /// verifies the certificate by its fingerprint in the session description (RFC 8122,
+    /// RFC 8827) and sends none.
     pub fn with_server_name(mut self, server_name: String) -> Self {
         self.server_name = server_name;
         self
@@ -1116,20 +1116,21 @@ impl ConfigBuilder {
         let mut server_name = self.server_name.clone();
 
         // A client given no server name takes the remote address's (an address is used to
-        // verify the certificate and never sent as SNI, RFC 6066 section 3). Without either it
-        // has no name: it sends no server_name extension (the extension is a MAY, and its
-        // HostName is "the fully qualified DNS hostname of the server, as understood by the
-        // client", which this client does not know), and it can verify no certificate by name.
-        // No name is made up: "localhost" is not the server's.
+        // verify the certificate and never sent as SNI, RFC 6066 section 3). A client that
+        // verifies nothing by name (insecure_skip_verify, or a PSK) and has neither keeps no
+        // name: it sends no server_name extension (the extension is a MAY, and its HostName
+        // is "the fully qualified DNS hostname of the server, as understood by the client",
+        // which this client does not know). A WebRTC peer connection is such a client: it
+        // checks the certificate by its fingerprint. A client that verifies by name and has
+        // neither still falls back to "localhost", as in 0.2.0.
         if is_client && server_name.is_empty() {
             if let Some(remote_addr) = remote_addr {
                 server_name = remote_addr.ip().to_string();
             } else if !self.insecure_skip_verify && self.psk.is_none() {
-                return Err(Error::Other(
-                    "a client that verifies the server's certificate needs a server name \
-                     (with_server_name) or a remote address"
-                        .to_owned(),
-                ));
+                warn!(
+                    "conn.remote_addr is empty, please set explicitly server_name in Config! Use default \"localhost\" as server_name now"
+                );
+                "localhost".clone_into(&mut server_name);
             }
         }
 
