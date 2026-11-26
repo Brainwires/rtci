@@ -46,8 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the video's first packet, 10 ms in) and
   `video_added_to_an_audio_call_is_probed_for_with_its_first_packet`,
   `cc::probe::tests::a_cluster_that_left_no_packet_is_asked_for_again_at_once`;
-  `tests/probe_start_order_rtc2rtc.rs` audio-first bounds tightened from 1.5 s / 2 s to
-  0.5 s / 1 s.
+  `tests/probe_start_order_rtc2rtc.rs`: audio first (every chain) and video first now held to
+  1 Mbit/s within 0.55 s and the maximum within 0.7 s (measured 0.27-0.37 s and 0.47 s in
+  every chain, order and seed; were 1.5 s / 2 s for audio first without a pacer, 1 s / 2 s
+  otherwise).
 - **Probing: a media stream that starts mid-call is probed for**
   (`conf/probe-4-a-new-media-flow-starts-the-probing`). A call that began with audio alone
   spent its two start-up clusters on the audio, which shows nothing of the path (with a pacer
@@ -67,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for an added video is the same. Tests: `rtci-interceptor/tests/probe_new_flow.rs`,
   `cc::probe::tests::a_flow_that_starts_later_starts_the_probing_again`;
   `tests/probe_start_order_rtc2rtc.rs` video-added bounds tightened from 3 s / 4 s to
-  1 s / 2 s.
+  0.35 s / 0.5 s after the renegotiation (measured 0.14-0.24 s to 1 Mbit/s and 0.29-0.34 s to
+  the maximum in every chain and seed).
 
 ### Testing
 
