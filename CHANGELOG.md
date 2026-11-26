@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+
+- **RFC 8836 property tests for the delay-based estimator** (`conf/ccrows-13-rfc8836-tests-on-master`,
+  the tests of `conf/ccrows-2-rfc8836-tests` re-based on 0.2.0): in
+  `rtci-interceptor/tests/rfc8836_multi_flow.rs`, jitter on the path is not taken for congestion
+  (requirement 1a), competing flows keep the queue short (1b), and a useful share is kept where
+  low delay is out of reach (3a). Audit rows RFC8836-2-1a, -1b, -3a untested -> tested;
+  RFC8836-2-8b partial -> tested and RFC8836-2-9 missing -> partial (stale notes: `a=rtcp-rsize`
+  is negotiated and used; datagrams are DSCP-marked, the estimator does not use the marking).
+  Tests and audit only.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the

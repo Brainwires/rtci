@@ -1105,9 +1105,8 @@ fn jitter_on_the_path_is_not_taken_for_congestion() {
 /// RFC 8836 section 2 (1b): low delay and little self-induced latency with competing flows.
 /// Two flows of this algorithm on one bottleneck, and one beside constant cross traffic that
 /// takes half the path: the queue they keep stays short against the 300 ms the tail-drop
-/// buffer would allow, and the path is used. Measured: two flows 18.5 ms mean, 93 ms p95
-/// (the draft's threshold time base, `ThresholdTimeBase::Arrival`: 2.9 / 11.0 ms); beside the
-/// cross traffic 1.7 / 5.4 ms.
+/// buffer would allow, and the path is used (the figures measured are in the audit row,
+/// `docs/conformance/audit/rfc8836.md` RFC8836-2-1b).
 #[test]
 fn competing_flows_keep_the_queue_short() {
     const CAPACITY: f64 = 2_000_000.0;
