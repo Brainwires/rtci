@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RTCRtpCodec::h264_depacketizer` and the new setting, in the README, and in a new
   `docs/conformance.md` list, "Standing departures from a MUST", which also lists the RTP
   circuit breaker's packet size (RFC 8083 section 3, audit row RFC8083-3-3, verdict unchanged).
+- **This default does not follow RFC 9429 section 5.11** (`conf/audit-1-must-departures-reconciled`):
+  an answer whose section has `a=rtcp-fb` its offer lacked is applied (the feedback never
+  enabled), where the RFC says it "MUST result in an error". Audit row RFC9429-5.11-6 `tested` ->
+  `partial` (it rounded up: no error was ever raised); listed under "Standing departures from a
+  MUST". Open MUST rows 7 -> 8.
+- RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
+  has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
+  `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
+  clause "a can" and left the setting out of every profile; it is now governed.
 
 ### Features
 
@@ -29,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   7.2.2 is written (`H264DeinterleavingBuffer::with_literal_pdon`). Before, no profile reached
   that form. `RTCRtpCodec::h264_depacketizer` is unchanged. Test
   `tests/h264_deinterleaving_profile.rs`.
+- `SettingEngineBuilder::with_unoffered_feedback_refused(bool)` (default `false`; profile row
+  `jsep.unoffered-feedback-refused`, `StrictRfc` `true`): `set_remote_description` refuses an
+  answer with `a=rtcp-fb` its offer lacked (RFC 9429 section 5.11) with
+  `ErrAnswerDoesNotMatchOffer`, leaving the offer pending. Tests
+  `tests/jsep_answer_feedback_profile.rs`, `answer_check.rs::feedback_the_offer_did_not_have_refuses_the_answer_when_asked`.
+- `StrictRfc` now turns `SettingEngineBuilder::with_msid_removal_ends_track` on (profile row
+  `track.msid-removal-ends-track`; RFC 8830 section 3.2.5), as it already did for the other RFC
+  8830 track settings; the default and `Chrome` keep it off. Test
+  `tests/jsep_msid.rs::the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid`.
 
 ## [0.2.0] - 2026-11-26
 

@@ -75,9 +75,8 @@ RFC9605-X-6	C	S	sframe	Stale in part: the Dependency Descriptor is offered by de
 RFC9628-6-1	A	S	media (running)	`setting`: VP9 receiver limits
 RFC9653-4-3	E	S	sctp	Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate
 RFC8830-3-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
-RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
-RFC8830-3.2.5-1	E	S	jsep (running)	`conflict`: as RFC8830-3-7 (no msid left); memberships tested
+RFC8830-3.2.5-1	E	S	jsep (running)	`conflict`: no msid left ends the track only with the setting (StrictRfc sets it); memberships tested. RFC8830-3-7, the same behaviour in section 3's words ("can"), is MAY since conf/audit-1
 RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-4.1.8-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella of 5.2.2-10, -27)
@@ -93,6 +92,7 @@ RFC9429-5.3-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged sect
 RFC9429-5.3.1-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.8-1	A	S	jsep (running)	`setting`: trailing white space in attribute values (webrtc-rs 0.17)
+RFC9429-5.11-6	C	S	jsep (running)	Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named
 RFC7160-4.1-1	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC7160-4.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC7160-4.1-3	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)

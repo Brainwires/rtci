@@ -63,11 +63,12 @@ WebRTC uses); every row names the code and the test that proves it. From
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
 browser or a deployed peer cannot interoperate with it by default. 16 MUST rows are open (1 untested,
 10 partial, 5 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
-is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Two defaults depart from a MUST by the
+is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by the
 owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a MUST"),
-each with the setting that gives the RFC form (the `StrictRfc` profile sets both): the H.264 de-interleaving order
+each with the setting that gives the RFC form (the `StrictRfc` profile sets all three): the H.264 de-interleaving order
 (**this default does not follow RFC 6184 section 7.2**: PDON does not start at 0, which would deliver a stream's DON 0
-last) and the RTP circuit breaker's packet size (RFC 8083 section 3). Known issues are tracked
+last), the RTP circuit breaker's packet size (RFC 8083 section 3), and an answer with RTCP feedback its offer lacked,
+which is applied rather than refused (**this default does not follow RFC 9429 section 5.11**). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/rtci/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
 
