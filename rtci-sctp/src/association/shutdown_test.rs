@@ -220,7 +220,9 @@ fn the_last_data_before_a_shutdown_asks_for_an_immediate_sack() -> Result<()> {
     a.cwnd = 0;
     a.shutdown()?;
     assert_eq!(AssociationState::ShutdownPending, a.state());
-    a.cwnd = a.inflight_queue.get_num_bytes() as u32 + 6;
+    // The congestion control counts chunks on the wire, header and padding included (RFC 9260
+    // 7.2): a window just above what is in flight lets one chunk out.
+    a.cwnd = a.inflight_queue.get_num_wire_bytes() as u32 + 6;
     let sent = transmitted_data(&a.gather_outbound(now).0);
     assert_eq!(1, sent.len());
     assert!(!sent[0].immediate_sack, "more DATA follows it");
