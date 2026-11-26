@@ -1566,3 +1566,47 @@ fn without_dtls12_resumption_nothing_is_asked_for_given_or_resumed() {
     assert!(exchange.completed());
     assert!(!exchange.server.connection_state().resumed());
 }
+
+/// RFC 5246 section 7.3: "Servers MUST NOT place confidential information in session
+/// identifiers or let the contents of fake session identifiers cause any breach of
+/// security." The session ids a server makes are its random source's: two full handshakes
+/// get two different 32-byte ids, and no eight bytes of one are in the master secret, the
+/// pre-master secret, the randoms or the exported keys of its own handshake.
+#[test]
+fn a_session_id_holds_nothing_of_the_handshake_it_names() {
+    let cache = cache();
+    let certificate = self_signed();
+    let server = server_config(Some(&cache), false, &certificate, builder());
+    let mut ids = vec![];
+    for _ in 0..2 {
+        // A new store each time: a full handshake, not a resumption.
+        let client = client_config(&store(), builder());
+        let exchange = handshake(&client, &server);
+        assert!(exchange.completed());
+        assert!(!exchange.server.connection_state().resumed());
+        let server_hello = last_body(&exchange.from_server, SERVER_HELLO).expect("a ServerHello");
+        let id = hello_session_id(&server_hello);
+        assert_eq!(id.len(), SESSION_ID_LENGTH);
+        let state = exchange.server.connection_state();
+        let (client_keys, _) = exported(&exchange);
+        let mut random = state.local_random.marshal_fixed().to_vec();
+        random.extend_from_slice(&state.remote_random.marshal_fixed());
+        let secrets: [&[u8]; 4] = [
+            state.master_secret.as_ref(),
+            state.pre_master_secret.as_ref(),
+            &random,
+            &client_keys,
+        ];
+        assert!(!state.master_secret.is_empty());
+        for window in id.windows(8) {
+            for secret in secrets {
+                assert!(
+                    !secret.windows(8).any(|other| other == window),
+                    "the session id shares bytes with the handshake's secrets"
+                );
+            }
+        }
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1]);
+}

@@ -432,3 +432,77 @@ fn a_message_larger_than_the_mtu_is_sent_whole() -> Result<()> {
     }
     Ok(())
 }
+
+/// The cipher suites and the extensions of the first ClientHello `client` writes.
+fn client_hello_suites_and_extensions(
+    client: ConfigBuilder,
+) -> Result<(Vec<u16>, Vec<(u16, Vec<u8>)>)> {
+    let mut pair = Pair::new(client, server_builder())?;
+    let hello = take(&mut pair.client);
+    let datagram = &hello[0];
+    assert_eq!((datagram[0], datagram[13]), (22, 1), "a ClientHello");
+    let length = usize::from(datagram[14]) << 16
+        | usize::from(datagram[15]) << 8
+        | usize::from(datagram[16]);
+    let body = &datagram[25..25 + length];
+    let session_end = 35 + usize::from(body[34]);
+    let cookie_end = session_end + 1 + usize::from(body[session_end]);
+    let suites_len = usize::from(u16::from_be_bytes([body[cookie_end], body[cookie_end + 1]]));
+    let suites: Vec<u16> = body[cookie_end + 2..cookie_end + 2 + suites_len]
+        .chunks(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    let compression_at = cookie_end + 2 + suites_len;
+    let extensions = crate::conn::conn_conformance_test::extensions_after(
+        body,
+        compression_at + 1 + usize::from(body[compression_at]),
+    );
+    Ok((suites, extensions))
+}
+
+/// RFC 8422 section 5.1 (RFC5246-8422-5.1-1, a SHOULD): "A TLS client that proposes ECC
+/// cipher suites in its ClientHello message SHOULD include these extensions." The ClientHello
+/// the engine writes, DTLS 1.2 only and offering both versions, read from the wire:
+/// supported_groups with at least one group, ec_point_formats with uncompressed (0).
+#[test]
+fn a_client_offering_ecc_suites_sends_supported_groups_and_point_formats() -> Result<()> {
+    for client in [dtls12(client_builder()), client_builder()] {
+        // The default suites, ECDHE ones among them.
+        let (suites, extensions) = client_hello_suites_and_extensions(client)?;
+        assert!(
+            suites.contains(&0xc02b),
+            "an ECDHE_ECDSA suite is offered: {suites:x?}"
+        );
+        let find = |typ: u16| {
+            extensions
+                .iter()
+                .find(|(t, _)| *t == typ)
+                .map(|(_, data)| data.clone())
+        };
+        let groups = find(10).expect("supported_groups");
+        let listed = usize::from(u16::from_be_bytes([groups[0], groups[1]]));
+        assert!(listed >= 2 && listed == groups.len() - 2, "{groups:?}");
+        let formats = find(11).expect("ec_point_formats");
+        assert_eq!(usize::from(formats[0]), formats.len() - 1, "{formats:?}");
+        assert!(formats[1..].contains(&0), "uncompressed: {formats:?}");
+    }
+    Ok(())
+}
+
+/// RFC 8422 section 5.1 (RFC5246-8422-5.1-3): "The client MUST NOT include these extensions
+/// in the ClientHello message if it does not propose any ECC cipher suites." A DTLS 1.2
+/// client configured for a pre-shared key, offering TLS_PSK_WITH_AES_128_GCM_SHA256 alone:
+/// its ClientHello has neither supported_groups nor ec_point_formats.
+#[test]
+fn a_client_offering_no_ecc_suite_sends_neither_ecc_extension() -> Result<()> {
+    let client = dtls12(client_builder())
+        .with_cipher_suites(vec![CipherSuiteId::Tls_Psk_With_Aes_128_Gcm_Sha256])
+        .with_psk(Some(Arc::new(|_| Ok(vec![0xab, 0xcd]))))
+        .with_psk_identity_hint(Some(b"rtci".to_vec()));
+    let (suites, extensions) = client_hello_suites_and_extensions(client)?;
+    assert_eq!(suites, vec![0x00a8], "the PSK suite alone");
+    let types: Vec<u16> = extensions.iter().map(|(t, _)| *t).collect();
+    assert!(!types.contains(&10), "no supported_groups: {types:x?}");
+    assert!(!types.contains(&11), "no ec_point_formats: {types:x?}");
+    Ok(())
+}

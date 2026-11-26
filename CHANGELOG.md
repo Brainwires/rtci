@@ -263,6 +263,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (audit row RFC8446-4.2.1-12, which was `tested` while its test asserted the refusal). New test
   `rfc8446_conformance_test.rs::a_server_hello_or_retry_request_with_another_legacy_version_is_taken`;
   the legacy_version case of the wrong-fixed-fields test is removed. Not breaking.
+- **DTLS server: a ClientHello whose supported_versions lists no version this server may select
+  is refused** (`conf/dtls-30-tls13-must-rows`; RFC 8446 section 4.2.1, "Servers MUST only select
+  a version of TLS present in that extension", and must not negotiate by legacy_version when the
+  extension is there). 0.2.0 served a ClientHello whose supported_versions held unknown versions
+  only (or DTLS 1.3 only, to a server without DTLS 1.3) with DTLS 1.2, chosen by its
+  legacy_version; it now answers protocol_version. A ClientHello without supported_versions, or
+  one listing DTLS 1.2, is served with DTLS 1.2 as before. Behaviour change, not breaking. Test
+  `rfc8446_conformance_test.rs::unknown_versions_are_ignored_and_only_a_listed_version_is_selected`.
+- **DTLS 1.3: data after a user_canceled alert is ignored** (`conf/dtls-30-tls13-must-rows`; RFC
+  8446 section 6.1: user_canceled is a closure alert, and "Any data received after a closure
+  alert has been received MUST be ignored", RFC 9147 section 5.10). 0.2.0 took no notice of a
+  received user_canceled and went on reading. It now ends the association's reading as a
+  close_notify does (answered with this side's close_notify, reported as `PeerClosed`). Test
+  `rfc8446_conformance_test.rs::data_after_a_user_canceled_is_ignored`.
+- Tests and audit rows for the other RFC 8446 MUST rows audit sweep 4 left `untested`, the
+  behaviour already right: unknown ClientHello extensions, suites, groups and schemes ignored
+  (4.1.2-16, 9.3-5), the HelloRetryRequest's version retained (4.1.4-12), the early_data
+  illegal_parameter alert (4.2.11-14), unknown NewSessionTicket extensions (4.6.1-14, 9.3-6),
+  unknown alert types (6-5), and RFC5246-7.4.1.3-3 (a DTLS 1.2 ServerHello suite the client did
+  not offer).
 
 ### Documentation
 
@@ -476,6 +496,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 2, "+1 for each packet"): notes
   the deliberate exception that a byte-identical re-send keeps its number, for SRTP's one
   packet per index (RFC 3711 3.3.1, RFC 7714 8.1).
+- The DTLS rows audit sweep 6 downgraded, closed with tests (`conf/dtls-31-sweep6-must-rows`),
+  each proved by a mutation of the engine: RFC 9147 sections 4 (no plaintext record past
+  sequence 2^48-1), 4.5.1 (a forgery far ahead does not move the replay window), 8 (a receiver
+  takes a KeyUpdate past epoch 2^48-1) and 9 (unexpected_message for connection id messages out
+  of place); RFC 8446 sections 4.1.2, 4.6.2, 4.6.3 (the protected alert of a ClientHello, a
+  CertificateRequest and a KeyUpdate out of place, through `on_post_handshake_message` and on
+  the wire), 4.1.3 (the ServerHello random is the server's own; legacy_version {254, 253} in the
+  ServerHello and HelloRetryRequest the server writes, no longer covered by the client's check
+  since `conf/dtls-29`), 4.2.2 (no cookie in a later connection's first ClientHello), 4.2.7
+  (supported_groups in EncryptedExtensions changes nothing), 4.2.10 (rejected 0-RTT data is not
+  resent), 4.6.1 (the resumption ClientHello's server name is reported; the server's and the
+  client's seven-day ticket caps each shown alone), 5 and 5.4 (unexpected_message for an
+  authenticated record of unknown type or all padding); RFC 5246 section 7.3 (a session id holds
+  nothing of its handshake). RFC5246-8422-5.1-1 is level SHOULD, not MUST (RFC 8422 section 5.1:
+  a client proposing ECC suites "SHOULD include these extensions"), now tested; the
+  paragraph's MUST NOT, no ECC extensions from a client that proposes no ECC suite, is a new row,
+  RFC5246-8422-5.1-3, tested (a DTLS 1.2 PSK client sends neither). "Standing
+  departures from a MUST" lists RFC 6347 section 4.2.1, whose MUST (the HelloVerifyRequest
+  version equals the ServerHello's) contradicts the SHOULD before it (DTLS 1.0 regardless): the
+  default keeps the SHOULD, as OpenSSL does, and `StrictRfc` does not change it; and RFC 8446
+  section 4.2.3, which `ConfigBuilder::with_insecure_hashes(true)` lets an application break by
+  listing an MD5 scheme (an opt-in). Tests only, no engine change.
 
 ### Testing
 
@@ -546,29 +588,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cluster is ever carried after the video starts (no padding; 460 to 490 kbit/s six seconds
   later, the controller's 8 % a second). Its three tests fail until `probe-3`, which also
   shortens the audio-first start-up (1.07 s against 0.37 s when the video sends first).
-
-### Fixed
-
-- **DTLS server: a ClientHello whose supported_versions lists no version this server may select
-  is refused** (`conf/dtls-30-tls13-must-rows`; RFC 8446 section 4.2.1, "Servers MUST only select
-  a version of TLS present in that extension", and must not negotiate by legacy_version when the
-  extension is there). 0.2.0 served a ClientHello whose supported_versions held unknown versions
-  only (or DTLS 1.3 only, to a server without DTLS 1.3) with DTLS 1.2, chosen by its
-  legacy_version; it now answers protocol_version. A ClientHello without supported_versions, or
-  one listing DTLS 1.2, is served with DTLS 1.2 as before. Behaviour change, not breaking. Test
-  `rfc8446_conformance_test.rs::unknown_versions_are_ignored_and_only_a_listed_version_is_selected`.
-- **DTLS 1.3: data after a user_canceled alert is ignored** (`conf/dtls-30-tls13-must-rows`; RFC
-  8446 section 6.1: user_canceled is a closure alert, and "Any data received after a closure
-  alert has been received MUST be ignored", RFC 9147 section 5.10). 0.2.0 took no notice of a
-  received user_canceled and went on reading. It now ends the association's reading as a
-  close_notify does (answered with this side's close_notify, reported as `PeerClosed`). Test
-  `rfc8446_conformance_test.rs::data_after_a_user_canceled_is_ignored`.
-- Tests and audit rows for the other RFC 8446 MUST rows audit sweep 4 left `untested`, the
-  behaviour already right: unknown ClientHello extensions, suites, groups and schemes ignored
-  (4.1.2-16, 9.3-5), the HelloRetryRequest's version retained (4.1.4-12), the early_data
-  illegal_parameter alert (4.2.11-14), unknown NewSessionTicket extensions (4.6.1-14, 9.3-6),
-  unknown alert types (6-5), and RFC5246-7.4.1.3-3 (a DTLS 1.2 ServerHello suite the client did
-  not offer).
 
 ## [0.2.0] - 2026-11-26
 

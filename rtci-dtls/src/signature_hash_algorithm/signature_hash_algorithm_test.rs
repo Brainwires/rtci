@@ -94,6 +94,32 @@ fn test_parse_signature_schemes() -> Result<()> {
             true,
             None,
         ),
+        // RFC 8446 section 4.2.3: MD5 "MUST NOT be offered or negotiated by any
+        // implementation". Dropped by default; `with_insecure_hashes(true)` keeps it, an
+        // opt-in departure listed in docs/conformance.md.
+        (
+            "Md5DeniedByDefault",
+            vec![
+                SignatureScheme::EcdsaWithP256AndSha256 as u16,
+                0x0103, // ecdsa with MD5
+            ],
+            vec![SignatureHashAlgorithm {
+                hash: HashAlgorithm::Sha256,
+                signature: SignatureAlgorithm::Ecdsa,
+            }],
+            false,
+            None,
+        ),
+        (
+            "Md5KeptWithInsecureHashes",
+            vec![0x0103],
+            vec![SignatureHashAlgorithm {
+                hash: HashAlgorithm::Md5,
+                signature: SignatureAlgorithm::Ecdsa,
+            }],
+            true,
+            None,
+        ),
         (
             "OnlyInsecureHashAlgorithm",
             vec![
