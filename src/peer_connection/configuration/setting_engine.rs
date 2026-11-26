@@ -1369,6 +1369,16 @@ impl SettingEngineBuilder {
     }
 
     /// set_ice_multicast_dns_mode controls if ice queries and generates mDNS ICE Candidates
+    ///
+    /// The default is [`MulticastDnsMode::QueryOnly`]: a remote host candidate with a
+    /// `<uuid>.local` name (as browsers send) is resolved with an mDNS query, and the
+    /// connection's own host candidates go out with their addresses
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 3.2.1, step 3: "Otherwise, resolve the
+    /// candidate using mDNS"). The query datagrams leave through `poll_write` to
+    /// 224.0.0.251:5353; a name that gets no answer is ignored when the query ends (step 5),
+    /// logged at debug. To turn resolution off, so that no query is made and remote `.local`
+    /// candidates are ignored at once, pass [`MulticastDnsMode::Disabled`]; the peer's checks
+    /// from behind such a name can still connect as a peer-reflexive candidate (section 5.3).
     pub fn with_multicast_dns_mode(mut self, multicast_dns_mode: MulticastDnsMode) -> Self {
         self.0.multicast_dns.mode = multicast_dns_mode;
         self

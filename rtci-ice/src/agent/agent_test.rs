@@ -2355,6 +2355,109 @@ fn test_an_mdns_name_that_does_not_resolve_in_time_leaves_no_candidate() -> Resu
     Ok(())
 }
 
+/// A browser's `<uuid>.local` host candidate that does not resolve is the normal case on many
+/// networks (draft-ietf-mmusic-mdns-ice-candidates Section 3.2.1 step 5: "Otherwise, ignore
+/// the candidate"), so it is dropped quietly: with the default mode (`QueryOnly`, which
+/// resolves: step 3), the query ends, no pair is formed, no error comes back from the agent's
+/// calls and no state change reaches the application, and the agent goes on pairing the
+/// candidates that follow. (The timeout's log line is at debug; the crates have no log
+/// capture for tests, so the level is not pinned here.)
+#[test]
+fn test_an_unresolved_remote_mdns_name_is_dropped_quietly_and_the_agent_goes_on() -> Result<()> {
+    let base = Instant::now();
+    assert_eq!(
+        AgentConfig::default().multicast_dns_mode,
+        crate::mdns::MulticastDnsMode::QueryOnly,
+        "the default resolves remote names"
+    );
+    let mut agent = Agent::new(
+        base,
+        Arc::new(AgentConfig {
+            // A short timeout keeps the test inside the checking timeouts; the mode is the
+            // default.
+            multicast_dns_query_timeout: Some(Duration::from_secs(2)),
+            multicast_dns_first_query_delay: Some(false),
+            ..Default::default()
+        }),
+        test_crypto_provider(),
+    )?;
+    agent.add_local_candidate(
+        CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: "192.168.1.2".to_owned(),
+                port: 5000,
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()?,
+    )?;
+    agent.start_connectivity_checks(
+        base,
+        true,
+        "remote-ufrag".to_owned(),
+        "remote-password".to_owned(),
+    )?;
+    assert!(
+        !agent.add_remote_candidate(unmarshal_candidate(&format!(
+            "1 1 udp 2113939711 {MDNS_TEST_NAME} 61163 typ host"
+        ))?)?,
+        "an mDNS candidate waits for its name"
+    );
+    assert_eq!(agent.mdns_queries.len(), 1, "the default mode queries");
+
+    let mut events = vec![];
+    let until = base + Duration::from_secs(3);
+    let mut now = base;
+    while now < until {
+        now = agent
+            .poll_timeout()
+            .filter(|t| *t > now && *t <= until)
+            .unwrap_or(until);
+        agent.handle_timeout(now)?;
+        while agent.poll_write().is_some() {}
+        while let Some(e) = agent.poll_event() {
+            events.push(e.event);
+        }
+    }
+    assert!(agent.mdns_queries.is_empty(), "the query ended");
+    assert!(agent.remote_candidates.is_empty(), "no remote candidate");
+    assert!(agent.candidate_pairs.is_empty(), "no pair");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            Event::CandidatePairAdded(..) | Event::ConnectionStateChange(ConnectionState::Failed)
+        )),
+        "nothing reaches the application"
+    );
+    assert_eq!(agent.state(), ConnectionState::Checking);
+
+    // The agent goes on: the next candidate is paired.
+    assert!(agent.add_remote_candidate(unmarshal_candidate(
+        "2 1 udp 2113939711 192.168.1.3 6000 typ host"
+    )?)?);
+    assert_eq!(
+        agent.candidate_pairs.len(),
+        1,
+        "the next candidate is paired"
+    );
+    let peer: SocketAddr = "192.168.1.3:6000".parse().unwrap();
+    let until = now + Duration::from_secs(1);
+    let mut checked = false;
+    while !checked && now < until {
+        agent.handle_timeout(now)?;
+        checked = std::iter::from_fn(|| agent.poll_write()).any(|t| t.transport.peer_addr == peer);
+        now = agent
+            .poll_timeout()
+            .filter(|t| *t > now && *t <= until)
+            .unwrap_or(until);
+    }
+    assert!(checked, "and checked");
+    Ok(())
+}
+
 /// mDNS-resolved candidates count against `MAX_REMOTE_CANDIDATES` like any other: they used to
 /// be added past it.
 #[test]

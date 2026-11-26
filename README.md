@@ -359,6 +359,14 @@ Remote candidates arrive over your signaling channel and go in through `add_remo
 description to have been set first. For `srflx` and `relay` candidates, set `RTCIceCandidateInit::url` to the
 STUN/TURN server the candidate was gathered from so it is attributed correctly in `getStats`.
 
+Browsers often send their host candidates under `<uuid>.local` names
+(draft-ietf-mmusic-mdns-ice-candidates). By default (`MulticastDnsMode::QueryOnly`) the connection resolves such a
+name with an mDNS query, which leaves through `poll_write` to `224.0.0.251:5353`, as the draft's processing procedure
+says (section 3.2.1, step 3). A name that does not resolve, the usual case when the peer is not on your link, is
+ignored when its query ends (10 s by default, `SettingEngineBuilder::with_multicast_dns_timeout`) and logged at debug
+level only; the peer's checks can still reach you as a peer-reflexive candidate. To send no mDNS at all and ignore
+remote `.local` candidates at once, set `SettingEngineBuilder::with_multicast_dns_mode(MulticastDnsMode::Disabled)`.
+
 ## Back-Pressure
 
 `poll_read` is the throttle. Undrained data-channel messages leave bytes in SCTP's reassembly queue, which lowers the

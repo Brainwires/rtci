@@ -1726,8 +1726,11 @@ impl Agent {
         // If we have a mDNS Candidate lets fully resolve it before adding it locally
         if c.candidate_type() == CandidateType::Host && c.address().ends_with(".local") {
             if self.mdns_mode == MulticastDnsMode::Disabled {
-                warn!(
-                    "remote mDNS candidate added, but mDNS is disabled: ({})",
+                // What the application asked for (`MulticastDnsMode::Disabled`), not a fault:
+                // debug, like an unresolved name.
+                debug!(
+                    "[{}]: ignoring remote mDNS candidate {}: mDNS is disabled",
+                    self.get_name(),
                     c.address()
                 );
                 // Ignored (draft Section 3.2.1, step 5), but the peer's checks from behind
@@ -1923,7 +1926,15 @@ impl Agent {
                     }
                     MdnsEvent::QueryTimeout(id) => {
                         if let Some(c) = self.mdns_queries.remove(&id) {
-                            error!("mDNS Query {} timed out for {}", id, c.address());
+                            // An expected outcome, not an engine error: a browser hides its
+                            // host addresses behind `<uuid>.local` names, and on many
+                            // networks they do not resolve. Logged once per query (its
+                            // retries log nothing), at debug.
+                            debug!(
+                                "mDNS query {} for {} ended without an address; the candidate is ignored",
+                                id,
+                                c.address()
+                            );
                             // Unresolved, and ignored (draft Section 3.2.1, step 5); the
                             // peer's checks may still come (Section 5.3).
                             UnpairedRemote::note(&mut self.unpaired_remotes, &c);
