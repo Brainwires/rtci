@@ -7,7 +7,7 @@
 // Every skip goes through na.mjs with its kind and citation (gate.mjs fails an uncited one).
 import { test, expect } from "@playwright/test";
 import { naBrowser, naEnv } from "./na.mjs";
-import { WS, TURN, setupPage, rustUdpPort, impair, netemDrops } from "./common.mjs";
+import { WS, TURN, setupPage, rustUdpPort, impair, netemDrops, impairFromRust, netemDropsFromRust } from "./common.mjs";
 
 setupPage();
 
@@ -67,7 +67,12 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   }, WS);
   const answer = await page.evaluate(() => S.pc.remoteDescription.sdp);
   const dropsBefore = netemDrops();
+  const dropsToBrowserBefore = netemDropsFromRust();
   const restore = impair(rustUdpPort(answer));
+  // Both legs lose: the browser's video to Rust (the browser repairs it) and what Rust sends
+  // back (Rust repairs it). Only a packet Rust sent and the path lost is one Rust necessarily
+  // holds when the browser asks for it again.
+  const restoreToBrowser = impairFromRust(rustUdpPort(answer));
   let r;
   try {
     r = await page.evaluate(async () => {
@@ -104,10 +109,13 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
     });
   } finally {
     restore();
+    restoreToBrowser();
   }
   const drops = netemDrops() - dropsBefore;
+  const dropsToBrowser = netemDropsFromRust() - dropsToBrowserBefore;
   await page.evaluate(() => S.close());
   expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
+  expect(dropsToBrowser, "netem dropped nothing on the way to the browser: the filter did not apply").toBeGreaterThan(0);
   expect(r.rtx, "the Rust answer negotiates no RTX for the video").toBe(true);
   const video = r.report.coverage.filter((c) => c.key.startsWith("video:"));
   expect(video.length, JSON.stringify(r.report.coverage)).toBeGreaterThan(0);
@@ -138,17 +146,31 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   }
   // The other way: the browser asked Rust for the packets missing from what Rust sent back,
   // Rust's NACK responder repaired them (RFC 4588; an ordinary loss, a round trip old, is
-  // never declined as useless), and the browser kept decoding. Each figure is asserted only
-  // where the browser fills it (webrtc-stats inbound-rtp); the line below says which it filled.
-  // This shows that the engine repairs for the browser the gaps it relays: netem drops only
-  // the browser-to-Rust leg (`impair` filters on Rust's port), so loss on the path TO the
-  // browser is not impaired in this cell. retransmittedPacketsReceived also counts the
-  // padding-only RTX packets of a bandwidth probe (it is above zero before any NACK), so the
-  // repairs are asserted on retransmittedBytesReceived where the browser fills it.
+  // never declined as useless), and the browser kept decoding.
+  //
+  // The repairs are the ones of Rust's own losses (netem on the Rust host, `impairFromRust`):
+  // Rust holds each such packet when the browser asks for it. A gap that is only relayed (the
+  // browser's packet lost on its way to Rust) is no such test: the browser's NACK for it and
+  // the browser's own RTX of it (asked for by Rust) cross the same 20 ms of netem, and when the
+  // NACK arrives first Rust does not hold the packet yet; the packet then reaches the browser
+  // as a late original, which no browser counts as a retransmission. On the 0.2.0 release head
+  // and before nack-11 alike, about 93% of the browser's NACKs in that form named packets Rust
+  // did not hold yet, 2337 of the 2338 NACKed packets it did hold were answered (the three
+  // browsers, 40 runs each), and in 1 run in 40 Firefox counted no retransmission at all.
+  //
+  // Asserted on both sides: Rust's outbound-rtp (its NACK responder sent RTX), and the
+  // browser's inbound-rtp where the browser fills each figure (the line below says which it
+  // filled). retransmittedPacketsReceived also counts the padding-only RTX packets of a
+  // bandwidth probe (it is above zero before any NACK), so the browser's side is asserted on
+  // retransmittedBytesReceived where the browser fills it.
   const [first, mid, last] = r.inbound;
+  const rustOut = (r.report.stats?.outbound || []).find((o) => o.kind === "video")?.w3c || {};
   console.log(
-    `[${test.info().project.name}] loss recovery, the browser's receive side: ${JSON.stringify({ first, mid, last })}`,
+    `[${test.info().project.name}] loss recovery, the browser's receive side: ${JSON.stringify({ first, mid, last })}; ` +
+      `dropped toward the browser ${dropsToBrowser}; Rust's outbound-rtp: ${JSON.stringify({ nackCount: rustOut.nackCount, retransmittedPacketsSent: rustOut.retransmittedPacketsSent, retransmittedBytesSent: rustOut.retransmittedBytesSent, pliCount: rustOut.pliCount })}; key-frame requests passed to the browser ${r.report.plisForwarded}`,
   );
+  expect(rustOut.nackCount || 0, `Rust saw no NACK from the browser: ${JSON.stringify(rustOut)}`).toBeGreaterThan(0);
+  expect(rustOut.retransmittedPacketsSent || 0, `Rust's NACK responder retransmitted nothing: ${JSON.stringify(rustOut)}`).toBeGreaterThan(0);
   expect(last, "the browser reports no inbound-rtp for Rust's video").toBeTruthy();
   if (last.nackCount !== undefined) {
     expect(last.nackCount - (first?.nackCount ?? 0), JSON.stringify(r.inbound)).toBeGreaterThan(0);
@@ -1329,5 +1351,12 @@ test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by i
     expect(r.out.retransmittedPacketsSent, JSON.stringify(r.out)).toBeGreaterThan(0);
   }
   // The reflected video still decodes: no stream of Rust's receiver was taken over by RTX.
+  // A picture the browser cannot complete in time makes its decoder ask Rust for a key frame;
+  // the reflecting peer passes the request on to the browser's encoder, as a forwarder does
+  // (examples/interop-peer `reflect`), so one late packet does not stop the count until the
+  // encoder's own next key frame.
+  const pli = r.report.rtcp?.pli || 0;
+  console.log(`[${test.info().project.name}] unsignalled loss recovery: ${r.frames} frames decoded, ${pli} key-frame requests reached Rust, ${r.report.plisForwarded} passed to the browser`);
+  if (pli > 0) expect(r.report.plisForwarded, "the reflecting peer passed no key-frame request on").toBeGreaterThan(0);
   expect(r.frames, JSON.stringify(r)).toBeGreaterThan(100);
 });

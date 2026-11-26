@@ -48,7 +48,9 @@
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
 //! `{"media":"reflect","video":"VP8|VP9|H264|H265|AV1","audio":true}` sends back what it
-//! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
+//! receives, and passes a key-frame request (PLI / FIR) for what it sends back on to the browser
+//! as a PLI for the source stream (at most one per 200 ms per source; `plisForwarded` in the
+//! report); `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
 //! only counts (simulcast: packets per RID); `{"media":"pipeline","video":"VP8|AV1"}` takes the
@@ -498,6 +500,15 @@ struct Session {
     video_dropped: Arc<AtomicU64>,
     /// RTCP packets received, by type (`sr`, `rr`, `nack`, `pli`, `fir`, `twcc`, ...).
     rtcp_by_type: BTreeMap<String, u64>,
+    /// `reflect`: the stream each SSRC this side sends carries, by that SSRC: the receiver and
+    /// the browser's SSRC it came from. A key-frame request for what this side sends is
+    /// passed to the browser for its source stream, as a forwarder does (only the source's
+    /// encoder can make the key frame).
+    reflected_from: HashMap<u32, (rtci::rtp_transceiver::RTCRtpReceiverId, u32)>,
+    /// When a key-frame request was last passed on for each source SSRC.
+    last_forwarded_pli: HashMap<u32, Instant>,
+    /// Key-frame requests passed on to the browser (`reflect`).
+    plis_forwarded: u64,
     /// The SSRCs whose RTP the engine discarded as unassociated (RFC 8830 3.1).
     discarded_ssrcs: Vec<u32>,
     coverage: HashMap<u32, SeqCoverage>,
@@ -637,6 +648,9 @@ impl Session {
             wire_rtp_sent: BTreeMap::new(),
             video_dropped,
             rtcp_by_type: BTreeMap::new(),
+            reflected_from: HashMap::new(),
+            last_forwarded_pli: HashMap::new(),
+            plis_forwarded: 0,
             discarded_ssrcs: vec![],
             coverage: HashMap::new(),
             dc_echoed: 0,
@@ -1157,6 +1171,7 @@ impl Session {
                     "stats": stats,
                     "transportsConnected": self.transports_connected.len(),
                     "rtcp": self.rtcp_by_type,
+                    "plisForwarded": self.plis_forwarded,
                     "discardedSsrcs": self.discarded_ssrcs,
                     "sctp": sctp,
                     "fec": self.fec_stats(),
@@ -1589,6 +1604,7 @@ impl Session {
                     for p in &packets {
                         *self.rtcp_by_type.entry(rtcp_name(&p.header())).or_default() += 1;
                     }
+                    self.forward_key_frame_requests(&packets);
                 }
                 _ => {}
             }
@@ -1643,10 +1659,56 @@ impl Session {
                 .map(|c| c.payload_type);
             if let Some(pt) = pt {
                 pkt.header.payload_type = pt;
+                self.reflected_from
+                    .insert(ssrc, (receiver_id, pkt.header.ssrc));
                 pkt.header.ssrc = ssrc;
                 pkt.header.extensions.clear();
                 pkt.header.extension = false;
                 let _ = s.write_rtp(Instant::now(), pkt);
+            }
+        }
+    }
+
+    /// `reflect`: a Picture Loss Indication or Full Intra Request for a stream this side sends
+    /// back asks the browser that sends its source for a key frame (a PLI for the source SSRC,
+    /// RFC 4585 6.3.1), at most one every 200 ms per source; the browser repeats a request
+    /// that is not answered.
+    fn forward_key_frame_requests(&mut self, packets: &[Box<dyn rtci::rtcp::Packet>]) {
+        use rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+        use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        if self.media != "reflect" {
+            return;
+        }
+        let mut asked = Vec::new();
+        for p in packets {
+            let any = p.as_any();
+            if let Some(pli) = any.downcast_ref::<PictureLossIndication>() {
+                asked.push(pli.media_ssrc);
+            } else if let Some(fir) = any.downcast_ref::<FullIntraRequest>() {
+                asked.extend(fir.fir.iter().map(|entry| entry.ssrc));
+            }
+        }
+        let now = Instant::now();
+        for ssrc in asked {
+            let Some(&(receiver_id, source)) = self.reflected_from.get(&ssrc) else {
+                continue;
+            };
+            if self
+                .last_forwarded_pli
+                .get(&source)
+                .is_some_and(|at| now.saturating_duration_since(*at) < Duration::from_millis(200))
+            {
+                continue;
+            }
+            if let Some(mut receiver) = self.pc.rtp_receiver(receiver_id) {
+                let pli = PictureLossIndication {
+                    sender_ssrc: 0,
+                    media_ssrc: source,
+                };
+                if receiver.write_rtcp(now, vec![Box::new(pli)]).is_ok() {
+                    self.last_forwarded_pli.insert(source, now);
+                    self.plis_forwarded += 1;
+                }
             }
         }
     }

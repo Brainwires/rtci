@@ -78,6 +78,30 @@ export function impair(port) {
   };
 }
 
+// Sends what the Rust side sends from `port` through the same netem band on the Rust host's
+// WAN interface (open-b's eth0, run.sh), until the returned function is called: loss on the
+// path TO the browser, for packets the Rust side necessarily holds when the browser asks for
+// them again. Priority per worker slot, apart from `impair`'s and peers.mjs's.
+export function impairFromRust(port) {
+  const prio = String(300 + test.info().parallelIndex);
+  const tc = (...args) =>
+    execFileSync("ip", ["netns", "exec", "open-b", "tc", ...args], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+  tc("filter", "add", "dev", "eth0", "parent", "1:", "protocol", "ip", "prio", prio, "u32",
+    "match", "ip", "protocol", "17", "0xff", "match", "ip", "sport", String(port), "0xffff", "flowid", "1:4");
+  return () => {
+    try {
+      tc("filter", "del", "dev", "eth0", "parent", "1:", "prio", prio);
+    } catch {}
+  };
+}
+
+// Packets the netem band on the Rust host has dropped so far (shared by every impaired test).
+export function netemDropsFromRust() {
+  const out = execFileSync("ip", ["netns", "exec", "open-b", "tc", "-s", "qdisc", "show", "dev", "eth0"]).toString();
+  const m = out.match(/qdisc netem 40:[\s\S]*?dropped (\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+
 // Packets the netem band has dropped so far (shared by every impaired test running).
 export function netemDrops() {
   const out = execFileSync("tc", ["-s", "qdisc", "show", "dev", "eth0"]).toString();
