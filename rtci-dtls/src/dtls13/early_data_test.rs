@@ -25,6 +25,7 @@ fn store() -> Arc<MemorySessionStore> {
 fn client(store: &Arc<MemorySessionStore>) -> Result<Arc<HandshakeConfig>> {
     Ok(Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .build(true, None)?,
     ))
@@ -261,6 +262,7 @@ fn early_data_needs_the_suite_of_the_ticket() -> Result<()> {
     let _ = early_pair(client(&store)?, server.clone(), now, &[])?.complete();
     let chacha_first = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .with_cipher_suites(vec![
                 CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,

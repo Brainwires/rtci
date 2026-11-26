@@ -1961,6 +1961,42 @@ fn client_hello_server_name(datagram: &[u8]) -> Option<String> {
         })
 }
 
+/// A client with no server name and no remote address has no name to send or to verify:
+/// its ClientHello has no server_name extension (RFC 6066 section 3: the extension is a MAY,
+/// its HostName the server's DNS name "as understood by the client"); none is made up (0.2.0
+/// sent "localhost"). One that would verify the server's certificate by name is refused by
+/// the builder; given a name, it sends it.
+#[test]
+fn a_client_with_no_name_and_no_address_sends_no_server_name() -> Result<()> {
+    let now = Instant::now();
+    let config = Arc::new(client_builder().build(true, None)?);
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    client.connect(now, server_addr(), config, None)?;
+    let hello = take_transmits(&mut client).remove(0);
+    assert_eq!(client_hello_server_name(&hello), None);
+
+    let verifying = ConfigBuilder::default()
+        .with_crypto_provider(provider())
+        .with_cipher_suites(vec![SUITE]);
+    assert!(
+        matches!(verifying.build(true, None), Err(Error::Other(message)) if message.contains("server name")),
+        "no name to verify the certificate against"
+    );
+    let named = ConfigBuilder::default()
+        .with_crypto_provider(provider())
+        .with_cipher_suites(vec![SUITE])
+        .with_server_name("example.org".to_owned());
+    let config = Arc::new(named.build(true, None)?);
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    client.connect(now, server_addr(), config, None)?;
+    let hello = take_transmits(&mut client).remove(0);
+    assert_eq!(
+        client_hello_server_name(&hello).as_deref(),
+        Some("example.org")
+    );
+    Ok(())
+}
+
 #[test]
 fn the_server_name_extension_never_carries_an_ip_address() -> Result<()> {
     let now = Instant::now();

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **A peer connection's DTLS ClientHello carries no server_name extension, and nothing is
+  logged for it** (`conf/dtlssni-1-no-sni-from-peer-connection`; RFC 6066 section 3, RFC 8446
+  section 4.4.2.2 "when applicable"). In 0.2.0 every client-role association sent SNI
+  `localhost` and logged a warning ("conn.remote_addr is empty ..."): the peer connection
+  gives rtci-dtls no server name and no address (DTLS runs over the ICE pair), and rtci-dtls
+  then made up `localhost`. RFC 6066 makes the extension a MAY whose HostName is "the fully
+  qualified DNS hostname of the server, as understood by the client"; a WebRTC endpoint knows
+  its peer by the certificate fingerprint in the session description (RFC 8122, RFC 8827)
+  and has no such name. libwebrtc's DTLS sends none either (`rtc_base/openssl_stream_adapter.cc`
+  at a222406d sets no host name), so no `Chrome` profile row. The connection's own DTLS 1.3
+  session tickets (`with_dtls_session_resumption`) are now kept under the empty name on both
+  sides, as they were under `localhost`; TURN over DTLS keeps the URI host.
+  - **rtci-dtls used on its own:** a client with no `with_server_name` and no remote address
+    sends no server_name extension and logs nothing, and `ConfigBuilder::build(true, None)`
+    now returns `Error::Other("a client that verifies the server's certificate needs a server
+    name ...")` when it would verify the certificate by name (no
+    `with_insecure_skip_verify(true)`, no PSK), where 0.2.0 verified against `localhost`. A
+    caller that relied on that sets `with_server_name("localhost".to_owned())`. Strictly a
+    breaking change for such callers (a configuration that built now fails); the integrator
+    may hold it for 0.3.0. Tests in rtci-dtls that keyed tickets on the made-up name now name
+    the server explicitly (`psk_test.rs`, `early_data_test.rs`). Audit row RFC8446-4.4.2.2-4.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
