@@ -71,6 +71,11 @@ struct Bottleneck {
     random: Lcg,
     /// The queueing delay each packet met, with the instant it was offered.
     delays: Vec<(Duration, Duration)>,
+    /// Extra delay after the queue, drawn for each packet up to this (a radio link's
+    /// scheduling, say); packets keep their order.
+    jitter: Duration,
+    /// When the last packet arrived at the far end, for the order.
+    last_arrival: Duration,
 }
 
 impl Bottleneck {
@@ -82,7 +87,14 @@ impl Bottleneck {
             free_at: Duration::ZERO,
             random: Lcg(0x5eed),
             delays: Vec::new(),
+            jitter: Duration::ZERO,
+            last_arrival: Duration::ZERO,
         }
+    }
+
+    fn with_jitter(mut self, jitter: Duration) -> Self {
+        self.jitter = jitter;
+        self
     }
 
     fn with_capacity_from(mut self, from: Duration, capacity: f64) -> Self {
@@ -122,7 +134,13 @@ impl Bottleneck {
         self.delays
             .push((now, Duration::from_secs_f64(waiting.max(0.0))));
         self.free_at = self.free_at.max(now) + Duration::from_secs_f64(bits / capacity);
-        Some(self.free_at + self.propagation)
+        let mut arrival = self.free_at + self.propagation;
+        if !self.jitter.is_zero() {
+            arrival += self.jitter.mul_f64(self.random.unit());
+        }
+        // In order: a packet held back by the jitter holds back the ones behind it.
+        self.last_arrival = self.last_arrival.max(arrival);
+        Some(self.last_arrival)
     }
 
     /// The mean and the 95th percentile of the queueing delay of packets offered in
@@ -1045,4 +1063,109 @@ fn the_draft_threshold_time_base_meets_the_same_bounds() {
             assert!(gcc >= 0.05 && tcp >= 0.2);
         }
     }
+}
+
+/// RFC 8836 section 2 (1a): the delay the algorithm tracks includes the short-term maxima of
+/// the path's jitter, so jitter is not taken for congestion. Behind 2 Mbit/s whose packets meet
+/// up to 30 ms of jitter after the queue (the order kept), one flow alone keeps most of the
+/// path, and its own queue stays short: the adaptive threshold (draft-ietf-rmcat-gcc-02 5.4)
+/// rises to the jitter's spread instead of reading over-use in it.
+#[test]
+fn jitter_on_the_path_is_not_taken_for_congestion() {
+    const CAPACITY: f64 = 2_000_000.0;
+    let mut world = World::new(
+        Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION)
+            .with_jitter(Duration::from_millis(30)),
+    );
+    world.gcc.push(GccFlow::new(300_000.0, Duration::ZERO));
+    world.run(Duration::from_secs(80));
+
+    let (from, until) = (Duration::from_secs(40), Duration::from_secs(80));
+    let flow = &world.gcc[0];
+    let shares: Vec<f64> = (40..80)
+        .map(|second| {
+            let from = Duration::from_secs(second);
+            share(
+                flow.goodput.rate(from, from + Duration::from_secs(1)),
+                CAPACITY,
+            )
+        })
+        .collect();
+    let mean = shares.iter().sum::<f64>() / shares.len() as f64;
+    let low = shares.iter().copied().fold(f64::INFINITY, f64::min);
+    let (mean_delay, p95_delay) = world.path.queueing_delay(from, until);
+    println!(
+        "30 ms of jitter: share mean {mean:.2}, lowest second {low:.2}; queueing delay mean {mean_delay:?}, p95 {p95_delay:?}"
+    );
+    assert!(mean >= 0.6, "{mean:.2}");
+    assert!(low >= 0.3, "{low:.2}");
+    assert!(p95_delay < Duration::from_millis(100), "{p95_delay:?}");
+}
+
+/// RFC 8836 section 2 (1b): low delay and little self-induced latency with competing flows.
+/// Two flows of this algorithm on one bottleneck, and one beside constant cross traffic that
+/// takes half the path: the queue they keep stays short against the 300 ms the tail-drop
+/// buffer would allow, and the path is used. Measured on 0.2.0: two flows 2.9 ms mean, 11.0 ms
+/// p95; beside the cross traffic 1.7 / 5.4 ms.
+#[test]
+fn competing_flows_keep_the_queue_short() {
+    const CAPACITY: f64 = 2_000_000.0;
+    let (from, until) = (Duration::from_secs(60), Duration::from_secs(90));
+
+    let mut two = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION));
+    two.gcc.push(GccFlow::new(300_000.0, Duration::ZERO));
+    two.gcc
+        .push(GccFlow::new(300_000.0, Duration::from_millis(50)));
+    two.run(until);
+    let used = share(
+        two.gcc[0].goodput.rate(from, until) + two.gcc[1].goodput.rate(from, until),
+        CAPACITY,
+    );
+    let (two_mean, two_p95) = two.path.queueing_delay(from, until);
+
+    let mut beside = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION));
+    beside.gcc.push(GccFlow::new(300_000.0, Duration::ZERO));
+    beside.cross.push(CrossTraffic {
+        rate: 0.5 * CAPACITY,
+        on: vec![(Duration::ZERO, until)],
+        next: Duration::ZERO,
+        goodput: Goodput::default(),
+    });
+    beside.run(until);
+    let gcc = share(beside.gcc[0].goodput.rate(from, until), CAPACITY);
+    let (beside_mean, beside_p95) = beside.path.queueing_delay(from, until);
+    println!(
+        "two Gcc flows: path used {used:.2}, queueing delay mean {two_mean:?} p95 {two_p95:?}; beside half the path of cross traffic: Gcc {gcc:.2}, queueing delay mean {beside_mean:?} p95 {beside_p95:?}"
+    );
+    assert!(used >= 0.6, "{used:.2}");
+    assert!(two_mean < Duration::from_millis(30), "{two_mean:?}");
+    assert!(two_p95 < Duration::from_millis(150), "{two_p95:?}");
+    assert!(gcc >= 0.25, "{gcc:.2}");
+    assert!(beside_mean < Duration::from_millis(30), "{beside_mean:?}");
+    assert!(beside_p95 < Duration::from_millis(60), "{beside_p95:?}");
+}
+
+/// RFC 8836 section 2 (3a): where a useful share and the lowest delay conflict, the share
+/// comes first. A TCP-like transfer holds the 200 ms tail-drop buffer full, so no flow can
+/// have low delay there; this algorithm does not back off to its floor chasing it, and keeps
+/// a useful share of the path (a fifth or more) while the queue is long.
+#[test]
+fn a_useful_share_is_kept_where_low_delay_is_out_of_reach() {
+    const CAPACITY: f64 = 2_000_000.0;
+    let mut world = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.2), PROPAGATION));
+    world.gcc.push(GccFlow::new(300_000.0, Duration::ZERO));
+    world
+        .tcp
+        .push(TcpFlow::new(Duration::from_secs(20), ROUND_TRIP));
+    world.run(Duration::from_secs(120));
+
+    let (from, until) = (Duration::from_secs(60), Duration::from_secs(120));
+    let gcc = share(world.gcc[0].goodput.rate(from, until), CAPACITY);
+    let (mean_delay, _) = world.path.queueing_delay(from, until);
+    println!("beside a TCP-like transfer: Gcc {gcc:.2}, queueing delay mean {mean_delay:?}");
+    assert!(
+        mean_delay >= Duration::from_millis(50),
+        "the conflict is there: {mean_delay:?}"
+    );
+    assert!(gcc >= 0.15, "{gcc:.2}");
 }

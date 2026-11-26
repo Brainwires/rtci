@@ -62,7 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next regular packet leaves `T_rr_interval` after the aggregated one, not some 0.35 s later as
   it would with the suppression in step b (mutation checked). RFC8108-5.3.2-5 `tested` (was
   `untested`, open-must class B).
-
 - **A forwarder routes SFrame-encrypted frames by the Dependency Descriptor alone** (RFC 9605
   sections 4.4.3 and 6.1;
   `tests/encoded_frame_metadata_rtc2rtc.rs::a_forwarder_routes_sframe_frames_by_the_dependency_descriptor_alone`;
@@ -72,6 +71,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers only and its `DecodeTargetSelector` forwards the T0 frames whole for a T0 receiver and
   every frame for a T2 one; the end receiver decrypts what it forwards. RFC9605-X-6 `tested` (was
   `missing`, open-must class C).
+
+- **RFC 8836 property tests for the delay-based estimator** (`conf/ccrows-13-rfc8836-tests-on-master`,
+  the tests of `conf/ccrows-2-rfc8836-tests` re-based on 0.2.0): in
+  `rtci-interceptor/tests/rfc8836_multi_flow.rs`, jitter on the path is not taken for congestion
+  (requirement 1a), competing flows keep the queue short (1b), and a useful share is kept where
+  low delay is out of reach (3a). Audit rows RFC8836-2-1a, -1b, -3a untested -> tested;
+  RFC8836-2-8b partial -> tested and RFC8836-2-9 missing -> partial (stale notes: `a=rtcp-rsize`
+  is negotiated and used; datagrams are DSCP-marked, the estimator does not use the marking).
+  Tests and audit only.
 
 ## [0.2.0] - 2026-11-26
 
