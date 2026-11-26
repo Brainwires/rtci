@@ -231,6 +231,41 @@ fn a_section_that_drops_its_msid_ends_the_track_only_when_asked() -> TestResult 
     Ok(())
 }
 
+/// RFC 8830 section 3.2.5: "If no such attribute is found, stop the MediaStreamTrack." The
+/// `StrictRfc` behaviour profile turns `with_msid_removal_ends_track` on; the default profile
+/// keeps the W3C form (the track stays live).
+#[test]
+fn the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid() -> TestResult {
+    use rtci::media_stream::MediaStreamTrackState::{Ended, Live};
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::BehaviourProfile;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    for (profile, expected) in [
+        (BehaviourProfile::Rfc, Live),
+        (BehaviourProfile::Chrome, Live),
+        (BehaviourProfile::StrictRfc, Ended),
+    ] {
+        let mut media_engine = MediaEngine::for_profile(profile);
+        media_engine.register_default_codecs()?;
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_behaviour_profile(profile)
+                    .build(),
+            )
+            .build(Instant::now())?;
+        assert_eq!(track_state(&mut pc, offer("a=msid:stream\n", ""))?, Live);
+        assert_eq!(
+            track_state(&mut pc, offer("", ""))?,
+            expected,
+            "{profile:?}"
+        );
+    }
+    Ok(())
+}
+
 /// RFC 9429 sections 5.2.2 and 5.3.2: for a transceiver that is not stopped "the 'a=msid'
 /// lines MUST stay the same regardless of changes to the transceiver's direction or track".
 /// After `remove_track` (no track, the direction no longer sends) the next offer and the
