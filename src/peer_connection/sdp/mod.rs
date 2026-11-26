@@ -168,6 +168,7 @@ mod rejected_mline_tests {
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
+            bundle_only_rtcp_mux_and_session_fingerprint: false,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -2365,7 +2366,11 @@ fn reject_written_section(media: &mut MediaDescription) -> bool {
 /// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
 /// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
-fn make_bundle_only(media: &mut MediaDescription) {
+///
+/// With `rtcp_mux` (`SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`)
+/// an RTP section keeps one BUNDLE attribute, `a=rtcp-mux`, against RFC 9143 sections 7.1.3 and
+/// 9.3.1.1: Chromium, WebKit and Firefox refuse an offer whose bundle-only RTP section lacks it.
+fn make_bundle_only(media: &mut MediaDescription, rtcp_mux: bool) {
     media.media_name.port = RangedPort {
         value: 0,
         range: None,
@@ -2373,6 +2378,14 @@ fn make_bundle_only(media: &mut MediaDescription) {
     media
         .attributes
         .retain(|a| !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates");
+    if rtcp_mux && media.media_name.media != MEDIA_SECTION_APPLICATION {
+        media
+            .attributes
+            .push(sdp::description::common::Attribute::new(
+                ATTR_KEY_RTCPMUX.to_owned(),
+                None,
+            ));
+    }
     media
         .attributes
         .push(sdp::description::common::Attribute::new(
@@ -2700,6 +2713,10 @@ pub(crate) struct PopulateSdpParams {
     /// `SettingEngineBuilder::with_bundle_attributes_repeated(false)`: the form of RFC 9143
     /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
+    /// `SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`:
+    /// an initial offer's bundle-only RTP sections say `a=rtcp-mux`, and when it has a
+    /// bundle-only section its fingerprints are at session level too.
+    pub(crate) bundle_only_rtcp_mux_and_session_fingerprint: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -2813,6 +2830,8 @@ impl RTCPeerConnection {
         // The media types (`audio`, `video`, `application`) of the sections so far that carry
         // their own transport parameters, for the bundle policy.
         let mut with_transport: Vec<String> = vec![];
+        // Whether a section was made bundle-only (an initial offer).
+        let mut any_bundle_only = false;
 
         let answer_payload_types = answer_payload_types(media_engine, media_sections);
         let mut candidates_added = false;
@@ -3034,7 +3053,11 @@ impl RTCPeerConnection {
                             && group.is_some()
                             && let Some(desc) = d.media_descriptions.last_mut()
                         {
-                            make_bundle_only(desc);
+                            make_bundle_only(
+                                desc,
+                                params.bundle_only_rtcp_mux_and_session_fingerprint,
+                            );
+                            any_bundle_only = true;
                         } else {
                             with_transport.push(media_type);
                         }
@@ -3083,7 +3106,16 @@ impl RTCPeerConnection {
             }
         }
 
-        if !params.media_description_fingerprint {
+        // RFC 8122 section 5: "The fingerprint attribute may be either a session-level or a
+        // media-level SDP attribute"; RFC 9429 section 5.2.1: the m= sections "MUST all have the
+        // same fingerprint value or values [RFC8122], or these values MUST be session-level
+        // attributes". With the setting, an initial offer with a bundle-only section has them at
+        // session level as well, so the bundle-only sections (which carry none, RFC 9143 7.1.3)
+        // see one: Chromium and WebKit otherwise answer a bundle-only data section with port
+        // zero, and Firefox does not apply the offer.
+        if !params.media_description_fingerprint
+            || (params.bundle_only_rtcp_mux_and_session_fingerprint && any_bundle_only)
+        {
             for fingerprint in dtls_fingerprints {
                 d = d.with_fingerprint(
                     fingerprint.algorithm.clone(),

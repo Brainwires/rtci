@@ -456,6 +456,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   it (RTCP `T_rr_interval` 1 s, congestion control feedback and reports inside RFC 3550's 5%), each value with its
   measured saving and cost. It never turns a capability off or leaves what the RFCs permit.
 
+**Known limit of the default profile: bundle-only sections and browsers.** An initial offer's bundle-only m= sections
+are written in the RFC 9143 form (sections 7.1.3 and 9.3.1.1: no `a=rtcp-mux`, no other BUNDLE attribute), which
+Chromium, WebKit and Firefox refuse. With the default profile no browser accepts an rtci offer under `max-bundle` with
+more than one m= section (nor, by the same rule, a `balanced` offer with two sections of one media type). Use the
+`Chrome` profile, or
+`SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections(true)` alone, or `balanced`
+with one section of each type. Offers from browsers and answers are not affected.
+
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads
 one from configuration. **At build time**, two cargo features of `rtci` change `BehaviourProfile::default()`, and with it

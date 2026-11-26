@@ -1085,8 +1085,11 @@ async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false
 // Rust offers under max-bundle (`?bundle_policy=max-bundle`): audio, video and its channel
 // `from-rust`, created before the tracks (`dataChannel` "before") or after them ("after"); it
 // streams the fixtures and the browser answers. With `renegotiate` the browser then offers and
-// Rust offers a second channel.
-async function maxBundleRustOffers(page, { dataChannel, renegotiate = false }) {
+// Rust offers a second channel. `profile` is the interop peer's behaviour profile (`?profile=`):
+// "chrome" writes the bundle-only sections in the form browsers accept
+// (`with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`), null the default, the
+// RFC 9143 form, which Chromium, WebKit and Firefox refuse (test-env run 45900172027).
+async function maxBundleRustOffers(page, { dataChannel, renegotiate = false, profile = "chrome" }) {
   return page.evaluate(async ([ws, dataChannel, renegotiate]) => {
     const s = await Interop.open(ws, {});
     s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
@@ -1183,7 +1186,7 @@ async function maxBundleRustOffers(page, { dataChannel, renegotiate = false }) {
       errors: report.errors.concat(s.errors),
       descriptions: Interop.transportLines(s.descriptions),
     };
-  }, [`${WS}/?bundle_policy=max-bundle`, dataChannel, renegotiate]);
+  }, [`${WS}/?bundle_policy=max-bundle${profile ? `&profile=${profile}` : ""}`, dataChannel, renegotiate]);
 }
 
 // An answer accepts every section of the offer: in order and of the same kinds, each with a
@@ -1246,7 +1249,7 @@ function expectMaxBundleBrowserOffer(r) {
   }
 }
 
-function expectMaxBundleRustOffer(r) {
+function expectMaxBundleRustOffer(r, { browserForm = true } = {}) {
   if (r.refused) {
     test.info().annotations.push({ type: "max-bundle-refused-offer", description: r.refused.offer || "no offer" });
     throw new Error(
@@ -1270,6 +1273,12 @@ function expectMaxBundleRustOffer(r) {
   expect(r.offer.sections.at(-1).sctpPort, ctx).toBeTruthy();
   expect(r.offer.groups.length, ctx).toBe(1);
   expect([...r.offer.groups[0]].sort(), ctx).toEqual(r.offer.sections.map((m) => m.mid).sort());
+  // The browser form (Chrome profile): a=rtcp-mux in the bundle-only RTP sections only, the
+  // fingerprint at session level too; the RFC 9143 7.1.3 form: neither.
+  for (const m of r.offer.sections.slice(1)) {
+    expect(m.rtcpMux, `${m.kind} ${m.mid} a=rtcp-mux: ${ctx}`).toBe(browserForm && m.kind !== "application");
+  }
+  expect(r.offer.sessionFingerprint, `session-level a=fingerprint: ${ctx}`).toBe(browserForm);
   expectAcceptsEverySection(r.offer, r.answer, ctx);
   expect(r.hello, `Rust's message on its channel: ${ctx}`).toBe("hello-from-rust");
   expect(r.sent, `5 messages from the browser reached Rust: ${ctx}`).toBe(5);
@@ -1284,18 +1293,19 @@ test("max-bundle: the browser offers audio, video and a data channel, Rust answe
   expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page));
 });
 
-// The data section first: the channel created before the tracks. Cryptex is negotiated too, so
-// the offer is the one 0.2.0 failed on with every RTP section bundle-only (Chromium's
-// recording of it is the fixture of tests/cryptex_require.rs).
+// The channel created before the tracks. Cryptex is negotiated too (when the browser offers it:
+// none in the image does, rtpHeaderEncryptionPolicy unsupported). No browser puts the data
+// section first even so (recorded offers, test-env 45898141031): Chromium and WebKit write
+// audio, video, application, all ported; Firefox audio first, video and data bundle-only.
 test("max-bundle: the browser offers a data channel created before audio and video, Rust answers", async ({ page }) => {
   expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page, { dataFirst: true, cryptex: true }));
 });
 
-test("max-bundle: Rust offers audio, video and a data channel, the browser answers", async ({ page }) => {
+test("max-bundle: Rust offers audio, video and a data channel (Chrome profile), the browser answers", async ({ page }) => {
   expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "after" }));
 });
 
-test("max-bundle: Rust offers a data channel created before audio and video, the browser answers", async ({ page }) => {
+test("max-bundle: Rust offers a data channel created before audio and video (Chrome profile), the browser answers", async ({ page }) => {
   expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "before" }));
 });
 
@@ -1303,8 +1313,29 @@ test("max-bundle: after the browser's offer, a renegotiation from each side keep
   expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page, { renegotiate: true }));
 });
 
-test("max-bundle: after Rust's offer, a renegotiation from each side keeps the data channel open", async ({ page }) => {
+test("max-bundle: after Rust's offer (Chrome profile), a renegotiation from each side keeps the data channel open", async ({ page }) => {
   expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "after", renegotiate: true }));
+});
+
+// Rust's default profile writes the bundle-only sections in the RFC 9143 7.1.3 / 9.3.1.1 form
+// (no a=rtcp-mux, no BUNDLE attribute at all). Every browser in the matrix refuses it
+// (test-env 45900172027): the cell records that refusal as na-browser, with the browser's own
+// error text, and passes in full if a browser ever takes the offer. A refusal for any other
+// reason fails the cell.
+const RTCP_MUX_REFUSAL = /rtcp-mux must be enabled when BUNDLE is enabled|missing a=rtcp-mux, which is required by rtcpMuxPolicy/;
+test("max-bundle: Rust offers audio, video and a data channel in the RFC 9143 form (default profile), the browser answers or refuses", async ({ page }) => {
+  const r = await maxBundleRustOffers(page, { dataChannel: "after", profile: null });
+  if (r.refused) {
+    test.info().annotations.push({ type: "max-bundle-refused-offer", description: r.refused.offer || "no offer" });
+    const said = r.refused.errors.join(" ");
+    expect(said, `refused for another reason: ${JSON.stringify(r.refused)}`).toMatch(RTCP_MUX_REFUSAL);
+    naBrowser(
+      true,
+      `this browser refuses an initial offer whose bundle-only RTP section has no a=rtcp-mux (the RFC form): ${said}`,
+      "RFC 9143 7.1.3 (no IDENTICAL / TRANSPORT attribute in a bundle-only m= section) and 9.3.1.1 (a=rtcp-mux \"excluding any bundle-only m= sections\"); observed at run time, first in test-env 45900172027; SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections (Chrome profile) is the form browsers take",
+    );
+  }
+  expectMaxBundleRustOffer(r, { browserForm: false });
 });
 
 // ---- a wrong DTLS fingerprint (RFC 5763 5, RFC 8122 5) ----

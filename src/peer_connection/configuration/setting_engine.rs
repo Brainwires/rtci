@@ -482,6 +482,8 @@ pub struct SettingEngine {
     pub(crate) max_bundle_ignored: bool,
     /// `with_rtcp_mux_only_in_subsequent_offers`.
     pub(crate) rtcp_mux_only_in_subsequent_offers: bool,
+    /// [`SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`].
+    pub(crate) rtcp_mux_and_session_fingerprint_for_bundle_only_sections: bool,
     /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
     /// connection gets ICE credentials of its own. The derived default `false` shares the first
     /// transport's.
@@ -681,6 +683,7 @@ impl SettingEngine {
             bundle_attributes_tagged_only: Default::default(),
             max_bundle_ignored: Default::default(),
             rtcp_mux_only_in_subsequent_offers: false,
+            rtcp_mux_and_session_fingerprint_for_bundle_only_sections: false,
             unique_transport_credentials: Default::default(),
             separate_fec_sessions: false,
             explicit_rollback_only: Default::default(),
@@ -2485,6 +2488,39 @@ impl SettingEngineBuilder {
     /// New sections of an offer say it either way (RFC 9429 section 4.1.1).
     pub fn with_rtcp_mux_only_in_subsequent_offers(mut self, repeated: bool) -> Self {
         self.0.rtcp_mux_only_in_subsequent_offers = repeated;
+        self
+    }
+
+    /// Whether an initial offer writes its bundle-only m= sections in the form browsers
+    /// accept: each bundle-only RTP section says `a=rtcp-mux`, and the offer, when it has a
+    /// bundle-only section, carries its `a=fingerprint` lines at session level as well as in
+    /// the sections with a transport. The default is `false`; the `Chrome` behaviour profile
+    /// sets `true`. Later offers and answers are not affected: they have no bundle-only
+    /// sections (RFC 9429 section 5.2.2).
+    ///
+    /// The default is the RFC form. RFC 9143 section 7.1.3: "In the initial BUNDLE offer, the
+    /// offerer MUST NOT include IDENTICAL and TRANSPORT multiplexing category SDP attributes
+    /// (BUNDLE attributes) in bundle-only "m=" sections", and section 9.3.1.1: "the offerer
+    /// MUST include an SDP 'rtcp-mux' attribute [RFC5761] in each bundled "m=" section
+    /// (excluding any bundle-only "m=" sections)" (`rtcp-mux` is IDENTICAL, RFC 8859). Chromium,
+    /// WebKit and Firefox refuse that form (browser matrix, test-env run 45900172027):
+    /// Chromium and WebKit with "Failed to set local answer sdp: rtcp-mux must be enabled when
+    /// BUNDLE is enabled.", Firefox with "m-section at level 1 is missing a=rtcp-mux, which is
+    /// required by rtcpMuxPolicy"; with `a=rtcp-mux` alone Chromium and WebKit answer a
+    /// bundle-only data section with port zero (no fingerprint applies to it) and Firefox
+    /// stops (run 45902077847). The `a=rtcp-mux` line is the departure; the session-level
+    /// fingerprints are RFC form (RFC 8122 section 5: "either a session-level or a media-level
+    /// SDP attribute"; RFC 9429 section 5.2.1: the m= sections "MUST all have the same
+    /// fingerprint value or values [RFC8122], or these values MUST be session-level
+    /// attributes"). With the default, a browser takes no initial offer of this engine that
+    /// has a bundle-only section: `max-bundle` with more than one m= section, or `balanced`
+    /// with two sections of one media type.
+    pub fn with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections(
+        mut self,
+        browser_form: bool,
+    ) -> Self {
+        self.0
+            .rtcp_mux_and_session_fingerprint_for_bundle_only_sections = browser_form;
         self
     }
 

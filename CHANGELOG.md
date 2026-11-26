@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SettingEngineBuilder::with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`, on in
+  the `Chrome` profile: an initial offer with bundle-only sections in the form browsers accept**
+  (`conf/bundle-4-browser-form-of-bundle-only-sections`; RFC 9143 sections 7.1.3 and 9.3.1.1,
+  RFC 8122 section 5, RFC 9429 section 5.2.1). The default writes bundle-only m= sections in the
+  RFC 9143 form: no IDENTICAL or TRANSPORT attribute, so no `a=rtcp-mux`. Chromium, WebKit and
+  Firefox refuse such an offer (browser matrix, test-env run 45900172027): Chromium and WebKit
+  "Failed to set local answer sdp: rtcp-mux must be enabled when BUNDLE is enabled.", Firefox
+  "m-section at level 1 is missing a=rtcp-mux, which is required by rtcpMuxPolicy". So with the
+  default profile no browser accepts an offer of this engine under `max-bundle` with more than
+  one m= section (nor a `balanced` offer with two sections of one media type). With the setting
+  each bundle-only RTP section says `a=rtcp-mux` (the departure) and the offer carries its
+  fingerprints at session level as well (RFC form: "either a session-level or a media-level SDP
+  attribute", RFC 8122 5; RFC 9429 5.2.1 "or these values MUST be session-level attributes"):
+  with `a=rtcp-mux` alone Chromium and WebKit answered the bundle-only data section with port
+  zero, no fingerprint applying to it, and Firefox's page crashed (run 45902077847); with both all
+  three apply the offer, open the channel and carry media (run 45903674595). Later offers and
+  answers are unchanged. The default, `Rfc` and `StrictRfc` keep the RFC form. Test:
+  `tests/jsep_bundle_only_browser_form.rs`.
+
 ### Fixed
 
 - **Data channels never opened under `max-bundle` when the offer also had media (regression in
@@ -45,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Testing
 
 - **Browser cells for `max-bundle` with audio, video and a data channel**
-  (`conf/bundle-3-max-bundle-browser-cells`; `scripts/test-env/interop/scenarios.spec.mjs`,
+  (`conf/bundle-3-max-bundle-browser-cells`, `conf/bundle-4-browser-form-of-bundle-only-sections`; `scripts/test-env/interop/scenarios.spec.mjs`,
   `peer.js`, `examples/interop-peer`; test harness only, no engine change; RFC 9429 sections
   4.1.1, 5.2.1 and 5.3.1, RFC 9143 sections 7.2 and 13, RFC 8841 section 5.1). The two
   regressions above went out in 0.1.0 and 0.2.0 because the browser matrix had `bundlePolicy`
@@ -65,7 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browsers' descriptions are kept as `browser-sdp/*.sdp` artifacts (`recordDescriptions`). The
   interop peer takes `?bundle_policy=<name>` (`RTCConfigurationBuilder::with_bundle_policy`),
   `request-offer`'s `"data_channel": "before" | "after"` with `"tracks"`, and reports
-  `dcReceived` (messages received on every channel).
+  `dcReceived` (messages received on every channel). Rust's offers in these cells use the
+  `Chrome` profile (`with_rtcp_mux_and_session_fingerprint_for_bundle_only_sections`, above); a
+  seventh cell offers in the default profile's RFC 9143 form and records each browser's refusal
+  as na-browser with the browser's own error text, failing on any other outcome than a refusal
+  for the missing `a=rtcp-mux` or a full pass. `scripts/test-env/hosted-cell.sh` makes `opus.ogg`
+  as the image does and runs Firefox as the runner's user (from `conf/ci-hosted-cell-firefox`).
 
 ## [0.2.0] - 2026-11-26
 
