@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same payload type, then the first (`codec_parameters_search`); the answer's level rules
   (RFC 6184 section 8.2.2, RFC 7798 section 7.2.2) are unchanged. ENGINE BEHAVIOUR CHANGE, NOT
   breaking (no API change): an answer to a browser whose H.264 payload type number is one of
-  the registered High numbers states that registered format's level, not Level 5.0. RTX, RED
+  the registered High numbers states that registered format's level, not Level 5.0; the
+  formats an answer adds (RFC 9429 section 5.3.1) at 118 to 121 carry their own levels; an
+  answer to an offer of several High levels (webrtc-rs 0.17 offers 118 to 121 and 123) now
+  accepts each of them under its own number, where 0.2.0 kept 123 alone (pinned answers in
+  `tests/fixtures/browser-sdp-answers/` updated). RTX, RED
   and FEC keep their own lines (they name payload types) and were not affected.
 
 ## [0.2.0] - 2026-11-26
