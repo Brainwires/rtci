@@ -1129,7 +1129,21 @@ async function maxBundleRustOffers(page, { dataChannel, renegotiate = false }) {
       };
     };
     s.send({ type: "request-offer", tracks: ["OPUS", "VP8"], data_channel: dataChannel });
-    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer");
+    await Interop.until(() => s.remoteOffers > 0 && (s.pc.signalingState === "stable" || s.errors.length > 0), 15000, "Rust's offer")
+      .catch(() => {});
+    // The browser did not take Rust's offer (or Rust made none): what it said, and the offer.
+    if (s.errors.length > 0 || !s.pc.remoteDescription || s.pc.signalingState !== "stable") {
+      const received = s.descriptions.find(([d, t]) => d === "received" && t === "offer");
+      const refused = {
+        errors: s.errors,
+        signalingState: s.pc.signalingState,
+        remoteOffers: s.remoteOffers,
+        layout: received ? Interop.bundleLayout(received[2]) : null,
+        offer: received ? received[2] : null,
+      };
+      s.close();
+      return { refused };
+    }
     const offer = Interop.bundleLayout(s.pc.remoteDescription.sdp);
     const answer = Interop.bundleLayout(s.pc.localDescription.sdp);
     await s.connected();
@@ -1233,6 +1247,14 @@ function expectMaxBundleBrowserOffer(r) {
 }
 
 function expectMaxBundleRustOffer(r) {
+  if (r.refused) {
+    test.info().annotations.push({ type: "max-bundle-refused-offer", description: r.refused.offer || "no offer" });
+    throw new Error(
+      `the browser did not apply Rust's max-bundle offer: errors ${JSON.stringify(r.refused.errors)}; ` +
+        `signalingState ${r.refused.signalingState}, offers ${r.refused.remoteOffers}; ` +
+        `layout ${JSON.stringify(r.refused.layout)}\n${r.refused.offer}`,
+    );
+  }
   test.info().annotations.push({ type: "max-bundle-answer", description: JSON.stringify(r.answer) });
   const ctx = JSON.stringify({ offer: r.offer, answer: r.answer, hello: r.hello, sent: r.sent, closed: r.closed, rust: r.rust, sctp: r.sctp, sctpPorts: r.sctpPorts, later: r.later, descriptions: r.descriptions });
   // Rust's initial offer under max-bundle (must-bundle by default, RFC 9429 4.1.1): the first
