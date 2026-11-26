@@ -97,6 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as na-browser with the browser's own error text, failing on any other outcome than a refusal
   for the missing `a=rtcp-mux` or a full pass. `scripts/test-env/hosted-cell.sh` makes `opus.ogg`
   as the image does and runs Firefox as the runner's user (from `conf/ci-hosted-cell-firefox`).
+  `tests/jsep_default_offers_pinned.rs` pins the default initial offers (default policy,
+  `max-bundle`, `must-bundle`, `max-compat`; normalized) in `tests/fixtures/engine-offers/`,
+  written by the test on the code before the setting (bundle-3, run 45911540683): the default
+  form of the bundle-only sections is unchanged byte for byte.
 
 ## [0.2.0] - 2026-11-26
 
