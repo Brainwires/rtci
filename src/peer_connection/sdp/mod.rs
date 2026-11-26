@@ -3667,6 +3667,15 @@ pub(crate) struct RemoteIceDetails {
 
 /// Whether an m-section is rejected: port zero without `a=bundle-only` (RFC 8843 §6, an
 /// m-section that is only reachable through its BUNDLE group also has port zero).
+///
+/// In an offer, port zero with `a=bundle-only` is a bundled section (RFC 9143 sections 7.2
+/// and 13). In an answer port zero is always a rejection (section 7.3.3): this reads so for
+/// answers only because no answer it is given carries `a=bundle-only`. This engine writes none
+/// (RFC 9429 section 5.3.1) and a remote answer's is discarded when it is parsed, inside a
+/// BUNDLE group too ([`discard_stray_bundle_only`] with `answers`). The callers that read
+/// answers (`check_answer_against_offer`, the answer passes of `set_remote_description` and
+/// `internal.rs`, `negotiated_sctp`, `describes_sctp_association`) rely on that; pinned by
+/// `tests/data_channel_max_bundle_rtc2rtc.rs::a_bundle_only_attribute_in_an_answer_does_not_keep_a_zero_port_section`.
 pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
     m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
 }
@@ -3998,7 +4007,8 @@ pub(crate) fn answered_extension_directions(
 ///   non-bundled 'm=' section, the offerer or answerer MUST discard the attribute." Without
 ///   it a port-zero section is what port zero says: rejected (RFC 3264 section 6).
 /// - RFC 9143 sections 7.3.2 and 7.3.3 and RFC 9429 section 5.3.1: no m= section of an
-///   answer has the attribute, so one in an answer is discarded too.
+///   answer has the attribute, so one in an answer is discarded too. [`is_rejected_media`]
+///   relies on this for every answer it reads: a zero port in an answer is a rejection.
 ///
 /// Only the parsed description changes: the SDP text stays as given.
 pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: bool) {
