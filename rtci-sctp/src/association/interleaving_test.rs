@@ -576,7 +576,8 @@ fn i_data_respects_the_window_and_the_packet_size() -> Result<()> {
     assert!(packets.iter().all(|p| p.len() <= a.mtu as usize));
     assert_eq!(a.fragment_size() as usize, sent[0].user_data.len());
     assert_eq!(a.max_payload_size - 4, a.fragment_size());
-    let bytes: usize = sent.iter().map(|c| c.user_data.len()).sum();
+    // The congestion control counts chunks on the wire, header and padding (RFC 9260 7.2).
+    let bytes: usize = sent.iter().map(|c| c.wire_size()).sum();
     assert!(
         bytes >= a.cwnd as usize && bytes < (a.cwnd + a.pmdcs) as usize,
         "{bytes} bytes sent with a window of {}",
@@ -848,8 +849,10 @@ fn unordered_messages_do_not_starve_ordered_ones() -> Result<()> {
         a.stream(1)?
             .write_sctp(now, &Bytes::from_static(b"unordered"), PPI)?;
     }
-    // A window that lets 25 of the 41 messages out.
-    a.cwnd = 25 * 9 - 4;
+    // A window that lets 25 of the 41 messages out, counted on the wire (RFC 9260 7.2): 24
+    // unordered chunks of 28 bytes (16 of header, 9 of data, padding) and the ordered one of
+    // 24; the 25th crosses the window.
+    a.cwnd = 24 * 28 + 24 - 4;
     let out = a.gather_outbound(now).0;
     let order: Vec<u16> = transmitted_data(&out)
         .iter()
