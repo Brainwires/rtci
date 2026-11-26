@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timer that bounds checking (RFC 8863 section 5 permits it, W3C does not; Chrome does the
   same). WEBRTC-5.2-33 `tested` -> `missing`: replaceTrack never refuses a track outside the
   negotiated envelope, which webrtc-pc defines by examples the engine can see (a track whose
-  codec is not negotiated, an audio track of another channel count). Open MUST rows 57 -> 53.
+  codec is not negotiated, an audio track of another channel count; fixed on `conf/w3c-2-replace-track-envelope`). Open MUST rows 57 -> 53.
 - **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
   owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
   initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
@@ -112,6 +112,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Behaviour change (0.3.0): `RTCRtpSender::replace_track` refuses a track the sender cannot
+  send within its negotiated envelope** (`conf/w3c-2-replace-track-envelope`; webrtc-pc
+  replaceTrack, "determine if withTrack can be sent immediately by the sender without violating
+  the sender's already-negotiated envelope, and if it cannot ... InvalidModificationError"; audit
+  row WEBRTC-5.2-33 `missing` -> `tested`). While the transceiver is sending (currentDirection
+  sendrecv or sendonly), a track any of whose codings names a codec that matches none of the
+  sender's negotiated codecs by mime type, clock rate and channel count fails with
+  `Error::InvalidModificationError`, and the sender keeps its track. In 0.2.0 such a track was
+  taken and its packets were relabelled with a negotiated codec's payload type (a VP9 stream
+  sent as VP8). A track whose codings name no codec, and any replacement before negotiation, are
+  taken as before. Tests `rtp_sender_test.rs::test_rtp_sender_replace_track_invalid_codec_change`
+  (it asserted the relabelling before), `test_rtp_sender_replace_track_with_another_channel_count_is_refused`,
+  `test_rtp_sender_replace_track_before_negotiation_takes_any_codec`.
 - **W3C "validate an ICE server URL": a TURN username or credential that is not an RFC 8265
   OpaqueString is refused** (`conf/w3c-1-must-rows-sweep4`; webrtc-pc 4.4.1.5, "fail to conform
   to [RFC8489] section 14.3 and [RFC8265] section 4.1 ... throw an InvalidAccessError"; audit

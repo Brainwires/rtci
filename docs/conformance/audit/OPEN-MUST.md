@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5035 of 5088 (99.0 %).
-- Tested as the default (`tested`): 5003 of 5088 (98.3 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 53: 39 untested, 8 partial, 4 missing, 2 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5036 of 5088 (99.0 %).
+- Tested as the default (`tested`): 5004 of 5088 (98.3 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 52: 39 untested, 8 partial, 3 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 38 | 2 |
 | C | partly implemented | 10 | 1 |
-| D | not implemented | 3 | 0 |
+| D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 1 | 0 |
-| all | | 85 | 28 |
+| all | | 84 | 28 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 52 rows, 47 of size S, 4 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 51 rows, 47 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -42,7 +42,6 @@ become `setting` only if such a cell is named, or close when the default changes
 | ice | 0 | 3 | 1 | 0 | 0 | 4 | 1 | 3 | 0 |
 | jsep | 7 | 0 | 0 | 0 | 0 | 7 | 7 | 0 | 0 |
 | jsep (running) | 2 | 1 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
-| media | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 1 | 0 |
 | media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 11 | 0 | 0 | 0 | 0 | 11 | 11 | 0 | 0 |
@@ -132,7 +131,6 @@ Sorted by class, then owner, size and ID.
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC8489-9.2.5-14 | `rfc8489.md` | A 400 without an integrity attribute is discarded as never received | violated | C | Discard an unsigned 400 to the anonymous first request too (rtci-turn credential.rs check_response, no session) so it retransmits and times out; tests with a 400 for the anonymous and the signed request (audit-5 sweep) | S | turn |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
-| WEBRTC-5.2-33 | `w3c-webrtc-pc.md` | replaceTrack: InvalidModificationError when the track cannot be sent ... | missing | D | replaceTrack refuses nothing with InvalidModificationError: refuse, while sending, a track whose codings name no codec the sender negotiated, or an audio track whose channel count is not the negotiated codec's (coordinator decision first: it changes replace_track, whose PT rewrite applications may rely on) (w3c-1) | M | media |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Measured: every SRTP and DTLS key is left in no freed heap block (Linux, macOS, Windows; both providers, ring's key objects in ErasedOnDrop) and nowhere in process memory on Linux outside the dead stack frames of the thread that built the contexts. Not met: stack copies left by the compiler or provider. Found in train 34's test environment (rustc 1.99.1, run 45714962513): SRTCP encryption key, its round keys, SRTCP HMAC-SHA1 states and the master key in the dead stack frames of the thread that built the contexts (20 of 20 runs in the test-env image, 0 of 40 on GitHub's Ubuntu runners: environment-dependent); reported, not asserted; known_limit_*_building_an_srtp_context_leaves_keys_in_dead_stack_frames (ignored). scrub_stack runs where DTLS builds keys (zeroize m13); a copy moved onto the stack is seen by no test (zeroize2 m3, m5 survive): not guaranteed. Closes by an engine-side observation of stack residue, or the owner reading the clause as not binding stack temporaries | M | dtls-srtp / crypto |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
