@@ -1584,6 +1584,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a_loss_before_anything_arrived_on_a_new_path_is_not_reported`,
   `a_loss_before_the_first_arrival_of_a_call_is_reported`, `gcc::twcc_gcc::tests::
   packets_sent_before_a_new_path_carried_anything_are_not_its_loss`.
+- **without a retransmission format, a NACK was never answered on the wire with the default
+  interceptors** (nortx-1). When no `rtx` format is negotiated (a peer that does not support
+  RFC 4588, an application that registers none) the NACK responder answers a request with
+  the packet again as it was sent: the media SSRC, the same sequence number, and so the SRTP
+  packet index of the first transmission. A packet index protects one packet (RFC 3711
+  section 3.3.1; RFC 7714 section 8.1): the SRTP sender protects the same packet again and
+  refuses a different one. The default set stamps the abs-send-time extension (offered on
+  video since it joined the default set) and, where negotiated, the RFC 6051 timestamp,
+  wire-ward of the responder, at the instant a packet leaves: the retransmission got a new
+  stamp, was a different packet under a used index, and was dropped below the interceptors
+  (`unsent_index_reused`), silently. No lost packet was repaired (a receiver waited for a
+  key frame), while the responder had lowered the media target to make room for each
+  retransmission (RFC 4588 section 7) and the congestion controller had recorded each as
+  sent. Both stampers now give a packet that passes again, marked a retransmission under an
+  SSRC and sequence number they have seen, what its first transmission left with (the stamp,
+  or no timestamp), as the TWCC sender already kept its transport-wide number: the packet
+  reaches the SRTP sender byte for byte as it first left. An RTX retransmission is a new
+  packet and is stamped as it passes, as before. Also in 0.1.0. Not affected: a stream with
+  RTX (every default codec has it), and a chain without those stampers. Tests
+  `tests/nack_without_rtx_rtc2rtc.rs::a_lost_packet_is_sent_again_as_it_was_and_arrives_when_no_rtx_is_negotiated`,
+  `a_packet_sent_again_as_it_was_keeps_its_abs_send_time`,
+  `a_packet_sent_again_as_it_was_leaves_as_its_first_transmission_did`.
+
 - **circuit breaker: a receiver that reports from several of its SSRCs is counted once**
   (rtcpbudget-4). RFC 8108 section 5.1 has every SSRC of an endpoint report on every stream
   it receives, so a peer that follows it (this engine with

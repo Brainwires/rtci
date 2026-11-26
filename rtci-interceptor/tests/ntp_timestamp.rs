@@ -100,11 +100,12 @@ fn a_negotiated_stream_carries_the_ntp_timestamp_at_first_and_then_once_a_second
         "a frame a second after: {later:?}"
     );
 
-    // The second packet of a stamped frame is stamped too; a retransmission is not.
+    // The second packet of a stamped frame is stamped too; an RTX retransmission (a new
+    // packet of the retransmission stream) is not.
     let at = base + Duration::from_secs(9);
     assert!(stamp(&mut chain, packet(at, SSRC, 300, 900_000)).is_some());
     assert!(stamp(&mut chain, packet(at, SSRC, 301, 900_000)).is_some());
-    let mut again = packet(at, SSRC, 300, 900_000);
+    let mut again = packet(at, 0x5678, 77, 900_000);
     again.message = again.message.with(Attribute::Retransmission);
     assert!(stamp(&mut chain, again).is_none());
 
@@ -114,6 +115,53 @@ fn a_negotiated_stream_carries_the_ntp_timestamp_at_first_and_then_once_a_second
         ..stream(NTP_64_URI)
     });
     assert!(stamp(&mut plain, packet(base, SSRC, 1, 0)).is_none());
+}
+
+/// A packet sent again as it was (the answer to a NACK when no RTX is negotiated: the media
+/// SSRC and the sequence number of the first transmission) leaves with what its first
+/// transmission left with: the same timestamp, whenever it passes again, or none when the
+/// first transmission had none. Under SRTP it is the same packet index, which protects one
+/// packet only (RFC 3711 section 3.3.1): anything else is refused by the SRTP sender and
+/// never leaves.
+#[test]
+fn a_packet_sent_again_as_it_was_leaves_as_its_first_transmission_did() {
+    let mut chain = stamping_chain(stream(NTP_64_URI));
+    let base = Instant::now();
+    let retransmission = |now: Instant, sequence_number: u16, timestamp: u32| {
+        let mut again = packet(now, SSRC, sequence_number, timestamp);
+        again.message = again.message.with(Attribute::Retransmission);
+        again
+    };
+
+    // In the initial window every packet is stamped.
+    let first = stamp(&mut chain, packet(base, SSRC, 10, 0)).expect("stamped");
+    let later = base + Duration::from_millis(700);
+    assert_eq!(
+        Some(first.clone()),
+        stamp(&mut chain, retransmission(later, 10, 0)),
+        "the timestamp of the first transmission, not of the instant it passes again"
+    );
+    // The packet sent again did not count as a packet of the stream: the next original is
+    // stamped with its own instant.
+    let next = stamp(&mut chain, packet(later, SSRC, 11, 3000)).expect("stamped");
+    assert_ne!(first, next);
+
+    // After the initial window: a frame a second. The frame at 6 s is stamped, the next
+    // frame, 33 ms later, is not, and neither is that packet when it passes again.
+    let at = base + Duration::from_secs(6);
+    assert!(stamp(&mut chain, packet(at, SSRC, 200, 540_000)).is_some());
+    let unstamped = at + Duration::from_millis(33);
+    assert!(stamp(&mut chain, packet(unstamped, SSRC, 201, 543_000)).is_none());
+    assert!(
+        stamp(
+            &mut chain,
+            retransmission(unstamped + Duration::from_millis(300), 201, 543_000)
+        )
+        .is_none(),
+        "sent without the timestamp, sent again without it"
+    );
+    // A retransmission of a packet this interceptor never saw is left as it is.
+    assert!(stamp(&mut chain, retransmission(unstamped, 5000, 1)).is_none());
 }
 
 /// RFC 6051 Figure 6: with only `ntp-56` negotiated the packets carry the 56-bit variant.

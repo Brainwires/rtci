@@ -461,6 +461,9 @@ pub struct AbsSendTimeInterceptor {
     /// The extension id, by SSRC (media, RTX and FEC of each stream).
     ids: HashMap<u32, u8>,
     epoch: Option<Instant>,
+    /// The stamp each recent packet left with: a packet that passes again (a retransmission
+    /// sent as it was, no RTX negotiated) keeps it. See [`crate::first_transmission`].
+    first: crate::first_transmission::FirstTransmissions<[u8; 3]>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -498,10 +501,29 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for AbsSendTimeInterceptor {
     }
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let retransmission = msg.message.has(&crate::Attribute::Retransmission);
         if let Packet::Rtp(packet) = &mut msg.message.packet
             && let Some(id) = self.ids.get(&packet.header.ssrc).copied()
         {
-            let stamp = self.stamp(msg.now);
+            let (ssrc, sequence_number) = (packet.header.ssrc, packet.header.sequence_number);
+            // A packet of this stream that passes again under the sequence number it had is
+            // that packet again: a retransmission sent as it was (no RTX negotiated). It keeps
+            // its stamp. A new one would make it a different packet under the SRTP index of
+            // its first transmission, which the SRTP sender refuses (RFC 3711 section 3.3.1):
+            // the retransmission would be dropped below the interceptors, after the NACK
+            // responder made room for it and the congestion controller recorded it as sent.
+            // An RTX retransmission is a new packet of the RTX stream and is stamped as one.
+            let again = retransmission
+                .then(|| self.first.of(ssrc, sequence_number).copied())
+                .flatten();
+            let stamp = match again {
+                Some(stamp) => stamp,
+                None => {
+                    let stamp = self.stamp(msg.now);
+                    self.first.remember(ssrc, sequence_number, stamp);
+                    stamp
+                }
+            };
             let _ = packet
                 .header
                 .set_extension_upgrading(id, bytes::Bytes::copy_from_slice(&stamp));
@@ -539,6 +561,7 @@ impl Interceptor for AbsSendTimeInterceptor {
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         for ssrc in flow_ssrcs(info) {
             self.ids.remove(&ssrc);
+            self.first.forget(ssrc);
         }
     }
 }
