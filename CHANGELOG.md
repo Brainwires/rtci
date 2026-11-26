@@ -63,8 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restart is staged); with one base and the same server the old allocation is deleted first
   (break before make, as before). A restart that keeps the local candidates kept the old relayed
   candidate in the new session, which then paired and nominated it again: it is withdrawn from
-  the new session (new `rtci_ice::Agent::withdraw_local_candidate`: its pairs removed, never
-  paired or signalled again, dropped at the next restart). Tests on an in-memory coturn-like server
+  the new session (new `rtci_ice::Agent::withdraw_local_candidate`: its pairs removed except
+  the one carrying the data, never paired or signalled again, dropped at the next restart; a
+  restart staged, abandoned or taken back does not cut the current session's path). Tests on an in-memory coturn-like server
   (`tests/common/turn_server.rs`). turn-5.
 
 ## [0.2.0] - 2026-11-26
