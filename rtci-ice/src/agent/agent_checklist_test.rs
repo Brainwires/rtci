@@ -1190,6 +1190,99 @@ fn test_completed_needs_a_nominated_pair_and_both_ends_of_candidates() {
     assert_eq!(states(&mut a), vec![ConnectionState::Completed]);
 }
 
+/// Whether a check of `a` is in flight or queued: a pair In-Progress, or the triggered-check
+/// queue not empty (consent checks on the selected pair leave it Succeeded).
+fn checking_a_pair(a: &Agent) -> Option<String> {
+    if !a.triggered_queue.is_empty() {
+        return Some(format!("triggered queue {:?}", a.triggered_queue));
+    }
+    a.candidate_pairs
+        .iter()
+        .find(|p| p.state == CandidatePairState::InProgress)
+        .map(|p| format!("pair {p} In-Progress"))
+}
+
+/// Runs `a` from `from` to `until` in 1 ms steps, answering checks to `10.0.0.1` only, and
+/// fails when it is `Completed` while a check is in flight.
+fn run_asserting_completed_only_when_done(
+    a: &mut Agent,
+    start: Instant,
+    from: Duration,
+    until: Duration,
+) {
+    let mut t = from;
+    while t < until {
+        run_with(a, start, t, t + MS, |s| {
+            if s.to == remote_addr(1) {
+                Answer::Success(addr(LOCAL))
+            } else {
+                Answer::Silence
+            }
+        });
+        t += MS;
+        if a.state() == ConnectionState::Completed
+            && let Some(checking) = checking_a_pair(a)
+        {
+            panic!("Completed at {t:?} while checking: {checking}");
+        }
+    }
+}
+
+/// W3C webrtc 5.6.4 `RTCIceTransportState`: "completed": the transport "has finished
+/// gathering, received an indication that there are no more remote candidates, finished
+/// checking all candidate pairs and found a connection"; "connected": it "has found a usable
+/// connection, but is still checking other candidate pairs". Both sides are done with their
+/// candidates from the start; 1 answers, 2 and 3 never do. The agent is never `Completed`
+/// while one of its checks is in flight (RFC 8445 Section 8.1.2 ends the others' transactions
+/// at the nomination).
+#[test]
+fn test_completed_is_never_reported_while_a_check_is_in_flight() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400), (3, 300)]);
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    run_asserting_completed_only_when_done(&mut a, start, Duration::ZERO, Duration::from_secs(10));
+    assert_eq!(a.state(), ConnectionState::Completed);
+    let (_, remote) = a.get_selected_candidate_pair().unwrap();
+    assert_eq!(remote.addr(), remote_addr(1));
+}
+
+/// The same, with the peer's Binding request on another pair after the nomination (a
+/// controlled peer checks its own pairs until it sees the nomination, RFC 8445 Section
+/// 7.3.1.4 makes the request a triggered check): while that check is in flight the agent is
+/// checking a candidate pair, which the W3C definition of "completed" excludes.
+#[test]
+fn test_completed_is_not_reported_while_a_triggered_check_is_in_flight() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400), (3, 300)]);
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    run_asserting_completed_only_when_done(&mut a, start, Duration::ZERO, Duration::from_secs(2));
+    assert_eq!(a.state(), ConnectionState::Completed);
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
+    );
+    deliver(
+        &mut a,
+        start + Duration::from_secs(2),
+        &request,
+        "10.0.0.2:5000",
+    )
+    .unwrap();
+    if a.state() == ConnectionState::Completed
+        && let Some(checking) = checking_a_pair(&a)
+    {
+        panic!("Completed right after the request while checking: {checking}");
+    }
+    run_asserting_completed_only_when_done(
+        &mut a,
+        start,
+        Duration::from_secs(2),
+        Duration::from_secs(10),
+    );
+}
+
 /// Section 7.2.5.4 with RFC 8838 Sections 8 and 14: when every pair has failed and none is
 /// valid the checklist is Failed, at once, provided no candidate is to come any more (local
 /// gathering complete, end-of-candidates received). While candidates may still come it keeps
