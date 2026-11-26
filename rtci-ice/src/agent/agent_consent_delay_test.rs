@@ -754,6 +754,94 @@ fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consen
     );
 }
 
+/// The pair ICE selects is not the pair that was checked: the response's XOR-MAPPED-ADDRESS
+/// is not a local candidate, so the valid pair has a peer-reflexive local candidate (RFC 8445
+/// Section 7.2.5.3.1) on the checked pair's base. Both are the same 5-tuple (RFC 7675
+/// Section 1), so the response that validated the checked pair is the selected pair's
+/// consent: with it answered 20 s after the check and nothing answered afterwards, the agent
+/// fails 30 s after that response, not 30 s after the start.
+#[test]
+fn test_the_response_that_validated_another_pair_is_the_selected_pairs_consent() {
+    const MAPPED: &str = "203.0.113.7:4000";
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut in_flight: Vec<(Instant, Message)> = vec![];
+    let mut validated_at: Option<Instant> = None;
+    let mut last_answer: Option<Instant> = None;
+    let mut selected: Option<(CandidateType, SocketAddr)> = None;
+    let mut failed_at: Option<Instant> = None;
+    let mut now = start;
+    while now <= start + 120 * S && failed_at.is_none() {
+        in_flight.sort_by_key(|(at, _)| *at);
+        while in_flight.first().is_some_and(|(at, _)| *at <= now) {
+            let (_, response) = in_flight.remove(0);
+            deliver(&mut a, now, &response, REMOTE_A).unwrap();
+            validated_at.get_or_insert(now);
+            last_answer = Some(now);
+        }
+        a.handle_timeout(now).unwrap();
+        while let Some(t) = a.poll_write() {
+            let mut m = Message {
+                raw: t.message.to_vec(),
+                ..Message::default()
+            };
+            m.decode().unwrap();
+            if m.typ != BINDING_REQUEST || !seen.insert(m.transaction_id) {
+                continue;
+            }
+            let response = peer_response(BINDING_SUCCESS, m.transaction_id, addr(MAPPED), None);
+            if seen.len() == 1 {
+                // The first check is answered 20 s later (its transaction lasts 39.5 s).
+                in_flight.push((now + 20 * S, response));
+            } else if validated_at.is_some() && selected.is_none() {
+                // The nomination, at once; nothing after the selection is answered.
+                in_flight.push((now, response));
+            }
+        }
+        while let Some(e) = a.poll_event() {
+            match e.event {
+                Event::ConnectionStateChange(ConnectionState::Connected) if selected.is_none() => {
+                    selected = a
+                        .get_selected_candidate_pair()
+                        .map(|(l, _)| (l.candidate_type(), l.addr()));
+                }
+                Event::ConnectionStateChange(ConnectionState::Failed) => failed_at = Some(e.now),
+                _ => {}
+            }
+        }
+        let arrival = in_flight.iter().map(|(at, _)| *at).min();
+        let next = match (a.poll_timeout(), arrival) {
+            (Some(timer), Some(arrival)) => Some(timer.min(arrival)),
+            (timer, arrival) => timer.or(arrival),
+        };
+        match next {
+            Some(next) => now = next.max(now + Duration::from_micros(1)),
+            None => break,
+        }
+    }
+
+    let validated_at = validated_at.expect("the first check was answered");
+    assert!(validated_at >= start + 20 * S);
+    assert_eq!(
+        selected,
+        Some((CandidateType::PeerReflexive, addr(MAPPED))),
+        "the selected pair is the valid pair, not the checked one"
+    );
+    // The last response is the nomination's, sent on the checked pair (or on the valid
+    // one): either way consent on the selected pair's 5-tuple.
+    let last_answer = last_answer.unwrap();
+    assert!(last_answer - validated_at < S);
+    assert!(
+        is_at(failed_at, last_answer + 30 * S),
+        "failed at {:?}, first response at {:?}, last at {:?}",
+        failed_at.map(|t| t - start),
+        validated_at - start,
+        last_answer - start,
+    );
+}
+
 /// An ICE restart with a consent request on its way (RFC 7675 Section 5.1: "an endpoint that
 /// continues to send traffic on the previously validated candidate pair during ICE restart
 /// MUST continue to perform consent freshness on that candidate pair"): the request stays

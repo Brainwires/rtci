@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its Disconnected timer, the first consent check after a selection, the controlling agent's
   nominating path and the path kept across an ICE restart read the pairs of the same 5-tuple
   (same local base and remote candidate) only. `Candidate::last_consent` still reports the last
-  response from that remote candidate on any pair. Test:
-  `rtci-ice/src/agent/agent_consent_delay_test.rs::test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent`.
+  response from that remote candidate on any pair. Tests:
+  `rtci-ice/src/agent/agent_consent_delay_test.rs::test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent`,
+  `test_the_response_that_validated_another_pair_is_the_selected_pairs_consent` (the selected
+  pair has a peer-reflexive local candidate, not the checked pair's).
 
 ## [0.2.0] - 2026-11-26
 
