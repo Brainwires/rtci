@@ -2055,7 +2055,11 @@ impl Agent {
     pub fn get_local_candidates_to_signal(&self) -> Vec<Candidate> {
         self.local_candidates
             .iter()
-            .filter(|c| c.candidate_type() != CandidateType::PeerReflexive && !c.withdrawn)
+            .filter(|c| {
+                c.candidate_type() != CandidateType::PeerReflexive
+                    && !c.withdrawn
+                    && !c.withdrawn_at_restart
+            })
             .cloned()
             .collect()
     }
@@ -2234,7 +2238,9 @@ impl Agent {
     /// Withdraws the local candidate whose transport address is `addr` (of `protocol`) from
     /// the current ICE session: its pairs are removed as [`Self::remove_candidate_pair`]
     /// removes one, it is never paired again (a check that reaches it forms no pair) and not
-    /// signalled again; the next restart drops it. For a relayed candidate whose allocation
+    /// signalled again; the next restart drops it. While a restart is staged (its credentials
+    /// generated, not applied), the current session keeps the candidate and its pairs, and the
+    /// session the restart begins does not have it. For a relayed candidate whose allocation
     /// this session must not use (its server left the configuration), kept by a restart that
     /// keeps the local candidates. The previous media path of a restart is not a pair of the
     /// session and is not affected. Returns whether such a candidate was there.
@@ -2245,10 +2251,19 @@ impl Agent {
         protocol: TransportProtocol,
     ) -> bool {
         let Some(local_index) = self.local_candidates.iter().position(|c| {
-            !c.withdrawn && c.addr() == addr && c.network_type().to_protocol() == protocol
+            !c.withdrawn
+                && !c.withdrawn_at_restart
+                && c.addr() == addr
+                && c.network_type().to_protocol() == protocol
         }) else {
             return false;
         };
+        // A restart is staged (its credentials are what `get_local_credentials` gives): the
+        // candidate is the current session's still, and is kept out of the next one only.
+        if self.has_pending_restart() {
+            self.local_candidates[local_index].withdrawn_at_restart = true;
+            return true;
+        }
         self.local_candidates[local_index].withdrawn = true;
         for index in 0..self.candidate_pairs.len() {
             let pair = &self.candidate_pairs[index];
@@ -2861,8 +2876,10 @@ impl Agent {
         if !keep_local_candidates {
             self.local_candidates.retain(|c| c.restart_generation);
         }
-        // A candidate withdrawn from the previous session is not the new one's.
-        self.local_candidates.retain(|c| !c.withdrawn);
+        // A candidate withdrawn from the previous session, or from this one while the
+        // restart was staged, is not the new one's.
+        self.local_candidates
+            .retain(|c| !c.withdrawn && !c.withdrawn_at_restart);
         self.delete_all_candidates(true);
         for c in &mut self.local_candidates {
             c.restart_generation = false;

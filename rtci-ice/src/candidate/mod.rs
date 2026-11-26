@@ -263,6 +263,9 @@ pub struct Candidate {
     /// ([`Agent::withdraw_local_candidate`](crate::agent::Agent::withdraw_local_candidate)):
     /// never paired again, nor signalled; the next restart drops it.
     pub(crate) withdrawn: bool,
+    /// Withdrawn while an ICE restart was staged: the current session keeps it, the session
+    /// the restart begins does not have it.
+    pub(crate) withdrawn_at_restart: bool,
 
     pub(crate) network: String,
 
@@ -297,6 +300,7 @@ impl Default for Candidate {
             restart_generation: false,
             awaiting_restart: false,
             withdrawn: false,
+            withdrawn_at_restart: false,
             network: String::new(),
 
             url: None,
