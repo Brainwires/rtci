@@ -218,6 +218,18 @@ pub fn run_parked<T: Send + 'static>(
     }
 }
 
+/// Runs `work` on a worker of its own and returns its value once the worker has ended and its
+/// stack has been overwritten and unmapped. For what must leave nothing behind on the calling
+/// thread's stack: the test computes the keys it looks for here, so that no frame of a test
+/// thread ever holds one in the clear (a value later built in such a frame and moved to the
+/// heap carries what its padding lies on: the search would find the test's own arithmetic).
+pub fn on_scratch_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let mut worker = run_parked("scratch", work);
+    let value = worker.take();
+    worker.finish();
+    value
+}
+
 impl<T> Parked<T> {
     /// What the work returned. Once.
     pub fn take(&mut self) -> T {

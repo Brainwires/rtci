@@ -15,8 +15,9 @@
 //!
 //! The answer does not depend on the C library's treatment of thread stacks, on which mapping
 //! the kernel reports a stack in, or on what an earlier thread left: the stacks are the
-//! test's, filled with a known byte before use, read while their threads are alive, and every
-//! exclusion is an exact address range. `the_search_finds_what_is_left_and_not_what_is_erased`
+//! test's, filled with a known byte before use and read while their threads are alive, and
+//! the process search leaves nothing out but its own buffer: the keys looked for are computed
+//! on a scratch worker whose stack is overwritten and unmapped before anything is searched. `the_search_finds_what_is_left_and_not_what_is_erased`
 //! is the control: a key deliberately left on a stack, in the heap, in a freed block and in
 //! static data is found in each, and one that was erased, or never there, is not.
 //!
@@ -42,7 +43,7 @@ mod residue_tests {
     use super::key_material::{
         Finder, Needle, check_local_primitives, every_needle, rtcp, rtp, rtp_with_extension, wipe,
     };
-    use super::owned_stack::{Parked, run_parked};
+    use super::owned_stack::{Parked, on_scratch_stack, run_parked};
     use crypto::{RTCCryptoProvider, SecretVec};
     use rtci_srtp::context::Context;
     use rtci_srtp::header_extension::EncryptedHeaderExtensions;
@@ -296,7 +297,7 @@ mod residue_tests {
     /// dead frames, and there exactly what the direct reading found.
     #[cfg(target_os = "linux")]
     mod process {
-        use super::super::process_scan::{Scan, own_thread_stack, scan};
+        use super::super::process_scan::{Scan, scan};
         use super::*;
 
         pub(super) fn search(
@@ -304,9 +305,9 @@ mod residue_tests {
             stages: &[Stage],
             notes: &mut Vec<String>,
         ) -> Scan {
-            // The test thread computed the needles in its own stack frames: left out, by the
-            // exact range of this thread's stack.
-            let found = scan(needles, &[own_thread_stack()]);
+            // Nothing is left out: the needles were computed on a scratch worker whose stack is
+            // gone, so this thread's own stack is searched like everything else.
+            let found = scan(needles, &[]);
             for stage in stages {
                 assert_eq!(
                     0,
@@ -405,34 +406,40 @@ mod residue_tests {
     ) -> Measured {
         let salt_len = profile.salt_len();
         let key_len = profile.key_len();
-        let (epochs, masters): (&[u64], u8) = match variant {
+        let (epochs, masters): (&'static [u64], u8) = match variant {
             Variant::Dtls => (&[0], 1),
             // Packet indexes 0 to 5 at a rate of two; the second master key's cipher derives
             // epoch 0 when it is built and epoch 2 for its packets.
             Variant::Keyed => (&[0, 1, 2], 2),
         };
-        let mut needles = Vec::new();
-        let mut keys = Vec::new();
-        for nth in 1..=masters {
-            let (mut key, mut salt) = master(test, provider.name(), profile, variant, nth);
-            let who = match variant {
-                Variant::Dtls => String::new(),
-                Variant::Keyed => format!("master key {nth}: "),
-            };
-            needles.extend(every_needle(
-                profile,
-                &key[..key_len],
-                &salt[..salt_len],
-                epochs,
-                &who,
-            ));
-            keys.push(MasterKey {
-                key: SecretVec::new(key[..key_len].to_vec()),
-                salt: SecretVec::new(salt[..salt_len].to_vec()),
-            });
-            wipe(&mut key);
-            wipe(&mut salt);
-        }
+        // The keys this session looks for, and the master keys as the engine is handed them,
+        // are made on a scratch worker: no frame of this thread ever holds one in the clear.
+        let name = provider.name();
+        let (needles, mut keys) = on_scratch_stack(move || {
+            let mut needles = Vec::new();
+            let mut keys = Vec::new();
+            for nth in 1..=masters {
+                let (mut key, mut salt) = master(test, name, profile, variant, nth);
+                let who = match variant {
+                    Variant::Dtls => String::new(),
+                    Variant::Keyed => format!("master key {nth}: "),
+                };
+                needles.extend(every_needle(
+                    profile,
+                    &key[..key_len],
+                    &salt[..salt_len],
+                    epochs,
+                    &who,
+                ));
+                keys.push(MasterKey {
+                    key: SecretVec::new(key[..key_len].to_vec()),
+                    salt: SecretVec::new(salt[..salt_len].to_vec()),
+                });
+                wipe(&mut key);
+                wipe(&mut salt);
+            }
+            (needles, keys)
+        });
         let second = (masters == 2).then(|| keys.pop().expect("two master keys"));
         let first = keys.pop().expect("a master key");
         let finder = Finder::new(&needles);
@@ -697,13 +704,14 @@ mod residue_tests {
     }
 
     /// Calls `on_the_stack` from 4 KiB further down, so that a later, shallower call does not
-    /// land on what this one leaves.
+    /// land on what this one leaves. The call is the last thing this does: any call made after
+    /// it from here would put its return address and frame exactly where the key was left
+    /// (the first form of this control did, and on x86-64 found nothing: run 45871064780).
     #[inline(never)]
     fn deeper_on_the_stack(which: usize, erase: bool) {
         let mut distance = [0u8; 4096];
         std::hint::black_box(&mut distance);
         on_the_stack(which, erase);
-        std::hint::black_box(&mut distance);
     }
 
     /// In static data (initialised, so it is in the binary's own writable mapping).
@@ -719,15 +727,17 @@ mod residue_tests {
     #[test]
     fn the_search_finds_what_is_left_and_not_what_is_erased() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let needles: Vec<Needle> = (0..CONTROLS.len())
-            .map(|which| {
-                let mut plain = [0u8; 32];
-                write_control(which, &mut plain);
-                let needle = Needle::named("control".to_owned(), CONTROL_NAMES[which], &plain);
-                wipe(&mut plain);
-                needle
-            })
-            .collect();
+        let needles: Vec<Needle> = on_scratch_stack(|| {
+            (0..CONTROLS.len())
+                .map(|which| {
+                    let mut plain = [0u8; 32];
+                    write_control(which, &mut plain);
+                    let needle = Needle::named("control".to_owned(), CONTROL_NAMES[which], &plain);
+                    wipe(&mut plain);
+                    needle
+                })
+                .collect()
+        });
         let finder = Finder::new(&needles);
 
         let worker = run_parked("control", || {
@@ -749,7 +759,7 @@ mod residue_tests {
 
         #[cfg(target_os = "linux")]
         {
-            use super::process_scan::{own_thread_stack, scan};
+            use super::process_scan::scan;
             let mut held = Box::new([0u8; 64]);
             write_control(HELD_IN_HEAP, &mut held[16..48]);
             std::hint::black_box(&mut held);
@@ -772,7 +782,7 @@ mod residue_tests {
             });
             freed_rx.recv().expect("the freeing thread");
 
-            let scanned = scan(&needles, &[own_thread_stack()]);
+            let scanned = scan(&needles, &[]);
             let mut places: Vec<Vec<String>> = vec![Vec::new(); needles.len()];
             for hit in &scanned.hits {
                 let place = if stage.dead.contains(&hit.address) {
