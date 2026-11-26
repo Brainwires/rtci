@@ -121,3 +121,78 @@ fn test_renegotiation_no_duplicate_mids() -> Result<(), Box<dyn std::error::Erro
     answerer.close()?;
     Ok(())
 }
+
+/// RFC 3264 section 8.1: "New media streams are created by new additional media descriptions
+/// below the existing ones". After an offer/answer with two video sections, the offerer adds a
+/// third track and the answerer adds one of its own: each one's next offer lists the
+/// negotiated sections first, in their negotiated order, and the new section last.
+#[test]
+fn a_new_media_description_goes_below_the_existing_ones() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut me = MediaEngine::default();
+    me.register_default_codecs()?;
+    let mut offerer = RTCPeerConnectionBuilder::new()
+        .with_media_engine(me.clone())
+        .build(Instant::now())?;
+    let mut answerer = RTCPeerConnectionBuilder::new()
+        .with_media_engine(me)
+        .build(Instant::now())?;
+    offerer.add_track(new_video_track("stream-1", "video-1", 11111))?;
+    offerer.add_track(new_video_track("stream-1", "video-2", 22222))?;
+
+    let offer = offerer.create_offer(None)?;
+    let negotiated = collect_mids(&offer);
+    assert_eq!(negotiated.len(), 2);
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    assert_eq!(
+        collect_mids(&answer),
+        negotiated,
+        "the answer keeps the order"
+    );
+    answerer.set_local_description(Instant::now(), answer.clone())?;
+    offerer.set_remote_description(Instant::now(), answer)?;
+
+    offerer.add_track(new_video_track("stream-2", "video-3", 33333))?;
+    let again = collect_mids(&offerer.create_offer(None)?);
+    assert_eq!(again.len(), 3, "{again:?}");
+    assert_eq!(again[..2], negotiated[..], "the offerer: {again:?}");
+    assert!(!negotiated.contains(&again[2]), "{again:?}");
+
+    // Audio: a video track would take one of the answerer's two video transceivers, which
+    // have no sender yet (RFC 9429 section 5.2.2), and need no new section.
+    answerer.add_track(MediaStreamTrack::new(
+        "stream-3".to_owned(),
+        "audio-1".to_owned(),
+        "track-audio-1".to_owned(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(44444),
+                ..Default::default()
+            },
+            codec: RTCRtpCodec {
+                mime_type: rtci::peer_connection::configuration::media_engine::MIME_TYPE_OPUS
+                    .to_owned(),
+                clock_rate: 48000,
+                channels: 2,
+                sdp_fmtp_line: String::new(),
+                rtcp_feedback: vec![],
+            },
+            ..Default::default()
+        }],
+    ))?;
+    let from_answerer = collect_mids(&answerer.create_offer(None)?);
+    assert_eq!(from_answerer.len(), 3, "{from_answerer:?}");
+    assert_eq!(
+        from_answerer[..2],
+        negotiated[..],
+        "the answerer, offering in turn: {from_answerer:?}"
+    );
+    assert!(!negotiated.contains(&from_answerer[2]));
+
+    offerer.close()?;
+    answerer.close()?;
+    Ok(())
+}

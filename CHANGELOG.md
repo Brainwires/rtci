@@ -108,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
   clause "a can" and left the setting out of every profile; it is now governed.
+- RFC 3264 section 8.1 ("New media streams are created by new additional media descriptions
+  below the existing ones"), audit row RFC3264-8.1-1, which audit sweep 6 downgraded,
+  `untested` -> `tested` (`conf/jsep-84-new-sections-below-the-existing`):
+  `tests/renegotiation_duplicate_mid.rs::a_new_media_description_goes_below_the_existing_ones`
+  asserts the order of the m= sections of a re-offer from each side. Proved by a mutation
+  placing a new section first. Test only, no engine change.
 
 ### Features
 
