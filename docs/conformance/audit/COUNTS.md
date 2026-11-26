@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 4999 | 26 | 6 | 43 | 9 | 3 | 2 | 663 | 5751 |
+| MUST | 5006 | 26 | 6 | 36 | 9 | 3 | 2 | 663 | 5751 |
 | SHOULD | 907 | 2 | 3 | 4 | 46 | 24 | 0 | 325 | 1311 |
 | MAY | 500 | 0 | 1 | 12 | 21 | 70 | 0 | 177 | 781 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6478 | 28 | 10 | 60 | 79 | 98 | 2 | 1166 | 7921 |
+| all | 6485 | 28 | 10 | 53 | 79 | 98 | 2 | 1166 | 7921 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5088 | 5031 | 98.9 | 4999 | 98.3 |
+| MUST | 5088 | 5038 | 99.0 | 5006 | 98.4 |
 | SHOULD | 986 | 912 | 92.5 | 907 | 92.0 |
 | MAY | 604 | 501 | 82.9 | 500 | 82.8 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
@@ -69,7 +69,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc3551.md` | MUST | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 8 | 17 |
 | `rfc3551.md` | SHOULD | 11 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 14 |
 | `rfc3551.md` | MAY | 3 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 6 |
-| `rfc3611.md` | MUST | 48 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 51 |
+| `rfc3611.md` | MUST | 51 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 51 |
 | `rfc3611.md` | SHOULD | 13 | 0 | 0 | 0 | 3 | 0 | 0 | 3 | 19 |
 | `rfc3611.md` | MAY | 6 | 0 | 0 | 0 | 0 | 2 | 0 | 1 | 9 |
 | `rfc3711.md` | MUST | 86 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 93 |
@@ -187,7 +187,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc7714.md` | MUST | 34 | 0 | 0 | 0 | 1 | 0 | 0 | 4 | 39 |
 | `rfc7714.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 3 |
 | `rfc7714.md` | MAY | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 5 |
-| `rfc7728.md` | MUST | 44 | 0 | 0 | 4 | 0 | 0 | 0 | 4 | 52 |
+| `rfc7728.md` | MUST | 48 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 52 |
 | `rfc7728.md` | SHOULD | 11 | 0 | 0 | 0 | 2 | 1 | 0 | 2 | 16 |
 | `rfc7728.md` | MAY | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 5 |
 | `rfc7741.md` | MUST | 46 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 48 |

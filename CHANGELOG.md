@@ -78,6 +78,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
   clause "a can" and left the setting out of every profile; it is now governed.
 
+- Tests for the RFC 7728 and RFC 3611 MUST rows audit sweep 4 left `untested`
+  (`conf/rtcp-2-xr-pause-must-rows`; tests and audit only, no engine change): PAUSED and REFUSED
+  carry the Target SSRC of the stream they are about (RFC7728-7-3), PAUSE-RESUME entries of a
+  reserved type are ignored on reception and never written (7-5), a RESUME with another PauseID
+  is refused while pausing or paused (8.3-5), one with the current or a past PauseID to a
+  playing stream is ignored (8.3-6), in `PauseResumeInterceptor`; the reserved bits of the
+  Packet Receipt Times and Statistics Summary blocks and the reserved octets of the VoIP Metrics
+  block are read set and ignored, and written zero (RFC3611-4.3-5, 4.6-5, 4.7-3). Open MUST rows
+  57 -> 50.
+
 ### Features
 
 - `MediaEngine::set_h264_literal_pdon(bool)` (default `false`; behaviour profile row
