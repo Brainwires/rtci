@@ -620,6 +620,140 @@ fn test_a_late_response_on_another_pair_does_not_renew_the_selected_pairs_consen
     );
 }
 
+/// Consent is per 5-tuple (RFC 7675 Section 1: "Consent to send applies to a single
+/// 5-tuple"; Section 5.1: without a valid response "from the remote peer's transport
+/// address in 30 seconds, the endpoint MUST cease transmission on that 5-tuple"). Two local
+/// candidates with bases of their own, one remote candidate: (L1, R) is selected while the
+/// check on (L2, R) is still open. From then on nothing sent from L1 is answered, and the
+/// open (L2, R) check is answered 10 s later, from the same remote address. That response
+/// is taken (it validates (L2, R)) but says nothing of the 5-tuple (L1, R): the agent fails
+/// 30 s after the last response on (L1, R).
+#[test]
+fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent() {
+    const LOCAL_2: &str = "192.168.0.5:1001";
+    let start = Instant::now();
+    let mut a = Agent::new(start, Arc::new(config(true)), provider()).unwrap();
+    a.add_local_candidate(host_with_priority(addr(LOCAL), 500))
+        .unwrap();
+    a.add_local_candidate(host_with_priority(addr(LOCAL_2), 400))
+        .unwrap();
+    a.add_remote_candidate(host(addr(REMOTE_A))).unwrap();
+    a.start_connectivity_checks(start, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+
+    let to_agent = |a: &mut Agent, now: Instant, m: &Message, local: &str| {
+        a.handle_read(TaggedBytesMut {
+            now,
+            transport: TransportContext {
+                local_addr: addr(local),
+                peer_addr: addr(REMOTE_A),
+                ecn: None,
+                transport_protocol: TransportProtocol::UDP,
+            },
+            message: BytesMut::from(&m.raw[..]),
+        })
+    };
+
+    // Responses on their way: arrival, the response, the local address it arrives at.
+    let mut in_flight: Vec<(Instant, Message, &str)> = vec![];
+    let mut seen = std::collections::HashSet::new();
+    let mut open_on_l2: Option<TransactionId> = None;
+    let mut selected_at: Option<Instant> = None;
+    let mut last_on_l1: Option<Instant> = None;
+    let mut l2_answered_at: Option<Instant> = None;
+    let mut l2_taken = false;
+    let mut selected_local: Option<SocketAddr> = None;
+    let mut failed_at: Option<Instant> = None;
+    let mut now = start;
+    let until = start + 120 * S;
+    while now <= until && failed_at.is_none() {
+        in_flight.sort_by_key(|(at, _, _)| *at);
+        while in_flight.first().is_some_and(|(at, _, _)| *at <= now) {
+            let (_, response, local) = in_flight.remove(0);
+            let _ = to_agent(&mut a, now, &response, local);
+            if local == LOCAL {
+                last_on_l1 = Some(now);
+            } else {
+                l2_answered_at = Some(now);
+                // The response was matched and taken: consent from the remote candidate,
+                // on the other 5-tuple.
+                let remote = a.find_remote_candidate(addr(REMOTE_A)).unwrap();
+                l2_taken = a.remote_candidates[remote].last_consent() == Some(now);
+            }
+        }
+        a.handle_timeout(now).unwrap();
+        while let Some(t) = a.poll_write() {
+            let mut m = Message {
+                raw: t.message.to_vec(),
+                ..Message::default()
+            };
+            m.decode().unwrap();
+            if m.typ != BINDING_REQUEST || !seen.insert(m.transaction_id) {
+                continue;
+            }
+            let response = peer_response(BINDING_SUCCESS, m.transaction_id, addr(LOCAL), None);
+            if t.transport.local_addr == addr(LOCAL_2) {
+                // The first check on (L2, R) is answered 10 s after the selection; nothing
+                // else sent from L2 is.
+                if open_on_l2.is_none() {
+                    open_on_l2 = Some(m.transaction_id);
+                }
+            } else if selected_at.is_none() {
+                // Until the selection (L1, R) answers after 100 ms, so that the check on
+                // (L2, R) is sent and open when (L1, R) is nominated.
+                in_flight.push((now + 100 * MS, response, LOCAL));
+            }
+        }
+        while let Some(e) = a.poll_event() {
+            match e.event {
+                Event::ConnectionStateChange(ConnectionState::Connected)
+                    if selected_at.is_none() =>
+                {
+                    selected_at = Some(e.now);
+                    selected_local = a.get_selected_candidate_pair().map(|(l, _)| l.addr());
+                }
+                Event::ConnectionStateChange(ConnectionState::Failed) => failed_at = Some(e.now),
+                _ => {}
+            }
+        }
+        if let (Some(selected), Some(id), None) = (selected_at, open_on_l2, l2_answered_at)
+            && !in_flight.iter().any(|(_, m, _)| m.transaction_id == id)
+        {
+            // The L2 check, answered from the remote's address 10 s after the selection.
+            let response = peer_response(BINDING_SUCCESS, id, addr(LOCAL_2), None);
+            in_flight.push((selected + 10 * S, response, LOCAL_2));
+        }
+        let arrival = in_flight.iter().map(|(at, _, _)| *at).min();
+        let next = match (a.poll_timeout(), arrival) {
+            (Some(timer), Some(arrival)) => Some(timer.min(arrival)),
+            (timer, arrival) => timer.or(arrival),
+        };
+        match next {
+            Some(next) => now = next.max(now + Duration::from_micros(1)),
+            None => break,
+        }
+    }
+
+    let selected_at = selected_at.expect("(L1, R) was selected");
+    assert_eq!(
+        selected_local,
+        Some(addr(LOCAL)),
+        "the selected pair is (L1, R)"
+    );
+    let last_on_l1 = last_on_l1.unwrap();
+    assert!(last_on_l1 + S >= selected_at && last_on_l1 <= selected_at + S);
+    let l2_answered_at = l2_answered_at.expect("the open check on (L2, R) was answered");
+    assert!(l2_answered_at > last_on_l1 + 5 * S);
+    assert!(l2_taken, "the late response on (L2, R) was matched");
+    assert!(
+        is_at(failed_at, last_on_l1 + 30 * S),
+        "failed at {:?}, last response on (L1, R) at {:?}, on (L2, R) at {:?}",
+        failed_at.map(|t| t - start),
+        last_on_l1 - start,
+        l2_answered_at - start,
+    );
+}
+
 /// An ICE restart with a consent request on its way (RFC 7675 Section 5.1: "an endpoint that
 /// continues to send traffic on the previously validated candidate pair during ICE restart
 /// MUST continue to perform consent freshness on that candidate pair"): the request stays
