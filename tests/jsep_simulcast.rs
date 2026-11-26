@@ -902,3 +902,43 @@ fn the_rid_lines_of_a_subsequent_offer_stay_the_same() -> TestResult {
 fn the_simulcast_line_of_a_subsequent_offer_stays_the_same() -> TestResult {
     assert_lines_stay_the_same("a=simulcast:", &["a=simulcast:send f;h;q"])
 }
+
+/// RFC 9429 section 5.2.2: "For RtpTransceivers that are still present, the "a=rid" lines MUST
+/// stay the same", also after an answer that tightened a restriction (RFC 8851 section 6.4 step
+/// 3, which the sender then sends under: `an_answered_rid_may_tighten_but_not_loosen_the_offer`).
+/// RFC 8851 does not ask for the tighter value to be offered back: section 6.5 has a changed
+/// stream take a new rid and an unchanged one keep its own.
+#[test]
+fn a_subsequent_offer_keeps_the_rid_line_an_answer_tightened() -> TestResult {
+    let (mut pc, sender, answer) = offered_three_layers()?;
+    let first = pc
+        .pending_local_description()
+        .expect("the applied offer")
+        .sdp;
+    let answer = edited(
+        &answer,
+        "a=rid:f recv max-width=1280",
+        "a=rid:f recv max-width=960",
+    );
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::answer(crlf(&answer))?,
+    )?;
+    // The sender sends under the answer's restriction.
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("f", Some(960)), ("h", Some(640)), ("q", Some(320))])
+    );
+    let next = pc.create_offer(None)?;
+    assert_eq!(
+        section_lines(&next.sdp, "a=rid:"),
+        section_lines(&first, "a=rid:"),
+        "{}",
+        next.sdp
+    );
+    assert_eq!(
+        section_lines(&next.sdp, "a=rid:")[0].1[0],
+        "a=rid:f send max-width=1280"
+    );
+    Ok(())
+}
