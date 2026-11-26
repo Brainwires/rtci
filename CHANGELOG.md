@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`BehaviourProfile::StrictRfc` turns DTLS session resumption between a connection's
+  transports on** (`conf/dtls-27-session-resumption-strict-rfc`; RFC 5764 section 3, "As an
+  optimization, the DTLS-SRTP implementation SHOULD use the following strategy"). The setting
+  `SettingEngineBuilder::with_dtls_session_resumption` is now a governed behaviour
+  (`dtls.session-resumption`): `false` under `Rfc` (the default), `Chrome` and `Performance`,
+  `true` under `StrictRfc`. The default is unchanged and stays off, measured: the strategy has
+  the other transports wait for the first, which costs connection time on links with latency
+  (`tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`:
+  round trip 100 ms, 453 ms off against 703 ms on), and no browser issues or offers a ticket.
+  Audit row RFC5764-3-4: `partial` to `setting`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
