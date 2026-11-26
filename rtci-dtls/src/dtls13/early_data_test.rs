@@ -228,7 +228,9 @@ fn more_early_data_than_allowed_is_an_unexpected_message() -> Result<()> {
 }
 
 /// RFC 8446 section 4.2.11: early_data in EncryptedExtensions with a selected_identity
-/// other than 0 is an illegal_parameter.
+/// other than 0 is an illegal_parameter ("If any other value is returned, the client MUST
+/// abort the handshake with an "illegal_parameter" alert"): the client fails with that
+/// alert sent, and none received.
 #[test]
 fn accepted_early_data_with_another_identity_is_an_illegal_parameter() -> Result<()> {
     let store = store();
@@ -246,6 +248,10 @@ fn accepted_early_data_with_another_identity_is_an_illegal_parameter() -> Result
     pair.deliver_to_client(vec![BytesMut::from(&flight[0][split..])]);
     assert!(pair.client.is_connection_failed(&server_addr()));
     assert!(!pair.client_complete);
+    assert_eq!(
+        pair.client.connection_fatal_alerts(&server_addr()),
+        Some((Some(alert::ILLEGAL_PARAMETER), None))
+    );
     Ok(())
 }
 

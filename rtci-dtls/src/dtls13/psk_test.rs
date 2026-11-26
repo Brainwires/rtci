@@ -1217,3 +1217,53 @@ fn an_external_psk_handshake_completes_for_a_server_that_requires_client_certifi
     );
     Ok(())
 }
+
+/// RFC 8446 sections 4.6.1 ("Clients MUST ignore unrecognized extensions") and 9.3 ("a
+/// client receiving a CertificateRequest or NewSessionTicket MUST also ignore all
+/// unrecognized extensions"), at the association: the server's ticket comes again in a
+/// NewSessionTicket whose extensions are unknown ones around early_data. The client keeps
+/// it, reads early_data among them, and the next handshake resumes with it.
+#[test]
+fn a_new_session_ticket_with_unknown_extensions_is_kept_and_resumes() -> Result<()> {
+    let store = store();
+    let (client, server) = (resuming_client(&store)?, ticket_server(1)?);
+    let mut first = Pair::with(client.clone(), server.clone())?.complete();
+    let mut sessions = drain(&store);
+    assert_eq!(sessions.len(), 1, "the server's one ticket");
+    let issued = sessions.remove(0);
+    assert_eq!(issued.max_early_data(), 0);
+
+    // The same ticket (the server's first nonce is [0]), its extensions block replaced.
+    let mut body = new_session_ticket(
+        issued.lifetime.as_secs() as u32,
+        issued.age_add,
+        &[0],
+        &issued.ticket,
+        None,
+    );
+    body.truncate(body.len() - 2);
+    let mut extensions = vec![];
+    put_vec16(&mut extensions, |block| {
+        put_extension(block, 0x7a7a, |_| {});
+        put_extension(block, super::messages::EXT_EARLY_DATA, |data| {
+            data.extend_from_slice(&512u32.to_be_bytes())
+        });
+        put_extension(block, 0xfefe, |data| data.extend_from_slice(&[1, 2, 3]));
+    });
+    body.extend_from_slice(&extensions);
+    first
+        .client_conn()
+        .on_post_handshake_message(super::messages::NEW_SESSION_TICKET, &body)
+        .map_err(|refusal| refusal.error)?;
+    assert!(!first.client.is_connection_failed(&server_addr()));
+
+    let mut kept = drain(&store);
+    assert_eq!(kept.len(), 1, "the ticket is kept");
+    assert_eq!(kept[0].ticket, issued.ticket);
+    assert_eq!(kept[0].max_early_data(), 512, "early_data is read");
+    store.put(NAME, kept.remove(0));
+
+    let second = Pair::with(client, server)?.complete();
+    assert_eq!(resumed(&second), (true, true));
+    Ok(())
+}

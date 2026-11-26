@@ -140,6 +140,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rfc8446_conformance_test.rs::a_server_hello_or_retry_request_with_another_legacy_version_is_taken`;
   the legacy_version case of the wrong-fixed-fields test is removed. Not breaking.
 
+- **DTLS server: a ClientHello whose supported_versions lists no version this server may select
+  is refused** (`conf/dtls-30-tls13-must-rows`; RFC 8446 section 4.2.1, "Servers MUST only select
+  a version of TLS present in that extension", and must not negotiate by legacy_version when the
+  extension is there). 0.2.0 served a ClientHello whose supported_versions held unknown versions
+  only (or DTLS 1.3 only, to a server without DTLS 1.3) with DTLS 1.2, chosen by its
+  legacy_version; it now answers protocol_version. A ClientHello without supported_versions, or
+  one listing DTLS 1.2, is served with DTLS 1.2 as before. Behaviour change, not breaking. Test
+  `rfc8446_conformance_test.rs::unknown_versions_are_ignored_and_only_a_listed_version_is_selected`.
+- **DTLS 1.3: data after a user_canceled alert is ignored** (`conf/dtls-30-tls13-must-rows`; RFC
+  8446 section 6.1: user_canceled is a closure alert, and "Any data received after a closure
+  alert has been received MUST be ignored", RFC 9147 section 5.10). 0.2.0 took no notice of a
+  received user_canceled and went on reading. It now ends the association's reading as a
+  close_notify does (answered with this side's close_notify, reported as `PeerClosed`). Test
+  `rfc8446_conformance_test.rs::data_after_a_user_canceled_is_ignored`.
+- Tests and audit rows for the other RFC 8446 MUST rows audit sweep 4 left `untested`, the
+  behaviour already right: unknown ClientHello extensions, suites, groups and schemes ignored
+  (4.1.2-16, 9.3-5), the HelloRetryRequest's version retained (4.1.4-12), the early_data
+  illegal_parameter alert (4.2.11-14), unknown NewSessionTicket extensions (4.6.1-14, 9.3-6),
+  unknown alert types (6-5), and RFC5246-7.4.1.3-3 (a DTLS 1.2 ServerHello suite the client did
+  not offer).
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
