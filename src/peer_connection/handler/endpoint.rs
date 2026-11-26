@@ -129,6 +129,9 @@ pub(crate) struct EndpointHandlerContext {
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
     /// RTP packets discarded because no receiver could take them (RFC 8830 section 3.1).
     pub(crate) discarded_rtp_packets: u64,
+    /// RTP packets of a bound stream ignored for a payload type its m= section did not
+    /// negotiate (RFC 3550 section 5.1).
+    pub(crate) unnegotiated_payload_type_rtp_packets: u64,
     /// The SSRCs `OnUnassociatedRtpDiscarded` was fired for, at most
     /// [`MAX_DISCARD_REPORTED_SSRCS`].
     pub(crate) discard_reported_ssrcs: Vec<SSRC>,
@@ -360,6 +363,7 @@ impl<'a> EndpointHandler<'a> {
                 "drop rtp packet ssrc = {} with payload type {} not negotiated for it",
                 ssrc, rtp_packet.header.payload_type
             );
+            self.ctx.unnegotiated_payload_type_rtp_packets += 1;
             return Ok(());
         }
 
@@ -1050,6 +1054,54 @@ mod rtx_test {
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 111, b"other").is_none());
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+    }
+
+    /// RFC 3550 section 5.1: every packet ignored for its payload type is counted
+    /// (`RTCPeerConnection::unnegotiated_payload_type_rtp_packets`), so a peer that switches to a
+    /// format the answer did not keep shows why its media stopped; a packet of a negotiated
+    /// payload type, and media no receiver takes (counted as unassociated), are not counted.
+    #[test]
+    fn packets_ignored_for_their_payload_type_are_counted() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+        assert_eq!(ctx.unnegotiated_payload_type_rtp_packets, 0);
+        for _ in 0..3 {
+            assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+        }
+        assert_eq!(ctx.unnegotiated_payload_type_rtp_packets, 3);
+        assert_eq!(ctx.discarded_rtp_packets, 0, "the stream is associated");
+
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+        assert!(dispatch(&mut ctx, &mut transceivers, 3000, 96, b"stray").is_none());
+        assert_eq!(ctx.unnegotiated_payload_type_rtp_packets, 3);
+        assert_eq!(ctx.discarded_rtp_packets, 1);
+    }
+
+    /// RFC 3264 sections 6.1 and 7, RFC 9429 section 5.3.1: a format this endpoint's answer
+    /// added beyond the offer's is one it said it is willing to receive, and the offerer may
+    /// send with it: its packets are delivered, not ignored. Once an answer no longer lists
+    /// it, it is ignored (and counted) again.
+    #[test]
+    fn a_format_this_endpoints_answer_added_is_received() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"vp8").is_some());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+        assert_eq!(ctx.unnegotiated_payload_type_rtp_packets, 1);
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_answered_formats(vec![codec(98, "video/VP9", "profile-id=0")]);
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_some());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"vp8").is_some());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 111, b"other").is_none());
+        assert_eq!(ctx.unnegotiated_payload_type_rtp_packets, 2);
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_answered_formats(vec![]);
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+        assert_eq!(ctx.unnegotiated_payload_type_rtp_packets, 3);
     }
 
     /// RFC 3264 section 5.1: while this endpoint's renegotiating offer is pending, a payload

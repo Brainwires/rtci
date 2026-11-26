@@ -7,25 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Probing without a pacer: a start-up cluster asked for before the video sent no longer
-  stops the probing** (`conf/probe-1-start-up-probe-before-the-video`, reported by a consumer,
-  ParolNet, on 0.2.0). In a chain without a pacer a cluster is padding on an RTX stream, and the
-  congestion controller stops asking for clusters after one that no packet left for, until a
-  stream is bound or sends its first packet (0.2.0, recover-3). A peer that sends audio and
-  video starts with an audio packet: that packet asks for the first start-up cluster (RFC 8836
-  section 2, requirement 4: "probing during setup"), when the video has not sent and the NACK
-  responder has no header to pad with, so nothing leaves for it. The video's first packet came
-  10-30 ms later, before the cluster was given up (1 s), so it could not undo what the time-out
-  then decided: the controller asked for nothing more, and that peer climbed at 8 % a second
-  (1 Mbit/s after 15.6 s on an open link, where the peer whose video happened to send first
-  had it after 0.6 s). Now a cluster that goes unanswered stops the asking only when no stream
-  was bound and none started to send since it was asked for; otherwise the next cluster is
-  asked for. Paced chains are unchanged (their clusters are answered). Test:
-  `rtci-interceptor/tests/probe_without_pacer.rs::
-  a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing`.
-
 ### Changed
 
 - **sctp** (`conf/sctp-22-t1-rto-backoff`): an expiry of T1-init or T1-cookie backs off the
@@ -51,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Two unused dependencies dropped** (train 35): `rtci` no longer depends on `serde_json`
   (only its own tests and examples use it: now a dev-dependency) and `rtci-srtp` no longer
   depends on `byteorder` (unused). The 0.2.0 publish dry run warned about both.
-
 - **`BehaviourProfile::StrictRfc` turns DTLS session resumption between a connection's
   transports on** (`conf/dtls-27-session-resumption-strict-rfc`; RFC 5764 section 3, "As an
   optimization, the DTLS-SRTP implementation SHOULD use the following strategy"). The setting
@@ -62,6 +42,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`:
   round trip 100 ms, 453 ms off against 703 ms on), and no browser issues or offers a ticket.
   Audit row RFC5764-3-4: `partial` to `setting`.
+
+### Added
+
+- **`RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`**: how many RTP packets of a
+  received stream the engine ignored because their payload type is not one the stream's m=
+  section negotiated (`conf/test-3-webkit-unnegotiated-pt-named`; RFC 3550 section 5.1, "A
+  receiver MUST ignore packets with payload types that it does not understand"). The drop itself is
+  unchanged (since 1999001f, 2026-11-22; a `debug!` line only until now); a peer that switches its sender to a
+  format the answer did not keep now shows up as a count instead of media that stopped for no
+  visible reason. Not a W3C member: webrtc-stats has none for it (`packetsDiscarded` is the
+  jitter buffer's late or early packets, RFC 7002 section 3.2), and it is not counted in
+  `discarded_rtp_packets` (media no section could take, RFC 8830 section 3.1). Engine
+  behaviour change no; API addition only.
+
+### Fixed
+
+- **Probing without a pacer: a start-up cluster asked for before the video sent no longer
+  stops the probing** (`conf/probe-1-start-up-probe-before-the-video`, reported by a consumer,
+  ParolNet, on 0.2.0). In a chain without a pacer a cluster is padding on an RTX stream, and the
+  congestion controller stops asking for clusters after one that no packet left for, until a
+  stream is bound or sends its first packet (0.2.0, recover-3). A peer that sends audio and
+  video starts with an audio packet: that packet asks for the first start-up cluster (RFC 8836
+  section 2, requirement 4: "probing during setup"), when the video has not sent and the NACK
+  responder has no header to pad with, so nothing leaves for it. The video's first packet came
+  10-30 ms later, before the cluster was given up (1 s), so it could not undo what the time-out
+  then decided: the controller asked for nothing more, and that peer climbed at 8 % a second
+  (1 Mbit/s after 15.6 s on an open link, where the peer whose video happened to send first
+  had it after 0.6 s). Now a cluster that goes unanswered stops the asking only when no stream
+  was bound and none started to send since it was asked for; otherwise the next cluster is
+  asked for. Paced chains are unchanged (their clusters are answered). Test:
+  `rtci-interceptor/tests/probe_without_pacer.rs::
+  a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing`.
+- **A format this endpoint's answer added beyond the offer is now received**
+  (`conf/test-3-webkit-unnegotiated-pt-named`; RFC 3264 section 6.1, an answer "MAY indicate
+  additional media formats ... that the answerer is willing to send or receive", and section 7,
+  the offerer "MUST send using a media format listed in the answer"; RFC 9429 section 5.3.1
+  makes adding them a MUST). Since 606bb2fa (2026-11-22, in 0.2.0) the answer to an offer
+  without codec preferences lists the engine's other formats after the offered ones, but the
+  receiver kept only the formats both descriptions had and dropped packets of the added ones
+  as "not negotiated" (RFC 3550 section 5.1). Seen in the browser interop cells: WebKit,
+  whose offer `setCodecPreferences` had cut to VP8 and RTX, was answered with VP9 on 98 added,
+  sent about 35 VP8 packets and then everything on 98, and the engine dropped the rest of the
+  call (6 of 240 loss-recovery runs on one runner; red-2's one unexplained WebKit failure of
+  "chrome profile: audio and video both ways" has the same shape). The receiver now takes the
+  formats its applied answer added (repair formats are never added) and receives them until
+  the next answer. They do not enter the RFC 9143 section 9.2 payload type table (the routing
+  of a stream with neither a signalled SSRC nor a MID): the answer may number an added format
+  as another section of the offer does (RFC 9143 section 9.1.1), and that section keeps the
+  payload type to itself; a stream that switches to an added format was bound by its first
+  packet. Engine behaviour change YES: media on an added format reaches the
+  application (its packets carry the added payload type; the receiver's W3C parameters still
+  list the negotiated codecs only). Not breaking; API unchanged. Tests
+  `tests/answer_added_formats_rtc2rtc.rs::a_format_the_answer_added_is_received_when_the_offerer_switches_to_it`,
+  `endpoint.rs::a_format_this_endpoints_answer_added_is_received`,
+  `interceptor_association_test.rs::a_format_only_the_answer_added_leaves_the_payload_type_to_the_section_that_negotiated_it`.
 
 ### Testing
 
@@ -90,6 +125,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC8836-2-8b partial -> tested and RFC8836-2-9 missing -> partial (stale notes: `a=rtcp-rsize`
   is negotiated and used; datagrams are DSCP-marked, the estimator does not use the marking).
   Tests and audit only.
+- test-env interop: the two browser loss-recovery cells ("loss recovery: NACK and RTX repair a
+  browser's video under netem" and "... the browser's SSRCs unsignalled ...") check, before
+  their loss checks, the payload types Rust received against the browser's own offer and the
+  answer (`common.mjs unlessOffFormat`). Media on a payload type the offer does not have fails
+  the cell with that payload type, its packet count, both descriptions' video format lines and
+  what the browser says it sends with (`Interop.codecView`: RTCRtpSendParameters.codecs,
+  outbound-rtp codecId), and says whether it is a format the answer added (RFC 9429 section
+  5.3.1, allowed by RFC 3264 section 7, not the format the cell measures) or one the answer
+  does not have either (RFC 3264 section 7; the engine's `unnegotiatedPayloadTypeRtp` count),
+  instead of an unexplained "span 0". For WebKit, seen switching its VP8 sender to the
+  answer's VP9 on 98 in 6 of 240 runs, it is recorded as a `known-browser-defect` annotation
+  and the cell runs once more, on that evidence only; the second attempt is checked in full (a
+  second switch fails the cell, named). Every attempt logs its payload types. The interop
+  peer's report carries `unnegotiatedPayloadTypeRtp`; a failed cell's descriptions are saved
+  under `failed-cell-sdp/` in the artifacts; the matrix and gate show a pass after such a
+  retry. "chrome profile: audio and video both ways" logs the same payload types and names such
+  a switch as its failure (no retry there).
 
 ## [0.2.0] - 2026-11-26
 

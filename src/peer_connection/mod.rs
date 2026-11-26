@@ -1834,6 +1834,20 @@ impl RTCPeerConnection {
             .discarded_rtp_packets
     }
 
+    /// How many RTP packets of a received stream were ignored because their payload type is
+    /// not one the stream's m= section negotiated (RFC 3550 section 5.1: "A receiver MUST
+    /// ignore packets with payload types that it does not understand"). A peer that switches
+    /// its sender to a format the answer did not keep shows up here instead of as media that
+    /// stopped. Not counted in
+    /// [`discarded_rtp_packets`](Self::discarded_rtp_packets) (those had no stream to go to).
+    /// Not a W3C attribute: webrtc-stats has no member for it (`packetsDiscarded` counts what
+    /// the jitter buffer discards as late or early, RFC 7002 section 3.2); a fork addition.
+    pub fn unnegotiated_payload_type_rtp_packets(&self) -> u64 {
+        self.pipeline_context
+            .endpoint_handler_context
+            .unnegotiated_payload_type_rtp_packets
+    }
+
     /// How many RTP and RTCP packets written to the connection were not sent, over all its
     /// transports: written while a transport had no ICE path to send them on (before
     /// connectivity, or after it was lost), or RTP whose SRTP index was already used for a

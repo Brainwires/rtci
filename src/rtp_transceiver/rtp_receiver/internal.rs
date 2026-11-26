@@ -104,6 +104,12 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// that carries a RID is bound by its rid, as without them.
     declared_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
+    /// The formats this endpoint's applied answer listed for the section beyond the offer's
+    /// (RFC 9429 section 5.3.1: "Any currently available media formats that are not present
+    /// in the current remote description MUST be added"), which it is therefore "willing to
+    /// receive" (RFC 3264 section 6.1) and the offerer may send with (section 7: "It MUST send
+    /// using a media format listed in the answer"). Empty when the last answer was the peer's.
+    answered_formats: Vec<RTCRtpCodecParameters>,
     /// What this endpoint's pending offer prepared the receiver for, which it must be ready
     /// to receive before the answer arrives (RFC 3264 section 5.1, RFC 9429 sections 4.1.11
     /// and 5.9); `None` outside `have-local-offer` and `have-remote-pranswer`.
@@ -160,6 +166,7 @@ impl RTCRtpReceiverInternal {
             declared_codings: vec![],
 
             receive_codecs: vec![],
+            answered_formats: vec![],
             offered: None,
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
@@ -275,6 +282,24 @@ impl RTCRtpReceiverInternal {
 
     pub(crate) fn track(&self) -> &MediaStreamTrack {
         &self.track
+    }
+
+    /// The formats this endpoint's applied answer added for the section beyond the offer's
+    /// (see the field): received like the negotiated ones until the next answer.
+    pub(crate) fn set_answered_formats(&mut self, formats: Vec<RTCRtpCodecParameters>) {
+        self.answered_formats = formats;
+    }
+
+    /// Whether `payload_type` is receivable only as a format this endpoint's answer added
+    /// beyond the offer (not negotiated by both descriptions).
+    pub(crate) fn is_answer_added_only(&self, payload_type: PayloadType) -> bool {
+        self.answered_formats
+            .iter()
+            .any(|codec| codec.payload_type == payload_type)
+            && !self
+                .receive_codecs
+                .iter()
+                .any(|codec| codec.payload_type == payload_type)
     }
 
     /// The local description's formats of this receiver's section, with their parameters.
@@ -827,21 +852,34 @@ impl RTCRtpReceiverInternal {
     /// section 5.9: "For each specified media format, establish a mapping between the payload
     /// type and the actual media format"). For a section that was never answered the receive
     /// codecs are local preferences, not a negotiated list: the offer's formats alone count.
+    /// The formats this endpoint's own answer added beyond the offer's are receivable too
+    /// (RFC 3264 sections 6.1 and 7: the answer lists them as formats the answerer is
+    /// willing to receive, and the offerer may send with any format of the answer).
     pub(crate) fn receivable_codecs(&self) -> impl Iterator<Item = &RTCRtpCodecParameters> {
         let offered = self.offered.as_ref();
         let negotiated = offered.is_none_or(|offered| offered.negotiated);
         let listed = &self.receive_codecs;
-        listed.iter().filter(move |_| negotiated).chain(
-            offered
-                .into_iter()
-                .flat_map(|offered| offered.codecs.iter())
-                .filter(move |codec| {
-                    !negotiated
-                        || !listed
-                            .iter()
-                            .any(|listed| listed.payload_type == codec.payload_type)
-                }),
-        )
+        let answered = self.answered_formats.iter().filter(move |codec| {
+            negotiated
+                && !listed
+                    .iter()
+                    .any(|listed| listed.payload_type == codec.payload_type)
+        });
+        listed
+            .iter()
+            .filter(move |_| negotiated)
+            .chain(answered)
+            .chain(
+                offered
+                    .into_iter()
+                    .flat_map(|offered| offered.codecs.iter())
+                    .filter(move |codec| {
+                        !negotiated
+                            || !listed
+                                .iter()
+                                .any(|listed| listed.payload_type == codec.payload_type)
+                    }),
+            )
     }
 
     /// [`Self::get_parameters`] as a stream is bound with: while a local offer is pending the
