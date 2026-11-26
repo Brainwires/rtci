@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5751; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5088.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5076 of 5088 (99.8 %).
-- Tested as the default (`tested`): 5044 of 5088 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 12: 3 untested, 7 partial, 2 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5046 of 5088 (99.2 %).
+- Tested as the default (`tested`): 5014 of 5088 (98.5 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 42: 28 untested, 10 partial, 2 missing, 2 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 3 | 0 |
-| C | partly implemented | 6 | 1 |
+| B | implemented, lacking a test that fails without it | 28 | 0 |
+| C | partly implemented | 11 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 7 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 44 | 26 |
+| all | | 74 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 11 rows, 9 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 41 rows, 37 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -36,13 +36,16 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
+| dtls-srtp | 12 | 1 | 0 | 0 | 0 | 13 | 13 | 0 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
-| ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
-| jsep | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
+| ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
+| jsep | 2 | 2 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| sctp | 3 | 2 | 0 | 0 | 0 | 5 | 5 | 0 | 0 |
+| rtp | 7 | 0 | 0 | 0 | 0 | 7 | 7 | 0 | 0 |
+| sctp | 5 | 2 | 0 | 0 | 0 | 7 | 7 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
+| turn | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 
 ## Rows
 
@@ -76,15 +79,45 @@ Sorted by class, then owner, size and ID.
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | setting | A | `setting` (measured, rtcpbudget-4): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; capacity instrument `tests/capacity_instrument.rs::measure`, chain `every` against `paced`, 1000 seeds: oldest picture 8.00 -> 8.53 s, target under the cap 209.8 -> 185.8 kbit/s, recovery over 20 s 81 -> 244 calls, 15 gate and 33 star statistics worse (RTCP 122 -> 149 kbit/s open); the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
+| RFC5246-7.4.1.3-3 | `rfc5246.md` | Client rejects a ServerHello cipher suite it did not offer | untested | B | A test that a DTLS 1.2 client handed a ServerHello with a suite it did not offer aborts (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-4.1.2-16 | `rfc8446.md` | Servers MUST ignore unrecognized extensions. | untested | B | A test that the DTLS 1.3 server answers a ClientHello carrying an unknown extension (e.g. 0x7777) with a ServerHello (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-4.1.4-12 | `rfc8446.md` | The value of selected_version in the HelloRetryRequest ... | untested | B | A test that a ServerHello whose selected_version differs from the HelloRetryRequest's is refused with illegal_parameter (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-4.2.1-5 | `rfc8446.md` | Servers MUST only select a version of TLS present in that extension ... | untested | B | A test that a ClientHello whose supported_versions also lists an unknown version (a GREASE value) negotiates DTLS 1.3 (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-4.2.11-14 | `rfc8446.md` | If any other value is returned, the client MUST abort the handshake ... | untested | B | Assert the illegal_parameter alert in accepted_early_data_with_another_identity_is_an_illegal_parameter (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-4.6.1-14 | `rfc8446.md` | Clients MUST ignore unrecognized extensions. | untested | B | A test that a NewSessionTicket with an unknown extension is taken (stored, usable) (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-6-5 | `rfc8446.md` | Unknown Alert types MUST be treated as error alerts. | untested | B | A test that a received alert of an unknown description fails the connection (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-6.1-1 | `rfc8446.md` | Any data received after a closure alert has been received MUST be ... | untested | B | A test that a record received after the peer's close_notify reaches nothing (no application data, no new connection) (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-6.1-4 | `rfc8446.md` | Any data received after a closure alert has been received MUST be ... | untested | B | As RFC8446-6.1-1 (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-9.3-5 | `rfc8446.md` | - A server receiving a ClientHello MUST correctly ignore all ... | untested | B | As RFC8446-4.1.2-16 (audit-5 sweep) | S | dtls-srtp |
+| RFC8446-9.3-6 | `rfc8446.md` | In TLS 1.3, a client receiving a CertificateRequest or ... | untested | B | As RFC8446-4.6.1-14 (the CertificateRequest half is tested) (audit-5 sweep) | S | dtls-srtp |
+| WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep) | S | dtls-srtp |
+| WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
+| WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
+| WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
+| WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
+| RFC3611-4.3-5 | `rfc3611.md` | rsvd bits zero when sent, ignored when received | untested | B | A test reading a Packet Receipt Times block with its rsvd bits set (ignored) (audit-5 sweep) | S | rtp |
+| RFC3611-4.6-5 | `rfc3611.md` | rsvd bits zero when sent, ignored when received | untested | B | A test reading a Statistics Summary block with its rsvd bits set (ignored) (audit-5 sweep) | S | rtp |
+| RFC3611-4.7-3 | `rfc3611.md` | Reserved octet (header) zero / ignored | untested | B | A test reading a VoIP Metrics block with its reserved octet set (ignored) (audit-5 sweep) | S | rtp |
+| RFC7728-7-3 | `rfc7728.md` | PAUSED targets the paused SSRC; REFUSED the target of the refused ... | untested | B | A test that a PAUSED and a REFUSED carry the target SSRC of the paused stream / refused request (audit-5 sweep) | S | rtp |
+| RFC7728-7-5 | `rfc7728.md` | Reserved types are ignored on reception and never sent | untested | B | A test that the interceptor takes no action on a received reserved-type entry (audit-5 sweep) | S | rtp |
+| RFC7728-8.3-5 | `rfc7728.md` | A RESUME that cannot be honoured, or with another PauseID while ... | untested | B | A test that a RESUME with another PauseID to a paused or pausing stream is refused (audit-5 sweep) | S | rtp |
+| RFC7728-8.3-6 | `rfc7728.md` | A RESUME with the current or a past PauseID to a playing stream is ... | untested | B | A test that a RESUME with the current PauseID to a playing stream is ignored (audit-5 sweep) | S | rtp |
 | RFC9260-3.2-8 | `rfc9260.md` | Chunk Length smaller than 4 or past the packet end is rejected | untested | B | A test that a chunk whose Chunk Length is below 4 refuses the packet (past the end is tested by a_partial_chunk_at_the_end_of_a_packet_is_dropped_alone) (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.2.1.5-2 | `rfc9260.md` | Supported Address Types is accepted; a Host Name entry in it is ... | untested | B | A test of an INIT whose Supported Address Types lists the Host Name type (11): answered with an INIT ACK, the entry ignored (audit-4 sweep) | S | sctp |
 | RFC9260-3.3.7-5 | `rfc9260.md` | An ABORT with a format error or without a TCB is silently discarded | untested | B | A test that a malformed ABORT on an established association is discarded: association stands, nothing sent (no-TCB case tested by out_of_the_blue_packets_are_answered_or_dropped_by_their_chunks) (audit-4 sweep) | S | sctp |
+| WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | B | A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep) | S | sctp |
+| WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep) | S | sctp |
+| RFC8446-4.2.1-12 | `rfc8446.md` | If this extension is present, clients MUST ignore the ... | violated | C | conf/dtls-29-server-hello-legacy-version-ignored: on_server_hello no longer checks legacy_version; the wrong-fixed-fields test then takes it (audit-5 sweep) | S | dtls-srtp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
+| WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |
+| WEBRTC-5.6.4-9 | `w3c-webrtc-pc.md` | failed and completed need the end-of-remote-candidates indication | partial | C | As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep) | M | ice |
 | RFC9429-5.8.2-22 | `rfc9429.md` | a=msid lines are parsed and stored, ignoring appdata | partial | C | is_same_remote_track compares the msid appdata by default, so a re-description that changes only the appdata drops the SSRCs and codecs learned from RTP: compare it only under with_msid_appdata_change_renews_track, with a test (sctp7 audit; track id and events already ignore it) | S | jsep |
+| WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep) | S | jsep |
 | RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
 | RFC9260-3.1-1 | `rfc9260.md` | Source port 0 is not used | partial | C | TransportConfig::with_sctp_port(0) refused (or never sent), with a test that no packet leaves with source port 0; the receive check is tested (audit-4 sweep) | S | sctp |
 | RFC9260-3.1-2 | `rfc9260.md` | Destination port 0 is not used | partial | C | TransportConfig::with_remote_sctp_port(0) refused (or never sent), with a test that no packet leaves with destination port 0 (audit-4 sweep) | S | sctp |
+| RFC8489-9.2.5-14 | `rfc8489.md` | A 400 without an integrity attribute is discarded as never received | violated | C | Discard an unsigned 400 to the anonymous first request too (rtci-turn credential.rs check_response, no session) so it retransmits and times out; tests with a 400 for the anonymous and the signed request (audit-5 sweep) | S | turn |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Measured: every SRTP and DTLS key is left in no freed heap block (Linux, macOS, Windows; both providers, ring's key objects in ErasedOnDrop) and nowhere in process memory on Linux outside the dead stack frames of the thread that built the contexts. Not met: stack copies left by the compiler or provider. Found in train 34's test environment (rustc 1.99.1, run 45714962513): SRTCP encryption key, its round keys, SRTCP HMAC-SHA1 states and the master key in the dead stack frames of the thread that built the contexts (20 of 20 runs in the test-env image, 0 of 40 on GitHub's Ubuntu runners: environment-dependent); reported, not asserted; known_limit_*_building_an_srtp_context_leaves_keys_in_dead_stack_frames (ignored). scrub_stack runs where DTLS builds keys (zeroize m13); a copy moved onto the stack is seen by no test (zeroize2 m3, m5 survive): not guaranteed. Closes by an engine-side observation of stack residue, or the owner reading the clause as not binding stack temporaries | M | dtls-srtp / crypto |
