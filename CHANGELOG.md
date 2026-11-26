@@ -208,6 +208,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
   `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
   clause "a can" and left the setting out of every profile; it is now governed.
+- Tests for three MUST rows the audit sweep found untested (`conf/must7-2-sdp-cname-msid-rtcp-mux-lines`;
+  no engine change): every SSRC of a generated description has one `cname` line (RFC 5576 6.1;
+  row RFC5576-6.1-4), the `a=msid` lines of a section carry one appdata, also when a repeated
+  pair is made unique (RFC 8830 2; row RFC8830-2-3), and every RTP section of a BUNDLE group
+  has `a=rtcp-mux` (RFC 8859 4.3; row RFC8859-4.3-2). Each mutation-checked. Open MUST rows (this branch alone)
+  15 -> 12.
 
 ### Testing
 

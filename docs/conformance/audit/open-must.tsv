@@ -100,6 +100,3 @@ RFC8834-4.3-6	A	S	media (media-25)	`setting`: one SSRC across clock rates by def
 RFC8083-3-3	A	S	media (running)	`setting` (measured): `CircuitBreakerBuilder::with_packet_size(PacketSize::LastFrames)`, RFC test both forms; section 3's s ceased a talking call in 14 of 24 sweep cells (5 % loss: after 3.8 to 5.0 s), the default in none (`circuit_breaker_reordering_rtc2rtc.rs`)
 RFC4585-3.5.4-2	C	S	media (running)	Count the congestion control feedback sent at once in `avg_rtcp_size` as the received is, or decide with RFC4585-3.5.2-5 (now `setting`)
 RFC6184-7.2.2-1	C	S	media (media-25)	Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp)
-RFC5576-6.1-4	B	S	sdp	A test counting cname lines per ssrc-id in a generated description (audit-2 sweep)
-RFC8859-4.3-2	B	S	jsep (running)	A named test that every m= line sharing a 5-tuple muxes RTCP (audit-2 sweep)
-RFC8830-2-3	B	S	jsep (running)	A test that a generated description's msid lines share one appdata (audit-2 sweep)

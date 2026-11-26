@@ -629,3 +629,113 @@ fn when_asked_a_subsequent_offer_says_rtcp_mux_only_again() -> TestResult {
     assert!(!offer.sdp.contains("a=rtcp-mux-only"), "{}", offer.sdp);
     Ok(())
 }
+
+/// The mids of the first `a=group:BUNDLE` of `sdp`.
+fn bundle_group(sdp: &str) -> Vec<String> {
+    sdp.lines()
+        .find_map(|line| line.strip_prefix("a=group:BUNDLE "))
+        .map(|mids| mids.split(' ').map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// The RTP sections (`m=audio`, `m=video`) of `sdp` that are in its BUNDLE group, as (mid,
+/// whether the section has `a=rtcp-mux`), and whether the group's tagged section has it.
+fn bundled_rtp_sections_mux(sdp: &str) -> (Vec<(String, bool)>, bool) {
+    let group = bundle_group(sdp);
+    let sections = media_sections(sdp);
+    let mid = |section: &[String]| jsep_common::mid_of(section).map(str::to_owned);
+    let tagged = sections
+        .iter()
+        .find(|section| mid(section).as_ref() == group.first())
+        .is_some_and(|section| has(section, "a=rtcp-mux"));
+    let rtp = sections
+        .iter()
+        .filter(|section| section[0].starts_with("m=audio") || section[0].starts_with("m=video"))
+        .filter(|section| port_of(section) != 0)
+        .filter_map(|section| {
+            let mid = mid(section)?;
+            group
+                .contains(&mid)
+                .then(|| (mid, has(section, "a=rtcp-mux")))
+        })
+        .collect();
+    (rtp, tagged)
+}
+
+/// RFC 8859 section 4.3: "RTCP multiplexing MUST be enabled for both the audio and video
+/// "m=" lines if they are transported over a single 5-tuple." Every RTP section of a BUNDLE
+/// group (one 5-tuple) this endpoint writes carries `a=rtcp-mux`: an initial offer of audio,
+/// two videos and data, the answer to it, a subsequent offer that adds a section, and the
+/// answerer's own subsequent offer. With the BUNDLE attributes in the tagged section only
+/// (`with_bundle_attributes_repeated(false)`, RFC 9143 section 7.1.3: they apply to the whole
+/// group) the initial offer still has it in every section that has a port of its own (RFC
+/// 9143 section 9.3.1.1) and the later descriptions in the tagged one.
+#[test]
+fn every_rtp_section_of_a_bundle_group_multiplexes_rtcp() -> TestResult {
+    use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+
+    for repeated in [true, false] {
+        let peer = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+            let mut media_engine = MediaEngine::default();
+            media_engine.register_default_codecs()?;
+            Ok(RTCPeerConnectionBuilder::new()
+                .with_media_engine(media_engine)
+                .with_setting_engine(
+                    SettingEngineBuilder::new()
+                        .with_bundle_attributes_repeated(repeated)
+                        .build(),
+                )
+                .build(Instant::now())?)
+        };
+        // `min`: the bundled RTP sections that have a port of their own; a bundle-only
+        // section of an initial offer (port zero) carries none of the BUNDLE attributes (RFC
+        // 9143 sections 7.2.1 and 9.3.1.1) and takes the group's once it is answered.
+        let check = |what: &str, sdp: &str, every: bool, min: usize| {
+            let (rtp, tagged) = bundled_rtp_sections_mux(sdp);
+            assert!(
+                rtp.len() >= min,
+                "repeated {repeated}, {what}: {min} bundled RTP sections: {sdp}"
+            );
+            if every {
+                assert!(
+                    rtp.iter().all(|(_, mux)| *mux),
+                    "repeated {repeated}, {what}: a bundled RTP section without a=rtcp-mux \
+                     {rtp:?}\n{sdp}"
+                );
+            } else {
+                assert!(
+                    tagged,
+                    "repeated {repeated}, {what}: the tagged section has no a=rtcp-mux\n{sdp}"
+                );
+            }
+        };
+        let mut offerer = peer()?;
+        let mut answerer = peer()?;
+        offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+        offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+        offerer.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(RTCRtpTransceiverInit::recvonly()),
+        )?;
+        offerer.create_data_channel("data", None)?;
+        let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+        check("initial offer", &offer, true, 2);
+        check("answer", &answer, repeated, 3);
+
+        offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+        let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+        check("subsequent offer", &offer, repeated, 4);
+        check("answer to it", &answer, repeated, 4);
+        assert_eq!(
+            5,
+            bundle_group(&offer).len(),
+            "the new section is bundled: {offer}"
+        );
+
+        let (offer, answer) = exchange(&mut answerer, &mut offerer)?;
+        check("the answerer's offer", &offer, repeated, 4);
+        check("the answer to it", &answer, repeated, 4);
+    }
+    Ok(())
+}
