@@ -170,8 +170,15 @@ mod process_memory_tests {
     }
 
     /// One session of `profile` with `provider` on a worker thread, searched for while its
-    /// contexts are alive and after the worker has dropped them and exited.
-    fn session(provider: &Arc<dyn RTCCryptoProvider>, profile: ProtectionProfile) -> Session {
+    /// contexts are alive and after the worker has dropped them and exited. With `packets`
+    /// the contexts protect and unprotect RTP and RTCP; without, building them is the last
+    /// thing the worker does, so the dead frames that building left below the worker's frame
+    /// are not overwritten by later calls before the search.
+    fn session(
+        provider: &Arc<dyn RTCCryptoProvider>,
+        profile: ProtectionProfile,
+        packets: bool,
+    ) -> Session {
         let master = master_for(provider.name());
         let (key, salt) = super::key_material::per_profile(profile, &master.0, &master.1);
         let master_key = &key[..profile.key_len()];
@@ -207,7 +214,7 @@ mod process_memory_tests {
             };
             let mut sender = context();
             let mut receiver = context();
-            for sequence_number in 0..4 {
+            for sequence_number in 0..if packets { 4 } else { 0 } {
                 let protected = sender.encrypt_rtp(&rtp(sequence_number)).expect("SRTP");
                 receiver.decrypt_rtp(&protected).expect("unprotected SRTP");
                 let protected = sender.encrypt_rtcp(&rtcp()).expect("SRTCP");
@@ -240,12 +247,12 @@ mod process_memory_tests {
     }
 
     /// Every profile with the provider named `name`.
-    fn every_session(name: &str) -> Vec<Session> {
+    fn every_session(name: &str, packets: bool) -> Vec<Session> {
         super::key_material::check_local_primitives();
         let mut sessions = Vec::new();
         for provider in providers().into_iter().filter(|p| p.name() == name) {
             for profile in ProtectionProfile::ALL {
-                let s = session(&provider, profile);
+                let s = session(&provider, profile, packets);
                 for (n, needle) in s.needles.iter().enumerate() {
                     println!(
                         "PROCESS {:<10} {:<22} {:<58} before {:?} after {:?}",
@@ -315,7 +322,7 @@ mod process_memory_tests {
     #[test]
     fn with_aws_lc_no_key_outlives_its_contexts_in_process_memory() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let sessions = every_session("aws-lc-rs");
+        let sessions = every_session("aws-lc-rs", true);
         check_the_search_sees_live_keys(&sessions);
         let left = left_behind(&sessions, |_, _| true);
         assert!(left.is_empty(), "found after the drop: {left:#?}");
@@ -333,9 +340,35 @@ mod process_memory_tests {
     #[test]
     fn with_ring_no_key_outlives_its_contexts_in_process_memory() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let sessions = every_session("ring");
+        let sessions = every_session("ring", true);
         check_the_search_sees_live_keys(&sessions);
         let left = left_behind(&sessions, |_, _| true);
         assert!(left.is_empty(), "found after the drop: {left:#?}");
+    }
+
+    /// Building a context leaves no key in the dead stack frames below the caller: the
+    /// worker builds the contexts and does nothing else before the search, so whatever
+    /// deriving the session keys and building their ciphers and MACs left on its stack is
+    /// still there unless the engine overwrote it (`crypto::scrub_stack` after `new_cipher`).
+    /// Found in train 34's test environment (rustc 1.99): the SRTCP keys, their AES schedules
+    /// and HMAC-SHA1 states and the master key, in the worker's stack after the drop.
+    fn building_leaves_no_key_in_dead_frames(name: &str) {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = every_session(name, false);
+        check_the_search_sees_live_keys(&sessions);
+        let left = left_behind(&sessions, |_, _| true);
+        assert!(left.is_empty(), "found after the drop: {left:#?}");
+    }
+
+    #[cfg(feature = "crypto-aws-lc-rs")]
+    #[test]
+    fn with_aws_lc_building_a_context_leaves_no_key_in_dead_stack_frames() {
+        building_leaves_no_key_in_dead_frames("aws-lc-rs");
+    }
+
+    #[cfg(feature = "crypto-ring")]
+    #[test]
+    fn with_ring_building_a_context_leaves_no_key_in_dead_stack_frames() {
+        building_leaves_no_key_in_dead_frames("ring");
     }
 }
