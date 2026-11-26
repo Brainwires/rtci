@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`CongestionControlHandle::has_feedback()` and `feedback_reports()`**
+  (`conf/ccfeedback-1-feedback-seen`). Not breaking: new methods. Before the first feedback
+  `target_bitrate()` is the estimator's start value (300 kbit/s by default), and nothing on
+  the handle said so: `stats().delay_based_bitrate` and `loss_based_bitrate` are `Some` from
+  the start (both halves start at the start value). `has_feedback()` is `true` from the first
+  batch the estimator was given: per-packet congestion control feedback (transport-wide or RFC
+  8888) that reported packets this controller sent, or, while there is none, a receiver report
+  block's loss (draft-ietf-rmcat-gcc-02 section 7); `feedback_reports()` counts them (a path
+  change does not reset it). Verified and documented on `stats()`: with `Gcc`, `packet_loss`
+  is `None` until a batch or a receiver report's loss was folded in, `round_trip_time` until
+  one implied a round-trip time.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
