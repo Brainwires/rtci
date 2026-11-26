@@ -5794,7 +5794,8 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
 
 /// Whether `sd` describes an SCTP association (RFC 8841 section 10.2: a data section that is
 /// not rejected, with a non-zero `a=sctp-port`), and whether it closes one (sections 10.3,
-/// 10.4: its data section is rejected or has `a=sctp-port:0`).
+/// 10.4: its data section is rejected or has `a=sctp-port:0`). A bundle-only data section of
+/// an offer (port zero with `a=bundle-only`, RFC 9143 section 7.2) is not rejected.
 fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
     let Some(section) = have_data_channel(sd) else {
         return (false, false);
@@ -5803,7 +5804,7 @@ fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
         .attributes
         .iter()
         .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
-    let closed = section.media_name.port.value == 0 || zero_port;
+    let closed = is_rejected_media(section) || zero_port;
     (!closed, closed)
 }
 
