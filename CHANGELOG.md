@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Probing without a pacer: a start-up cluster asked for before the video sent no longer
+  stops the probing** (`conf/probe-1-start-up-probe-before-the-video`, reported by a consumer,
+  ParolNet, on 0.2.0). In a chain without a pacer a cluster is padding on an RTX stream, and the
+  congestion controller stops asking for clusters after one that no packet left for, until a
+  stream is bound or sends its first packet (0.2.0, recover-3). A peer that sends audio and
+  video starts with an audio packet: that packet asks for the first start-up cluster (RFC 8836
+  section 2, requirement 4: "probing during setup"), when the video has not sent and the NACK
+  responder has no header to pad with, so nothing leaves for it. The video's first packet came
+  10-30 ms later, before the cluster was given up (1 s), so it could not undo what the time-out
+  then decided: the controller asked for nothing more, and that peer climbed at 8 % a second
+  (1 Mbit/s after 15.6 s on an open link, where the peer whose video happened to send first
+  had it after 0.6 s). Now a cluster that goes unanswered stops the asking only when no stream
+  was bound and none started to send since it was asked for; otherwise the next cluster is
+  asked for. Paced chains are unchanged (their clusters are answered). Test:
+  `rtci-interceptor/tests/probe_without_pacer.rs::
+  a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
