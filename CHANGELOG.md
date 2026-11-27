@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A format an answer adds whose registered payload type the offer uses for another format is
+  added on a free number, also with the default codecs**
+  (`conf/jsep-92-answer-added-formats-find-a-free-number`; RFC 9429 section 5.3.1: formats absent
+  from the offer "MUST be added after all existing formats"; RFC 3551 section 3, RFC 5761 section
+  4). The free-number search covered 96-127 only, and with the default codecs every number there
+  is registered or was held for the SFrame numbering, which was reserved even when no section
+  used SFrame: such a format was silently left out of the answer (an offer giving 98 to H.264
+  got no VP9 profile 0 back). The search now continues in 35-63 ("Values below 64 MAY be used
+  if that is insufficient", never 64-95), and the SFrame numbering is reserved only when a
+  section of the description uses SFrame. Engine behaviour change YES: answers to offers that
+  use the engine's registered numbers for other formats list more formats. Test
+  `tests/jsep_answer_added_format_free_number.rs`.
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;

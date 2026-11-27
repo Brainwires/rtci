@@ -2842,7 +2842,13 @@ impl RTCPeerConnection {
         // Whether a section was made bundle-only (an initial offer).
         let mut any_bundle_only = false;
 
-        let answer_payload_types = answer_payload_types(media_engine, media_sections);
+        // SFrame numbering is reserved only when a section of this description uses SFrame.
+        let any_sframe = media_sections.iter().any(|m| {
+            transceivers
+                .get(m.transceiver_index)
+                .is_some_and(|t| t.use_sframe() == Some(true))
+        });
+        let answer_payload_types = answer_payload_types(media_engine, media_sections, any_sframe);
         let mut candidates_added = false;
         let offers_over_tcp = params.bundle.is_offer() && params.sctp_over_tcp;
         for m in media_sections.iter() {
@@ -5190,11 +5196,13 @@ fn parse_rtcp_feedback(value: &str) -> Option<RTCPFeedback> {
 /// for the whole answer so that every section numbers a format alike. A format keeps its own
 /// number unless the offer uses that number for another format anywhere (in a BUNDLE group one
 /// payload type has one configuration, RFC 9143 section 9.1.1); then it takes the next
-/// dynamic payload type no offered, registered or SFrame format uses and no format before it
-/// took. A format with nothing left is not added.
+/// dynamic payload type (96 to 127, then 35 to 63) no offered, registered or, when a section
+/// uses SFrame, SFrame format uses and no format before it took. A format with nothing left is
+/// not added.
 fn answer_payload_types(
     media_engine: &MediaEngine,
     media_sections: &[MediaSection],
+    any_sframe: bool,
 ) -> HashMap<(bool, RtpCodecKind, u8), u8> {
     let mut offered: HashMap<u8, RTCRtpCodec> = HashMap::new();
     for codec in media_sections
@@ -5216,7 +5224,9 @@ fn answer_payload_types(
                 .cloned()
                 .map(move |codec| (false, kind, codec))
         })
-        .chain(kinds.iter().flat_map(|&kind| {
+        // The SFrame numbering (draft-ietf-avtcore-rtp-sframe-03 section 6) only when a section
+        // of the description uses SFrame: otherwise its numbers are free for other formats.
+        .chain(kinds.iter().filter(|_| any_sframe).flat_map(|&kind| {
             media_engine
                 .codecs_for_section(kind, true)
                 .into_iter()
@@ -5226,7 +5236,13 @@ fn answer_payload_types(
     let mut taken: HashSet<u8> = offered.keys().copied().collect();
     taken.extend(candidates.iter().map(|(_, _, codec)| codec.payload_type));
     taken.extend(media_engine.sframe_payload_types.iter().copied());
-    let mut free = (96..=127u8).filter(|pt| !taken.contains(pt));
+    // RFC 3551 section 3: "Applications SHOULD first use values in this range [96-127] for
+    // dynamic payload types. Those applications which need to define more than 32 dynamic
+    // payload types MAY bind codes below 96"; RFC 5761 section 4: "Values below 64 MAY be used
+    // if that is insufficient" (64-95 "MUST NOT be used" with RTP/RTCP multiplexing).
+    let mut free = (96..=127u8)
+        .chain(35..=63u8)
+        .filter(|pt| !taken.contains(pt));
     let mut numbers = HashMap::new();
     for (sframe, kind, codec) in candidates {
         let conflicting = offered.get(&codec.payload_type).is_some_and(|offered| {
