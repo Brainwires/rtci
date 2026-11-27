@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5094.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5064 of 5094 (99.4 %).
-- Tested as the default (`tested`): 5032 of 5094 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 30: 17 untested, 11 partial, 2 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5066 of 5094 (99.5 %).
+- Tested as the default (`tested`): 5034 of 5094 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 28: 15 untested, 11 partial, 2 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 17 | 0 |
+| B | implemented, lacking a test that fails without it | 15 | 0 |
 | C | partly implemented | 9 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 62 | 26 |
+| all | | 60 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 28 rows, 21 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 26 rows, 19 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -39,7 +39,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | dtls-srtp | 6 | 1 | 0 | 1 | 0 | 8 | 7 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
-| jsep | 4 | 3 | 0 | 0 | 0 | 7 | 5 | 2 | 0 |
+| jsep | 2 | 3 | 0 | 0 | 0 | 5 | 3 | 2 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
@@ -86,8 +86,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep) | S | dtls-srtp |
 | WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
 | WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
-| RFC8851-6.3-5 | `rfc8851.md` | A line whose formats are all discarded is dropped; no pt= in the ... | untested | B | A test whose offer lists a `pt=` none of the answerer's formats keep: the answer drops that a=rid line (audit-6 sweep) | S | jsep |
-| RFC8853-5.2-1 | `rfc8853.md` | a=simulcast is not used at session level; one received there is ... | untested | B | A test of a remote offer with a=simulcast at session level only: taken, no simulcast negotiated for its sections (audit-6 sweep) | S | jsep |
 | WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
 | WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
 | RFC5576-9-1 | `rfc5576.md` | The sender is prepared for receivers that ignore its source ... | untested | B | An rtc2rtc test whose answerer is handed the offer with every a=ssrc / a=ssrc-group line removed: media and RTX still bound (MID, RID, RRID) (audit-6 sweep) | S | rtp |
