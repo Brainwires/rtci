@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **The examples say when their candidates end** (`conf/examples-3-end-of-candidates`, after
+  `conf/ice-32-failed-needs-end-of-candidates`: W3C webrtc-pc 5.6.4 "failed" needs the end of
+  the candidates). Examples whose signalling carries candidates relay the end-of-candidates
+  and add their own when their gathering is done (`data-channels-flow-control`,
+  `data-channels-offer-answer`, `ice-tcp-active-passive`, `trickle-ice`, `trickle-ice-host`,
+  `trickle-ice-srflx`, `trickle-ice-relay`, `perfect-negotiation`, `data-channels-simple`; the
+  browser pages now forward the empty or `null` candidate, and `data-channels-offer-answer`
+  hands the peer's trickled candidate to `add_remote_candidate`, not `add_local_candidate`).
+  Browser examples whose page sends only its description (`ice-restart`, `ice-tcp`,
+  `play-from-disk-renegotiation`, `play-from-disk-playlist-control`) give up after 30 s of
+  "disconnected" on their own timer. The copy-paste examples (`data-channels`, `reflect`,
+  `save-to-disk-*`, `play-from-disk-{vpx,h26x,fec}`, `simulcast`, `stats`, and the rest of the
+  base64 ones) set `SettingEngineBuilder::with_ice_failed_without_end_of_candidates(true)`
+  (Chromium's pasted description has no `a=end-of-candidates`) and add their own
+  end-of-candidates local candidate. Examples only; no engine change.
+
 - **ICE: a transport is "failed" only once no candidate is to come; until then "disconnected"**
   (`conf/ice-32-failed-needs-end-of-candidates`; W3C webrtc-pc 5.6.4 `RTCIceTransportState`:
   "failed" is a transport that "has finished gathering, received an indication that there are
