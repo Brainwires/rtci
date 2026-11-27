@@ -69,42 +69,38 @@ impl CipherSuite for CipherSuiteChaCha20Poly1305Sha256 {
         server_random: &[u8],
         is_client: bool,
     ) -> Result<()> {
-        // The key block and the record keys are built in frames that are overwritten when
-        // they return (`crypto::on_erased_stack`): nothing of them is left on the stack.
-        crypto::on_erased_stack(|| {
-            let keys = prf_encryption_keys(
-                provider.crypto(),
-                master_secret,
-                client_random,
-                server_random,
-                EncryptionKeyLengths {
-                    mac: CipherSuiteChaCha20Poly1305Sha256::PRF_MAC_LEN,
-                    key: CipherSuiteChaCha20Poly1305Sha256::PRF_KEY_LEN,
-                    iv: CipherSuiteChaCha20Poly1305Sha256::PRF_IV_LEN,
-                },
-                self.hash_func(),
-            )?;
+        let keys = prf_encryption_keys(
+            provider.crypto(),
+            master_secret,
+            client_random,
+            server_random,
+            EncryptionKeyLengths {
+                mac: CipherSuiteChaCha20Poly1305Sha256::PRF_MAC_LEN,
+                key: CipherSuiteChaCha20Poly1305Sha256::PRF_KEY_LEN,
+                iv: CipherSuiteChaCha20Poly1305Sha256::PRF_IV_LEN,
+            },
+            self.hash_func(),
+        )?;
 
-            if is_client {
-                self.cipher = Some(CryptoChaCha20::new(
-                    provider,
-                    &keys.client_write_key,
-                    &keys.client_write_iv,
-                    &keys.server_write_key,
-                    &keys.server_write_iv,
-                )?);
-            } else {
-                self.cipher = Some(CryptoChaCha20::new(
-                    provider,
-                    &keys.server_write_key,
-                    &keys.server_write_iv,
-                    &keys.client_write_key,
-                    &keys.client_write_iv,
-                )?);
-            }
+        if is_client {
+            self.cipher = Some(CryptoChaCha20::new(
+                provider,
+                &keys.client_write_key,
+                &keys.client_write_iv,
+                &keys.server_write_key,
+                &keys.server_write_iv,
+            )?);
+        } else {
+            self.cipher = Some(CryptoChaCha20::new(
+                provider,
+                &keys.server_write_key,
+                &keys.server_write_iv,
+                &keys.client_write_key,
+                &keys.client_write_iv,
+            )?);
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 
     fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {

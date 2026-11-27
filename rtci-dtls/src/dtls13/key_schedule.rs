@@ -111,8 +111,7 @@ impl KeySchedule {
         prefix: &'static str,
         psk: &[u8],
     ) -> Result<Self> {
-        let early = crypto::on_erased_stack(|| hkdf_extract(crypto, suite.hmac(), &[], psk))
-            .map_err(crypto_error)?;
+        let early = hkdf_extract(crypto, suite.hmac(), &[], psk).map_err(crypto_error)?;
         Ok(Self {
             suite,
             prefix,
@@ -132,7 +131,8 @@ impl KeySchedule {
     /// `HKDF-Expand-Label`, on a stack that is overwritten afterwards
     /// (`crypto::on_erased_stack`): the HMAC leaves the keyed hash states of `secret` and its
     /// output in the provider's frames (tests/key_residue.rs). Every secret of the schedule but
-    /// the extracted ones comes through here.
+    /// the extracted ones comes through here, and each extraction is followed by a call here,
+    /// whose overwrite covers what the extraction left.
     fn expand_label(
         &self,
         crypto: &dyn RTCCrypto,
@@ -200,10 +200,11 @@ impl KeySchedule {
     fn advance(&mut self, crypto: &dyn RTCCrypto, input: &[u8]) -> Result<()> {
         let empty_hash = crypto.hash(self.suite.hash(), &[]).map_err(crypto_error)?;
         let salt = self.derive_secret(crypto, self.current.as_ref(), "derived", &empty_hash)?;
-        self.current = crypto::on_erased_stack(|| {
-            hkdf_extract(crypto, self.suite.hmac(), salt.as_ref(), input)
-        })
-        .map_err(crypto_error)?;
+        // Not on an erased stack of its own: every caller derives a secret with
+        // `expand_label` right after, whose overwrite reaches the frames this HMAC left
+        // (tests/key_residue.rs measures it: wrapping this changed nothing it finds).
+        self.current =
+            hkdf_extract(crypto, self.suite.hmac(), salt.as_ref(), input).map_err(crypto_error)?;
         Ok(())
     }
 

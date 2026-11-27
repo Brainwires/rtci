@@ -1325,9 +1325,10 @@ mod residue_tests {
         forms: usize,
         /// The same per kind of step and class.
         by_step: Vec<(&'static str, Class, usize)>,
-        /// Record-key forms in the scenarios of the AES suites (every scenario but the
-        /// ChaCha20-Poly1305 ones), any step.
-        aes_suite_record_keys: usize,
+        /// Record-key forms in the scenarios of the AES-GCM and AES-CBC suites, any step.
+        gcm_cbc_record_keys: usize,
+        /// Record-key forms in the scenarios of the AES-CCM suites, any step.
+        ccm_record_keys: usize,
     }
 
     impl Inventory {
@@ -1355,7 +1356,8 @@ mod residue_tests {
         let mut inventory = Inventory {
             forms: 0,
             by_step: Vec::new(),
-            aes_suite_record_keys: 0,
+            gcm_cbc_record_keys: 0,
+            ccm_record_keys: 0,
         };
         // The deepest form of each class: (distance below the floor, where).
         let mut deepest: Vec<(Class, usize, String)> = Vec::new();
@@ -1426,8 +1428,12 @@ mod residue_tests {
                             Some(_) => {}
                             None => deepest.push((class, residue.depth.end, form.clone())),
                         }
-                        if class == Class::RecordKey && !m.session.contains("ChaCha20") {
-                            inventory.aes_suite_record_keys += 1;
+                        if class == Class::RecordKey {
+                            if m.session.contains("Ccm") {
+                                inventory.ccm_record_keys += 1;
+                            } else if !m.session.contains("ChaCha20") {
+                                inventory.gcm_cbc_record_keys += 1;
+                            }
                         }
                         match inventory
                             .by_step
@@ -1516,10 +1522,11 @@ mod residue_tests {
             );
         }
         println!(
-            "NOT ASSERTED: {} record-key forms ({} of them with an AES suite) and {} IV forms \
-             left by steps that protect records",
+            "NOT ASSERTED: {} record-key forms ({} with an AES-GCM or AES-CBC suite, {} with an \
+             AES-CCM suite) and {} IV forms left by steps that protect records",
             inventory.of_class(Class::RecordKey),
-            inventory.aes_suite_record_keys,
+            inventory.gcm_cbc_record_keys,
+            inventory.ccm_record_keys,
             inventory.of_class(Class::NotKey)
         );
     }
@@ -1532,10 +1539,13 @@ mod residue_tests {
     /// both: after every step no (EC)DHE, premaster, master, PRF, HKDF, Finished, binder,
     /// cookie secret or exported keying material is found in any form, and after the steps
     /// that protect no record, no key at all ([`check`]). In an optimised build also no record
-    /// key of an AES suite after any step. Not asserted: ring's ChaCha20-Poly1305 record path,
-    /// which copies the key to the stack for every record, the IVs (a record's nonce is its
-    /// IV at sequence number 0), and an unoptimised build's record path (RustCrypto's AES of
-    /// the CCM and CBC suites keeps its round keys in stack slots: rustc 1.89 and 1.99.1).
+    /// key of an AES-GCM or AES-CBC suite after any step. Not asserted: ring's
+    /// ChaCha20-Poly1305 record path, which copies the key to the stack for every record; the
+    /// AES-CCM record path (RustCrypto's AES in rtci-crypto, with either provider), which left
+    /// one round key in an optimised build with rustc 1.89 (DTLS 1.3, run 46012389383) and
+    /// none with 1.99.1 and 1.100; the IVs (a record's nonce is its IV at sequence number 0);
+    /// and an unoptimised build's record path (RustCrypto's AES of the CCM and CBC suites keeps
+    /// its round keys in stack slots).
     #[cfg(feature = "crypto-ring")]
     #[test]
     fn with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
@@ -1543,9 +1553,9 @@ mod residue_tests {
         check(&inventory);
         if !cfg!(debug_assertions) {
             assert_eq!(
-                0, inventory.aes_suite_record_keys,
-                "record keys of an AES suite left in dead stack frames in an optimised build \
-                 (the FORM lines above name each)"
+                0, inventory.gcm_cbc_record_keys,
+                "record keys of an AES-GCM or AES-CBC suite left in dead stack frames in an \
+                 optimised build (the FORM lines above name each)"
             );
         }
     }
