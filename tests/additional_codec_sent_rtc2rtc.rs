@@ -52,9 +52,36 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    /// `minimal`: VP8 and one H.264 format only (as a binding that registers few codecs), so
+    /// the dynamic payload types are not all taken.
+    fn with_codecs(addr: &str, minimal: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
-        media_engine.register_default_codecs()?;
+        if minimal {
+            for (mime, pt, fmtp) in [
+                ("video/VP8", 96u8, ""),
+                (
+                    "video/H264",
+                    102u8,
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+                ),
+            ] {
+                media_engine.register_codec(
+                    RTCRtpCodecParameters {
+                        rtp_codec: rtci::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                            mime_type: mime.to_owned(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: fmtp.to_owned(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type: pt,
+                    },
+                    RtpCodecKind::Video,
+                )?;
+            }
+        } else {
+            media_engine.register_default_codecs()?;
+        }
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
@@ -162,8 +189,15 @@ impl World {
     /// pc1 offers VP8 only; pc2 answers the WPT's edit of that offer. Returns the world, pc1's
     /// sender and the answer's SDP.
     fn connected() -> Result<(Self, RTCRtpSenderId, String)> {
+        Self::connected_with(false)
+    }
+
+    fn connected_with(minimal: bool) -> Result<(Self, RTCRtpSenderId, String)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [
+                Peer::with_codecs("10.0.0.1:5000", minimal)?,
+                Peer::with_codecs("10.0.0.2:5000", minimal)?,
+            ],
             now: Instant::now(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
@@ -435,6 +469,47 @@ fn a_packet_written_with_the_offers_vp8_number_does_not_leave_with_it() -> Resul
         received.iter().all(|p| *p != 96) && unnegotiated == 0,
         "the offer's VP8 number left pc1: received {received:?}, {unnegotiated} unnegotiated at \
          pc2, outbound codec {stats_codec:?}\n{answer}"
+    );
+    Ok(())
+}
+
+/// The same scenario with a media engine of VP8 and one H.264 format at both ends: dynamic
+/// numbers are free, so the answer can add VP8 on one of them after H.264 on 63. RFC 9429
+/// section 5.11 still has the offerer send "the most preferred media format from the remote
+/// description that is also locally supported": H.264 on 63. (Diagnostic: prints the answer's
+/// video section and pc1's send codecs.)
+#[test]
+fn with_free_payload_types_the_offerer_still_sends_the_answers_first_format() -> Result<()> {
+    let (mut world, sender, answer) = World::connected_with(true)?;
+    let video: Vec<&str> = answer
+        .lines()
+        .skip_while(|l| !l.starts_with("m=video"))
+        .take_while(|l| !l.starts_with("m=") || l.starts_with("m=video"))
+        .filter(|l| {
+            l.starts_with("m=video") || l.starts_with("a=rtpmap:") || l.starts_with("a=fmtp:")
+        })
+        .collect();
+    println!(
+        "MINIMAL ENGINE, ANSWER VIDEO SECTION:\n{}",
+        video.join("\n")
+    );
+    let pc1_send_codecs: Vec<(u8, String)> = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(|c| (c.payload_type, c.rtp_codec.mime_type.clone()))
+        .collect();
+    println!("MINIMAL ENGINE, PC1 SEND CODECS AFTER THE ANSWER: {pc1_send_codecs:?}");
+    let (pt, mime) = named_send_format(&mut world, sender);
+    assert_eq!(
+        (pt, mime.as_str()),
+        (63, "video/h264"),
+        "RFC 9429 5.11: the answer's first format it can send; send codecs {pc1_send_codecs:?}\n{}",
+        video.join("\n")
     );
     Ok(())
 }
