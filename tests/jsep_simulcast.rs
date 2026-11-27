@@ -1086,3 +1086,30 @@ fn encodings_made_inactive_leave_the_next_offer_alone() -> TestResult {
     );
     Ok(())
 }
+
+/// `add_track` after a remote offer to receive simulcast reuses the transceiver the offer
+/// created (W3C `addTrack`) and gives its sender the track's encodings; a rollback of the offer
+/// keeps the transceiver (the application touched it, RFC 9429 section 5.7) and those
+/// encodings, not the empty set the sender had before the offer proposed its own.
+#[test]
+fn a_track_added_after_a_simulcast_offer_survives_its_rollback() -> TestResult {
+    let mut pc = default_peer()?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0086))?;
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.get_transceivers().count(), 1);
+    let ssrcs: Vec<_> = pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings
+        .iter()
+        .map(|e| e.rtp_coding_parameters.ssrc)
+        .collect();
+    assert_eq!(ssrcs, [Some(0x0516_0086)]);
+    Ok(())
+}

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A transceiver a remote offer to receive simulcast creates sends the offered streams**
+  (`conf/jsep-86-simulcast-answer-for-multiple-send-encodings`; W3C webrtc-pc "set the
+  RTCSessionDescription": "If no suitable transceiver was found ... Create an RTCRtpSender,
+  sender, from the media description using proposedSendEncodings"). The sender of such a
+  transceiver, and of a found one that had no encodings yet, was left without encodings, so
+  after `set_direction(Sendonly)` the answer sent one stream with no `a=rid` and no
+  `a=simulcast` (WPT `webrtc/protocol/simulcast-answer.html`, "createAnswer() with multiple
+  send encodings should create simulcast answer"). Such a sender now takes one encoding per
+  offered rid, as a sender with one rid-less encoding already did, and the answer writes
+  `a=rid:<rid> send` for each and `a=simulcast:send foo;bar;baz` (RFC 8853 section 5.3.2). A
+  track added before the offer is rolled back keeps its own encodings over the rollback. Tests
+  `jsep_simulcast.rs::a_transceiver_a_simulcast_offer_creates_sends_the_offered_streams`,
+  `an_offered_pause_mark_leaves_the_proposed_encoding_active`,
+  `encodings_made_inactive_leave_the_next_offer_alone`,
+  `a_track_added_after_a_simulcast_offer_survives_its_rollback`; audit row WEBRTC-4.4.1.4-55
+  (stays `tested`, the violation recorded in its note).
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
