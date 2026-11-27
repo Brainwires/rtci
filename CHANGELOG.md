@@ -27,6 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now expect the failures at the timer (`an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_with_the_pac_timer`,
   renamed from `..._at_once`).
 
+- **ICE consent is kept per 5-tuple, not per remote candidate** (`conf/ice-27-consent-per-5-tuple`;
+  RFC 7675 section 1, "Consent to send applies to a single 5-tuple", and section 5.1, "if a
+  valid STUN binding response has not been received from the remote peer's transport address
+  in 30 seconds, the endpoint MUST cease transmission on that 5-tuple"). The time of the last
+  consent response was kept on the remote candidate, so with two local candidates L1 and L2 and
+  one remote R, a response on (L2, R) (a check cancelled at the nomination and answered late,
+  or one the peer's requests trigger) renewed the consent of the selected (L1, R) although
+  nothing was answered on that 5-tuple, and a dead (L1, R) path was not detected. Each pair
+  now records its own last consent (`CandidatePair::last_consent`); the selected pair's expiry,
+  its Disconnected timer, the first consent check after a selection, the controlling agent's
+  nominating path and the path kept across an ICE restart read the pairs of the same 5-tuple
+  (same local base and remote candidate) only. `Candidate::last_consent` still reports the last
+  response from that remote candidate on any pair. Tests:
+  `rtci-ice/src/agent/agent_consent_delay_test.rs::test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent`,
+  `test_the_response_that_validated_another_pair_is_the_selected_pairs_consent` (a controlled
+  agent selects a valid pair with a peer-reflexive local candidate; the one response is on the
+  checked pair, the same 5-tuple).
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;

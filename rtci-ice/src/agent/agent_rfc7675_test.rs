@@ -360,6 +360,7 @@ fn test_old_generation_consent_requests_are_answered_during_a_restart() {
         } else {
             a.candidate_pairs[0].state = CandidatePairState::Succeeded;
             a.remote_candidates[0].last_consent = Some(start);
+            a.candidate_pairs[0].last_consent = Some(start);
             a.set_selected_pair(Some(start), Some(0));
         }
         let _ = sent(&mut a);
