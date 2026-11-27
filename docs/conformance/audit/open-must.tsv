@@ -115,7 +115,6 @@ WEBRTC-5.6.4-2	C	M	ice	W3C failed needs the end-of-candidates indication: withou
 WEBRTC-5.6.4-9	C	M	ice	As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep)
 WEBRTC-6.1.2-3	B	S	sctp	A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep)
 WEBRTC-6.2.8-1	B	S	sctp	A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep)
-RFC8489-9.2.5-14	C	S	turn	Discard an unsigned 400 to the anonymous first request too (rtci-turn credential.rs check_response, no session) so it retransmits and times out; tests with a 400 for the anonymous and the signed request (audit-5 sweep)
 RFC8851-6.3-5	B	S	jsep	A test whose offer lists a `pt=` none of the answerer's formats keep: the answer drops that a=rid line (audit-6 sweep)
 RFC8834-4.1-24	B	S	rtp	As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep)
 RFC5746-3.6-5	B	S	dtls-srtp	A DTLS 1.2 server test handed a ClientHello with an unknown extension type that completes the handshake (audit-6 sweep)

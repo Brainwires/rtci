@@ -168,6 +168,7 @@ mod rejected_mline_tests {
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
+            bundle_only_browser_form: false,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -334,8 +335,8 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_fec_mime_type,
-    repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, codec_parameters_search,
+    is_fec_mime_type, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
@@ -1564,7 +1565,11 @@ impl RTCPeerConnection {
 
             // An answer has only feedback the offer has for the format (RFC 4585 section 4.2).
             let feedbacks = match &media_section.offered_codecs {
-                Some(offered) => match codec_parameters_fuzzy_search(&codec.rtp_codec, offered) {
+                Some(offered) => match codec_parameters_search(
+                    &codec.rtp_codec,
+                    Some(codec.payload_type),
+                    offered,
+                ) {
                     (offered, CodecMatch::Exact | CodecMatch::Partial) => {
                         rtcp_feedback_intersection(
                             &codec.rtp_codec.rtcp_feedback,
@@ -2369,7 +2374,11 @@ fn reject_written_section(media: &mut MediaDescription) -> bool {
 /// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
 /// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
-fn make_bundle_only(media: &mut MediaDescription) {
+///
+/// With `rtcp_mux` (`SettingEngineBuilder::with_bundle_only_sections_in_browser_form`)
+/// an RTP section keeps one BUNDLE attribute, `a=rtcp-mux`, against RFC 9143 sections 7.1.3 and
+/// 9.3.1.1: Chromium, WebKit and Firefox refuse an offer whose bundle-only RTP section lacks it.
+fn make_bundle_only(media: &mut MediaDescription, rtcp_mux: bool) {
     media.media_name.port = RangedPort {
         value: 0,
         range: None,
@@ -2377,6 +2386,14 @@ fn make_bundle_only(media: &mut MediaDescription) {
     media
         .attributes
         .retain(|a| !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates");
+    if rtcp_mux && media.media_name.media != MEDIA_SECTION_APPLICATION {
+        media
+            .attributes
+            .push(sdp::description::common::Attribute::new(
+                ATTR_KEY_RTCPMUX.to_owned(),
+                None,
+            ));
+    }
     media
         .attributes
         .push(sdp::description::common::Attribute::new(
@@ -2704,6 +2721,11 @@ pub(crate) struct PopulateSdpParams {
     /// `SettingEngineBuilder::with_bundle_attributes_repeated(false)`: the form of RFC 9143
     /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
+    /// `SettingEngineBuilder::with_bundle_only_sections_in_browser_form`:
+    /// an initial offer's bundle-only RTP sections say `a=rtcp-mux`, every bundle-only section
+    /// says its group's ICE credentials, and when it has a bundle-only section its fingerprints
+    /// are at session level too.
+    pub(crate) bundle_only_browser_form: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -2817,6 +2839,8 @@ impl RTCPeerConnection {
         // The media types (`audio`, `video`, `application`) of the sections so far that carry
         // their own transport parameters, for the bundle policy.
         let mut with_transport: Vec<String> = vec![];
+        // Whether a section was made bundle-only (an initial offer).
+        let mut any_bundle_only = false;
 
         let answer_payload_types = answer_payload_types(media_engine, media_sections);
         let mut candidates_added = false;
@@ -3038,7 +3062,8 @@ impl RTCPeerConnection {
                             && group.is_some()
                             && let Some(desc) = d.media_descriptions.last_mut()
                         {
-                            make_bundle_only(desc);
+                            make_bundle_only(desc, params.bundle_only_browser_form);
+                            any_bundle_only = true;
                         } else {
                             with_transport.push(media_type);
                         }
@@ -3087,7 +3112,16 @@ impl RTCPeerConnection {
             }
         }
 
-        if !params.media_description_fingerprint {
+        // RFC 8122 section 5: "The fingerprint attribute may be either a session-level or a
+        // media-level SDP attribute"; RFC 9429 section 5.2.1: the m= sections "MUST all have the
+        // same fingerprint value or values [RFC8122], or these values MUST be session-level
+        // attributes". With the setting, an initial offer with a bundle-only section has them at
+        // session level as well, so the bundle-only sections (which carry none, RFC 9143 7.1.3)
+        // see one: Chromium and WebKit otherwise answer a bundle-only data section with port
+        // zero, and Firefox does not apply the offer.
+        if !params.media_description_fingerprint
+            || (params.bundle_only_browser_form && any_bundle_only)
+        {
             for fingerprint in dtls_fingerprints {
                 d = d.with_fingerprint(
                     fingerprint.algorithm.clone(),
@@ -3302,6 +3336,50 @@ impl RTCPeerConnection {
                 .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
         }
         make_msid_pairs_unique(&mut d);
+
+        // `SettingEngineBuilder::with_bundle_only_sections_in_browser_form`: each bundle-only
+        // section says its group's ICE credentials (the tagged section's), against RFC 9429
+        // section 5.2.1 ("Bundle-only "m=" sections MUST NOT contain any ICE credentials") and
+        // RFC 9143 section 7.1.3. Firefox compares each m= section's credentials in a later
+        // remote description with the ones of the current one (JsepSessionImpl
+        // IceCredentialsDiffer) and takes the credentials a later answer repeats in a section
+        // that had none for an ICE restart; it also refuses a later description without them
+        // in every section ("no ice-ufrag attribute at level 1"), so the tagged-only form of
+        // RFC 9143 7.1.3 for later descriptions does not help (test-env run 45908363443).
+        if params.bundle_only_browser_form && any_bundle_only {
+            let credentials: Vec<Option<(String, String)>> = d
+                .media_descriptions
+                .iter()
+                .map(|media| {
+                    if !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
+                        return None;
+                    }
+                    let tagged = tagged_section(&d, media)?;
+                    Some((
+                        tagged.attribute("ice-ufrag")??.to_owned(),
+                        tagged.attribute("ice-pwd")??.to_owned(),
+                    ))
+                })
+                .collect();
+            for (media, credentials) in d.media_descriptions.iter_mut().zip(credentials) {
+                let Some((ufrag, pwd)) = credentials else {
+                    continue;
+                };
+                let at = media
+                    .attributes
+                    .iter()
+                    .position(|a| a.key == ATTR_KEY_BUNDLE_ONLY)
+                    .unwrap_or(media.attributes.len());
+                media.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new("ice-pwd".to_owned(), Some(pwd)),
+                );
+                media.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new("ice-ufrag".to_owned(), Some(ufrag)),
+                );
+            }
+        }
 
         Ok(d)
     }

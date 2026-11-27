@@ -338,6 +338,53 @@ pub(crate) fn codec_parameters_fuzzy_search(
     (RTCRtpCodecParameters::default(), CodecMatch::None)
 }
 
+/// [`codec_parameters_fuzzy_search`], taking among the formats of `haystack` it matches
+/// exactly the one that is the needle's own.
+///
+/// The exact match of the fuzzy search compares a format's configuration only (H.264 profile
+/// and `packetization-mode`, RFC 6184 section 8.2.2, where the level may differ; VP9
+/// `profile-id`; AV1 `profile`; H.265 profile and tier), so several registered formats of one
+/// configuration that differ in level or in another parameter all match, and the first
+/// one would stand for all of them (an offer gave the payload types of H.264 High levels 4.0
+/// to 5.1 the line of Level 5.0). Among the exact matches this takes, in order:
+///
+/// 1. one with the same parameters (W3C webrtc 5.4 codec dictionary match, asymmetrical
+///    parameters included) and the payload type `payload_type`,
+/// 2. one with the same parameters,
+/// 3. one with the payload type `payload_type`,
+/// 4. the first, as [`codec_parameters_fuzzy_search`] does.
+///
+/// A partial match or none is the fuzzy search's.
+pub(crate) fn codec_parameters_search(
+    needle_rtp_codec: &RTCRtpCodec,
+    payload_type: Option<PayloadType>,
+    haystack: &[RTCRtpCodecParameters],
+) -> (RTCRtpCodecParameters, CodecMatch) {
+    let (first, matched) = codec_parameters_fuzzy_search(needle_rtp_codec, haystack);
+    if matched != CodecMatch::Exact {
+        return (first, matched);
+    }
+    let exact: Vec<&RTCRtpCodecParameters> = haystack
+        .iter()
+        .filter(|c| {
+            codec_parameters_fuzzy_search(needle_rtp_codec, std::slice::from_ref(*c)).1
+                == CodecMatch::Exact
+        })
+        .collect();
+    let same_payload_type = |c: &&&RTCRtpCodecParameters| Some(c.payload_type) == payload_type;
+    let same_parameters =
+        |c: &&&RTCRtpCodecParameters| codec_dictionary_match(needle_rtp_codec, &c.rtp_codec);
+    let own = exact
+        .iter()
+        .find(|c| same_parameters(c) && same_payload_type(c))
+        .or_else(|| exact.iter().find(same_parameters))
+        .or_else(|| exact.iter().find(same_payload_type));
+    match own {
+        Some(own) => ((*own).clone(), CodecMatch::Exact),
+        None => (first, matched),
+    }
+}
+
 /// W3C webrtc 5.4 "codec dictionary match" with `ignoreAsymmetricalParameters` false (its
 /// default): see [`codec_dictionary_match_with`].
 pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {

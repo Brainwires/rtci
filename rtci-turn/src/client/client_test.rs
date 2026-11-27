@@ -1016,19 +1016,21 @@ fn test_an_allocate_that_is_never_answered_times_out_under_the_id_allocate_retur
     Ok(())
 }
 
-/// An error reply to the anonymous Allocate that carries no NONCE, or no REALM — a 400, a 403,
-/// a 486, or a server that simply left the attribute out — is reported as an
+/// An error reply to the anonymous Allocate that carries no NONCE, or no REALM — a 403, a 486,
+/// or a server that simply left the attribute out — is reported as an
 /// [`Event::AllocateError`], and that too has to name the allocation its caller knows: the id
 /// [`Client::allocate`] returned, as a response and now a timeout do. It named the anonymous
 /// request instead, so a caller matching on what `allocate()` told it never saw the error,
 /// and waited on the allocation for ever.
 #[test]
 fn test_an_error_reply_without_a_nonce_is_reported_under_the_id_allocate_returned() -> Result<()> {
-    use stun::error_code::{CODE_BAD_REQUEST, CODE_UNAUTHORIZED, ErrorCode};
+    use stun::error_code::{CODE_FORBIDDEN, CODE_UNAUTHORIZED, ErrorCode};
 
-    // Neither attribute, and a 401 that remembered the nonce but not the realm.
+    // Neither attribute, and a 401 that remembered the nonce but not the realm. (Not a 400:
+    // RFC 8489 section 9.2.5 has an unsigned 400 "discarded, as if it were never received",
+    // so it reports nothing; `test_an_unsigned_400_to_the_first_allocate_is_never_received`.)
     let replies: [(ErrorCode, Option<Nonce>); 2] = [
-        (CODE_BAD_REQUEST, None),
+        (CODE_FORBIDDEN, None),
         (
             CODE_UNAUTHORIZED,
             Some(Nonce::new(ATTR_NONCE, "nonce".to_owned())),

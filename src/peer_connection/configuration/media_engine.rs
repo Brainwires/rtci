@@ -272,8 +272,9 @@ use crate::peer_connection::sdp::{
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_flexfec_mime_type,
-    is_repair_codec, parse_rtx_apt, repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, codec_parameters_search,
+    is_flexfec_mime_type, is_repair_codec, parse_rtx_apt, repair_family,
+    rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::{
@@ -1587,7 +1588,11 @@ impl MediaEngine {
             // replace the apt value with the original codec's payload type
             let mut to_match_codec = remote_codec.clone();
             if let Some(apt_codec) = apt_codec {
-                let (apt_matched, mt) = codec_parameters_fuzzy_search(&apt_codec.rtp_codec, codecs);
+                let (apt_matched, mt) = codec_parameters_search(
+                    &apt_codec.rtp_codec,
+                    Some(apt_codec.payload_type),
+                    codecs,
+                );
                 if mt == apt_match {
                     to_match_codec.rtp_codec.sdp_fmtp_line =
                         to_match_codec.rtp_codec.sdp_fmtp_line.replacen(
@@ -1607,8 +1612,11 @@ impl MediaEngine {
             return Ok((local_codec, match_type));
         }
 
-        let (local_codec, match_type) =
-            codec_parameters_fuzzy_search(&remote_codec.rtp_codec, codecs);
+        let (local_codec, match_type) = codec_parameters_search(
+            &remote_codec.rtp_codec,
+            Some(remote_codec.payload_type),
+            codecs,
+        );
         Ok((local_codec, match_type))
     }
 
@@ -1824,7 +1832,7 @@ impl MediaEngine {
         // formats of one codec (H.264 profiles) are both offered.
         let negotiated = out.clone();
         for codec in registered.iter().filter(|c| !is_rtx(&c.rtp_codec)) {
-            match codec_parameters_fuzzy_search(&codec.rtp_codec, &negotiated) {
+            match codec_parameters_search(&codec.rtp_codec, Some(codec.payload_type), &negotiated) {
                 (negotiated, CodecMatch::Exact) => {
                     primaries.insert(codec.payload_type, negotiated.payload_type);
                 }
@@ -2417,7 +2425,10 @@ impl MediaEngine {
         if is_repair_codec(&codec.rtp_codec) {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }
-        let (local, matched) = codec_parameters_fuzzy_search(&codec.rtp_codec, registered);
+        // The registered format that is this one: by its parameters and payload type, not the
+        // first of its configuration (several H.264 levels of one profile are registered).
+        let (local, matched) =
+            codec_parameters_search(&codec.rtp_codec, Some(codec.payload_type), registered);
         if matched == CodecMatch::None
             || (matched == CodecMatch::Partial && has_symmetric_configuration(&codec.rtp_codec))
         {

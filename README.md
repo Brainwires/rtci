@@ -56,13 +56,13 @@ WebRTC uses); every row names the code and the test that proves it. From
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5093 | 5062 (99.4 %) | 5030 (98.8 %) |
-| SHOULD | 987 | 921 (93.3 %) | 915 (92.7 %) |
+| MUST | 5094 | 5064 (99.4 %) | 5032 (98.8 %) |
+| SHOULD | 988 | 922 (93.3 %) | 916 (92.7 %) |
 | MAY | 605 | 501 (82.8 %) | 500 (82.6 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. 31 MUST rows are open (17 untested,
-11 partial, 2 missing, 1 violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+browser or a deployed peer cannot interoperate with it by default. 30 MUST rows are open (17 untested,
+11 partial, 2 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by the
 owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a MUST"),
 each with the setting that gives the RFC form (the `StrictRfc` profile sets all three): the H.264 de-interleaving order
@@ -120,6 +120,17 @@ The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnecti
 | `handle_write(TaggedRTCMessage)` | in | Queue an outbound RTP/RTCP/data-channel message |
 | `close()` | in | Shut the connection down |
 
+After `close()` keep the loop running for the connection until `poll_timeout()` returns `None`:
+drain `poll_write` onto the socket, feed what arrives with `handle_read`, call `handle_timeout`
+at `poll_timeout`. A closed connection does nothing else, but the engine's TURN allocations over
+UDP are deleted with a Refresh of LIFETIME 0 that is an ordinary STUN transaction (RFC 8656
+section 8, RFC 8489 section 6.2.1): it is retransmitted, a 438 is answered with the new nonce,
+and an Allocate still under way is followed and its allocation deleted. Each one done raises
+`OnTurnAllocationReleased` with the local address it used; when `poll_timeout()` is `None` the
+socket is free for another connection, whose Allocate on the same 5-tuple would otherwise be
+refused with 437 while the old allocation lives (up to its lifetime, 10 minutes by default).
+Dropping a connection without `close()` sends nothing.
+
 `handle_event` is also part of the trait, but `RTCEvent` is currently uninhabited: no value of it can be constructed,
 so there is nothing to call it with. It exists so the signature is already right when the first inbound event variant
 is added.
@@ -166,8 +177,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   let answer = RTCSessionDescription::answer(answer_sdp)?;
     //   pc.set_remote_description(Instant::now(), answer)?;
 
-    // 3. You own the socket.
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    // 3. You own the socket. Bind a concrete local address, the one you add as a host
+    //    candidate ("Feeding ICE Candidates"): `local_addr` below must be a local candidate's
+    //    address, and a socket bound to 0.0.0.0 reports 0.0.0.0:port, which none is.
+    let socket = UdpSocket::bind("192.168.1.100:0").await?;
     let local_addr = socket.local_addr()?;
     let mut buf = vec![0u8; 2000];
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(86400);
@@ -254,6 +267,40 @@ needed only when the engine is to run TCP (ICE-TCP candidates, TURN over TCP or 
 tagged `TransportProtocol::TCP` there is one the application framed itself, for a TCP candidate
 it added on its own.
 
+**The local address of a datagram.** The `local_addr` of a datagram given to `handle_read` is
+the address of the local *candidate* it arrived on, not necessarily the socket's own address:
+the ICE agent matches it exactly against its local candidates (RFC 8445 section 7.3.1.4) and
+discards anything else with "Discarded message, not a valid local candidate". Two cases trip
+ported code:
+
+- **A socket bound to the unspecified address** (`0.0.0.0:port`, `[::]:port`) must report the
+  concrete local address each datagram was received on (its destination address, from
+  `IP_PKTINFO` / `IPV6_RECVPKTINFO` or the platform's equivalent), which is the host
+  candidate's address; `socket.local_addr()` matches no host candidate. Or bind one socket per
+  local address, as `rtci-stream-driver`'s `PeerDriver` does (`PeerDriverConfig::addresses`).
+  A datagram that only "works" on `0.0.0.0:port` does so by accident: a server-reflexive
+  candidate whose related address is `0.0.0.0:port` matches it.
+- **A datagram relayed by a TURN allocation the application runs**
+  (`with_relay_gathering(RelayGathering::Application)`, relay candidate added with
+  `add_local_candidate`) carries `local_addr` = the relayed address (the relay candidate's
+  address), `peer_addr` = the peer from the Data indication or the channel. In the other
+  direction, a datagram from `poll_write` whose `transport.local_addr` is the relayed address
+  goes through the allocation (Send indication or ChannelData to `transport.peer_addr`), not
+  out of a socket. This is what the engine does for the allocations it runs itself.
+
+```text
+// wildcard-bound socket: the destination address of the datagram, not 0.0.0.0:port
+let local_addr = SocketAddr::new(destination_ip /* IP_PKTINFO */, socket.local_addr()?.port());
+// relayed by the application's TURN client
+pc.handle_read(TaggedBytesMut { now, message: payload, transport: TransportContext {
+    local_addr: relayed_addr, peer_addr: peer, transport_protocol: TransportProtocol::UDP, ecn: None } })?;
+// and out
+while let Some(msg) = pc.poll_write() {
+    if msg.transport.local_addr == relayed_addr { turn.send_to(&msg.message, msg.transport.peer_addr)?; }
+    else { socket_of(msg.transport.local_addr).send_to(&msg.message, msg.transport.peer_addr)?; }
+}
+```
+
 **Streams** (`rtci::shared::stream`): the engine names its TCP connections and listeners by id
 and the application only owns the sockets. After each input:
 
@@ -329,7 +376,9 @@ routes between connections: by the ufrag the first Binding request names (RFC 84
 
 Because RTC does no I/O, it also does no candidate gathering: **you** bind the sockets, so **you** tell the connection
 which local candidates exist. Build them with the `rtci-ice` candidate constructors and hand each one to
-`add_local_candidate`:
+`add_local_candidate`. A host candidate's address is a concrete local address, and it is the `local_addr` of every
+datagram you then feed for it (see "The local address of a datagram" above: not `0.0.0.0:port` for a wildcard-bound
+socket; the relayed address for a datagram relayed by your own TURN client):
 
 ```rust,no_run
 use rtci::peer_connection::RTCPeerConnectionBuilder;
@@ -368,6 +417,14 @@ After an ICE restart, send your local candidates to the peer again: a candidate 
 not announced again, and without them a peer reached only through a relay never selects a pair in the new generation.
 (The restarted generation keeps its local candidates by default;
 `SettingEngineBuilder::with_discard_local_candidates_during_ice_restart(true)` drops them instead.)
+
+Browsers often send their host candidates under `<uuid>.local` names
+(draft-ietf-mmusic-mdns-ice-candidates). By default (`MulticastDnsMode::QueryOnly`) the connection resolves such a
+name with an mDNS query, which leaves through `poll_write` to `224.0.0.251:5353`, as the draft's processing procedure
+says (section 3.2.1, step 3). A name that does not resolve, the usual case when the peer is not on your link, is
+ignored when its query ends (10 s by default, `SettingEngineBuilder::with_multicast_dns_timeout`) and logged at debug
+level only; the peer's checks can still reach you as a peer-reflexive candidate. To send no mDNS at all and ignore
+remote `.local` candidates at once, set `SettingEngineBuilder::with_multicast_dns_mode(MulticastDnsMode::Disabled)`.
 
 ## Back-Pressure
 
@@ -506,6 +563,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `Performance`: the defaults, with each behaviour where an RFC permits a cheaper form that does the same thing set to
   it (RTCP `T_rr_interval` 1 s, congestion control feedback and reports inside RFC 3550's 5%), each value with its
   measured saving and cost. It never turns a capability off or leaves what the RFCs permit.
+
+**Known limit of the default profile: bundle-only sections and browsers.** An initial offer's bundle-only m= sections
+are written in the RFC 9143 / RFC 9429 form (RFC 9143 7.1.3 and 9.3.1.1, RFC 9429 5.2.1: no `a=rtcp-mux`, no ICE
+credentials, no other BUNDLE attribute), which
+Chromium, WebKit and Firefox refuse. With the default profile no browser accepts an rtci offer under `max-bundle` with
+more than one m= section (nor, by the same rule, a `balanced` offer with two sections of one media type). Use the
+`Chrome` profile, or
+`SettingEngineBuilder::with_bundle_only_sections_in_browser_form(true)` alone, or `balanced`
+with one section of each type. Offers from browsers and answers are not affected.
 
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads

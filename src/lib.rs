@@ -107,8 +107,10 @@
 //!     .with_media_engine(media_engine)
 //!     .build(Instant::now())?;
 //!
-//! // Bind UDP socket for network I/O
-//! let socket = UdpSocket::bind("0.0.0.0:0").await?;
+//! // Bind UDP socket for network I/O, on the concrete address of the host candidate you add:
+//! // `local_addr` must be a local candidate's address, and a socket bound to 0.0.0.0 reports
+//! // 0.0.0.0:port, which none is (README, "The local address of a datagram").
+//! let socket = UdpSocket::bind("192.168.1.100:0").await?;
 //! let local_addr = socket.local_addr()?;
 //!
 //! let mut buf = vec![0u8; 2000];

@@ -353,7 +353,7 @@ use crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::RTCRtpSender;
 use crate::rtp_transceiver::rtp_sender::internal::validate_send_encodings;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RtpCodecKind, codec_parameters_fuzzy_search,
+    CodecMatch, RtpCodecKind, codec_parameters_search,
 };
 use crate::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiver, RTCRtpTransceiverId,

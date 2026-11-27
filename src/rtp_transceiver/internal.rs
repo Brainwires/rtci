@@ -6,15 +6,15 @@ use crate::peer_connection::sdp::codecs_from_media_description;
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::internal::RTCRtpSenderInternal;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, codec_dictionary_match, codec_parameters_fuzzy_search, find_rtx_payload_type,
-    is_repair_codec, repair_family, rtcp_feedback_intersection,
+    CodecMatch, codec_dictionary_match, codec_parameters_fuzzy_search, codec_parameters_search,
+    find_rtx_payload_type, is_repair_codec, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpHeaderExtensionToNegotiate, RtpCodecKind,
 };
 use crate::rtp_transceiver::{
     PayloadType, RTCFecGroupSemantics, RTCRemoteBandwidth, RTCRtpTransceiverDirection,
-    RTCRtpTransceiverInit, fmtp,
+    RTCRtpTransceiverInit,
 };
 use interceptor::Interceptor;
 use log::trace;
@@ -1161,7 +1161,8 @@ impl RTCRtpTransceiverInternal {
         // (the receive path finds a RED packet's primary encoding by that list).
         let local_number = |remote: PayloadType| -> Option<PayloadType> {
             let named = given.iter().find(|codec| codec.payload_type == remote)?;
-            match codec_parameters_fuzzy_search(&named.rtp_codec, &left_codecs) {
+            match codec_parameters_search(&named.rtp_codec, Some(named.payload_type), &left_codecs)
+            {
                 (_, CodecMatch::None) => None,
                 (local, _) => Some(local.payload_type),
             }
@@ -1203,8 +1204,15 @@ impl RTCRtpTransceiverInternal {
                     continue;
                 }
 
-                let (match_codec, match_type) =
-                    codec_parameters_fuzzy_search(&remote_codec.rtp_codec, &left_codecs);
+                // The local format that is this one (its parameters, its payload type), not the
+                // first of its configuration: several H.264 levels of one profile are each
+                // their own format (RFC 6184 section 8.2.2 lets the level differ, so any of
+                // them matches).
+                let (match_codec, match_type) = codec_parameters_search(
+                    &remote_codec.rtp_codec,
+                    Some(remote_codec.payload_type),
+                    &left_codecs,
+                );
                 // A format whose parameters are its configuration (H.264, VP9, AV1) is not
                 // matched by name alone: see `has_symmetric_configuration`.
                 if match_type == CodecMatch::Partial
@@ -1233,26 +1241,12 @@ impl RTCRtpTransceiverInternal {
                     // removed matched codec for next round
                     remote_codecs.remove(remote_codec_idx);
 
-                    let needle_fmtp = fmtp::parse(
-                        match_codec.rtp_codec.mime_type.as_str(),
-                        //match_codec.RTPCodecCapability.ClockRate,
-                        //match_codec.RTPCodecCapability.Channels,
-                        match_codec.rtp_codec.sdp_fmtp_line.as_str(),
-                    );
-
-                    for left_codec_idx in (0..left_codecs.len()).rev() {
-                        let left_codec = &left_codecs[left_codec_idx];
-                        let left_codec_fmtp = fmtp::parse(
-                            left_codec.rtp_codec.mime_type.as_str(),
-                            //left_codec.RTPCodecCapability.ClockRate,
-                            //left_codec.RTPCodecCapability.Channels,
-                            left_codec.rtp_codec.sdp_fmtp_line.as_str(),
-                        );
-
-                        if needle_fmtp.match_fmtp(&*left_codec_fmtp) {
-                            left_codecs.remove(left_codec_idx);
-                            break;
-                        }
+                    // The matched local format is taken: another remote format of the same
+                    // configuration matches one of the others (before, the last local format
+                    // of the configuration was removed instead, and every remote one took the
+                    // first's payload type).
+                    if let Some(taken) = left_codecs.iter().position(|left| left == &match_codec) {
+                        left_codecs.remove(taken);
                     }
                 }
             }

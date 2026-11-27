@@ -44,7 +44,16 @@ pub enum TransportProtocol {
 /// Transport Context with local address, peer address, ECN, protocol, etc.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TransportContext {
-    /// Local socket address, either IPv4 or IPv6
+    /// Local address, either IPv4 or IPv6.
+    ///
+    /// For a datagram handed to a connection's `handle_read`, the transport address of the
+    /// local ICE candidate it arrived on, which the ICE agent matches exactly: a host
+    /// candidate's address, or, for a datagram a TURN allocation relayed, the relayed address
+    /// (the relay candidate's). A socket bound to the unspecified address (`0.0.0.0:port`,
+    /// `[::]:port`) reports the concrete address the datagram was received on (its destination
+    /// address, e.g. from `IP_PKTINFO` / `IPV6_RECVPKTINFO`), not its own unspecified one. For a
+    /// datagram from `poll_write`, the address to send from: a host candidate's socket, or a
+    /// relayed address, whose datagrams go through that TURN allocation.
     pub local_addr: SocketAddr,
     /// Peer socket address, either IPv4 or IPv6
     pub peer_addr: SocketAddr,

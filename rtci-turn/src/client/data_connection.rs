@@ -14,7 +14,7 @@ use stun::message::*;
 use stun::textattrs::*;
 use stun::validated::Rejection;
 
-use super::credential::Credential;
+use super::credential::{Checked, Credential};
 use super::{RequestError, validator};
 use crate::proto::connid::ConnectionId;
 use shared::error::{Error, Result};
@@ -263,7 +263,16 @@ impl DataConnection {
                 &validator(),
                 self.crypto_provider.crypto(),
             ) {
-                Ok(valid) => valid,
+                Ok(Checked::Valid(valid)) => valid,
+                Ok(Checked::NeverReceived) => {
+                    // RFC 8489 §9.2.5: an unsigned 400 is discarded as if it had never
+                    // arrived; the bind waits on, until its deadline.
+                    debug!(
+                        "data connection {}: {msg}: discarded as never received",
+                        self.connection_id
+                    );
+                    continue;
+                }
                 Err(Rejection::IntegrityMissing | Rejection::IntegrityMismatch) => {
                     debug!(
                         "data connection {}: {msg}: integrity attribute missing or wrong",
