@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `data-channels-offer-answer`, `ice-tcp-active-passive`, `trickle-ice`, `trickle-ice-host`,
   `trickle-ice-srflx`, `trickle-ice-relay`, `perfect-negotiation`, `data-channels-simple`; the
   browser pages now forward the empty or `null` candidate, and `data-channels-offer-answer`
-  hands the peer's trickled candidate to `add_remote_candidate`, not `add_local_candidate`).
+  hands the peer's trickled candidate to `add_remote_candidate`, not `add_local_candidate`:
+  it connected before only because the offerer, which had the answerer's candidate from the
+  answer's SDP, checked it and the answerer learnt the offerer as a peer-reflexive candidate;
+  the offer it posted was created before its candidate and carried none).
   Browser examples whose page sends only its description (`ice-restart`, `ice-tcp`,
   `play-from-disk-renegotiation`, `play-from-disk-playlist-control`) give up after 30 s of
   "disconnected" on their own timer. The copy-paste examples (`data-channels`, `reflect`,
