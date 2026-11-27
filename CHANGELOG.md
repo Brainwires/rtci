@@ -17,13 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback) all five failed, saying nothing about the engine. Each now first sends a probe to
   224.0.0.251:5353 on its interface and waits up to two seconds for it on a socket of its own
   joined there; if it does not come back the test is skipped with the reason printed, except on
-  Linux, where the hosted runners always deliver and a failing probe fails the test (the
-  real-socket coverage is guaranteed there). The shared mDNS budget of two drivers (draft
+  the jobs that say multicast works there (`RTCI_EXPECT_HOST_MULTICAST`, which `cargo.yml` sets
+  to Linux everywhere, plus macOS and GitHub-hosted Windows in the platform job: the places
+  these tests run today), where a failing probe fails the test, so the skip cannot quietly
+  remove coverage. Each probe uses the sockets of the code under test: the driver's tests join
+  and send on the address's interface (`IP_MULTICAST_IF`), the interop tests use a
+  `MulticastSocket::new()` as their rtc peer does (the system's route for the group, which
+  `cargo.yml` points at loopback on GitHub's macOS image). The shared mDNS budget of two drivers (draft
   section 7.1) moves to virtual time
   (`mdns_virtual_time.rs::two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time`),
   where it does not depend on multicast at all; the real-socket file keeps the two smoke tests
-  (egress interface, loopback). `socket2` becomes a dev-dependency of `rtci` (already in the
-  tree through `rtci-mdns`). No engine change.
+  (egress interface, loopback). No engine change.
 
 ### Security
 

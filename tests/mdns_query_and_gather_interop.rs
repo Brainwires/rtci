@@ -103,35 +103,22 @@ fn mdns_egress_ip() -> Option<std::net::IpAddr> {
         .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
-/// Whether the host delivers a datagram sent to the mDNS group (224.0.0.251:5353) from `ip`'s
-/// interface back to a socket of this process joined to the group there, within two seconds.
-/// The QueryAndGather tests resolve each peer's `.local` name over the host's mDNS group: a
-/// host that does not loop multicast back (seen on a self-hosted Windows VM, NAT address
-/// 10.0.2.15: no mDNS datagram arrived) fails them whatever the engine does. The probe is a DNS
-/// response with no records and a random ID (other responders ignore it), sent up to ten times
-/// 200 ms apart; it asks the host one question before the test, which runs once. (The same
-/// probe is in `examples/stream-driver/tests/mdns.rs`.)
-fn host_loops_multicast(ip: std::net::IpAddr) -> bool {
-    use std::net::{IpAddr, SocketAddr};
-    let IpAddr::V4(interface) = ip else {
-        return false;
-    };
+/// Whether the host delivers a datagram this process sends to the mDNS group (224.0.0.251:5353)
+/// back to it, through a socket made the way these tests make the rtc peer's mDNS socket
+/// (`MulticastSocket::new()`: joined on the default interface, sending by the system's route for
+/// the group, which `cargo.yml` points at loopback on GitHub-hosted macOS), within two seconds.
+/// The QueryAndGather tests resolve each peer's `.local` name over the host's mDNS group: a host
+/// that does not loop multicast back (seen on a self-hosted Windows VM, NAT address 10.0.2.15:
+/// no mDNS datagram arrived) fails them whatever the engine does. The probe is a DNS response
+/// with no records and a random ID (other responders ignore it), sent up to ten times 200 ms
+/// apart; it asks the host one question before the test, which runs once.
+fn host_loops_multicast() -> bool {
+    use std::net::SocketAddr;
     let probe = || -> std::io::Result<bool> {
         let group = SocketAddr::from((rtci::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT));
-        let receiver: std::net::UdpSocket = MulticastSocket::new()
-            .with_interface(interface)
-            .into_std()?;
-        receiver.set_nonblocking(false)?;
-        receiver.set_read_timeout(Some(Duration::from_millis(200)))?;
-        let sender = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        sender.set_multicast_if_v4(&interface)?;
-        sender.set_multicast_loop_v4(true)?;
-        sender.bind(&SocketAddr::new(ip, 0).into())?;
-        let sender: std::net::UdpSocket = sender.into();
+        let socket: std::net::UdpSocket = MulticastSocket::new().into_std()?;
+        socket.set_nonblocking(false)?;
+        socket.set_read_timeout(Some(Duration::from_millis(200)))?;
         let nonce = std::process::id()
             ^ std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -141,10 +128,10 @@ fn host_loops_multicast(ip: std::net::IpAddr) -> bool {
         let message = [id0, id1, 0x84, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut buf = [0u8; 1500];
         for _ in 0..10 {
-            sender.send_to(&message, group)?;
+            socket.send_to(&message, group)?;
             let until = Instant::now() + Duration::from_millis(200);
             while Instant::now() < until {
-                match receiver.recv_from(&mut buf) {
+                match socket.recv_from(&mut buf) {
                     Ok((n, _)) if buf[..n] == message => return Ok(true),
                     Ok(_) => continue,
                     Err(e)
@@ -162,27 +149,38 @@ fn host_loops_multicast(ip: std::net::IpAddr) -> bool {
         Ok(false)
     };
     probe().unwrap_or_else(|e| {
-        log::warn!("multicast probe on {ip}: {e}");
+        log::warn!("multicast probe: {e}");
         false
     })
 }
 
-/// [`host_loops_multicast`] on the interface the mDNS group traffic of these tests uses (the
-/// egress interface, else loopback), or the test is skipped with the reason printed; on Linux,
-/// where the hosted runners always deliver, a failing probe fails the test (so the skip cannot
-/// become universal).
+/// Whether this job says the host delivers multicast to itself: `RTCI_EXPECT_HOST_MULTICAST`, a
+/// comma-separated list of operating system names (`std::env::consts::OS`: `linux`, `macos`,
+/// `windows`), which `cargo.yml` sets on the jobs where these tests run today (Linux, macOS
+/// with its multicast route over loopback, GitHub-hosted Windows). There a failing probe fails
+/// the test instead of skipping it, so the skip cannot quietly remove coverage; elsewhere
+/// (a self-hosted VM that does not loop multicast, an `agent-test` run without the variable) it
+/// skips with the reason printed.
+fn host_multicast_expected() -> bool {
+    std::env::var("RTCI_EXPECT_HOST_MULTICAST")
+        .is_ok_and(|v| v.split(',').any(|os| os.trim() == std::env::consts::OS))
+}
+
+/// [`host_loops_multicast`], or the test is skipped with the reason printed; where
+/// [`host_multicast_expected`], a host that does not deliver fails the test.
 fn multicast_or_skip(test: &str) -> bool {
-    let ip = mdns_egress_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    if host_loops_multicast(ip) {
+    if host_loops_multicast() {
         return true;
     }
-    if cfg!(target_os = "linux") {
+    if host_multicast_expected() {
         panic!(
-            "{test}: this Linux host does not deliver multicast to itself on {ip}; the Linux \
-             runners must (they are where the real-socket mDNS tests are guaranteed to run)"
+            "{test}: this host does not deliver multicast to itself, and the job says it does \
+             (RTCI_EXPECT_HOST_MULTICAST): the mDNS interop tests must run here"
         );
     }
-    println!("SKIPPED {test}: the host does not loop multicast on {ip} back to this process");
+    println!(
+        "SKIPPED {test}: the host does not loop multicast to the mDNS group back to this process"
+    );
     false
 }
 

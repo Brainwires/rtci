@@ -11,9 +11,11 @@
 //! not the driver's to give: a CI virtual machine whose network does not loop multicast back
 //! (seen on a self-hosted Windows VM, NAT address 10.0.2.15: no mDNS datagram arrived, on its
 //! interface nor on loopback) made all of them fail. So each test first probes the host
-//! ([`host_loops_multicast`]): when the host does not deliver, the test is skipped with the
-//! reason printed, except on Linux, where the hosted runners always deliver and a failing probe
-//! fails the test (real-socket coverage is guaranteed there; the skip cannot become universal).
+//! ([`host_loops_multicast`], with the driver's own socket options: joined on the address's
+//! interface, sent with `IP_MULTICAST_IF` set to it): when the host does not deliver, the test
+//! is skipped with the reason printed, except where the job says multicast works
+//! ([`host_multicast_expected`]: `cargo.yml` on Linux, macOS and GitHub-hosted Windows), where
+//! a failing probe fails the test (the skip cannot become universal).
 //!
 //! Linux and Windows. Multicast needs a route that carries it back to this host: GitHub's macOS
 //! image has none (an mDNS send fails with "No route to host"; `cargo.yml` reroutes it for the
@@ -139,16 +141,28 @@ fn host_loops_multicast(ip: IpAddr) -> bool {
     })
 }
 
+/// Whether this job says the host delivers multicast to itself: `RTCI_EXPECT_HOST_MULTICAST`, a
+/// comma-separated list of operating system names (`std::env::consts::OS`: `linux`, `macos`,
+/// `windows`), which `cargo.yml` sets on the jobs where these tests run today (Linux, macOS
+/// with its multicast route over loopback, GitHub-hosted Windows). There a failing probe fails
+/// the test instead of skipping it, so the skip cannot quietly remove coverage; elsewhere
+/// (a self-hosted VM that does not loop multicast, an `agent-test` run without the variable) it
+/// skips with the reason printed.
+fn host_multicast_expected() -> bool {
+    std::env::var("RTCI_EXPECT_HOST_MULTICAST")
+        .is_ok_and(|v| v.split(',').any(|os| os.trim() == std::env::consts::OS))
+}
+
 /// [`host_loops_multicast`] on `ip`'s interface, or the test is skipped with the reason
-/// printed; on Linux a host that does not deliver fails the test.
+/// printed; where [`host_multicast_expected`], a host that does not deliver fails the test.
 fn multicast_or_skip(test: &str, ip: IpAddr) -> bool {
     if host_loops_multicast(ip) {
         return true;
     }
-    if cfg!(target_os = "linux") {
+    if host_multicast_expected() {
         panic!(
-            "{test}: this Linux host does not deliver multicast to itself on {ip}; the Linux \
-             runners must (they are where the real-socket mDNS tests are guaranteed to run)"
+            "{test}: this host does not deliver multicast to itself on {ip}, and the job says it \
+             does (RTCI_EXPECT_HOST_MULTICAST): the real-socket mDNS tests must run here"
         );
     }
     println!("SKIPPED {test}: the host does not loop multicast on {ip} back to this process");
