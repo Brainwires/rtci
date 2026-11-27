@@ -272,6 +272,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `pipefail` (SIGPIPE refused master's tip); and a patch release's generated page is
   corrected by hand, since git-cliff files `!`-marked behaviour-change commits under "Breaking
   changes".
+- Tests for two simulcast MUST rows the sixth audit sweep found untested
+  (`conf/jsep-93-must-rows-batch8`), each checked by a runtime-gated mutation
+  (`mut/must8b-gated`): RFC8851-6.3-5, an offered `a=rid` line whose `pt=` formats the answer
+  all discards is dropped from the answer and its `a=simulcast` ("the answerer MUST discard the
+  entire 'a=rid' line"), on the receiving and the sending side
+  (`a_rid_line_whose_formats_the_answer_discards_is_dropped`); RFC8853-5.2-1, an `a=simulcast`
+  received at the session level is ignored ("MUST ignore it if received at the session level"):
+  the offer is taken and no simulcast is negotiated (`a_session_level_simulcast_line_is_ignored`).
+  Both `untested` -> `tested`. No engine change. Open MUST rows 30 -> 28.
 
 ### Testing
 

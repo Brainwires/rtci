@@ -387,6 +387,134 @@ fn a_rid_id_offered_twice_is_not_answered() -> TestResult {
     Ok(())
 }
 
+/// A remote offer of one video section, `direction`, offering VP8 (96) and a format this
+/// endpoint does not have (98), with `extra` lines (rids, simulcast).
+fn remote_offer_with_an_unknown_format(
+    direction: &str,
+    extra: &str,
+) -> Result<RTCSessionDescription, Error> {
+    RTCSessionDescription::offer(crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0
+m=video 9 UDP/TLS/RTP/SAVPF 96 98
+{TRANSPORT}a=mid:0
+a=msid:remote-stream remote-track
+a={direction}
+a=rtpmap:96 VP8/90000
+a=rtpmap:98 MUST8B-UNKNOWN/90000
+{extra}"
+    )))
+}
+
+/// RFC 8851 section 6.3 step 4: "If the answerer chooses to discard all the media formats
+/// from an 'a=rid' line, the answerer MUST discard the entire 'a=rid' line. If the offer did
+/// not contain a 'pt=' for a given 'a=rid' line, then the answer MUST NOT contain a 'pt=' in
+/// the corresponding line." An offered `pt=` that names only the format the answer leaves out
+/// drops the line (and its simulcast stream); one that names it with VP8 keeps VP8; one
+/// without `pt=` is answered without. Both the answerer's `recv` lines (the offerer sends)
+/// and its `send` lines (the offerer receives).
+#[test]
+fn a_rid_line_whose_formats_the_answer_discards_is_dropped() -> TestResult {
+    let now = Instant::now();
+    let mut receiving = default_peer()?;
+    receiving.set_remote_description(
+        now,
+        remote_offer_with_an_unknown_format(
+            "sendonly",
+            "a=rid:f send pt=98\na=rid:h send pt=96,98\na=rid:q send\na=simulcast:send f;h;q\n",
+        )?,
+    )?;
+    let answer = receiving.create_answer(None)?;
+    assert!(
+        !answer.sdp.contains("MUST8B-UNKNOWN"),
+        "the unknown format is not answered:\n{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:h recv pt=96", "a=rid:q recv"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:recv h;q"]
+    );
+
+    let (mut sending, sender) = simulcast_sender(&[("f", None), ("h", None)])?;
+    sending.set_remote_description(
+        now,
+        remote_offer_with_an_unknown_format(
+            "recvonly",
+            "a=rid:f recv pt=98\na=rid:h recv\na=simulcast:recv f;h\n",
+        )?,
+    )?;
+    let answer = sending.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:h send"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send h"]
+    );
+    sending.set_local_description(now, answer)?;
+    assert_eq!(sent_layers(&mut sending, sender), layers(&[("h", None)]));
+    Ok(())
+}
+
+/// RFC 8853 section 5.2: "Implementations of this specification MUST NOT use it at the
+/// session level and MUST ignore it if received at the session level." A remote offer whose
+/// only `a=simulcast` is at the session level, over a section with `a=rid` lines, is taken
+/// and negotiates no simulcast: the answer has no `a=simulcast`, and a simulcast sender keeps
+/// its first encoding (W3C webrtc-pc: "If description indicates that simulcast is not
+/// supported or desired ... remove all dictionaries ... except the first one").
+#[test]
+fn a_session_level_simulcast_line_is_ignored() -> TestResult {
+    let now = Instant::now();
+    let session_offer = |direction: &str, rids: &str, simulcast: &str| {
+        RTCSessionDescription::offer(crlf(&format!(
+            "{SESSION}a=group:BUNDLE 0
+a=simulcast:{simulcast}
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=msid:remote-stream remote-track
+a={direction}
+a=rtpmap:96 VP8/90000
+{rids}"
+        )))
+    };
+
+    let (mut sending, sender) = simulcast_sender(&[("f", None), ("h", None)])?;
+    sending.set_remote_description(
+        now,
+        session_offer("recvonly", "a=rid:f recv\na=rid:h recv\n", "recv f;h")?,
+    )?;
+    let answer = sending.create_answer(None)?;
+    assert!(
+        lines_with(&answer.sdp, "a=simulcast:").is_empty(),
+        "no simulcast is negotiated:\n{}",
+        answer.sdp
+    );
+    sending.set_local_description(now, answer)?;
+    assert_eq!(sent_layers(&mut sending, sender), layers(&[("f", None)]));
+
+    let mut receiving = default_peer()?;
+    receiving.set_remote_description(
+        now,
+        session_offer("sendonly", "a=rid:f send\na=rid:h send\n", "send f;h")?,
+    )?;
+    let answer = receiving.create_answer(None)?;
+    assert!(
+        lines_with(&answer.sdp, "a=simulcast:").is_empty(),
+        "no simulcast is negotiated:\n{}",
+        answer.sdp
+    );
+    receiving.set_local_description(now, answer)?;
+    Ok(())
+}
+
 /// RFC 8853 section 5.3.2: an offer with more than one `a=simulcast` line in a section is
 /// answered without simulcast.
 #[test]
