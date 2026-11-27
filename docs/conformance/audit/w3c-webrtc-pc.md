@@ -10,14 +10,14 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 857 / untested 7 / partial 3 / missing 0 / violated 0 / n-a 62
+- MUST: tested 858 / untested 6 / partial 3 / missing 0 / violated 0 / n-a 62
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 11
 
 By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 339 / untested 4 / partial 3 / missing 0 / violated 0 / n-a 36
-- section 5: rows 258; MUST: tested 232 / untested 1 / partial 4 / missing 0 / violated 0 / n-a 13
+- section 5: rows 258; MUST: tested 233 / untested 0 / partial 4 / missing 0 / violated 0 / n-a 13
 - sections 6 to 12: rows 300; MUST: tested 282 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
@@ -612,7 +612,7 @@ By pass:
 | WEBRTC-5.4.2-1 | 5.4.2 | MUST | Hold: direction plus replaceTrack give music-on-hold and resume without a new transceiver | tested | src/rtp_transceiver/mod.rs (set_direction), src/rtp_transceiver/rtp_sender/mod.rs (replace_track) | replace_track_with_none_stops_sending, replace_track_keeps_the_msid_and_ssrcs_and_needs_no_negotiation, test_set_direction_change_triggers_renegotiation |  |
 | WEBRTC-5.5-1 | 5.5 | MUST | RTCDtlsTransport: one object per transport, reused by a new DTLS association | tested | `src/peer_connection/transport/mod.rs:340`, `src/peer_connection/transport/dtls/mod.rs:334` | `restart_from_connected_as_client` | - |
 | WEBRTC-5.5-2 | 5.5 | MUST | [[DtlsTransportState]] starts "new"; [[RemoteCertificates]] starts empty | tested | `src/peer_connection/transport/dtls/mod.rs:112` | `remote_certificates_are_empty_until_the_handshake_supplies_them` | - |
-| WEBRTC-5.5-3 | 5.5 | MUST | DTLS error (certificate validation failure, fatal alert): state becomes "failed", once | untested | `src/peer_connection/handler/dtls.rs:514` | `a_fingerprint_mismatch_fails_the_dtls_transport_and_the_connection` | audit-5 sweep 2026-11-26: the state becoming failed is tested; "once" (W3C: if already failed, abort) is not: no test sends a second alert or a datagram after the failure (fail_transport's guard, the datagram guard in handler/dtls.rs) |
+| WEBRTC-5.5-3 | 5.5 | MUST | DTLS error (certificate validation failure, fatal alert): state becomes "failed", once | tested | `src/peer_connection/handler/dtls.rs:514` | `tests/dtls_failed_state.rs::a_failed_dtls_transport_fails_once`, `a_fingerprint_mismatch_fails_the_dtls_transport_and_the_connection` | audit-5 sweep 2026-11-26: the state becoming failed is tested; "once" (W3C: if already failed, abort) is not: no test sends a second alert or a datagram after the failure (fail_transport's guard, the datagram guard in handler/dtls.rs) — must8a 2026-11-27: `a_failed_dtls_transport_fails_once` (from conf/w3c-1, identical): after both transports failed over a fingerprint mismatch every datagram of the handshake, the fatal alert among them, reaches each peer again and the clocks run 10 s: one `error`, one `statechange` to failed, one connection "failed". Its w3c-1 mutation (both guards removed) survived because the announcement (`announce_dtls_state_on_active`) fires only on a change of state; "once" is held by three layers (the datagram guard in handler/dtls.rs, `fail_transport`'s guard, the announcement), and the mutation now removes all three, i.e. the W3C steps without "if already failed, abort" (M5.5-3) |
 | WEBRTC-5.5-4 | 5.5 | MUST | DTLS error: an error event with errorDetail dtls-failure or fingerprint-failure and the alert fields | tested | src/peer_connection/states_events.rs (announce_transport_states), src/peer_connection/transport/dtls/mod.rs (failure_error) | a_dtls_failure_is_announced_with_its_error_detail_before_the_state_change | OnDtlsTransportError, then OnDtlsTransportStateChange(Failed) |
 | WEBRTC-5.5-5 | 5.5 | MUST | DTLS state change: a statechange event at the transport | tested | src/peer_connection/states_events.rs (announce_transport_states) | transport_state_events_come_before_the_connection_events_they_cause | OnDtlsTransportStateChange |
 | WEBRTC-5.5-6 | 5.5 | MUST | On "connected", [[RemoteCertificates]] is the remote chain, DER | tested | `src/peer_connection/handler/dtls.rs:309` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | - |

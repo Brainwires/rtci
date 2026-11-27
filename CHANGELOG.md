@@ -401,6 +401,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offerer opened in parallel and carries the data on it, without an ICE restart
   (`two_lite_agents_close_nothing_while_the_updated_offer_is_awaited`; ice-30's untested arm in
   RFC6544-6.1-2's note).
+- **Five DTLS MUST rows are tested** (`conf/dtls-33-must-rows-batch8`; tests and audit only, no
+  engine change; each checked by a mutation, `mut/must8a-gated`). RFC 5746 3.6: a DTLS 1.2
+  server ignores unknown extensions in a ClientHello and answers with its full flight
+  (`conn_conformance_test.rs::unknown_extensions_in_a_client_hello_are_ignored`). RFC 9147
+  section 4: records of two DTLS 1.3 associations of one endpoint never share a datagram
+  (`rfc9147_rows_test.rs::records_of_two_associations_never_share_a_datagram`); section 5: the
+  server echoes no legacy_session_id in its ServerHello or HelloRetryRequest
+  (`rfc8446_conformance_test.rs::the_server_echoes_no_legacy_session_id`); section 5.5: the
+  fragments of a handshake message tile it without overlap
+  (`rfc9147_rows_test.rs::the_fragments_of_a_handshake_message_tile_it_without_overlap`).
+  W3C webrtc-pc 5.5: a failed DTLS transport fails once, whatever reaches it after
+  (`tests/dtls_failed_state.rs::a_failed_dtls_transport_fails_once`, the test of conf/w3c-1,
+  now with a mutation that removes every layer of "if already failed, abort"). RFC5746-3.6-5,
+  RFC9147-4-9, RFC9147-5-1, RFC9147-5.5-1 and WEBRTC-5.5-3 `tested` (were `untested`,
+  open-must class B).
 
 ## [0.2.1] - 2026-11-27
 
