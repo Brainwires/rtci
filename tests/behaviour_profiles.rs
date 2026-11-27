@@ -972,3 +972,41 @@ fn strict_rfc_answers_chromium_in_the_form_browsers_refuse() -> Result<()> {
     }
     Ok(())
 }
+
+/// `rtp.audio-level-encryption`: RFC 8834 sections 5.2.2 and 5.2.3 make RFC 6904 encryption
+/// of the audio level extensions RECOMMENDED, so `Rfc` offers them best-effort (clear and
+/// `urn:ietf:params:rtp-hdrext:encrypt`, RFC 6904 section 4.1); Chromium offers them in the
+/// clear unless the application asks (libwebrtc pc/media_session.cc, `preferred_encrypt`),
+/// and so does `Chrome`.
+#[test]
+fn audio_levels_are_offered_encrypted_under_rfc_and_in_the_clear_under_chrome() -> Result<()> {
+    for (profile, encrypted) in [
+        (BehaviourProfile::Rfc, true),
+        (BehaviourProfile::StrictRfc, true),
+        (BehaviourProfile::Chrome, false),
+    ] {
+        let mut pc = peer_connection(profile)?;
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+        let offer = pc.create_offer(None)?.sdp;
+        for uri in [
+            "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+            "urn:ietf:params:rtp-hdrext:csrc-audio-level",
+        ] {
+            let clear = offer.lines().any(|l| {
+                l.starts_with("a=extmap:")
+                    && l.ends_with(&format!(" {uri}"))
+                    && !l.contains("encrypt")
+            });
+            let encrypt = offer.lines().any(|l| {
+                l.starts_with("a=extmap:")
+                    && l.contains(&format!("urn:ietf:params:rtp-hdrext:encrypt {uri}"))
+            });
+            if !clear || encrypt != encrypted {
+                bail!(
+                    "{profile:?}: {uri} clear {clear}, encrypted {encrypt} (want {encrypted}):\n{offer}"
+                );
+            }
+        }
+    }
+    Ok(())
+}

@@ -406,6 +406,16 @@ pub struct DefaultInterceptorOptions {
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
     /// 5.2.1 recommends the extensions. RTCP-SR-REQ is answered with an Early SR either way.
     pub rapid_synchronisation: bool,
+    /// How the audio level header extensions (RFC 6464 client-to-mixer, RFC 6465
+    /// mixer-to-client) are offered with respect to RFC 6904 header extension encryption.
+    /// [`BestEffort`](RTCRtpHeaderExtensionEncryption::BestEffort) by default: RFC 8834
+    /// sections 5.2.2 and 5.2.3 make the encryption RECOMMENDED "unless ... explicitly
+    /// disabled through API or signaling", and RFC 6904 section 4.1 offers both forms when
+    /// lack of confidentiality is acceptable. The `Chrome` profile offers them in the clear
+    /// ([`Clear`](RTCRtpHeaderExtensionEncryption::Clear)), as Chromium does unless the
+    /// application asks for encryption. Answering, the engine takes the encrypted form an
+    /// offer has whatever this says (RFC 6904 section 4.1).
+    pub audio_level_encryption: RTCRtpHeaderExtensionEncryption,
     /// `T_rr_interval` of the RTCP session (RFC 4585 section 3.4): the least time between two
     /// regular reports. Zero by default, RFC 4585 section 4.2's value when `trr-int` is not
     /// negotiated; a negotiated `trr-int` replaces it. See
@@ -584,6 +594,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("probe_after_drop", &self.probe_after_drop)
             .field("recovery_probing", &self.recovery_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
+            .field("audio_level_encryption", &self.audio_level_encryption)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
             .field(
                 "rtcp_immediate_congestion_feedback",
@@ -670,6 +681,7 @@ impl DefaultInterceptorOptions {
             probe_after_drop: interceptor::AfterDropProbe::Repeated,
             recovery_probing: false,
             rapid_synchronisation: true,
+            audio_level_encryption: RTCRtpHeaderExtensionEncryption::BestEffort,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
             rtcp_report_from_every_ssrc: false,
@@ -702,6 +714,13 @@ impl DefaultInterceptorOptions {
 
     /// What these options register on the media engine beyond the video defaults.
     fn register_audio_extras(&self, media_engine: &mut MediaEngine) -> Result<()> {
+        // After `configure_default_header_extensions`, which offers them best-effort.
+        for uri in [
+            ::sdp::extmap::AUDIO_LEVEL_URI,
+            rtp::extension::CSRC_AUDIO_LEVEL_URI,
+        ] {
+            media_engine.set_header_extension_encryption(uri, self.audio_level_encryption)?;
+        }
         if self.receiver_reference_time_on_audio {
             media_engine.register_feedback(
                 RTCPFeedback {
