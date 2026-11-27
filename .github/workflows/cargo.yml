@@ -274,9 +274,11 @@ jobs:
   # none (docs/key-erasure.md). How deep an unoptimised build's frames go depends on the
   # compiler (rustc 1.99.1 went past the 32 KiB that used to be overwritten), so the oldest
   # one is measured too. x86-64 Linux, with the whole process searched, and AArch64 macOS.
+  # The DTLS measurement (rtci-dtls/tests/key_residue.rs) runs in the same builds: every step of
+  # DTLS 1.2 and 1.3 associations, the export and resumption included.
   key_residue:
-    timeout-minutes: 30
-    name: SRTP key residue (${{ matrix.os }}, ${{ matrix.toolchain }}, ${{ matrix.profile }})
+    timeout-minutes: 45
+    name: SRTP and DTLS key residue (${{ matrix.os }}, ${{ matrix.toolchain }}, ${{ matrix.profile }})
     strategy:
       fail-fast: false
       matrix:
@@ -314,6 +316,8 @@ jobs:
         run: |
           rustc --version
           cargo test $RELEASE --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
+      - name: No DTLS key is left in a dead stack frame
+        run: cargo test $RELEASE --package rtci-dtls --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
       - name: HMAC-SHA1 computed in the keyed object (RFC 2202, object reuse)
         run: cargo test $RELEASE --package rtci-crypto --features crypto-aws-lc-rs --test hmac_sha1_vectors --verbose
 

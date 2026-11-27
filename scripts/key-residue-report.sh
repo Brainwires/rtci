@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# Runs the SRTP key residue measurement (rtci-srtp/tests/key_residue.rs) and prints what it
-# found: the controls, anything left outside dead stack frames, the inventory per step and its
-# digest, and (Linux) how this system treats thread stacks.
+# Runs a key residue measurement and prints what it found: the SRTP one
+# (rtci-srtp/tests/key_residue.rs: the controls, anything left outside dead stack frames, the
+# inventory per step and its digest, and (Linux) how this system treats thread stacks) or, with
+# `dtls` first, the DTLS one (rtci-dtls/tests/key_residue.rs: the control, the inventory per
+# step and its digest, and the forms left).
 #
-#   scripts/key-residue-report.sh [+toolchain] [features]
+#   scripts/key-residue-report.sh [dtls] [+toolchain] [features]
 #
+#   dtls        the DTLS measurement instead of the SRTP one
 #   +toolchain  a rustup toolchain for cargo, e.g. +1.99.1 (default: the active one)
-#   features    rtci-srtp features to add, e.g. crypto-aws-lc-rs (default: none: ring only)
+#   features    features of the measured crate to add, e.g. crypto-aws-lc-rs (default: none:
+#               ring only)
 #
 # Environment: OUT (directory for the logs, default a new temporary one), REPEAT (how often the
 # tests are run again to compare digests, default 3), PROFILE=release (an optimised build: the
 # one in which the packet path is asserted).
 # Exit status: that of the tests that are not ignored; 2 when the build fails.
 set -u
+measure=srtp
+[ "${1:-}" = dtls ] && { measure=dtls; shift; }
 toolchain=
 case "${1:-}" in +*) toolchain=$1; shift ;; esac
 features=${1:-}
@@ -22,7 +28,7 @@ mkdir -p "$out"
 
 # $toolchain is left unquoted on purpose: empty, it must vanish from the command line.
 # shellcheck disable=SC2206
-cargo_test=(cargo $toolchain test -p rtci-srtp --test key_residue)
+cargo_test=(cargo $toolchain test -p "rtci-$measure" --test key_residue)
 [ -n "$features" ] && cargo_test+=(--features "$features")
 [ "${PROFILE:-}" = release ] && cargo_test+=(--release)
 
@@ -31,6 +37,28 @@ echo "== $(rustc $toolchain --version), $(uname -srm), features: ${features:-def
 "${cargo_test[@]}" --no-run > "$out/build.log" 2>&1 || { tail -30 "$out/build.log"; exit 2; }
 "${cargo_test[@]}" -- --nocapture > "$out/live.log" 2>&1
 status=$?
+if [ "$measure" = dtls ]; then
+  for i in $(seq "$repeat"); do
+    "${cargo_test[@]}" -- --include-ignored key_handling the_dtls_record_path --nocapture > "$out/known-limit-$i.log" 2>&1
+  done
+  echo "== tests"
+  grep -h '^test ' "$out/live.log" "$out/known-limit-1.log"
+  echo "== control"
+  grep -h '^CONTROL' "$out/live.log" | sort | uniq -c
+  echo "== inventory digests (not ignored, then each repeat with the known limit included)"
+  grep -h '^INVENTORY\|^NOT ASSERTED' "$out/live.log"
+  grep -h '^INVENTORY' "$out"/known-limit-*.log | sort | uniq -c
+  echo "== per provider, kind of step and secret"
+  grep -h '^SUMMARY' "$out/known-limit-1.log"
+  echo "== steps that left key forms"
+  grep -h '^STAGE' "$out/known-limit-1.log" | grep -v '|0 key forms left'
+  echo "== the forms left (the first 400)"
+  grep -h '^FORM' "$out/known-limit-1.log" | head -400
+  echo "== panics"
+  grep -h -A12 'panicked at' "$out/live.log" | head -60
+  grep -h -A3 'panicked at' "$out/known-limit-1.log" | head -24
+  exit $status
+fi
 "${cargo_test[@]}" -- --ignored investigate_ --nocapture > "$out/investigate.log" 2>&1
 for i in $(seq "$repeat"); do
   "${cargo_test[@]}" -- --include-ignored key_handling the_packet_path --nocapture > "$out/known-limit-$i.log" 2>&1
