@@ -344,6 +344,35 @@ fn named_send_format(world: &mut World, sender: RTCRtpSenderId) -> (u8, String) 
 #[test]
 fn the_offerer_sends_h264_on_63_which_the_answer_leads_with() -> Result<()> {
     let (mut world, sender, answer) = World::connected()?;
+    // Diagnostic (run with --nocapture): the answer's video section as pc2 wrote it.
+    let video: Vec<&str> = answer
+        .lines()
+        .skip_while(|l| !l.starts_with("m=video"))
+        .take_while(|l| !l.starts_with("m=") || l.starts_with("m=video"))
+        .filter(|l| {
+            l.starts_with("m=video") || l.starts_with("a=rtpmap:") || l.starts_with("a=fmtp:")
+        })
+        .collect();
+    println!("ANSWER VIDEO SECTION:\n{}", video.join("\n"));
+    let pc1_send_codecs: Vec<(u8, String)> = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(|c| (c.payload_type, c.rtp_codec.mime_type.clone()))
+        .collect();
+    println!("PC1 SEND CODECS AFTER THE ANSWER: {pc1_send_codecs:?}");
+    // What I believe: the answer cannot add VP8 (its registered 96 is the offer's
+    // no-such-codec and `answer_payload_types` finds no free number in 96-127).
+    assert!(
+        !video
+            .iter()
+            .any(|l| l.starts_with("a=rtpmap:") && l.contains(" VP8/")),
+        "the answer contains VP8: {video:?}"
+    );
     let first_answered = answer
         .lines()
         .find(|l| l.starts_with("m=video"))
@@ -360,6 +389,7 @@ fn the_offerer_sends_h264_on_63_which_the_answer_leads_with() -> Result<()> {
         .iter()
         .map(|h| h.payload_type)
         .collect();
+    println!("PC2 RECEIVED PAYLOAD TYPES: {received:?}");
     assert!(
         received.len() >= 4 && received.iter().all(|p| *p == 63),
         "pc2 receives H.264 on 63: {received:?}\n{answer}"
@@ -393,6 +423,11 @@ fn a_packet_written_with_the_offers_vp8_number_does_not_leave_with_it() -> Resul
         .collect();
     let ssrc = world.ssrc(sender);
     let stats_codec = world.outbound_codec(ssrc);
+    println!(
+        "WRITTEN WITH 96: pc2 received {received:?}, pc2 unnegotiated {}, pc1 outbound codec \
+         {stats_codec:?}",
+        world.peers[1].pc.unnegotiated_payload_type_rtp_packets()
+    );
     // On the wire: pc2 counts what arrives with a payload type its answer does not have
     // (RFC 3550 section 5.1, dropped).
     let unnegotiated = world.peers[1].pc.unnegotiated_payload_type_rtp_packets();
