@@ -1643,6 +1643,15 @@ impl RTCPeerConnection {
             });
         }
 
+        // RFC 3264 section 8.3.2: every payload type number the description gives a format keeps
+        // meaning it for the rest of the session (`MediaEngine::payload_type_history`). A
+        // rolled-back remote offer's go with the media engine the rollback restores.
+        if sd.sdp_type != RTCSdpType::Rollback
+            && let Some(parsed) = sd.parsed.as_ref()
+        {
+            self.media_engine.record_payload_types(parsed);
+        }
+
         match (op, sd.sdp_type) {
             (StateChangeOp::SetLocal, RTCSdpType::Offer | RTCSdpType::Pranswer) => {
                 self.pending_local_description = Some(sd.clone());

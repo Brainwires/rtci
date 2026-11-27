@@ -5209,8 +5209,10 @@ fn parse_rtcp_feedback(value: &str) -> Option<RTCPFeedback> {
 /// section 5.3.1), by (SFrame numbering, kind, the format's own payload type), worked out once
 /// for the whole answer so that every section numbers a format alike. A format keeps its own
 /// number unless the offer uses that number for another format anywhere (in a BUNDLE group one
-/// payload type has one configuration, RFC 9143 section 9.1.1); then it takes the next
-/// dynamic payload type no offered, registered or SFrame format uses and no format before it
+/// payload type has one configuration, RFC 9143 section 9.1.1), or an earlier description of
+/// the session gave it another format (RFC 3264 section 8.3.2: the mapping "MUST NOT change
+/// for the duration of a session"); then it takes the next dynamic payload type no offered,
+/// registered or SFrame format uses, no earlier description used and no format before it
 /// took. A format with nothing left is not added.
 fn answer_payload_types(
     media_engine: &MediaEngine,
@@ -5246,15 +5248,31 @@ fn answer_payload_types(
     let mut taken: HashSet<u8> = offered.keys().copied().collect();
     taken.extend(candidates.iter().map(|(_, _, codec)| codec.payload_type));
     taken.extend(media_engine.sframe_payload_types.iter().copied());
+    taken.extend(media_engine.payload_type_history.keys().copied());
     let mut free = (96..=127u8).filter(|pt| !taken.contains(pt));
     let mut numbers = HashMap::new();
     for (sframe, kind, codec) in candidates {
         let conflicting = offered.get(&codec.payload_type).is_some_and(|offered| {
             codec_parameters_fuzzy_search(offered, std::slice::from_ref(&codec)).1
                 != CodecMatch::Exact
-        });
+        }) || media_engine
+            .payload_type_means_another_format(codec.payload_type, &codec);
         let number = if conflicting {
-            free.next()
+            // A number an earlier description already gave this very format, when the offer
+            // does not use it for another one; else a new one.
+            media_engine
+                .payload_type_history
+                .iter()
+                .filter(|(pt, earlier)| {
+                    !offered.contains_key(pt)
+                        && crate::peer_connection::configuration::media_engine::is_same_codec(
+                            earlier,
+                            &codec.rtp_codec,
+                        )
+                })
+                .map(|(pt, _)| *pt)
+                .min()
+                .or_else(|| free.next())
         } else {
             Some(codec.payload_type)
         };
