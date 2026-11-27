@@ -1568,10 +1568,18 @@ mod tests {
     #[test]
     fn a_stuns_server_whose_host_is_an_ip_address_is_not_asked_and_is_reported() {
         let now = Instant::now();
+        // Roots to check a server with: without them a `stuns:` attempt fails before any
+        // connection is opened ("stuns: server without roots or a verifier to check it"), and
+        // an engine that asked the server would go unnoticed by the connection assertion.
+        let (_, roots) = tls_server("stun.rtc.test");
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_tcp_simultaneous_open(false)
+                    .with_turn_tls(TurnTlsConfig {
+                        roots: Some(roots),
+                        ..Default::default()
+                    })
                     .build(),
             )
             .build(now)
