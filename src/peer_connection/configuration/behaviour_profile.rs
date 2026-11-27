@@ -636,6 +636,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| s.rtcp_mux_only_in_subsequent_offers,
     },
     {
+        id: "jsep.bundle-only-sections-browser-form",
+        setting: "SettingEngineBuilder::with_bundle_only_sections_in_browser_form",
+        clause: "RFC 9143 7.1.3, 9.3.1.1, RFC 9429 5.2.1 (RFC 8122 5 and RFC 9429 5.2.1 allow the session-level fingerprint)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "browser matrix test-env 45900172027: Chromium and WebKit refuse an initial offer whose bundle-only RTP section has no a=rtcp-mux (\"Failed to set local answer sdp: rtcp-mux must be enabled when BUNDLE is enabled.\"), Firefox too (\"m-section at level 1 is missing a=rtcp-mux, which is required by rtcpMuxPolicy\"); with a=rtcp-mux alone Chromium and WebKit answer the bundle-only data section with port zero and Firefox's page crashes (45902077847); with a=rtcp-mux and the fingerprint at session level all three apply the offer, open the channel and carry media (45903674595, probe P4); Firefox then refuses the answer to its next offer (\"Remote description indicates ICE restart but offer did not request ICE restart\", 45905096237: the bundle-only sections had no ICE credentials) unless the bundle-only sections carry the group's ICE credentials, as Firefox's own do (45908363443, probe R1; later descriptions with credentials in the tagged section only are refused: \"Invalid description, no ice-ufrag attribute at level 1\"). Firefox's own max-bundle offers have a session-level a=fingerprint (test-env 45898141031, browser-sdp firefox--max-bundle-*)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_bundle_only_sections_in_browser_form(v),
+        read: |s: &SettingEngine| s.bundle_only_sections_in_browser_form,
+    },
+    {
         id: "jsep.stopping-transceiver-rejected-in-answer",
         setting: "SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer",
         clause: "RFC 9429 5.3.1",

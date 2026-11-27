@@ -119,7 +119,8 @@ variables the tests read.
   (multi-slice H.264 and multi-packet Ogg included), three-layer simulcast (RIDs) with and
   without loss repaired by RTX, an encoded transform, Cryptex, NACK + RTX under netem, relay-only
   through coturn, ICE-TCP, the browser as answerer for media, transceiver stop and m-line reuse,
-  direction changes, rollback and glare, a wrong fingerprint either way, `getStats()` against the
+  direction changes, rollback and glare, `max-bundle` with audio, video and a data channel
+  either side offering, a wrong fingerprint either way, `getStats()` against the
   Rust side's counters, and (in the `-mdns` projects, each browser's defaults) mDNS-hidden
   candidates, which run apart on the mDNS LAN: a second interop-peer in `lan-b` and the
   browsers in `lan-a`. The loss tests add a `tc` filter for their own session to a netem band that

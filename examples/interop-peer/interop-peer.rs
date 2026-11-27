@@ -11,6 +11,8 @@
 //!   `"tracks":["VP8","OPUS",...]` it adds those send tracks (streaming the fixtures) instead,
 //!   so the browser answers for media.
 //!   `"ice_restart":true` restarts ICE in that offer (W3C restartIce).
+//!   `"data_channel":"before"|"after"` with `"tracks"` opens the `from-rust` channel as well,
+//!   before or after the tracks are added (an offer with media and data).
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
 //!   connection state, its W3C stats counters (with the remote-inbound / remote-outbound
 //!   stats the peer's RTCP reports made) and per-stream sequence coverage, the RTCP that
@@ -22,6 +24,8 @@
 //!   `unnegotiatedPayloadTypeRtp` counts the packets the engine ignored for a payload type
 //!   their m= section did not negotiate (`RTCPeerConnection::unnegotiated_payload_type_rtp_packets`,
 //!   RFC 3550 section 5.1).
+//!   `dcReceived` counts the data channel messages received on every channel (`from-rust`'s
+//!   too, which are not echoed).
 //! - `{"type":"switch-codec","codec":"PCMU"|"PCMA"|"OPUS"}`: the streamed audio track goes on
 //!   with a 440 Hz tone in G.711 (8 kHz) or back to the Opus fixture (48 kHz), on the payload
 //!   type the answer gave that format: a codec of another clock rate mid-stream (RFC 7160).
@@ -46,7 +50,10 @@
 //! (`OnLocalCandidatesNeeded`: the transport set up after every m= section was rejected, or
 //! an ICE restart for a new association), the peer binds a new UDP socket, adds its host
 //! candidate for the event's section and trickles it to the browser; the previous socket
-//! keeps being read and written until the session ends.
+//! keeps being read and written until the session ends. `?bundle_policy=max-bundle` (or
+//! `balanced`, `max-compat`, `must-bundle`: the W3C / RFC 9429 4.1.1 names) builds the peer
+//! connection with `RTCConfigurationBuilder::with_bundle_policy`; without it the default
+//! (`balanced`) applies.
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -89,7 +96,6 @@ use rtci::media::io::h26x_reader::H26xSampleReader;
 use rtci::media::io::ivf_reader::IVFReader;
 use rtci::media::io::ogg_reader::OggReader;
 use rtci::media_stream::{MediaStreamTrack, MediaStreamTrackId};
-use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorOptions, configure_simulcast_extension_headers,
     register_default_interceptors_with_options,
@@ -100,6 +106,9 @@ use rtci::peer_connection::configuration::media_engine::{
 };
 use rtci::peer_connection::configuration::setting_engine::{
     SctpMaxMessageSize, SettingEngineBuilder,
+};
+use rtci::peer_connection::configuration::{
+    BehaviourProfile, RTCBundlePolicy, RTCConfigurationBuilder,
 };
 use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
@@ -174,6 +183,8 @@ async fn main() -> Result<()> {
             let mut drop_video_every = None;
             let mut profile = BehaviourProfile::default();
             let mut unknown_profile = None;
+            let mut bundle_policy = None;
+            let mut unknown_bundle_policy = None;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
             #[allow(clippy::result_large_err)]
             let options = |request: &Request, response: Response| {
@@ -186,6 +197,13 @@ async fn main() -> Result<()> {
                         video_red_ulpfec = Some(value == "1");
                     } else if let Some(value) = pair.strip_prefix("drop_video_every=") {
                         drop_video_every = value.parse().ok().filter(|n: &u64| *n > 0);
+                    } else if let Some(name) = pair.strip_prefix("bundle_policy=") {
+                        match RTCBundlePolicy::from(name) {
+                            RTCBundlePolicy::Unspecified => {
+                                unknown_bundle_policy = Some(name.to_owned())
+                            }
+                            named => bundle_policy = Some(named),
+                        }
                     } else if let Some(name) = pair.strip_prefix("profile=") {
                         match BehaviourProfile::from_name(name) {
                             Some(named) => profile = named,
@@ -201,12 +219,17 @@ async fn main() -> Result<()> {
                         eprintln!("session {from}: unknown profile {name:?}");
                         return;
                     }
+                    if let Some(name) = unknown_bundle_policy {
+                        eprintln!("session {from}: unknown bundle policy {name:?}");
+                        return;
+                    }
                     let options = SessionOptions {
                         ssrc_per_clock_rate,
                         previous_addresses,
                         video_red_ulpfec,
                         drop_video_every,
                         profile,
+                        bundle_policy,
                     };
                     if let Err(e) = Session::run(ws, ip, dir, options).await {
                         eprintln!("session {from}: {e:#}");
@@ -448,6 +471,8 @@ struct SessionOptions {
     /// ([`DropEveryNthRedMedia`]).
     drop_video_every: Option<u64>,
     profile: BehaviourProfile,
+    /// `bundle_policy=<name>`: `RTCConfigurationBuilder::with_bundle_policy`.
+    bundle_policy: Option<RTCBundlePolicy>,
 }
 
 struct Session {
@@ -516,6 +541,8 @@ struct Session {
     discarded_ssrcs: Vec<u32>,
     coverage: HashMap<u32, SeqCoverage>,
     dc_echoed: u64,
+    /// Data channel messages received, on every channel.
+    dc_received: u64,
     rust_dc: Option<RTCDataChannelId>,
     /// This side's offer is outstanding (have-local-offer).
     have_local_offer: bool,
@@ -550,6 +577,7 @@ impl Session {
             video_red_ulpfec,
             drop_video_every,
             profile,
+            bundle_policy,
         } = options;
         let (mut ws_tx, mut ws_rx) = ws.split();
         let sock = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
@@ -599,8 +627,19 @@ impl Session {
             None => setting_engine,
         }
         .build();
-        println!("session on {local}: behaviour profile {profile}");
-        let pc = RTCPeerConnectionBuilder::new()
+        println!(
+            "session on {local}: behaviour profile {profile}, bundle policy {}",
+            bundle_policy.unwrap_or_default()
+        );
+        let builder = match bundle_policy {
+            Some(policy) => RTCPeerConnectionBuilder::new().with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_bundle_policy(policy)
+                    .build(),
+            ),
+            None => RTCPeerConnectionBuilder::new(),
+        };
+        let pc = builder
             .with_media_engine(me)
             .with_setting_engine(setting_engine)
             .with_interceptor_registry(registry)
@@ -657,6 +696,7 @@ impl Session {
             discarded_ssrcs: vec![],
             coverage: HashMap::new(),
             dc_echoed: 0,
+            dc_received: 0,
             rust_dc: None,
             have_local_offer: false,
             rollbacks: 0,
@@ -1080,7 +1120,13 @@ impl Session {
                 if v["ice_restart"].as_bool().unwrap_or(false) {
                     self.pc.restart_ice();
                 }
-                if tracks.is_empty() && receive.is_empty() {
+                // With tracks, `data_channel` opens the channel too, before or after them.
+                let data_channel = v["data_channel"].as_str();
+                if !matches!(data_channel, None | Some("before") | Some("after")) {
+                    return Err(anyhow!("request-offer: data_channel {data_channel:?}"));
+                }
+                let only_data = tracks.is_empty() && receive.is_empty();
+                if only_data || data_channel == Some("before") {
                     let dc = self.pc.create_data_channel("from-rust", None)?;
                     self.rust_dc = Some(dc.id());
                 }
@@ -1092,6 +1138,10 @@ impl Session {
                 }
                 for name in tracks {
                     self.add_send_track(&name.to_ascii_uppercase(), true)?;
+                }
+                if !only_data && data_channel == Some("after") {
+                    let dc = self.pc.create_data_channel("from-rust", None)?;
+                    self.rust_dc = Some(dc.id());
                 }
                 self.send_offer()?;
             }
@@ -1161,6 +1211,7 @@ impl Session {
                         "sent": wire_rtp_json(&self.wire_rtp_sent),
                     },
                     "dc_echoed": self.dc_echoed,
+                    "dcReceived": self.dc_received,
                     "sent": sent,
                     "coverage": coverage,
                     "state": self.state,
@@ -1586,6 +1637,7 @@ impl Session {
         while let Some(TaggedRTCMessage { message, .. }) = self.pc.poll_read() {
             match message {
                 RTCMessage::DataChannelMessage(id, msg) => {
+                    self.dc_received += 1;
                     if Some(id) == self.rust_dc {
                         continue;
                     }

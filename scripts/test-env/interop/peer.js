@@ -393,6 +393,28 @@
     }
   }
 
+  // The BUNDLE layout of a description: its BUNDLE groups (lists of mids), whether it has
+  // a=cryptex (session or media level) and a session-level a=fingerprint and, per m= section,
+  // its kind, port, mid, a=bundle-only, a=rtcp-mux, a=ice-ufrag and a=sctp-port (null when
+  // absent).
+  function bundleLayout(sdp) {
+    const [session, ...media] = sdp.split(/\r?\nm=/);
+    return {
+      groups: [...session.matchAll(/^a=group:BUNDLE([^\r\n]*)/gm)].map((g) => g[1].split(" ").filter(Boolean)),
+      cryptex: /^a=cryptex\r?$/m.test(sdp),
+      sessionFingerprint: /^a=fingerprint:/m.test(session),
+      sections: media.map((m) => ({
+        kind: m.split(" ")[0],
+        port: Number(m.split(" ")[1]),
+        mid: (m.match(/^a=mid:(\S+)/m) || [, null])[1],
+        bundleOnly: /^a=bundle-only\r?$/m.test(m),
+        rtcpMux: /^a=rtcp-mux\r?$/m.test(m),
+        iceUfrag: (m.match(/^a=ice-ufrag:(\S+)/m) || [, null])[1],
+        sctpPort: (m.match(/^a=sctp-port:(\d+)/m) || [, null])[1],
+      })),
+    };
+  }
+
   async function transport(pc) {
     const stats = await pc.getStats();
     let t = null;
@@ -445,6 +467,6 @@
   window.Interop = {
     open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
     selectedPair, wrongFingerprint, mlines, transportLines, sdpPayloadTypes, receivedOutside, codecLines,
-    codecView, defaultCodecLines,
+    codecView, defaultCodecLines, bundleLayout,
   };
 })();
