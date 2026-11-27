@@ -670,6 +670,66 @@ fn an_application_that_never_serves_streams_gets_no_tcp_candidate_and_ends_gathe
     Ok(())
 }
 
+/// RFC 8838 section 13: "an agent MUST NOT convey any more candidates after it has conveyed
+/// an end-of-candidates indication". An application that adds its candidates and its end of
+/// candidates before it first serves the stream interface is taken for one that serves no
+/// streams: gathering completes at once and no TCP candidate follows, even once it does poll
+/// and binds the listeners the engine asked for. Those listeners would accept connections no
+/// candidate announces: the engine releases them (each `Listen` is followed by its
+/// `StopListening`) and says so at warn level.
+#[test]
+fn an_end_of_candidates_before_the_first_stream_poll_releases_the_tcp_listeners() -> Result<()> {
+    let mut p = Peer::new(pc(SettingEngine::default(), Instant::now()), 0);
+    let c = udp_host(&p);
+    p.pc.add_local_candidate(c)?;
+    p.pc.add_local_candidate(RTCIceCandidateInit::default())?;
+    assert_eq!(p.pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    // The driver starts now: it binds every listener it is asked for, as it is asked.
+    let now = Instant::now();
+    let mut listens = vec![];
+    let mut stops = vec![];
+    while let Some(cmd) = p.pc.poll_stream_command() {
+        match cmd {
+            StreamCommand::Listen {
+                listener, local, ..
+            } => {
+                listens.push(listener);
+                let bound = std::net::SocketAddr::new(local.ip(), 6000 + listens.len() as u16);
+                p.pc.handle_stream_event(
+                    now,
+                    StreamEvent::Listening {
+                        listener,
+                        local: bound,
+                    },
+                )?;
+            }
+            StreamCommand::StopListening { listener } => stops.push(listener),
+            _ => {}
+        }
+    }
+    assert!(!listens.is_empty(), "the engine asked for its listeners");
+    listens.sort_unstable();
+    stops.sort_unstable();
+    assert_eq!(
+        listens, stops,
+        "every listener the engine asked for is released: none can announce a candidate"
+    );
+    let mut tcp = vec![];
+    while let Some(e) = p.pc.poll_event() {
+        if let RTCPeerConnectionEvent::OnIceCandidateEvent(ev) = e
+            && let Some(c) = ev.candidate
+            && c.to_string().contains(" tcp ")
+        {
+            tcp.push(c.to_string());
+        }
+    }
+    assert!(
+        tcp.is_empty(),
+        "no candidate after end-of-candidates: {tcp:?}"
+    );
+    Ok(())
+}
+
 /// `with_nat_1to1_ips` (a server behind a 1:1 NAT, rtci-ice's external IP mapper) reaches the
 /// engine's own TCP candidates: with the `Host` type they are announced on the external
 /// address, with `Srflx` a server-reflexive candidate is added beside each.
@@ -1592,6 +1652,81 @@ fn two_lite_agents_close_a_parallel_connection_the_updated_offer_does_not_match(
             )
         })?;
     }
+    Ok(())
+}
+
+/// Each peer's active and passive TCP candidates, and the offerer's UDP candidate to the
+/// answerer only: the answerer pairs it with its own UDP candidate and selects that pair (a
+/// UDP host candidate has the higher priority), the offerer has only the two TCP pairs and
+/// selects its active-to-passive one. The two agents select different pairs.
+fn offerers_udp_to_the_answerer_only(peer: usize, c: &RTCIceCandidateInit) -> bool {
+    active_and_passive(peer, c) || (peer == 0 && c.candidate.contains(" udp "))
+}
+
+/// RFC 6544 section 6.1: "the answerer MUST still accept incoming TCP connections to any of
+/// the passive candidates it listed in the answer, from any of the IP addresses the offerer
+/// listed in the initial offer", and RFC 8445 section 8.2: "ICE processing is complete after
+/// and only after the updated candidate exchange is complete". The agents select different
+/// pairs: the answerer a UDP one, the offerer its active TCP candidate to the answerer's
+/// passive one, whose connection it opens in parallel with its updated offer. The answerer
+/// closes nothing while the update is awaited (on its own pair the connection carries no
+/// selected pair); the update then selects the connection's pair, which is kept and carries
+/// the data, without an ICE restart.
+#[test]
+fn two_lite_agents_close_nothing_while_the_updated_offer_is_awaited() -> Result<()> {
+    use rtci::peer_connection::transport::RTCIceProtocol;
+    let mut net = Net::new();
+    net.carry = Some(offerers_udp_to_the_answerer_only);
+    let mut peers = peers(&net, lite);
+    let channel = negotiate(&mut peers, &net)?;
+    let mark = until_the_update_is_due(&mut peers, &mut net, true)?;
+    let selected = |p: &Peer| {
+        p.pc.sctp()
+            .and_then(|s| s.transport().ice_transport().get_selected_candidate_pair())
+            .map(|pair| pair.local().protocol)
+    };
+    assert_eq!(
+        selected(&peers[1]),
+        Some(RTCIceProtocol::Udp),
+        "the answerer selected its UDP pair{}",
+        lite_diagnostics(&mut peers, &net)
+    );
+    assert_eq!(selected(&peers[0]), Some(RTCIceProtocol::Tcp));
+    let parallel = answerers_connection(&net).expect("the parallel connection");
+    // The update is late: two seconds in which the answerer has a selected pair of its own
+    // and a connection that carries none.
+    let until = net.elapsed() + Duration::from_secs(2);
+    while net.elapsed() < until {
+        net.step(&mut peers);
+        assert!(
+            !answerer_ended(&net, parallel),
+            "closed at {:?}, before the updated offer{}",
+            net.elapsed(),
+            lite_diagnostics(&mut peers, &net)
+        );
+        net.advance(&mut peers);
+    }
+    lite_update(&mut peers, &net, str::to_owned)?;
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(30),
+        |_, _| {},
+    )
+    .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
+    assert_eq!(peers[1].received, expected, "every message, in order");
+    assert_eq!(selected(&peers[1]), Some(RTCIceProtocol::Tcp));
+    assert!(
+        !answerer_ended(&net, parallel),
+        "the parallel connection is kept"
+    );
+    assert_eq!(answerers_connection(&net), Some(parallel));
+    assert_eq!(net.open_connections(), 1);
+    assert_eq!(connect_commands(&peers[0]), 1);
+    assert!(!negotiation_needed(&peers[1], mark), "no ICE restart");
     Ok(())
 }
 
