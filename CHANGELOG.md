@@ -496,7 +496,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DTLS, SCTP), with their clocks and NTP times anchored at the run's start. The measured share
   was different in every run and landed once above the unchanged 5% bound of
   `the_performance_profile_keeps_low_rate_rtcp_inside_five_percent` (train 36 round 10b, macOS:
-  0.0516); every share is now printed in full (`RTCP-SHARE ...`).
+  0.0516); every share is now printed in full (`RTCP-SHARE ...`). The test, renamed
+  `the_performance_profile_keeps_low_rate_rtcp_inside_five_percent_on_average`, asserts what
+  RFC 3550 6.2 / 6.3.1 promise, an average: the mean share over 16 fixed seed pairs of the 15 s
+  call is at most 5%, and each of 4 seed pairs of a 30 s call is (measured over 200 seed pairs:
+  15 s call mean 0.0474, max 0.0516, 1% of draws above 5%; 30 s call max 0.0489; the 10 s window
+  holds one to three regular reports at 24 kbit/s). New ignored measurement
+  `rtcp_share_over_seed_pairs`.
 
 - **The test environment relays the end of candidates**
   (`conf/ice-34-lite-agents-and-failed-after-end-of-candidates`; `tests/testenv/mod.rs`
