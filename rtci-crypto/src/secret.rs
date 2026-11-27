@@ -134,15 +134,16 @@ pub fn scrub_stack() {
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
-/// How much stack [`scrub_record_stack`] overwrites: 32 KiB, in an unoptimised build only.
+/// How much stack [`scrub_record_stack`] overwrites: 48 KiB, in an unoptimised build only.
 ///
 /// The deepest record-key form measured in an unoptimised build lay 31,288 bytes below the
 /// DTLS key residue measurement's floor (rustc 1.89, the AES-CCM records step,
 /// `rtci-dtls/tests/key_residue.rs`, run 46015302538). Every record call's own frame lies below
-/// that floor, so what the record work leaves lies less than that below the call: an overwrite
-/// of 32 KiB starting there reaches past it.
+/// that floor, so what the record work leaves lies less than that below the call. 48 KiB is
+/// that depth times 1.5, for other compilers and call paths; it is paid in unoptimised builds
+/// only.
 #[cfg(debug_assertions)]
-const SCRUB_RECORD_STACK_BYTES: usize = 32 * 1024;
+const SCRUB_RECORD_STACK_BYTES: usize = 48 * 1024;
 
 /// Overwrites the stack below the caller's frame after one record's work with RustCrypto's AES,
 /// in an unoptimised build (`debug_assertions`); in an optimised build it is not compiled.
