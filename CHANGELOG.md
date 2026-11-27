@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RTCRtpSender::rewritten_payload_type_rtp_packets()`** and
+  **`RTCRtpSender::rewritten_from_another_codec_rtp_packets()`**, with their connection sums
+  `RTCPeerConnection::rewritten_payload_type_rtp_packets()` and
+  `RTCPeerConnection::rewritten_from_another_codec_rtp_packets()`
+  (`conf/sender-1-rewritten-payload-type-counter`). `write_rtp` rewrites a payload type that is
+  not negotiated for the sender to the one negotiated for its encoding's codec, and only the
+  number: the payload is not touched (the engine has no encoder). The first counter counts every
+  packet sent with a rewritten payload type, the legitimate case included (the application kept
+  its own offer's number for a codec the answer numbered otherwise, RFC 3264 section 5.1); the
+  second the ones whose written number names a different format of the sender's kind, among the
+  registered and negotiated formats (VP8 written with its offered number after the answer
+  negotiated H.264 only): their bytes went out labelled as a codec they are not in (RFC 3264
+  section 7, the offerer "MUST send using a media format listed in the answer"). An application
+  whose encoder follows the sender's negotiated codec keeps the second at 0, and its tests can
+  assert it. Codecs are compared by MIME type; a number that names no format counts in the first
+  only; packets refused or dropped are not counted. Not W3C members: webrtc-stats has none. The
+  `write_rtp` and `get_parameters` rustdoc and the README say what the application must do after
+  applying an answer: re-read the sender's negotiated codec and encode that one. Test
+  `tests/rewritten_payload_type_counter_rtc2rtc.rs`. Engine behaviour change no (the rewrite is
+  unchanged); API addition only.
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
