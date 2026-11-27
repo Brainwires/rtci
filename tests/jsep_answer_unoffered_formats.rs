@@ -76,20 +76,28 @@ fn an_answer_lists_its_other_formats_after_the_offered_ones() -> TestResult {
         "an added format has no feedback: {answer}"
     );
 
-    // The offerer sends only what it offered.
+    // The offerer may send with every format of the answer it can send (W3C webrtc-pc
+    // [[SendCodecs]]: "the codecs that description negotiates for sending and which the user
+    // agent is currently capable of sending"; jsep-91), VP9 included, and sends with the
+    // answer's first, VP8 (RFC 9429 section 5.11, RFC 3264 section 7). Before jsep-91 the
+    // added format was left out of the send codecs.
     let parameters = offerer
         .rtp_sender(sender)
         .expect("sender")
         .get_parameters()
         .clone();
+    let codecs = &parameters.rtp_parameters.codecs;
     assert!(
-        parameters
-            .rtp_parameters
-            .codecs
+        codecs
+            .first()
+            .is_some_and(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP8)),
+        "{codecs:?}"
+    );
+    assert!(
+        codecs
             .iter()
-            .all(|c| !c.rtp_codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP9)),
-        "{:?}",
-        parameters.rtp_parameters.codecs
+            .any(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP9)),
+        "{codecs:?}"
     );
     Ok(())
 }
