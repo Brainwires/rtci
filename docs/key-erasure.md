@@ -220,7 +220,7 @@ bytes of `aes`'s union, carried from the stack). Cost: docs/performance.md, row 
   build profile with opt-level 0 and `debug-assertions = false` gets 32 KiB, which rustc 1.99.1
   was measured to exceed). A provider supplied by the application that uses more stack than
   that to build a key object leaves what lies deeper.
-- **DTLS.** Scrubbed (above), not measured in this way.
+- **DTLS.** Measured the same way since zeroize-5: the next section.
 
 For an application: nothing is asked of it for SRTP with the default provider. With the AWS-LC
 provider, the thread that protects and unprotects packets keeps HMAC-SHA1 states or a GCM key
@@ -231,8 +231,150 @@ The AWS-LC provider (`crypto-aws-lc-rs`) cleanses its `EVP_AEAD_CTX` and `HMAC_C
 freed block and no other part of the process holds a key after the drop, for every SRTP profile
 and the DTLS suites tested. What its packet path leaves in stack frames is in the next section.
 
+## DTLS keys on the stack: what is guaranteed, and how it is known
+
+RFC 5246 section 8.1 (the premaster secret deleted once the master secret exists), RFC 8446
+section 7.1 (a secret erased once what derives from it is computed), RFC 7714 section 13.1 for
+the SRTP keying material a DTLS-SRTP association exports (RFC 5764 section 4.2).
+
+**Why it matters.** A key left in a dead stack frame does not stay there: the next value built
+over that frame and moved into the heap carries it in bytes no field owns (padding, the
+payload of a `None`, the unused arm of a union), and that heap block is later freed with the
+key in it, which no `Zeroize` can prevent. The heap quarantine test (`tests/dtls_secret_erasure.rs`)
+saw it twice on Windows before this work: the exporter output carried by an `Option<Instant>`,
+and an AES-CCM write key in a freed 692-byte buffer. Fixing a carrier moves the leak to the
+next one; the source is the dead frames.
+
+**The measurement** (`rtci-dtls/tests/key_residue.rs`, unix; the `owned_stack` module of the
+SRTP measurement). Each step of an association runs on a worker thread whose stack the test
+maps itself: the configurations and endpoints, every one-way delivery of the handshake, the
+DTLS-SRTP export (client and server), four application records each way, two DTLS 1.3 key
+updates, the close_notify exchange, the teardown; for ticket resumption the first association's
+teardown and the resumed association's steps too. Scenarios, with each provider: DTLS 1.2 with
+AES-128-GCM, AES-128-CCM, ChaCha20-Poly1305, AES-256-CBC-SHA and PSK AES-128-GCM, DTLS 1.2 ticket
+resumption, DTLS 1.3 with AES-128-GCM, AES-128-CCM and ChaCha20-Poly1305, DTLS 1.3 ticket
+resumption. The secrets come from a provider wrapper that records, inverted, every key that
+crosses the provider boundary and the first inputs of each HMAC; the test recomputes the PRF
+outputs (master secret, `A(i)`, key block, exporter output) and every `HKDF-Expand-Label`
+output with the provider's HMAC, and turns each secret into its forms (AES round keys of both
+schedules, the GHASH key forms, HMAC padded keys and SHA-1 / SHA-256 states, raw bytes), on a
+scratch worker whose stack is overwritten and unmapped, after every step's worker has been
+parked. The needles are checked against what the association used (each record key in a
+recomputed key block or equal to an HKDF "key" output; the recomputed exporter output equal to
+what was exported), and a control step leaves the exported material on its stack and must be
+found. Each form is classed:
+
+- *secrets of key derivation*: (EC)DHE shared secret, premaster and master secret, PRF
+  intermediates, HKDF secrets, Finished and binder keys, cookie secrets, the exported keying
+  material;
+- *record keys*: the AEAD, CBC and record-number keys with their schedules, the CBC suite's
+  HMAC-SHA1 MAC key;
+- *not keys*: IVs and key-block bytes outside every key. A DTLS 1.3 record's nonce is the IV
+  XORed with the sequence number, and `RecordKeys::nonce` copies the whole IV into its frame
+  before the XOR, so the nonce of a record with sequence number 0 is the IV itself. An AEAD does
+  not need its nonce to be secret, and the IV is an independent HKDF output: knowing it gives
+  neither the key nor the traffic secret. Counted and printed, not asserted.
+
+**What was left before** (0.2.0 with the SRTP work of zeroize-3 and zeroize-4, whose DTLS
+code is 0.2.0's; runs 46006489538, 46007195162, 46007201947; forms over all scenarios,
+unoptimised / optimised):
+
+| | ring | AWS-LC |
+|---|---|---|
+| x86-64 Linux, rustc 1.100 | 138 / 107 | 162 / 168 |
+| x86-64 Linux, rustc 1.99.1 | 294 / 159 | 308 / 166 |
+| x86-64 Linux, rustc 1.89 | 269 / 114 | 300 / 172 |
+| AArch64 macOS, rustc 1.100 | 160 / 110 | 188 / 186 |
+
+Almost all of it HMAC state of secrets of key derivation: the master secret's HMAC states after
+every DTLS 1.2 delivery that runs the PRF (key block, Finished verify_data) and after the export
+(ring copies the keyed HMAC context onto the stack for every MAC; AWS-LC both states, many
+times); the exported keying material itself; the cookie secrets' states (HelloVerifyRequest,
+HelloRetryRequest); in DTLS 1.3 the HMAC states and outputs of the key schedule's secrets
+(traffic, exporter, resumption secrets, Finished and binder keys). No AES round key was found
+in the set-up of any suite, no ticket key, no (EC)DHE shared secret. The deepest form lay 61.5
+KB below the measurement's floor (unoptimised; DTLS 1.3, the first delivery to the server, an
+HMAC-SHA-256 key's state), 30.4 KB optimised. Teardown left nothing.
+
+**What is done about it.** Six places that derive keys run under `crypto::on_erased_stack`:
+`prf_p_hash` (master secret, extended master secret, key block, verify_data, exporter), the
+DTLS 1.2 cookie MAC, the DTLS 1.3 key schedule's `expand_label` (every secret but the extracted
+ones) and its Finished HMAC (Finished and binder), the DTLS 1.3 exporter, and the DTLS 1.3
+HelloRetryRequest cookie MAC. The record path is unchanged. Eight more wraps were tried and
+removed: with each taken away alone, every inventory stayed the same byte for byte (run
+46010716061): the five DTLS 1.2 suite set-ups (their PRF is `prf_p_hash`, and each cipher's
+constructor already overwrites the stack after every provider call), `RecordKeys::new` (it
+already overwrites before and after building its key objects) and the two HKDF-Extract steps
+(each caller derives a secret through `expand_label` right after, whose overwrite reaches the
+same frames). The overwrite depth is the SRTP one (32 KiB optimised, 128 KiB unoptimised); no
+DTLS form of any class lay deeper than 38.2 KB below the floor afterwards.
+
+**After** (head `98e3cbd7`; runs 46015289354, 46015302538, 46015308455): no secret of key
+derivation in any form, after any step, in any scenario, with either provider, in either build,
+with rustc 1.89, 1.99.1 and 1.100 on x86-64 Linux and 1.100 on AArch64 macOS; nothing at all
+after the configurations, the connect, the export and the teardown. What is left is the record
+path and IVs (forms, unoptimised / optimised):
+
+| | ring | AWS-LC |
+|---|---|---|
+| x86-64 Linux, rustc 1.100 | 50 / 27 | 58 / 50 |
+| x86-64 Linux, rustc 1.99.1 | 195 / 27 | 203 / 50 |
+| x86-64 Linux, rustc 1.89 | 182 / 36 | 193 / 64 |
+| AArch64 macOS, rustc 1.100 | 76 / 33 | 83 / 77 |
+
+**What is guaranteed, by which test**
+
+| Claim | Where it is asserted |
+|---|---|
+| either provider, every build: no secret of key derivation in a dead stack frame after any step; no key of any class after the steps that protect no record | `with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames`, `with_aws_lc_dtls_key_handling_leaves_no_key_in_dead_stack_frames`: CI job `key_residue` (x86-64 Linux with `rust-version` and stable, AArch64 macOS with stable, unoptimised and optimised); the ordinary test jobs and the test environment unoptimised |
+| ring, optimised build: no record key of an AES suite (AES-GCM, AES-CBC cipher and MAC keys, AES-CCM) after any step | the ring test; AES-CCM from rustc 1.99.1 on (below) |
+| AWS-LC, optimised build: no AES-CBC cipher key and no AES-CCM key (the record path rtci-crypto composes from RustCrypto's AES) | the AWS-LC test; AES-CCM from rustc 1.99.1 on |
+
+Each wrap is held by these tests: with any one of the six taken away alone, both tests fail in
+both builds (run 46014737611, `mut/zeroize-5-gated-wraps-2`).
+
+**What is not guaranteed**
+
+- **ring's ChaCha20-Poly1305 record path.** It copies the key to the stack for every record:
+  DTLS 1.2 key-block bytes of the write keys after the deliveries that seal or open records, the
+  records and the close (8 to 10 forms optimised, at most 17.8 KB deep; up to 25.8 KB
+  unoptimised).
+  Removing the suite set-up's wrap did not change them: they come from the records.
+- **AWS-LC's record path.** A GHASH table entry of the AES-GCM key for every record (33 to 36
+  forms optimised, DTLS 1.2 and 1.3), and the HMAC-SHA1 states of the AES-CBC suite's MAC key
+  (10 forms, 22.7 KB deep optimised, 38.2 KB unoptimised), from AWS-LC's own frames.
+  `known_limit_with_aws_lc_the_dtls_record_path_leaves_keys_in_dead_stack_frames` (ignored) is
+  the limit as a test.
+- **AES-CCM with rustc older than 1.99.1, optimised.** AES-CCM is RustCrypto's AES in
+  rtci-crypto with either provider. With rustc 1.89 it left one or two round keys of a DTLS 1.3
+  AES-CCM record key in the delivery that opens the server's flight, 16.4 to 16.7 KB below the
+  floor (round key 4 with the 14-wrap build, run 46012389383; round keys 5 and 9 with the final
+  one, run 46015302538; repeats within a run identical): by reading the record path, since the
+  record keys' set-up runs on an overwritten stack. None with 1.99.1 or 1.100. Not fixed: it
+  would need an overwrite after every record. `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1` turns the
+  assertion into a printed count; `scripts/key-residue-report.sh` and the `key_residue` CI job
+  set it for any compiler older than 1.99.1 (the versions between 1.89 and 1.99.1 are
+  unmeasured and treated as the limit).
+- **Unoptimised builds' record path.** At opt-level 0 RustCrypto's AES of the AES-CCM and AES-CBC
+  record path keeps keys and round keys in stack slots: 97 to 100 AES-CCM and 45 to 47 AES-CBC
+  forms with rustc 1.89 and 1.99.1, 24 and 9 on AArch64 macOS, none with 1.100 on Linux; at most
+  31.3 KB deep (ring) and 38.2 KB (AWS-LC, its HMAC-SHA1). Printed, not asserted.
+- **IVs** (above): 7 to 26 forms per provider and build.
+- **Run-to-run variation.** Within a run the repeats agree digest for digest, except one form
+  more or less in a few legs (AWS-LC optimised on Linux, 50 / 51; ring unoptimised on Linux,
+  50 / 51; ring optimised on macOS, 33 / 35): all of them record-path or IV forms.
+- **CPU registers, signal frames, Windows, other architectures**: as for SRTP above. On Windows
+  the evidence is the heap side: the quarantine tests of `tests/dtls_secret_erasure.rs` and
+  `tests/dtls_srtp_keying_material_erasure.rs` pass, three rounds each, on Windows and macOS
+  (runs 46014745677, 46014758592).
+- **What the measurement cannot see**: forms the test does not compute (AWS-LC's internal
+  representations other than the ones above, SHA-384 / SHA-512 HMAC states: no measured suite
+  uses them), and a provider wrapper is in the measured stack (it adds a frame to each provider
+  call and handles keys only by reference and only inverted).
+
 ## What the tests look at
 
+`rtci-dtls/tests/key_residue.rs` is the DTLS stack measurement described above.
 `tests/dtls_secret_erasure.rs` runs associations over a provider wrapper that records every
 secret crossing the provider boundary (kept inverted) and derives what the association
 computes from them; a test allocator keeps every block freed during the association (and

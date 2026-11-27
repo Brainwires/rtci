@@ -56,6 +56,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stack overwrites, once per context); per packet nothing slower, SRTCP 12 to 15 % faster (no
   key expansion per packet).
   Performance: zeroize-3
+- **DTLS key derivation no longer leaves its secrets in dead stack frames**
+  (`conf/zeroize-5-dtls-key-setup-on-an-erased-stack`; RFC 5246 section 8.1, RFC 8446 section
+  7.1, RFC 7714 section 13.1 for the exported SRTP keying material; docs/key-erasure.md; audit
+  row RFC7714-13.1-3). Measured first with a new test that reads the stack itself (below):
+  every DTLS association left the HMAC states of its master secret after each use of the PRF
+  (ring copies the keyed HMAC context onto the stack for every MAC; AWS-LC both states, many
+  times), the exported keying material itself, the cookie secrets' HMAC states, and in DTLS 1.3
+  the HMAC states and outputs of the key schedule's secrets: 107 to 308 key forms per provider
+  and build over nine scenarios, rustc 1.89, 1.99.1 and 1.100 on x86-64 Linux and 1.100 on
+  AArch64 macOS, down to 61.5 KB below the measurement's floor. Such a key is later carried
+  into heap blocks through bytes no field owns (padding, the payload of a `None`): the two
+  Windows-only failures of the heap quarantine test seen in this release cycle (an exporter
+  output, an AES-CCM write key) were that. Now `prf_p_hash` (master secret, extended master
+  secret, key block, verify_data, exporter), the DTLS 1.2 cookie MAC, the DTLS 1.3 key
+  schedule's `HKDF-Expand-Label` and Finished HMAC, the DTLS 1.3 exporter and the DTLS 1.3
+  HelloRetryRequest cookie MAC run under `crypto::on_erased_stack`. Result: no secret of key
+  derivation in any form after any step, with either provider, in unoptimised and optimised
+  builds, on every compiler and platform measured; no key at all after the configuration,
+  connect, export and teardown steps. With ring in an optimised build also no record key of an
+  AES suite (AES-CCM from rustc 1.99.1 on: Known limits). Each of the six is held by the test:
+  taken away alone, the test fails. Eight more wraps that were tried (the DTLS 1.2 suite
+  set-ups, the DTLS 1.3 record-key set-up, both HKDF-Extract steps) changed nothing measured and
+  were left out. The record path is unchanged. No wire format, API or default changes.
 
 ### Changed
 
@@ -100,8 +123,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `debug-assertions = false` gets the optimised depth; a provider supplied by the
     application that goes deeper leaves what lies below.
 
+- **What the DTLS work is not shown to hold for** (docs/key-erasure.md):
+  - **The record path**: ring's ChaCha20-Poly1305 copies the key to the stack for every record
+    (8 to 10 key forms over the scenarios, optimised); AWS-LC leaves a GHASH table entry of the
+    AES-GCM key and the HMAC-SHA1 states of the AES-CBC MAC key per record (43 to 51 forms,
+    optimised; the limit as a test:
+    `known_limit_with_aws_lc_the_dtls_record_path_leaves_keys_in_dead_stack_frames`, ignored).
+    The engine does not overwrite the stack after every record.
+  - **AES-CCM with rustc older than 1.99.1, optimised**: AES-CCM is RustCrypto's AES in
+    rtci-crypto with either provider; with rustc 1.89 its record path left one or two round keys
+    of a DTLS 1.3 AES-CCM key, 16.4 to 16.7 KB deep, none with 1.99.1 and 1.100. Asserted from
+    1.99.1 on; for older compilers `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1` (set by
+    `scripts/key-residue-report.sh` and the CI job) prints it instead.
+  - **Unoptimised builds' record path**: RustCrypto's AES of the AES-CCM and AES-CBC suites
+    keeps keys and round keys in stack slots (up to 145 forms with rustc 1.89 and 1.99.1).
+  - **IVs**: a DTLS 1.3 record's nonce is its IV at sequence number 0, and the nonce is built
+    from a copy of the whole IV; counted and printed, not asserted, as an AEAD does not need a
+    secret nonce.
+  - **Windows**: the stack measurement needs `pthread_attr_setstack`; the heap quarantine tests
+    are the evidence there (pass, three rounds, Windows and macOS).
+
 ### Testing
 
+- **The DTLS key residue measurement** (`rtci-dtls/tests/key_residue.rs`, `residue_forms/`;
+  `scripts/key-residue-report.sh dtls`; CI job `key_residue`). Each step of a DTLS association
+  (configurations, connect, every one-way delivery of the handshake, the DTLS-SRTP export,
+  application records, DTLS 1.3 key updates, close_notify, teardown, and the resumed
+  association of ticket resumption) runs on a worker whose stack the test owns (the SRTP
+  measurement's `owned_stack`); DTLS 1.2 with AES-GCM, AES-CCM, ChaCha20-Poly1305, AES-CBC and a
+  PSK suite, DTLS 1.3 with AES-GCM, AES-CCM and ChaCha20-Poly1305, ticket resumption in both,
+  ring and AWS-LC. The secrets come from a recording provider and the PRF / HKDF outputs
+  recomputed from them, in every form (AES round keys of both schedules, GHASH key forms, HMAC
+  padded keys and SHA-1 / SHA-256 states); the needles are checked against what the association
+  used, and a control's planted key must be found. Forms are classed as secrets of key
+  derivation, record keys, or IVs, and asserted as docs/key-erasure.md says.
+  - `with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames`,
+    `with_aws_lc_dtls_key_handling_leaves_no_key_in_dead_stack_frames`.
 - **A measurement of key residue in stack frames that does not depend on the C library**
   (`rtci-srtp/tests/key_residue.rs`, `owned_stack/`, `process_scan/`;
   `scripts/key-residue-report.sh`; CI job `key_residue`). Each step of a session (building the
