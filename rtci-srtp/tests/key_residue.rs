@@ -22,8 +22,7 @@
 //!
 //! What is asserted (`check`, and each test's documentation): nothing outside dead stack frames
 //! after the teardown; nothing in them after building and tearing down, in any build, with
-//! either provider; with the ring provider nothing in them after any step in an optimised
-//! build. What the dead frames hold after each step is printed either way (`STAGE`, `FORM`,
+//! either provider; with the ring provider nothing in them after any step, in any build. What the dead frames hold after each step is printed either way (`STAGE`, `FORM`,
 //! `SUMMARY`, `INVENTORY` lines; `scripts/key-residue-report.sh` collects them).
 
 #[cfg(unix)]
@@ -664,29 +663,21 @@ mod residue_tests {
     /// anywhere else in the process after the teardown either, and the search is shown to see
     /// the live keys.
     ///
-    /// The build and teardown steps are asserted in every build. The packet path (the
-    /// `packets` and `rekey` steps) is asserted in an OPTIMISED build, which is what CI runs
-    /// this test in besides the ordinary one (`cargo test --release`): the ciphers' key
-    /// schedules and the MAC states stay in the heap objects that own them and the code works
-    /// through references, but an unoptimised build stores every intermediate value of the
-    /// AES and SHA-1 routines in a stack slot, round keys included, whatever the source says.
-    /// There the count is printed and not asserted.
+    /// Every step is asserted in every build. In an unoptimised build the AES and SHA-1
+    /// routines store their intermediate values in stack slots, round keys included; rtci-crypto
+    /// overwrites the stack after each record operation of RustCrypto's AES there
+    /// (`scrub_record_stack`), which removed the 72 and 108 AES-CTR round-key forms the packet
+    /// path left with rustc 1.89 and 1.99.1 (18 on AArch64 macOS; runs 46030856312, 46030861874:
+    /// 0 with the overwrite, those counts without it).
     #[cfg(feature = "crypto-ring")]
     #[test]
     fn with_ring_key_handling_leaves_no_key_in_dead_stack_frames() {
         let inventory = measure(1, "ring");
         check(&inventory);
-        if cfg!(debug_assertions) {
-            println!(
-                "NOT ASSERTED in an unoptimised build: {} key forms left by the packet path",
-                inventory.in_step("packets") + inventory.in_step("rekey")
-            );
-        } else {
-            assert_eq!(
-                0, inventory.forms,
-                "key forms left in dead stack frames (the FORM lines above name each)"
-            );
-        }
+        assert_eq!(
+            0, inventory.forms,
+            "key forms left in dead stack frames (the FORM lines above name each)"
+        );
     }
 
     /// The same with the AWS-LC provider, for what holds with it: building the contexts and

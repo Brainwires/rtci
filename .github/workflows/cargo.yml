@@ -270,8 +270,9 @@ jobs:
   # residue measurement (rtci-srtp/tests/key_residue.rs) in an UNOPTIMISED and an OPTIMISED
   # build, with the workspace's rust-version (the oldest supported compiler) and with stable.
   # In every build it asserts that building and tearing down leave no key form in a dead stack
-  # frame; in the optimised one it also asserts that the ring provider's packet path leaves
-  # none (docs/key-erasure.md). How deep an unoptimised build's frames go depends on the
+  # frame, and that the ring provider's packet path leaves none (in an unoptimised build
+  # because rtci-crypto overwrites the stack after each RustCrypto AES record operation there;
+  # docs/key-erasure.md). How deep an unoptimised build's frames go depends on the
   # compiler (rustc 1.99.1 went past the 32 KiB that used to be overwritten), so the oldest
   # one is measured too. x86-64 Linux, with the whole process searched, and AArch64 macOS.
   # The DTLS measurement (rtci-dtls/tests/key_residue.rs) runs in the same builds: every step of
