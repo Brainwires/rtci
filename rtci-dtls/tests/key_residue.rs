@@ -1562,11 +1562,13 @@ mod residue_tests {
     /// compilers older than 1.99.1, the first measured to hold.
     const CCM_KNOWN_LIMIT: &str = "RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT";
 
-    /// The AES-CCM record path in an optimised build (RustCrypto's AES in rtci-crypto, with
-    /// either provider): asserted to leave no key form unless [`CCM_KNOWN_LIMIT`] is `1`, then
-    /// printed with its count and depth.
+    /// The AES-CCM record path (RustCrypto's AES in rtci-crypto, with either provider):
+    /// asserted to leave no key form; in an optimised build unless [`CCM_KNOWN_LIMIT`] is `1`,
+    /// then printed with its count and depth. (In an unoptimised build rtci-crypto overwrites
+    /// the stack after every RustCrypto AES record operation, `scrub_record_stack`, so the
+    /// compiler does not matter there.)
     fn check_ccm(inventory: &Inventory) {
-        if std::env::var_os(CCM_KNOWN_LIMIT).is_some_and(|v| v == "1") {
+        if !cfg!(debug_assertions) && std::env::var_os(CCM_KNOWN_LIMIT).is_some_and(|v| v == "1") {
             println!(
                 "NOT ASSERTED ({CCM_KNOWN_LIMIT}=1): {} AES-CCM record-key forms, the deepest \
                  {} bytes below the floor: {}",
@@ -1575,8 +1577,8 @@ mod residue_tests {
         } else {
             assert_eq!(
                 0, inventory.ccm_record_keys,
-                "AES-CCM record keys left in dead stack frames in an optimised build (the FORM \
-                 lines above name each; {CCM_KNOWN_LIMIT}=1 states this as the limit of a \
+                "AES-CCM record keys left in dead stack frames (the FORM lines above name each; \
+                 in an optimised build {CCM_KNOWN_LIMIT}=1 states this as the limit of a \
                  compiler older than rustc 1.99.1)"
             );
         }
@@ -1589,32 +1591,29 @@ mod residue_tests {
     /// with AES-GCM, AES-CCM and ChaCha20-Poly1305 and key updates, and ticket resumption in
     /// both: after every step no (EC)DHE, premaster, master, PRF, HKDF, Finished, binder,
     /// cookie secret or exported keying material is found in any form, and after the steps
-    /// that protect no record, no key at all ([`check`]). In an optimised build also no record
-    /// key of an AES suite after any step: AES-GCM, AES-CBC (cipher and MAC keys) and AES-CCM
-    /// ([`check_ccm`]: printed instead with `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1`, set for
-    /// compilers older than rustc 1.99.1). Not asserted: ring's ChaCha20-Poly1305 record path,
-    /// which copies the key to the stack for every record; the IVs (a record's nonce is its IV
-    /// at sequence number 0); and an unoptimised build's record path (RustCrypto's AES of the
-    /// CCM and CBC suites keeps its round keys in stack slots).
+    /// that protect no record, no key at all ([`check`]). In every build also no record key of
+    /// an AES suite after any step: AES-GCM, AES-CBC (cipher and MAC keys) and AES-CCM
+    /// ([`check_ccm`]: in an optimised build printed instead with
+    /// `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1`, set for compilers older than rustc 1.99.1). Not
+    /// asserted: ring's ChaCha20-Poly1305 record path, which copies the key to the stack for
+    /// every record, and the IVs (a record's nonce is its IV at sequence number 0).
     #[cfg(feature = "crypto-ring")]
     #[test]
     fn with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
         let inventory = measure("ring");
         check(&inventory);
-        if !cfg!(debug_assertions) {
-            assert_eq!(
-                0,
-                inventory.gcm_record_keys + inventory.cbc_cipher_keys + inventory.cbc_mac_keys,
-                "record keys of an AES-GCM or AES-CBC suite left in dead stack frames in an \
-                 optimised build (the FORM lines above name each)"
-            );
-            check_ccm(&inventory);
-        }
+        assert_eq!(
+            0,
+            inventory.gcm_record_keys + inventory.cbc_cipher_keys + inventory.cbc_mac_keys,
+            "record keys of an AES-GCM or AES-CBC suite left in dead stack frames (the FORM \
+             lines above name each)"
+        );
+        check_ccm(&inventory);
     }
 
-    /// The same with the AWS-LC provider ([`check`]), and in an optimised build no form of
-    /// a key of the record path rtci-crypto composes from RustCrypto's AES with either
-    /// provider: the AES-CBC cipher keys and AES-CCM ([`check_ccm`]). AWS-LC's own record path
+    /// The same with the AWS-LC provider ([`check`]), and in every build no form of a key of
+    /// the record path rtci-crypto composes from RustCrypto's AES with either provider: the
+    /// AES-CBC cipher keys and AES-CCM ([`check_ccm`]). AWS-LC's own record path
     /// leaves a GHASH table entry of the AES-GCM key and the HMAC-SHA1 states of the AES-CBC MAC
     /// key for every record: the known limit below.
     #[cfg(feature = "crypto-aws-lc-rs")]
@@ -1622,14 +1621,11 @@ mod residue_tests {
     fn with_aws_lc_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
         let inventory = measure("aws-lc-rs");
         check(&inventory);
-        if !cfg!(debug_assertions) {
-            assert_eq!(
-                0, inventory.cbc_cipher_keys,
-                "AES-CBC cipher keys left in dead stack frames in an optimised build (the FORM \
-                 lines above name each)"
-            );
-            check_ccm(&inventory);
-        }
+        assert_eq!(
+            0, inventory.cbc_cipher_keys,
+            "AES-CBC cipher keys left in dead stack frames (the FORM lines above name each)"
+        );
+        check_ccm(&inventory);
     }
 
     /// The requirement as a test with the AWS-LC provider: no key form after any step, the
