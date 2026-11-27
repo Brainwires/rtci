@@ -1655,12 +1655,9 @@ fn two_lite_agents_close_a_parallel_connection_the_updated_offer_does_not_match(
     Ok(())
 }
 
-/// Each peer's active and passive TCP candidates, and the offerer's UDP candidate to the
-/// answerer only: the answerer pairs it with its own UDP candidate and selects that pair (a
-/// UDP host candidate has the higher priority), the offerer has only the two TCP pairs and
-/// selects its active-to-passive one. The two agents select different pairs.
-fn offerers_udp_to_the_answerer_only(peer: usize, c: &RTCIceCandidateInit) -> bool {
-    active_and_passive(peer, c) || (peer == 0 && c.candidate.contains(" udp "))
+/// Whether `p` has announced a TCP candidate of its own.
+fn tcp_announced(p: &Peer) -> bool {
+    p.announced().iter().any(|c| c.contains(" tcp "))
 }
 
 /// RFC 6544 section 6.1: "the answerer MUST still accept incoming TCP connections to any of
@@ -1676,10 +1673,24 @@ fn offerers_udp_to_the_answerer_only(peer: usize, c: &RTCIceCandidateInit) -> bo
 fn two_lite_agents_close_nothing_while_the_updated_offer_is_awaited() -> Result<()> {
     use rtci::peer_connection::transport::RTCIceProtocol;
     let mut net = Net::new();
-    net.carry = Some(offerers_udp_to_the_answerer_only);
+    net.carry = Some(active_and_passive);
     let mut peers = peers(&net, lite);
     let channel = negotiate(&mut peers, &net)?;
-    let mark = until_the_update_is_due(&mut peers, &mut net, true)?;
+    // The offerer's UDP candidate reaches the answerer only, and only once both peers' TCP
+    // candidates are out, before the answerer next runs its timers (where two lite agents
+    // select, RFC 8445 section 8.2): the answerer then selects among its UDP pair and its two
+    // TCP pairs, the UDP one (the UDP host candidate's priority is the higher), while the
+    // offerer has the two TCP pairs only. Given earlier, the answerer would select its UDP
+    // pair alone and refuse its own TCP candidates gathered after that (RFC 8838 section 13:
+    // no new candidate after a pair is selected), and no TCP pair would ever form.
+    run_until(&mut peers, &mut net, Duration::from_secs(2), |_, peers| {
+        tcp_announced(&peers[0]) && tcp_announced(&peers[1])
+    })
+    .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
+    let udp = udp_host(&peers[0]);
+    peers[1].pc.add_remote_candidate(udp)?;
+    let mark = until_the_update_is_due(&mut peers, &mut net, true)
+        .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
     let selected = |p: &Peer| {
         p.pc.sctp()
             .and_then(|s| s.transport().ice_transport().get_selected_candidate_pair())
