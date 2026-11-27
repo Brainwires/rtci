@@ -34,6 +34,21 @@ cargo_test=(cargo $toolchain test -p "rtci-$measure" --test key_residue)
 
 # shellcheck disable=SC2086
 echo "== $(rustc $toolchain --version), $(uname -srm), features: ${features:-default}, profile: ${PROFILE:-dev}"
+# The DTLS measurement asserts the AES-CCM record path in an optimised build (RustCrypto's AES
+# in rtci-crypto) where it was measured to hold: rustc 1.99.1 and newer. rustc 1.89 left one
+# round key there (run 46012389383); the versions between 1.89 and 1.99.1 are unmeasured and
+# treated as the limit too: for a compiler older than 1.99.1 the test is told to print the
+# AES-CCM forms instead of asserting none (RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1).
+if [ "$measure" = dtls ]; then
+  # shellcheck disable=SC2086
+  version=$(rustc $toolchain --version | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')
+  if [ -n "$version" ] && [ "$(printf '%s\n' "$version" 1.99.1 | sort -V | head -1)" != 1.99.1 ]; then
+    export RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1
+    echo "== rustc $version is older than 1.99.1: AES-CCM record path printed, not asserted (RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1)"
+  else
+    echo "== rustc ${version:-unknown}: AES-CCM record path asserted in an optimised build"
+  fi
+fi
 "${cargo_test[@]}" --no-run > "$out/build.log" 2>&1 || { tail -30 "$out/build.log"; exit 2; }
 "${cargo_test[@]}" -- --nocapture > "$out/live.log" 2>&1
 status=$?
@@ -46,7 +61,7 @@ if [ "$measure" = dtls ]; then
   echo "== control"
   grep -h '^CONTROL\|^SCENARIO FAILED\|CONTROL: ' "$out/live.log" | sort | uniq -c
   echo "== inventory digests (not ignored, then each repeat with the known limit included)"
-  grep -h '^INVENTORY\|^NOT ASSERTED\|^DEEPEST' "$out/live.log"
+  grep -h '^INVENTORY\|^NOT ASSERTED\|^RECORD PATH\|^DEEPEST' "$out/live.log"
   grep -h '^INVENTORY' "$out"/known-limit-*.log | sort | uniq -c
   echo "== per provider, kind of step and secret"
   grep -h '^SUMMARY' "$out/known-limit-1.log"

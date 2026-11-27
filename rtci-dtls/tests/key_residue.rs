@@ -1325,10 +1325,19 @@ mod residue_tests {
         forms: usize,
         /// The same per kind of step and class.
         by_step: Vec<(&'static str, Class, usize)>,
-        /// Record-key forms in the scenarios of the AES-GCM and AES-CBC suites, any step.
-        gcm_cbc_record_keys: usize,
-        /// Record-key forms in the scenarios of the AES-CCM suites, any step.
+        /// Record-key forms in the scenarios of the AES-GCM suites, any step.
+        gcm_record_keys: usize,
+        /// Forms of the AES-CBC suites' cipher keys (key, round keys, key-block bytes), any
+        /// step: RustCrypto's AES in rtci-crypto, with either provider.
+        cbc_cipher_keys: usize,
+        /// Forms of the AES-CBC suites' HMAC-SHA1 MAC keys (padded keys, states), any step:
+        /// the provider's HMAC.
+        cbc_mac_keys: usize,
+        /// Record-key forms in the scenarios of the AES-CCM suites, any step: RustCrypto's AES
+        /// in rtci-crypto, with either provider.
         ccm_record_keys: usize,
+        /// The deepest AES-CCM record-key form (bytes below the floor) and where.
+        ccm_deepest: (usize, String),
     }
 
     impl Inventory {
@@ -1356,8 +1365,11 @@ mod residue_tests {
         let mut inventory = Inventory {
             forms: 0,
             by_step: Vec::new(),
-            gcm_cbc_record_keys: 0,
+            gcm_record_keys: 0,
+            cbc_cipher_keys: 0,
+            cbc_mac_keys: 0,
             ccm_record_keys: 0,
+            ccm_deepest: (0, String::new()),
         };
         // The deepest form of each class: (distance below the floor, where).
         let mut deepest: Vec<(Class, usize, String)> = Vec::new();
@@ -1429,10 +1441,19 @@ mod residue_tests {
                             None => deepest.push((class, residue.depth.end, form.clone())),
                         }
                         if class == Class::RecordKey {
+                            let hmac = needle.form.starts_with("HMAC")
+                                || needle.form.starts_with("key XOR");
                             if m.session.contains("Ccm") {
                                 inventory.ccm_record_keys += 1;
-                            } else if !m.session.contains("ChaCha20") {
-                                inventory.gcm_cbc_record_keys += 1;
+                                if residue.depth.end > inventory.ccm_deepest.0 {
+                                    inventory.ccm_deepest = (residue.depth.end, form.clone());
+                                }
+                            } else if m.session.contains("Cbc") && hmac {
+                                inventory.cbc_mac_keys += 1;
+                            } else if m.session.contains("Cbc") {
+                                inventory.cbc_cipher_keys += 1;
+                            } else if m.session.contains("Gcm") {
+                                inventory.gcm_record_keys += 1;
                             }
                         }
                         match inventory
@@ -1522,13 +1543,43 @@ mod residue_tests {
             );
         }
         println!(
-            "NOT ASSERTED: {} record-key forms ({} with an AES-GCM or AES-CBC suite, {} with an \
-             AES-CCM suite) and {} IV forms left by steps that protect records",
+            "RECORD PATH: {} record-key forms (AES-GCM {}, AES-CBC cipher keys {}, AES-CBC MAC \
+             keys {}, AES-CCM {}, the rest ChaCha20-Poly1305) and {} IV forms (not asserted) left \
+             by steps that protect records",
             inventory.of_class(Class::RecordKey),
-            inventory.gcm_cbc_record_keys,
+            inventory.gcm_record_keys,
+            inventory.cbc_cipher_keys,
+            inventory.cbc_mac_keys,
             inventory.ccm_record_keys,
             inventory.of_class(Class::NotKey)
         );
+    }
+
+    /// The environment variable that moves the AES-CCM record path from asserted to printed:
+    /// `1` for a compiler on which it was measured to leave a key (rustc 1.89, optimised: one
+    /// round key of a DTLS 1.3 AES-CCM record key, run 46012389383; none with 1.99.1 and
+    /// 1.100). `scripts/key-residue-report.sh` and the `key_residue` CI job set it for
+    /// compilers older than 1.99.1, the first measured to hold.
+    const CCM_KNOWN_LIMIT: &str = "RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT";
+
+    /// The AES-CCM record path in an optimised build (RustCrypto's AES in rtci-crypto, with
+    /// either provider): asserted to leave no key form unless [`CCM_KNOWN_LIMIT`] is `1`, then
+    /// printed with its count and depth.
+    fn check_ccm(inventory: &Inventory) {
+        if std::env::var_os(CCM_KNOWN_LIMIT).is_some_and(|v| v == "1") {
+            println!(
+                "NOT ASSERTED ({CCM_KNOWN_LIMIT}=1): {} AES-CCM record-key forms, the deepest \
+                 {} bytes below the floor: {}",
+                inventory.ccm_record_keys, inventory.ccm_deepest.0, inventory.ccm_deepest.1
+            );
+        } else {
+            assert_eq!(
+                0, inventory.ccm_record_keys,
+                "AES-CCM record keys left in dead stack frames in an optimised build (the FORM \
+                 lines above name each; {CCM_KNOWN_LIMIT}=1 states this as the limit of a \
+                 compiler older than rustc 1.99.1)"
+            );
+        }
     }
 
     /// RFC 7714 section 13.1, RFC 5246 section 8.1, RFC 8446 section 7.1, with the ring
@@ -1539,13 +1590,12 @@ mod residue_tests {
     /// both: after every step no (EC)DHE, premaster, master, PRF, HKDF, Finished, binder,
     /// cookie secret or exported keying material is found in any form, and after the steps
     /// that protect no record, no key at all ([`check`]). In an optimised build also no record
-    /// key of an AES-GCM or AES-CBC suite after any step. Not asserted: ring's
-    /// ChaCha20-Poly1305 record path, which copies the key to the stack for every record; the
-    /// AES-CCM record path (RustCrypto's AES in rtci-crypto, with either provider), which left
-    /// one round key in an optimised build with rustc 1.89 (DTLS 1.3, run 46012389383) and
-    /// none with 1.99.1 and 1.100; the IVs (a record's nonce is its IV at sequence number 0);
-    /// and an unoptimised build's record path (RustCrypto's AES of the CCM and CBC suites keeps
-    /// its round keys in stack slots).
+    /// key of an AES suite after any step: AES-GCM, AES-CBC (cipher and MAC keys) and AES-CCM
+    /// ([`check_ccm`]: printed instead with `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1`, set for
+    /// compilers older than rustc 1.99.1). Not asserted: ring's ChaCha20-Poly1305 record path,
+    /// which copies the key to the stack for every record; the IVs (a record's nonce is its IV
+    /// at sequence number 0); and an unoptimised build's record path (RustCrypto's AES of the
+    /// CCM and CBC suites keeps its round keys in stack slots).
     #[cfg(feature = "crypto-ring")]
     #[test]
     fn with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
@@ -1553,20 +1603,33 @@ mod residue_tests {
         check(&inventory);
         if !cfg!(debug_assertions) {
             assert_eq!(
-                0, inventory.gcm_cbc_record_keys,
+                0,
+                inventory.gcm_record_keys + inventory.cbc_cipher_keys + inventory.cbc_mac_keys,
                 "record keys of an AES-GCM or AES-CBC suite left in dead stack frames in an \
                  optimised build (the FORM lines above name each)"
             );
+            check_ccm(&inventory);
         }
     }
 
-    /// The same with the AWS-LC provider ([`check`]). Its record path leaves a GHASH table
-    /// entry of the AES-GCM key and the HMAC-SHA1 states of the AES-CBC MAC key for every
-    /// record: the known limit below.
+    /// The same with the AWS-LC provider ([`check`]), and in an optimised build no form of
+    /// a key of the record path rtci-crypto composes from RustCrypto's AES with either
+    /// provider: the AES-CBC cipher keys and AES-CCM ([`check_ccm`]). AWS-LC's own record path
+    /// leaves a GHASH table entry of the AES-GCM key and the HMAC-SHA1 states of the AES-CBC MAC
+    /// key for every record: the known limit below.
     #[cfg(feature = "crypto-aws-lc-rs")]
     #[test]
     fn with_aws_lc_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
-        check(&measure("aws-lc-rs"));
+        let inventory = measure("aws-lc-rs");
+        check(&inventory);
+        if !cfg!(debug_assertions) {
+            assert_eq!(
+                0, inventory.cbc_cipher_keys,
+                "AES-CBC cipher keys left in dead stack frames in an optimised build (the FORM \
+                 lines above name each)"
+            );
+            check_ccm(&inventory);
+        }
     }
 
     /// The requirement as a test with the AWS-LC provider: no key form after any step, the

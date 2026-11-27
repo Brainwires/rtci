@@ -317,7 +317,19 @@ jobs:
           rustc --version
           cargo test $RELEASE --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
       - name: No DTLS key is left in a dead stack frame
-        run: cargo test $RELEASE --package rtci-dtls --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
+        # The AES-CCM record path (RustCrypto's AES in rtci-crypto) is asserted in an optimised
+        # build from rustc 1.99.1 on, where it was measured to leave no key; rustc 1.89 left
+        # one round key (docs/key-erasure.md), and the versions between are unmeasured: for a
+        # compiler older than 1.99.1 the test prints the AES-CCM forms instead (as
+        # scripts/key-residue-report.sh does).
+        shell: bash
+        run: |
+          version=$(rustc --version | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')
+          if [ "$(printf '%s\n' "$version" 1.99.1 | sort -V | head -1)" != 1.99.1 ]; then
+            echo "rustc $version is older than 1.99.1: AES-CCM record path printed, not asserted"
+            export RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1
+          fi
+          cargo test $RELEASE --package rtci-dtls --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
       - name: HMAC-SHA1 computed in the keyed object (RFC 2202, object reuse)
         run: cargo test $RELEASE --package rtci-crypto --features crypto-aws-lc-rs --test hmac_sha1_vectors --verbose
 
