@@ -75,40 +75,48 @@ impl CipherSuite for CipherSuiteAes128Ccm {
         server_random: &[u8],
         is_client: bool,
     ) -> Result<()> {
-        let keys = prf_encryption_keys(
-            provider.crypto(),
-            master_secret,
-            client_random,
-            server_random,
-            EncryptionKeyLengths {
-                mac: CipherSuiteAes128Ccm::PRF_MAC_LEN,
-                key: CipherSuiteAes128Ccm::PRF_KEY_LEN,
-                iv: CipherSuiteAes128Ccm::PRF_IV_LEN,
-            },
-            self.hash_func(),
-        )?;
+        // On a stack that is overwritten afterwards (`crypto::on_erased_stack`). The AES-CCM
+        // cipher is RustCrypto's (rtci-crypto `common::new_ccm`, with either provider); its key
+        // schedule, whose round key 0 is the key, is built by value. On Windows the raw write
+        // key of this suite reached a freed heap block through the unwritten bytes of a
+        // handshake message moved into the handshake cache's map (`full_pull_map`): the stack
+        // residue of key handling, carried (tests/dtls_secret_erasure.rs, docs/key-erasure.md).
+        crypto::on_erased_stack(|| {
+            let keys = prf_encryption_keys(
+                provider.crypto(),
+                master_secret,
+                client_random,
+                server_random,
+                EncryptionKeyLengths {
+                    mac: CipherSuiteAes128Ccm::PRF_MAC_LEN,
+                    key: CipherSuiteAes128Ccm::PRF_KEY_LEN,
+                    iv: CipherSuiteAes128Ccm::PRF_IV_LEN,
+                },
+                self.hash_func(),
+            )?;
 
-        if is_client {
-            self.ccm = Some(CryptoCcm::new(
-                provider,
-                &self.crypto_ccm_tag_len,
-                &keys.client_write_key,
-                &keys.client_write_iv,
-                &keys.server_write_key,
-                &keys.server_write_iv,
-            )?);
-        } else {
-            self.ccm = Some(CryptoCcm::new(
-                provider,
-                &self.crypto_ccm_tag_len,
-                &keys.server_write_key,
-                &keys.server_write_iv,
-                &keys.client_write_key,
-                &keys.client_write_iv,
-            )?);
-        }
+            if is_client {
+                self.ccm = Some(CryptoCcm::new(
+                    provider,
+                    &self.crypto_ccm_tag_len,
+                    &keys.client_write_key,
+                    &keys.client_write_iv,
+                    &keys.server_write_key,
+                    &keys.server_write_iv,
+                )?);
+            } else {
+                self.ccm = Some(CryptoCcm::new(
+                    provider,
+                    &self.crypto_ccm_tag_len,
+                    &keys.server_write_key,
+                    &keys.server_write_iv,
+                    &keys.client_write_key,
+                    &keys.client_write_iv,
+                )?);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {
