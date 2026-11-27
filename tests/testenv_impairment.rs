@@ -311,13 +311,17 @@ fn unreliable_channel_loses_without_retransmitting() {
     eprintln!(
         "unreliable: {} of 1000 delivered over a 10%-loss link (each way), queue drained after \
          {drained_after:?}: {t3} T3-rtx expiries waiting {t3_wait:?} (mean {:?}), rest {rest:?}; \
-         losses found by Fast Retransmit {}, retransmissions {} (before the first message {}), \
-         abandoned messages {} (end {}), FORWARD TSNs {} (end {})",
+         losses found by Fast Retransmit {}, retransmissions {} (before the first message {}, \
+         end {}; of partially reliable DATA {}, the rest reliable: the DCEP OPEN), SACK losses \
+         {}, abandoned messages {} (end {}), FORWARD TSNs {} (end {})",
         unique.len(),
         t3_wait.checked_div(t3 as u32).unwrap_or_default(),
         at_drain.get_num_fast_retrans_abandoned(),
         at_drain.get_num_retransmissions(),
         at_open.get_num_retransmissions(),
+        at_end.get_num_retransmissions(),
+        at_end.get_num_partially_reliable_retransmissions(),
+        at_end.get_num_sack_losses(),
         at_drain.get_num_abandoned_messages(),
         at_end.get_num_abandoned_messages(),
         at_drain.get_num_forward_tsns(),
@@ -334,12 +338,16 @@ fn unreliable_channel_loses_without_retransmitting() {
         unique.len()
     );
     // "Without retransmitting", counted: no DATA chunk of the channel's messages went twice
-    // (max_retransmits 0, RFC 7496 3.1), by T3-rtx or by Fast Retransmit. Counted from the
-    // first message: the DATA_CHANNEL_OPEN before it is sent reliably (RFC 8832 5) and is
-    // retransmitted when it is lost.
+    // (max_retransmits 0, RFC 7496 3.1, RFC 8831 6.6), by T3-rtx or by Fast Retransmit, over the
+    // association's whole life. The association's partially reliable retransmissions are the
+    // channel's: its messages are the only partially reliable DATA sent. The reliable ones
+    // are the DATA_CHANNEL_OPEN's (RFC 8832 5: sent reliably whatever the channel's
+    // reliability), which goes again when it or its SACK is lost, after the first message too:
+    // the channel opens on the peer's DATA_CHANNEL_ACK, which can arrive while the SACK of the
+    // OPEN is lost (run 46050142067: one retransmission before the first message, two after).
     assert_eq!(
-        at_open.get_num_retransmissions(),
-        at_end.get_num_retransmissions(),
+        at_end.get_num_partially_reliable_retransmissions(),
+        0,
         "DATA of the channel was sent again"
     );
     // Every message that did not arrive was given up by the sender and skipped with FORWARD
