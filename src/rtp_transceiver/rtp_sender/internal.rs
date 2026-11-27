@@ -104,6 +104,13 @@ pub(crate) struct RTCRtpSenderInternal {
     /// A rid leaves it when the answer removes its encoding or the application gives it new
     /// restrictions (`set_parameters`).
     offered_rid_restrictions: Vec<(String, RTCRtpRidRestrictions)>,
+    /// `with_rejected_rids_kept_in_offers` (RFC 9429 section 5.2.2): the encodings of the
+    /// simulcast streams remote answers rejected, which later offers still list and a later
+    /// answer may accept again. Not sent, not in `get_parameters`.
+    rejected_encodings: Vec<RTCRtpEncodingParameters>,
+    /// The rids of the simulcast envelope in the order first offered, rejected ones included,
+    /// kept with `rejected_encodings`: the order later offers list them in.
+    envelope_rids: Vec<String>,
     /// The `RTCDTMFSender` of an audio sender: its slots and playout.
     pub(crate) dtmf: super::dtmf::DtmfState,
     /// Whether the last answer negotiated `a=extmap-allow-mixed` for the media section (RFC
@@ -555,6 +562,9 @@ impl RTCRtpSenderInternal {
     /// Gives a sender that has none its encodings (SSRCs allocated by the caller).
     pub(crate) fn set_send_encodings(&mut self, send_encodings: Vec<RTCRtpEncodingParameters>) {
         self.send_encodings = send_encodings;
+        // A new envelope: the streams answers rejected from the old one are not offered.
+        self.rejected_encodings.clear();
+        self.envelope_rids.clear();
         self.last_returned_parameters = None;
         self.sync_tracks();
     }
@@ -1049,8 +1059,36 @@ impl RTCRtpSenderInternal {
     /// with the restrictions the answer gave them (see
     /// `RTCPeerConnection::apply_negotiated_simulcast`). Without any of them, the first
     /// encoding stays. A sender with one encoding is left as it is.
-    pub(crate) fn apply_simulcast_answer(&mut self, accepted: &[(String, RTCRtpRidRestrictions)]) {
+    ///
+    /// `keep_rejected` (`with_rejected_rids_kept_in_offers`, a remote answer): the encodings
+    /// the answer leaves out are kept aside instead of dropped, for later offers to list
+    /// (RFC 9429 section 5.2.2), and those an earlier answer left out take part again: one
+    /// this answer accepts is the sender's again, in its place in the envelope.
+    pub(crate) fn apply_simulcast_answer(
+        &mut self,
+        accepted: &[(String, RTCRtpRidRestrictions)],
+        keep_rejected: bool,
+    ) {
+        if keep_rejected {
+            let order = if self.envelope_rids.is_empty() {
+                self.send_encodings
+                    .iter()
+                    .map(|encoding| encoding.rtp_coding_parameters.rid.clone())
+                    .collect()
+            } else {
+                std::mem::take(&mut self.envelope_rids)
+            };
+            self.send_encodings.append(&mut self.rejected_encodings);
+            self.send_encodings.sort_by_key(|encoding| {
+                order
+                    .iter()
+                    .position(|rid| *rid == encoding.rtp_coding_parameters.rid)
+                    .unwrap_or(usize::MAX)
+            });
+            self.envelope_rids = order;
+        }
         if self.send_encodings.len() < 2 {
+            self.envelope_rids.clear();
             return;
         }
         let restrictions_of = |rid: &str| {
@@ -1081,26 +1119,66 @@ impl RTCRtpSenderInternal {
                             .push((coding.rid.clone(), coding.rid_restrictions.clone()));
                     }
                     coding.rid_restrictions = restrictions.clone();
+                    // A stream an earlier answer rejected, accepted again.
+                    if let Some(ssrc) = coding.ssrc {
+                        self.removed_ssrcs.retain(|removed| *removed != ssrc);
+                    }
                     kept.push(encoding);
                 }
                 None if !keeps_any && index == 0 => kept.push(encoding),
                 None => {
-                    if let Some(ssrc) = coding.ssrc {
+                    if let Some(ssrc) = coding.ssrc
+                        && !self.removed_ssrcs.contains(&ssrc)
+                    {
                         self.removed_ssrcs.push(ssrc);
+                    }
+                    if keep_rejected {
+                        self.rejected_encodings.push(encoding);
                     }
                 }
             }
         }
         self.send_encodings = kept;
+        if self.rejected_encodings.is_empty() {
+            self.envelope_rids.clear();
+        }
+        // The restrictions offered for a kept-aside stream stay what later offers write.
         let kept_rids: Vec<String> = self
             .send_encodings
             .iter()
+            .chain(&self.rejected_encodings)
             .map(|encoding| encoding.rtp_coding_parameters.rid.clone())
             .collect();
         self.offered_rid_restrictions
             .retain(|(rid, _)| kept_rids.contains(rid));
         self.last_returned_parameters = None;
         self.sync_tracks();
+    }
+
+    /// The encodings an offer lists, in the envelope's order, each with whether a remote
+    /// answer rejected it (`with_rejected_rids_kept_in_offers`): the sender's own, and those
+    /// kept aside for later offers (RFC 9429 section 5.2.2). Without kept-aside ones, the
+    /// sender's encodings.
+    pub(crate) fn offered_encodings(&self) -> Vec<(&RTCRtpEncodingParameters, bool)> {
+        let mut offered: Vec<(&RTCRtpEncodingParameters, bool)> = self
+            .send_encodings
+            .iter()
+            .map(|encoding| (encoding, false))
+            .chain(
+                self.rejected_encodings
+                    .iter()
+                    .map(|encoding| (encoding, true)),
+            )
+            .collect();
+        if !self.rejected_encodings.is_empty() {
+            offered.sort_by_key(|(encoding, _)| {
+                self.envelope_rids
+                    .iter()
+                    .position(|rid| *rid == encoding.rtp_coding_parameters.rid)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        offered
     }
 
     /// The restrictions the offer gave `rid` before an answer tightened them, which a later

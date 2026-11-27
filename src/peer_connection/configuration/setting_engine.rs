@@ -573,6 +573,8 @@ pub struct SettingEngine {
     pub(crate) rollback_content_ignored: bool,
     /// [`SettingEngineBuilder::with_rollback_resets_offer_created_senders`].
     pub(crate) rollback_resets_offer_created_senders: bool,
+    /// [`SettingEngineBuilder::with_rejected_rids_kept_in_offers`].
+    pub(crate) rejected_rids_kept_in_offers: bool,
     /// [`SettingEngineBuilder::with_strict_sdp_attribute_grammar`].
     pub(crate) strict_sdp_attribute_grammar: bool,
     /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
@@ -731,6 +733,7 @@ impl SettingEngine {
             rid_pause_marks: Default::default(),
             rollback_content_ignored: Default::default(),
             rollback_resets_offer_created_senders: Default::default(),
+            rejected_rids_kept_in_offers: Default::default(),
             strict_sdp_attribute_grammar: Default::default(),
             w3c_simulcast_answer: Default::default(),
             nominated_candidates_only: Default::default(),
@@ -3489,6 +3492,39 @@ impl SettingEngineBuilder {
     /// Firefox 161 has and Chrome 158 and Safari 27.2 do not (wpt.fyi).
     pub fn with_rollback_resets_offer_created_senders(mut self, resets: bool) -> Self {
         self.0.rollback_resets_offer_created_senders = resets;
+        self
+    }
+
+    /// Keeps offering, in later offers, the simulcast streams a remote answer rejected (left
+    /// out of its `a=simulcast`), as RFC 9429 section 5.2.2 writes subsequent offers. The
+    /// default is `false`.
+    ///
+    /// W3C webrtc-pc "set the RTCSessionDescription": "If description is missing any of the
+    /// previously negotiated layers, then remove the dictionaries that correspond to the
+    /// missing layers from transceiver.\[\[Sender\]\].\[\[SendEncodings\]\]", and its
+    /// `createOffer` adds "an a=rid send line" "for each encoding given in
+    /// \[\[SendEncodings\]\]": by default the sender drops the encodings of the rejected
+    /// streams, and the next offer has neither their `a=rid` lines nor their place in
+    /// `a=simulcast` (the W3C "simulcast envelope ... may be narrowed ... but cannot be
+    /// reexpanded"). RFC 9429 section 5.2.2: "For RtpTransceivers that are still present, the
+    /// "a=rid" lines MUST stay the same" and "any "a=simulcast" line MUST stay the same".
+    ///
+    /// With `true`, after a remote answer the sender still sends only the streams the answer
+    /// kept (RFC 8853 section 5.3.3: the offerer "MUST NOT send any RTP packets corresponding
+    /// to the removed rid-ids"), and `get_parameters` lists only those, but it keeps the
+    /// rejected encodings: each later offer writes their `a=rid` lines as first offered and
+    /// lists them in `a=simulcast` in their first place. A rejected stream counts as paused
+    /// (RFC 8853 section 5.3.4: the `send` pause marks "SHALL reflect the offerer's opinion of
+    /// the current pause state"), so it is written `~rid` only where the engine writes pause
+    /// marks at all ([`Self::with_rid_pause_marks`], or RFC 7728 pause negotiated); otherwise
+    /// the line is the first offer's. A later answer that accepts such a stream again brings
+    /// its encoding back, and it is sent (RFC 8853 section 5.3.4: offers "inside an existing
+    /// session follow the same rules as for initial SDP offer"; section 5.3.3: the offerer
+    /// "MAY send any of the kept "receive"-direction rid-id alternatives"). Streams a local
+    /// answer leaves out are not kept: section 5.2.2 is about the offers that follow this
+    /// endpoint's own.
+    pub fn with_rejected_rids_kept_in_offers(mut self, kept: bool) -> Self {
+        self.0.rejected_rids_kept_in_offers = kept;
         self
     }
 

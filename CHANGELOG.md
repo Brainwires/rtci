@@ -55,6 +55,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("expected 1 but got 14"). The default is unchanged (pinned answers unchanged). Engine
   behaviour change NO by default; API addition only. Tests:
   `tests/jsep_answer_offered_formats_only.rs` (both values, the profiles, the WPT scenario).
+- **`SettingEngineBuilder::with_rejected_rids_kept_in_offers`: later offers keep the simulcast
+  streams a remote answer rejected** (`conf/jsep-93-rfc-form-rids-in-later-offers`; RFC 9429
+  section 5.2.2: "the "a=rid" lines MUST stay the same", "any "a=simulcast" line MUST stay the
+  same"). The default is unchanged and is the W3C webrtc-pc form ("remove the dictionaries that
+  correspond to the missing layers from transceiver.[[Sender]].[[SendEncodings]]"; createOffer
+  writes an a=rid line "for each encoding given in [[SendEncodings]]"): the next offer lists only
+  the streams the answer kept. With `true` the sender still sends only those (RFC 8853 section
+  5.3.3) and `get_parameters` lists only those, but each later offer writes the rejected
+  streams' a=rid lines as first offered and lists them in a=simulcast in their first place;
+  a rejected stream counts as paused, so it is written `~rid` only where the engine writes pause
+  marks (`with_rid_pause_marks`, or RFC 7728 pause negotiated). A later answer that accepts it
+  again gives the sender its encoding back, in its place, and it is sent (RFC 8853 section
+  5.3.4). Streams a local answer leaves out are not kept. Profile row
+  `jsep.rejected-rids-kept-in-offers`: `Rfc` off, `StrictRfc` on, `Chrome` on (libwebrtc's
+  `UpdateSimulcastLayerStatusInSender` / `DisableEncodingLayers` keep a rejected layer inactive
+  and re-offer it `~rid`). Audit rows RFC9429-5.2.2-15 / 5.2.2-16 `partial` -> `conflict`; open
+  MUST rows class C -> E. Engine behaviour change NO for the default profile, YES under the
+  `StrictRfc` and `Chrome` profiles (and the `chrome-defaults` feature): their later offers keep
+  the rejected streams; API addition only. Tests
+  `tests/jsep_rejected_rids.rs` (both values, an answer without simulcast, re-acceptance).
 
 ### Fixed
 
