@@ -180,7 +180,13 @@ pub(crate) struct RecordKeys {
 }
 
 impl RecordKeys {
+    /// Builds the record keys of an epoch on a stack that is overwritten afterwards
+    /// (`crypto::on_erased_stack`): the providers build each key schedule on the stack.
     pub(crate) fn new(crypto: &dyn RTCCrypto, suite: Suite13, keys: &TrafficKeys) -> Result<Self> {
+        crypto::on_erased_stack(|| Self::build(crypto, suite, keys))
+    }
+
+    fn build(crypto: &dyn RTCCrypto, suite: Suite13, keys: &TrafficKeys) -> Result<Self> {
         let crypto_error = |error: crypto::CryptoError| Error::Crypto(error.to_string());
         crypto::scrub_stack();
         let aead = crypto

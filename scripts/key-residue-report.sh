@@ -52,8 +52,8 @@ if [ "$measure" = dtls ]; then
   grep -h '^SUMMARY' "$out/known-limit-1.log"
   echo "== steps that left key forms"
   grep -h '^STAGE' "$out/known-limit-1.log" | grep -v '|0 key forms left'
-  echo "== the forms left (the first 400)"
-  grep -h '^FORM' "$out/known-limit-1.log" | head -400
+  echo "== the forms left"
+  grep -h '^FORM' "$out/known-limit-1.log"
   echo "== panics"
   grep -h -A12 'panicked at' "$out/live.log" | head -60
   grep -h -A3 'panicked at' "$out/known-limit-1.log" | head -24

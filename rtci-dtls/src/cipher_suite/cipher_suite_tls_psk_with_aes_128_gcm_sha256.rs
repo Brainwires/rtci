@@ -52,38 +52,42 @@ impl CipherSuite for CipherSuiteTlsPskWithAes128GcmSha256 {
         server_random: &[u8],
         is_client: bool,
     ) -> Result<()> {
-        let keys = prf_encryption_keys(
-            provider.crypto(),
-            master_secret,
-            client_random,
-            server_random,
-            EncryptionKeyLengths {
-                mac: CipherSuiteTlsPskWithAes128GcmSha256::PRF_MAC_LEN,
-                key: CipherSuiteTlsPskWithAes128GcmSha256::PRF_KEY_LEN,
-                iv: CipherSuiteTlsPskWithAes128GcmSha256::PRF_IV_LEN,
-            },
-            self.hash_func(),
-        )?;
+        // The key block and the record keys are built in frames that are overwritten when
+        // they return (`crypto::on_erased_stack`): nothing of them is left on the stack.
+        crypto::on_erased_stack(|| {
+            let keys = prf_encryption_keys(
+                provider.crypto(),
+                master_secret,
+                client_random,
+                server_random,
+                EncryptionKeyLengths {
+                    mac: CipherSuiteTlsPskWithAes128GcmSha256::PRF_MAC_LEN,
+                    key: CipherSuiteTlsPskWithAes128GcmSha256::PRF_KEY_LEN,
+                    iv: CipherSuiteTlsPskWithAes128GcmSha256::PRF_IV_LEN,
+                },
+                self.hash_func(),
+            )?;
 
-        if is_client {
-            self.gcm = Some(CryptoGcm::new(
-                provider,
-                &keys.client_write_key,
-                &keys.client_write_iv,
-                &keys.server_write_key,
-                &keys.server_write_iv,
-            )?);
-        } else {
-            self.gcm = Some(CryptoGcm::new(
-                provider,
-                &keys.server_write_key,
-                &keys.server_write_iv,
-                &keys.client_write_key,
-                &keys.client_write_iv,
-            )?);
-        }
+            if is_client {
+                self.gcm = Some(CryptoGcm::new(
+                    provider,
+                    &keys.client_write_key,
+                    &keys.client_write_iv,
+                    &keys.server_write_key,
+                    &keys.server_write_iv,
+                )?);
+            } else {
+                self.gcm = Some(CryptoGcm::new(
+                    provider,
+                    &keys.server_write_key,
+                    &keys.server_write_iv,
+                    &keys.client_write_key,
+                    &keys.client_write_iv,
+                )?);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {

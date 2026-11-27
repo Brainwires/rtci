@@ -70,38 +70,42 @@ impl CipherSuite for CipherSuiteAes256CbcSha {
         server_random: &[u8],
         is_client: bool,
     ) -> Result<()> {
-        let keys = prf_encryption_keys(
-            provider.crypto(),
-            master_secret,
-            client_random,
-            server_random,
-            EncryptionKeyLengths {
-                mac: CipherSuiteAes256CbcSha::PRF_MAC_LEN,
-                key: CipherSuiteAes256CbcSha::PRF_KEY_LEN,
-                iv: CipherSuiteAes256CbcSha::PRF_IV_LEN,
-            },
-            self.hash_func(),
-        )?;
+        // The key block and the record keys are built in frames that are overwritten when
+        // they return (`crypto::on_erased_stack`): nothing of them is left on the stack.
+        crypto::on_erased_stack(|| {
+            let keys = prf_encryption_keys(
+                provider.crypto(),
+                master_secret,
+                client_random,
+                server_random,
+                EncryptionKeyLengths {
+                    mac: CipherSuiteAes256CbcSha::PRF_MAC_LEN,
+                    key: CipherSuiteAes256CbcSha::PRF_KEY_LEN,
+                    iv: CipherSuiteAes256CbcSha::PRF_IV_LEN,
+                },
+                self.hash_func(),
+            )?;
 
-        if is_client {
-            self.cbc = Some(CryptoCbc::new(
-                provider,
-                &keys.client_write_key,
-                &keys.client_mac_key,
-                &keys.server_write_key,
-                &keys.server_mac_key,
-            )?);
-        } else {
-            self.cbc = Some(CryptoCbc::new(
-                provider,
-                &keys.server_write_key,
-                &keys.server_mac_key,
-                &keys.client_write_key,
-                &keys.client_mac_key,
-            )?);
-        }
+            if is_client {
+                self.cbc = Some(CryptoCbc::new(
+                    provider,
+                    &keys.client_write_key,
+                    &keys.client_mac_key,
+                    &keys.server_write_key,
+                    &keys.server_mac_key,
+                )?);
+            } else {
+                self.cbc = Some(CryptoCbc::new(
+                    provider,
+                    &keys.server_write_key,
+                    &keys.server_mac_key,
+                    &keys.client_write_key,
+                    &keys.client_mac_key,
+                )?);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {

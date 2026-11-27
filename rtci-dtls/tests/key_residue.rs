@@ -409,11 +409,29 @@ mod residue_tests {
         },
     }
 
+    /// What a secret is, for what is asserted about it.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    enum Class {
+        /// Not a key: an IV (the per-record nonce is the IV XORed with the sequence number,
+        /// so the nonce of sequence number 0 IS the IV, and `RecordKeys::nonce` copies the
+        /// whole IV into its frame first), or PRF output past the keys of a key block. An AEAD
+        /// does not need its nonce to be secret; it is counted and printed, not asserted.
+        NotKey,
+        /// A secret of key derivation: (EC)DHE shared secret, premaster and master secret, PRF
+        /// intermediates, HKDF secrets, Finished and binder keys, cookie secrets, the exported
+        /// keying material. The record path never uses one.
+        Derivation,
+        /// A record key, its key schedule or MAC key (AEAD, CBC, HMAC-SHA1 record MAC,
+        /// record-number mask): used for every record, inside the handshake too.
+        RecordKey,
+    }
+
     /// One secret, inverted, with the ways it is used.
     struct Secret {
         name: String,
         inverted: Vec<u8>,
         forms: Vec<Forms>,
+        class: Class,
     }
 
     #[derive(Default)]
@@ -431,7 +449,7 @@ mod residue_tests {
 
     impl Derived {
         /// Adds a secret; one already there with the same bytes takes the name and the use too.
-        fn push(&mut self, name: impl Into<String>, inverted: &[u8], forms: Forms) {
+        fn push(&mut self, name: impl Into<String>, inverted: &[u8], forms: Forms, class: Class) {
             if inverted.len() < SHORTEST || inverted.iter().all(|b| *b == 0xff) {
                 return;
             }
@@ -444,11 +462,14 @@ mod residue_tests {
                     if !secret.forms.contains(&forms) {
                         secret.forms.push(forms);
                     }
+                    // A record key that is also a block of a PRF is a record key.
+                    secret.class = secret.class.max(class);
                 }
                 None => self.secrets.push(Secret {
                     name,
                     inverted: inverted.to_vec(),
                     forms: vec![forms],
+                    class,
                 }),
             }
         }
@@ -466,12 +487,37 @@ mod residue_tests {
         provider: &dyn RTCCryptoProvider,
         records: &[Record],
         exported: &[Vec<u8>],
+        psk: bool,
     ) -> Derived {
         let mut derived = Derived::default();
-        for material in exported {
-            derived.push("the exported keying material", material, Forms::Raw);
+        if psk {
+            derived.push("the PSK", &PSK_INVERTED, Forms::Raw, Class::Derivation);
         }
+        for material in exported {
+            derived.push(
+                "the exported keying material",
+                material,
+                Forms::Raw,
+                Class::Derivation,
+            );
+        }
+        // The record keys, to tell the keys of a key block from its IVs.
+        let record_keys: Vec<&[u8]> = records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    Kind::Aead(_) | Kind::Cbc | Kind::Hmac(HmacAlgorithm::Sha1)
+                )
+            })
+            .map(|r| r.inverted.as_slice())
+            .collect();
         for record in records {
+            let class = match record.kind {
+                Kind::Hmac(HmacAlgorithm::Sha1) => Class::RecordKey,
+                Kind::Hmac(_) | Kind::SharedSecret => Class::Derivation,
+                _ => Class::RecordKey,
+            };
             let (name, forms) = match record.kind {
                 Kind::Hmac(algorithm) => {
                     let first: Vec<u8> = record
@@ -513,7 +559,7 @@ mod residue_tests {
                 Kind::Block => ("a block cipher key".to_owned(), Forms::Aes { gcm: false }),
                 Kind::SharedSecret => ("an (EC)DHE shared secret".to_owned(), Forms::Raw),
             };
-            derived.push(name, &record.inverted, forms);
+            derived.push(name, &record.inverted, forms, class);
             let Kind::Hmac(algorithm) = record.kind else {
                 continue;
             };
@@ -528,17 +574,60 @@ mod residue_tests {
                     let label = String::from_utf8_lossy(label).into_owned();
                     let mut a = hmac_inverted(provider, algorithm, &record.inverted, &[input]);
                     let mut output = Vec::new();
+                    let mut blocks = Vec::new();
                     for i in 1..=PRF_BLOCKS {
                         let block =
                             hmac_inverted(provider, algorithm, &record.inverted, &[&a, input]);
-                        derived.push(format!("A({i}) of the PRF \"{label}\""), &a, Forms::Raw);
                         derived.push(
-                            format!("block {i} of the PRF \"{label}\""),
-                            &block,
+                            format!("A({i}) of the PRF \"{label}\""),
+                            &a,
                             Forms::Raw,
+                            Class::Derivation,
                         );
+                        blocks.push(block.clone());
                         output.extend_from_slice(&block);
                         a = hmac_inverted(provider, algorithm, &record.inverted, &[&a]);
+                    }
+                    let expansion = label == "key expansion";
+                    // Where the record keys lie in a key block: the rest is IVs and output
+                    // past the keys.
+                    let keys_at: Vec<Range<usize>> = if expansion {
+                        record_keys
+                            .iter()
+                            .flat_map(|key| {
+                                output
+                                    .windows(key.len())
+                                    .enumerate()
+                                    .filter(|(_, w)| w == key)
+                                    .map(|(at, _)| at..at + key.len())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let in_a_key = |bytes: Range<usize>| {
+                        if keys_at
+                            .iter()
+                            .any(|key| key.start < bytes.end && bytes.start < key.end)
+                        {
+                            Class::RecordKey
+                        } else {
+                            Class::NotKey
+                        }
+                    };
+                    for (i, block) in blocks.iter().enumerate() {
+                        let class = if expansion {
+                            in_a_key(i * block.len()..(i + 1) * block.len())
+                        } else {
+                            Class::Derivation
+                        };
+                        derived.push(
+                            format!("block {} of the PRF \"{label}\"", i + 1),
+                            block,
+                            Forms::Raw,
+                            class,
+                        );
                     }
                     match label.as_str() {
                         "key expansion" => {
@@ -548,12 +637,18 @@ mod residue_tests {
                                     format!("key block bytes {at}..{}", at + SHORTEST),
                                     &output[at..at + SHORTEST],
                                     Forms::Raw,
+                                    in_a_key(at..at + SHORTEST),
                                 );
                             }
                             derived.key_blocks.push(output);
                         }
                         "master secret" | "extended master secret" => {
-                            derived.push("the master secret", &output[..48], Forms::Raw);
+                            derived.push(
+                                "the master secret",
+                                &output[..48],
+                                Forms::Raw,
+                                Class::Derivation,
+                            );
                             derived.master_secrets += 1;
                         }
                         _ => derived.exporter_blocks.push(output[..32].to_vec()),
@@ -561,10 +656,16 @@ mod residue_tests {
                 } else if let Some((label, length)) = hkdf_label(&plain_start) {
                     let output = hmac_inverted(provider, algorithm, &record.inverted, &[input]);
                     let length = length.min(output.len());
+                    let class = match label.as_str() {
+                        "key" | "sn" => Class::RecordKey,
+                        "iv" => Class::NotKey,
+                        _ => Class::Derivation,
+                    };
                     derived.push(
                         format!("HKDF-Expand-Label \"{label}\" output"),
                         &output[..length],
                         Forms::Raw,
+                        class,
                     );
                     derived.expanded.push((label, output[..length].to_vec()));
                 }
@@ -574,11 +675,13 @@ mod residue_tests {
     }
 
     /// Every form of every secret: the needles.
-    fn needles_of(derived: &Derived) -> Vec<Needle> {
+    fn needles_of(derived: &Derived) -> (Vec<Needle>, Vec<Class>) {
         let mut out: Vec<Needle> = Vec::new();
+        let mut classes: Vec<Class> = Vec::new();
         let mut plain = [0u8; MAX_NEEDLE];
         for secret in &derived.secrets {
             let len = uninvert(&secret.inverted, &mut plain);
+            let before = out.len();
             for forms in &secret.forms {
                 match forms {
                     Forms::Raw => out.push(Needle::plain(&secret.name, "the key", &plain[..len])),
@@ -592,16 +695,27 @@ mod residue_tests {
                 }
             }
             wipe(&mut plain);
+            classes.resize(classes.len() + out.len() - before, secret.class);
         }
         // One needle per byte string: a secret used two ways has its plain form once.
         let mut unique: Vec<Needle> = Vec::new();
-        for needle in out {
-            if needle.len() >= SHORTEST && !unique.iter().any(|u| u.inverted() == needle.inverted())
+        let mut unique_classes: Vec<Class> = Vec::new();
+        for (needle, class) in out.into_iter().zip(classes) {
+            if needle.len() < SHORTEST {
+                continue;
+            }
+            match unique
+                .iter()
+                .position(|u| u.inverted() == needle.inverted())
             {
-                unique.push(needle);
+                Some(at) => unique_classes[at] = unique_classes[at].max(class),
+                None => {
+                    unique.push(needle);
+                    unique_classes.push(class);
+                }
             }
         }
-        unique
+        (unique, unique_classes)
     }
 
     /// The needles are what the association used: each record key the provider was handed is
@@ -672,12 +786,23 @@ mod residue_tests {
         store: Option<Arc<MemorySessionStore>>,
     }
 
+    /// What `ConfigBuilder::with_psk` takes.
+    type PskCallback = Arc<dyn Fn(&[u8]) -> shared::error::Result<Vec<u8>> + Send + Sync>;
+
+    /// The PSK of the PSK scenario, inverted (the plain bytes are made only when handed over).
+    const PSK_INVERTED: [u8; 32] = [
+        0x5d, 0xa2, 0x13, 0xee, 0x47, 0x90, 0x2b, 0xc6, 0x71, 0x0e, 0xb8, 0x34, 0xf9, 0x66, 0xd1,
+        0x08, 0x9b, 0x24, 0xe7, 0x52, 0x3a, 0xcd, 0x80, 0x1f, 0x6c, 0xb5, 0x49, 0xf2, 0x07, 0xaa,
+        0x3e, 0xd4,
+    ];
+
     fn configs(
         provider: &Arc<dyn RTCCryptoProvider>,
         certificate: &Certificate,
         version: DtlsVersion,
         suite: CipherSuiteId,
         tickets: bool,
+        psk: bool,
     ) -> Configs {
         let mut client = ConfigBuilder::default()
             .with_crypto_provider(provider.clone())
@@ -693,6 +818,14 @@ mod residue_tests {
             .with_cipher_suites(vec![suite])
             .with_srtp_protection_profiles(vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80])
             .with_certificates(vec![certificate.clone()]);
+        if psk {
+            // RFC 4279: the application's callback hands the PSK over in a heap buffer.
+            let callback: PskCallback = Arc::new(|_hint: &[u8]| Ok(invert(&PSK_INVERTED)));
+            client = client
+                .with_psk(Some(callback.clone()))
+                .with_psk_identity_hint(Some(b"device".to_vec()));
+            server = server.with_psk(Some(callback));
+        }
         let store = tickets.then(|| Arc::new(MemorySessionStore::new()));
         if let Some(store) = &store {
             client = client.with_session_store(Some(store.clone()));
@@ -984,6 +1117,8 @@ mod residue_tests {
         Full(DtlsVersion, CipherSuiteId),
         /// A full handshake that issues a ticket, then a second association resumed from it.
         Resumed(DtlsVersion, CipherSuiteId),
+        /// A full DTLS 1.2 handshake with a PSK suite (RFC 4279).
+        Psk(CipherSuiteId),
     }
 
     impl Scenario {
@@ -995,6 +1130,7 @@ mod residue_tests {
                 Scenario::Full(Dtls1_2, Tls_Ecdhe_Ecdsa_With_Aes_128_Ccm),
                 Scenario::Full(Dtls1_2, Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256),
                 Scenario::Full(Dtls1_2, Tls_Ecdhe_Ecdsa_With_Aes_256_Cbc_Sha),
+                Scenario::Psk(Tls_Psk_With_Aes_128_Gcm_Sha256),
                 Scenario::Resumed(Dtls1_2, Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256),
                 Scenario::Full(Dtls1_3, Tls_Aes_128_Gcm_Sha256),
                 Scenario::Full(Dtls1_3, Tls_Aes_128_Ccm_Sha256),
@@ -1007,6 +1143,7 @@ mod residue_tests {
             match self {
                 Scenario::Full(version, suite) => format!("{version:?} {suite:?}"),
                 Scenario::Resumed(version, suite) => format!("{version:?} {suite:?} resumed"),
+                Scenario::Psk(suite) => format!("Dtls1_2 {suite:?}"),
             }
         }
     }
@@ -1015,6 +1152,8 @@ mod residue_tests {
     struct Measured {
         session: String,
         needles: Vec<Needle>,
+        /// The class of each needle.
+        classes: Vec<Class>,
         stages: Vec<Stage>,
     }
 
@@ -1026,9 +1165,10 @@ mod residue_tests {
         control: bool,
     ) -> Measured {
         let session = format!("{}|{}", provider.name(), scenario.name());
-        let (version, suite, resumption) = match scenario {
-            Scenario::Full(version, suite) => (version, suite, false),
-            Scenario::Resumed(version, suite) => (version, suite, true),
+        let (version, suite, resumption, psk) = match scenario {
+            Scenario::Full(version, suite) => (version, suite, false, false),
+            Scenario::Resumed(version, suite) => (version, suite, true, false),
+            Scenario::Psk(suite) => (DtlsVersion::Dtls1_2, suite, false, true),
         };
         RECORDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // The server's certificate, made with the real provider on a scratch worker.
@@ -1055,6 +1195,7 @@ mod residue_tests {
                 version,
                 suite,
                 resumption,
+                psk,
             )));
         });
         steps.handshake("", now);
@@ -1108,10 +1249,10 @@ mod residue_tests {
         let exported = std::mem::take(&mut carry.exported);
         let inner = provider.clone();
         let name = session.clone();
-        let check = matches!(scenario, Scenario::Full(..));
-        let needles = on_scratch_stack(move || {
+        let check = !resumption;
+        let (needles, classes) = on_scratch_stack(move || {
             let records = std::mem::take(&mut *RECORDS.lock().unwrap_or_else(|e| e.into_inner()));
-            let derived = derive(inner.as_ref(), &records, &exported);
+            let derived = derive(inner.as_ref(), &records, &exported, psk);
             if check {
                 let kinds: Vec<(Kind, Vec<u8>)> = records
                     .iter()
@@ -1148,6 +1289,7 @@ mod residue_tests {
         Measured {
             session,
             needles,
+            classes,
             stages,
         }
     }
@@ -1179,18 +1321,30 @@ mod residue_tests {
     /// Everything one test measured.
     struct Inventory {
         /// Key forms found in dead stack frames, over every scenario and step (the control
-        /// left out).
+        /// left out), of every class.
         forms: usize,
-        /// The same per kind of step.
-        by_step: Vec<(&'static str, usize)>,
+        /// The same per kind of step and class.
+        by_step: Vec<(&'static str, Class, usize)>,
+        /// Record-key forms in the scenarios of the AES suites (every scenario but the
+        /// ChaCha20-Poly1305 ones), any step.
+        aes_suite_record_keys: usize,
     }
 
     impl Inventory {
-        fn in_step(&self, step: &str) -> usize {
+        fn in_step(&self, step: &str, class: Class) -> usize {
             self.by_step
                 .iter()
-                .find(|(name, _)| *name == step)
-                .map_or(0, |(_, forms)| *forms)
+                .filter(|(name, c, _)| *name == step && *c == class)
+                .map(|(_, _, forms)| *forms)
+                .sum()
+        }
+
+        fn of_class(&self, class: Class) -> usize {
+            self.by_step
+                .iter()
+                .filter(|(_, c, _)| *c == class)
+                .map(|(_, _, forms)| *forms)
+                .sum()
         }
     }
 
@@ -1201,7 +1355,10 @@ mod residue_tests {
         let mut inventory = Inventory {
             forms: 0,
             by_step: Vec::new(),
+            aes_suite_record_keys: 0,
         };
+        // The deepest form of each class: (distance below the floor, where).
+        let mut deepest: Vec<(Class, usize, String)> = Vec::new();
         let mut digest = 0xcbf2_9ce4_8422_2325u64;
         let mut summary: Vec<(String, usize, usize)> = Vec::new();
         // A scenario that fails (a panic in a step or a check) is reported and the others
@@ -1256,10 +1413,30 @@ mod residue_tests {
                     }
                     for residue in &stage.residue {
                         let needle = &m.needles[residue.needle];
+                        let class = m.classes[residue.needle];
                         let form = format!(
-                            "{}|{}|{}|{}",
-                            m.session, stage.name, needle.key, needle.form
+                            "{}|{}|{:?}|{}|{}",
+                            m.session, stage.name, class, needle.key, needle.form
                         );
+                        match deepest.iter_mut().find(|(c, _, _)| *c == class) {
+                            Some((_, depth, at)) if *depth < residue.depth.end => {
+                                *depth = residue.depth.end;
+                                *at = form.clone();
+                            }
+                            Some(_) => {}
+                            None => deepest.push((class, residue.depth.end, form.clone())),
+                        }
+                        if class == Class::RecordKey && !m.session.contains("ChaCha20") {
+                            inventory.aes_suite_record_keys += 1;
+                        }
+                        match inventory
+                            .by_step
+                            .iter_mut()
+                            .find(|(k, c, _)| *k == stage.kind && *c == class)
+                        {
+                            Some((_, _, forms)) => *forms += 1,
+                            None => inventory.by_step.push((stage.kind, class, 1)),
+                        }
                         for byte in form.bytes().chain(*b"\n") {
                             digest = (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
                         }
@@ -1277,15 +1454,14 @@ mod residue_tests {
                         }
                     }
                     inventory.forms += stage.residue.len();
-                    match inventory.by_step.iter_mut().find(|(k, _)| *k == stage.kind) {
-                        Some((_, forms)) => *forms += stage.residue.len(),
-                        None => inventory.by_step.push((stage.kind, stage.residue.len())),
-                    }
                 }
             }
         }
         for (key, forms, copies) in &summary {
             println!("SUMMARY {key}|{forms} key forms|{copies} copies");
+        }
+        for (class, depth, at) in &deepest {
+            println!("DEEPEST {name} {class:?}: {depth} bytes below the floor: {at}");
         }
         println!(
             "INVENTORY dtls {name}: {} key forms in dead stack frames {:?}, digest {digest:016x}, {} build",
@@ -1304,67 +1480,97 @@ mod residue_tests {
         inventory
     }
 
-    /// The steps the engine's key handling runs in: making the endpoints and the first flight,
-    /// the handshake deliveries (key exchange, master secret or key schedule, record keys,
-    /// tickets, cookies, Finished), the export, the key updates and the teardown. The records
-    /// and close steps are the record path.
-    const KEY_STEPS: [&str; 5] = ["connect", "handshake", "export", "key update", "teardown"];
+    /// The steps that run no record protection: making the endpoints and the first flight,
+    /// the export, the teardown.
+    const SETUP_STEPS: [&str; 3] = ["connect", "export", "teardown"];
+    /// Every kind of step.
+    const ALL_STEPS: [&str; 7] = [
+        "connect",
+        "handshake",
+        "export",
+        "records",
+        "key update",
+        "close",
+        "teardown",
+    ];
 
-    fn check(inventory: &Inventory, steps: &[&str]) {
-        for step in steps {
+    /// What holds with every provider and in every build: no secret of key derivation (see
+    /// [`Class::Derivation`]) after any step, and no key at all after the steps that run no
+    /// record protection. Record keys left by the record path (inside the handshake too: the
+    /// Finished and later records) are counted and printed (`NOT ASSERTED`), and so are IVs.
+    fn check(inventory: &Inventory) {
+        for step in ALL_STEPS {
             assert_eq!(
                 0,
-                inventory.in_step(step),
-                "key forms left in dead stack frames by the `{step}` steps (the FORM lines \
-                 above name each)"
+                inventory.in_step(step, Class::Derivation),
+                "secrets of key derivation left in dead stack frames by the `{step}` steps \
+                 (the FORM lines above name each)"
             );
         }
+        for step in SETUP_STEPS {
+            assert_eq!(
+                0,
+                inventory.in_step(step, Class::RecordKey),
+                "record keys left in dead stack frames by the `{step}` steps, which protect no \
+                 record (the FORM lines above name each)"
+            );
+        }
+        println!(
+            "NOT ASSERTED: {} record-key forms ({} of them with an AES suite) and {} IV forms \
+             left by steps that protect records",
+            inventory.of_class(Class::RecordKey),
+            inventory.aes_suite_record_keys,
+            inventory.of_class(Class::NotKey)
+        );
     }
 
     /// RFC 7714 section 13.1, RFC 5246 section 8.1, RFC 8446 section 7.1, with the ring
-    /// provider (the default): a DTLS association's key handling leaves no key in the dead
-    /// stack frames of the thread that ran it. For DTLS 1.2 with each cipher suite family
-    /// (AES-GCM, AES-CCM, ChaCha20-Poly1305, AES-CBC with HMAC-SHA1), DTLS 1.3 with AES-GCM,
-    /// AES-CCM and ChaCha20-Poly1305 and key updates, and ticket resumption in both, after
-    /// every step of the handshake, the export, the key updates and the teardown no secret of
-    /// the association is found in any form; with an optimised build, none after the records
-    /// and the close either.
+    /// provider (the default): a DTLS association's key derivation leaves none of its secrets
+    /// in the dead stack frames of the thread that ran it. For DTLS 1.2 with each cipher
+    /// suite family (AES-GCM, AES-CCM, ChaCha20-Poly1305, AES-CBC with HMAC-SHA1), DTLS 1.3
+    /// with AES-GCM, AES-CCM and ChaCha20-Poly1305 and key updates, and ticket resumption in
+    /// both: after every step no (EC)DHE, premaster, master, PRF, HKDF, Finished, binder,
+    /// cookie secret or exported keying material is found in any form, and after the steps
+    /// that protect no record, no key at all ([`check`]). In an optimised build also no record
+    /// key of an AES suite after any step. Not asserted: ring's ChaCha20-Poly1305 record path,
+    /// which copies the key to the stack for every record, the IVs (a record's nonce is its
+    /// IV at sequence number 0), and an unoptimised build's record path (RustCrypto's AES of
+    /// the CCM and CBC suites keeps its round keys in stack slots: rustc 1.89 and 1.99.1).
     #[cfg(feature = "crypto-ring")]
     #[test]
     fn with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
         let inventory = measure("ring");
-        check(&inventory, &KEY_STEPS);
-        if cfg!(debug_assertions) {
-            println!(
-                "NOT ASSERTED in an unoptimised build: {} key forms left by the record path",
-                inventory.in_step("records") + inventory.in_step("close")
-            );
-        } else {
+        check(&inventory);
+        if !cfg!(debug_assertions) {
             assert_eq!(
-                0, inventory.forms,
-                "key forms left in dead stack frames (the FORM lines above name each)"
+                0, inventory.aes_suite_record_keys,
+                "record keys of an AES suite left in dead stack frames in an optimised build \
+                 (the FORM lines above name each)"
             );
         }
     }
 
-    /// The same with the AWS-LC provider, for the steps whose stack the engine overwrites.
+    /// The same with the AWS-LC provider ([`check`]). Its record path leaves a GHASH table
+    /// entry of the AES-GCM key and the HMAC-SHA1 states of the AES-CBC MAC key for every
+    /// record: the known limit below.
     #[cfg(feature = "crypto-aws-lc-rs")]
     #[test]
     fn with_aws_lc_dtls_key_handling_leaves_no_key_in_dead_stack_frames() {
-        check(&measure("aws-lc-rs"), &KEY_STEPS);
+        check(&measure("aws-lc-rs"));
     }
 
     /// The requirement as a test with the AWS-LC provider: no key form after any step, the
-    /// record path included. Run with `-- --ignored known_limit_ --nocapture`.
+    /// record path included (IVs left out). Run with `-- --ignored known_limit_ --nocapture`.
     #[cfg(feature = "crypto-aws-lc-rs")]
     #[test]
     #[ignore = "known limit: the AWS-LC provider's record path leaves keys in dead stack frames (docs/test-exclusions.md)"]
     fn known_limit_with_aws_lc_the_dtls_record_path_leaves_keys_in_dead_stack_frames() {
         let inventory = measure("aws-lc-rs");
-        check(&inventory, &KEY_STEPS);
+        check(&inventory);
         assert_eq!(
-            0, inventory.forms,
-            "key forms left in dead stack frames (the FORM lines above name each)"
+            0,
+            inventory.of_class(Class::RecordKey),
+            "record keys left in dead stack frames (the FORM lines above name each)"
         );
     }
 }

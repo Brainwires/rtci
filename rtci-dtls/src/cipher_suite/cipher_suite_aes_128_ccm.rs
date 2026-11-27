@@ -75,40 +75,44 @@ impl CipherSuite for CipherSuiteAes128Ccm {
         server_random: &[u8],
         is_client: bool,
     ) -> Result<()> {
-        let keys = prf_encryption_keys(
-            provider.crypto(),
-            master_secret,
-            client_random,
-            server_random,
-            EncryptionKeyLengths {
-                mac: CipherSuiteAes128Ccm::PRF_MAC_LEN,
-                key: CipherSuiteAes128Ccm::PRF_KEY_LEN,
-                iv: CipherSuiteAes128Ccm::PRF_IV_LEN,
-            },
-            self.hash_func(),
-        )?;
+        // The key block and the record keys are built in frames that are overwritten when
+        // they return (`crypto::on_erased_stack`): nothing of them is left on the stack.
+        crypto::on_erased_stack(|| {
+            let keys = prf_encryption_keys(
+                provider.crypto(),
+                master_secret,
+                client_random,
+                server_random,
+                EncryptionKeyLengths {
+                    mac: CipherSuiteAes128Ccm::PRF_MAC_LEN,
+                    key: CipherSuiteAes128Ccm::PRF_KEY_LEN,
+                    iv: CipherSuiteAes128Ccm::PRF_IV_LEN,
+                },
+                self.hash_func(),
+            )?;
 
-        if is_client {
-            self.ccm = Some(CryptoCcm::new(
-                provider,
-                &self.crypto_ccm_tag_len,
-                &keys.client_write_key,
-                &keys.client_write_iv,
-                &keys.server_write_key,
-                &keys.server_write_iv,
-            )?);
-        } else {
-            self.ccm = Some(CryptoCcm::new(
-                provider,
-                &self.crypto_ccm_tag_len,
-                &keys.server_write_key,
-                &keys.server_write_iv,
-                &keys.client_write_key,
-                &keys.client_write_iv,
-            )?);
-        }
+            if is_client {
+                self.ccm = Some(CryptoCcm::new(
+                    provider,
+                    &self.crypto_ccm_tag_len,
+                    &keys.client_write_key,
+                    &keys.client_write_iv,
+                    &keys.server_write_key,
+                    &keys.server_write_iv,
+                )?);
+            } else {
+                self.ccm = Some(CryptoCcm::new(
+                    provider,
+                    &self.crypto_ccm_tag_len,
+                    &keys.server_write_key,
+                    &keys.server_write_iv,
+                    &keys.client_write_key,
+                    &keys.client_write_iv,
+                )?);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {
