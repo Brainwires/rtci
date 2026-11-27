@@ -139,23 +139,46 @@ impl RTCRtpCodec {
     ///
     /// Use it on a remote track's codec: its fmtp line is the one the sender described.
     ///
+    /// **This default does not follow RFC 6184 section 7.2.** The RFC initialises PDON to 0,
+    /// so a NAL unit whose DON is 0 is at the largest DON distance (65536) and a stream
+    /// numbered from DON 0 has its first NAL unit passed on last; here, until a NAL unit has
+    /// been passed on, PDON is the DON just before the earliest one buffered (owner decision,
+    /// 2026-11-26; `docs/conformance.md`, "Standing departures from a MUST").
+    /// [`MediaEngine::h264_depacketizer`] with [`MediaEngine::set_h264_literal_pdon`]`(true)`,
+    /// which the `StrictRfc` behaviour profile sets, gives the RFC's form
+    /// ([`H264DeinterleavingBuffer::with_literal_pdon`]).
+    ///
+    /// [`MediaEngine::h264_depacketizer`]: crate::peer_connection::configuration::media_engine::MediaEngine::h264_depacketizer
+    /// [`MediaEngine::set_h264_literal_pdon`]: crate::peer_connection::configuration::media_engine::MediaEngine::set_h264_literal_pdon
+    /// [`H264DeinterleavingBuffer::with_literal_pdon`]: rtp::codec::h264::H264DeinterleavingBuffer::with_literal_pdon
+    ///
     /// # Errors
     ///
     /// `Error::ErrNoPayloaderForCodec` for a codec other than H.264; an error for a
     /// `packetization-mode` other than 0, 1 or 2.
     pub fn h264_depacketizer(&self) -> Result<rtp::codec::h264::H264Packet> {
+        self.h264_depacketizer_with(false)
+    }
+
+    /// [`Self::h264_depacketizer`], with RFC 6184 section 7.2.2's PDON initialised to 0 when
+    /// `literal_pdon` is set.
+    pub(crate) fn h264_depacketizer_with(
+        &self,
+        literal_pdon: bool,
+    ) -> Result<rtp::codec::h264::H264Packet> {
         if !self.mime_type.eq_ignore_ascii_case(MIME_TYPE_H264) {
             return Err(Error::ErrNoPayloaderForCodec);
         }
         let packet = rtp::codec::h264::H264Packet::default();
         match h264_packetization_mode(&self.sdp_fmtp_line) {
             0 | 1 => Ok(packet),
-            2 => Ok(
-                packet.with_deinterleaving(rtp::codec::h264::H264DeinterleavingBuffer::new(
+            2 => Ok(packet.with_deinterleaving(
+                rtp::codec::h264::H264DeinterleavingBuffer::new(
                     fmtp_number(&self.sdp_fmtp_line, "sprop-interleaving-depth").unwrap_or(0),
                     fmtp_number(&self.sdp_fmtp_line, "sprop-max-don-diff"),
-                )),
-            ),
+                )
+                .with_literal_pdon(literal_pdon),
+            )),
             other => Err(Error::Other(format!(
                 "H.264 packetization-mode is 0, 1 or 2, not {other}"
             ))),
@@ -313,6 +336,53 @@ pub(crate) fn codec_parameters_fuzzy_search(
     }
 
     (RTCRtpCodecParameters::default(), CodecMatch::None)
+}
+
+/// [`codec_parameters_fuzzy_search`], taking among the formats of `haystack` it matches
+/// exactly the one that is the needle's own.
+///
+/// The exact match of the fuzzy search compares a format's configuration only (H.264 profile
+/// and `packetization-mode`, RFC 6184 section 8.2.2, where the level may differ; VP9
+/// `profile-id`; AV1 `profile`; H.265 profile and tier), so several registered formats of one
+/// configuration that differ in level or in another parameter all match, and the first
+/// one would stand for all of them (an offer gave the payload types of H.264 High levels 4.0
+/// to 5.1 the line of Level 5.0). Among the exact matches this takes, in order:
+///
+/// 1. one with the same parameters (W3C webrtc 5.4 codec dictionary match, asymmetrical
+///    parameters included) and the payload type `payload_type`,
+/// 2. one with the same parameters,
+/// 3. one with the payload type `payload_type`,
+/// 4. the first, as [`codec_parameters_fuzzy_search`] does.
+///
+/// A partial match or none is the fuzzy search's.
+pub(crate) fn codec_parameters_search(
+    needle_rtp_codec: &RTCRtpCodec,
+    payload_type: Option<PayloadType>,
+    haystack: &[RTCRtpCodecParameters],
+) -> (RTCRtpCodecParameters, CodecMatch) {
+    let (first, matched) = codec_parameters_fuzzy_search(needle_rtp_codec, haystack);
+    if matched != CodecMatch::Exact {
+        return (first, matched);
+    }
+    let exact: Vec<&RTCRtpCodecParameters> = haystack
+        .iter()
+        .filter(|c| {
+            codec_parameters_fuzzy_search(needle_rtp_codec, std::slice::from_ref(*c)).1
+                == CodecMatch::Exact
+        })
+        .collect();
+    let same_payload_type = |c: &&&RTCRtpCodecParameters| Some(c.payload_type) == payload_type;
+    let same_parameters =
+        |c: &&&RTCRtpCodecParameters| codec_dictionary_match(needle_rtp_codec, &c.rtp_codec);
+    let own = exact
+        .iter()
+        .find(|c| same_parameters(c) && same_payload_type(c))
+        .or_else(|| exact.iter().find(same_parameters))
+        .or_else(|| exact.iter().find(same_payload_type));
+    match own {
+        Some(own) => ((*own).clone(), CodecMatch::Exact),
+        None => (first, matched),
+    }
 }
 
 /// W3C webrtc 5.4 "codec dictionary match" with `ignoreAsymmetricalParameters` false (its

@@ -125,7 +125,9 @@ impl Mdns {
                 Some(MdnsEvent::QueryAnswered(id, *first))
             }
             _ => {
-                log::warn!("mDNS query {id} ends: its name has more than one address");
+                // The draft's SHOULD (ignore the candidate), not a fault: debug, like the
+                // other ends of a query without an address.
+                log::debug!("mDNS query {id} ends: its name has more than one address");
                 Some(MdnsEvent::QueryTimeout(id))
             }
         }

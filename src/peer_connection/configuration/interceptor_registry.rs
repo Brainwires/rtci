@@ -181,13 +181,22 @@ use shared::error::Result;
 ///
 /// RFC 8834 section 7 requires a WebRTC endpoint to adapt its RTP traffic to the capacity of
 /// the path and to implement the RTP circuit breaker, so the standard set does both. The
-/// estimate is what the application's encoder should produce: read it from
+/// estimate is what the application's encoder should produce. **The supported way to read
+/// it** is [`register_default_interceptors_with_handles`] (or
+/// [`register_default_interceptors_with_options`]) in place of this function:
 /// [`DefaultInterceptorHandles::congestion_control`]
-/// (see [`register_default_interceptors_with_handles`]), from the statistics report
-/// (`availableOutgoingBitrate`), or keep using the fork's pull-style
-/// [`GccHandle`](interceptor::GccHandle) by placing a
-/// [`GccInterceptor`](interceptor::GccInterceptor) in [`Slot::CongestionControl`], which replaces
-/// the estimator registered here (a slot holds one interceptor) while the pacer follows it.
+/// ([`CongestionControlHandle::target_bitrate`], the first transport's target; every
+/// transport's in [`DefaultInterceptorHandles::transports`]), and per encoding, with the
+/// pacer's pause as 0, `RTCRtpSender::target_bitrates`. The statistics report has it too
+/// (`availableOutgoingBitrate`, `targetBitrate`).
+///
+/// The fork's pull-style [`GccHandle`](interceptor::GccHandle) is for a chain assembled by
+/// hand. A [`GccInterceptor`](interceptor::GccInterceptor) placed in
+/// [`Slot::CongestionControl`] of this registry replaces the controller registered here (a
+/// slot holds one interceptor; the pacer follows the replacement): it is then one estimator
+/// for every transport instead of one per transport, without the circuit breaker link or
+/// [`DefaultInterceptorOptions`]' congestion settings, and
+/// [`DefaultInterceptorHandles::congestion_control`] no longer reads a controller in the chain.
 /// Media written faster than the target is queued by the pacer, not sent.
 ///
 /// An application that brings its own congestion control, or runs where none is wanted (a
@@ -397,6 +406,16 @@ pub struct DefaultInterceptorOptions {
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
     /// 5.2.1 recommends the extensions. RTCP-SR-REQ is answered with an Early SR either way.
     pub rapid_synchronisation: bool,
+    /// How the audio level header extensions (RFC 6464 client-to-mixer, RFC 6465
+    /// mixer-to-client) are offered with respect to RFC 6904 header extension encryption.
+    /// [`BestEffort`](RTCRtpHeaderExtensionEncryption::BestEffort) by default: RFC 8834
+    /// sections 5.2.2 and 5.2.3 make the encryption RECOMMENDED "unless ... explicitly
+    /// disabled through API or signaling", and RFC 6904 section 4.1 offers both forms when
+    /// lack of confidentiality is acceptable. The `Chrome` profile offers them in the clear
+    /// ([`Clear`](RTCRtpHeaderExtensionEncryption::Clear)), as Chromium does unless the
+    /// application asks for encryption. Answering, the engine takes the encrypted form an
+    /// offer has whatever this says (RFC 6904 section 4.1).
+    pub audio_level_encryption: RTCRtpHeaderExtensionEncryption,
     /// `T_rr_interval` of the RTCP session (RFC 4585 section 3.4): the least time between two
     /// regular reports. Zero by default, RFC 4585 section 4.2's value when `trr-int` is not
     /// negotiated; a negotiated `trr-int` replaces it. See
@@ -575,6 +594,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("probe_after_drop", &self.probe_after_drop)
             .field("recovery_probing", &self.recovery_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
+            .field("audio_level_encryption", &self.audio_level_encryption)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
             .field(
                 "rtcp_immediate_congestion_feedback",
@@ -661,6 +681,7 @@ impl DefaultInterceptorOptions {
             probe_after_drop: interceptor::AfterDropProbe::Repeated,
             recovery_probing: false,
             rapid_synchronisation: true,
+            audio_level_encryption: RTCRtpHeaderExtensionEncryption::BestEffort,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
             rtcp_report_from_every_ssrc: false,
@@ -693,6 +714,13 @@ impl DefaultInterceptorOptions {
 
     /// What these options register on the media engine beyond the video defaults.
     fn register_audio_extras(&self, media_engine: &mut MediaEngine) -> Result<()> {
+        // After `configure_default_header_extensions`, which offers them best-effort.
+        for uri in [
+            ::sdp::extmap::AUDIO_LEVEL_URI,
+            rtp::extension::CSRC_AUDIO_LEVEL_URI,
+        ] {
+            media_engine.set_header_extension_encryption(uri, self.audio_level_encryption)?;
+        }
         if self.receiver_reference_time_on_audio {
             media_engine.register_feedback(
                 RTCPFeedback {
@@ -755,7 +783,34 @@ impl Default for DefaultInterceptorOptions {
 }
 
 /// [`register_default_interceptors`], returning the handles of the congestion controller and
-/// the circuit breaker it installs.
+/// the circuit breaker it installs: the supported way for an application to read the
+/// congestion controller's target.
+///
+/// ```
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::RTCPeerConnectionBuilder;
+/// use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors_with_handles;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
+/// use std::time::Instant;
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut media_engine = MediaEngine::default();
+/// media_engine.register_default_codecs()?;
+/// let (registry, handles) =
+///     register_default_interceptors_with_handles(Registry::new(), &mut media_engine)?;
+/// let pc = RTCPeerConnectionBuilder::new()
+///     .with_media_engine(media_engine)
+///     .with_interceptor_registry(registry)
+///     .build(Instant::now())?;
+///
+/// // On each tick of the application: the first transport's target, bits per second.
+/// // (`RTCRtpSender::target_bitrates` gives each encoding its share, 0 while the pacer
+/// // asks the source to pause.)
+/// let target: f64 = handles.congestion_control.target_bitrate();
+/// # let _ = (pc, target);
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Errors
 ///

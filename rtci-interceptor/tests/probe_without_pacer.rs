@@ -10,7 +10,9 @@
 //! a cluster that left as one burst is measured by how far apart the path delivered it, never
 //! above the rate it was asked for at. Where no cluster can be sent at all (no RTX stream to
 //! pad on), the first unanswered cluster is the last one asked for until another stream
-//! starts to send.
+//! starts to send; the NACK responder says when it had nothing to pad a cluster with, and such
+//! a cluster is counted as never asked for, so the start-up sequence waits for the stream that
+//! can carry it (the first audio packet asks before the video has sent).
 //!
 //! The chain here is the NACK responder, the congestion controller and the TWCC sender that
 //! numbers the packets; the test writes media, collects what leaves and feeds the
@@ -39,6 +41,7 @@ const VIDEO_SSRC: u32 = 0x00A0_0001;
 const VIDEO_RTX_SSRC: u32 = 0x00A0_0002;
 const SECOND_SSRC: u32 = 0x00C0_0001;
 const SECOND_RTX_SSRC: u32 = 0x00C0_0002;
+const AUDIO_SSRC: u32 = 0x00B0_0001;
 /// The estimate the recorder reports: the start-up clusters are three and six times it.
 const TARGET: f64 = 300_000.0;
 
@@ -79,6 +82,26 @@ fn video(ssrc: u32, ssrc_rtx: Option<u32>) -> StreamInfo {
                 parameter: String::new(),
             },
         ],
+        rtp_header_extensions: vec![RTPHeaderExtension {
+            uri: TRANSPORT_CC_URI.to_owned(),
+            id: u16::from(TWCC_ID),
+        }],
+        ..Default::default()
+    }
+}
+
+/// Opus with transport-wide feedback and no RTX stream: nothing a cluster can be padded on.
+fn audio(ssrc: u32) -> StreamInfo {
+    StreamInfo {
+        ssrc,
+        payload_type: 111,
+        clock_rate: 48_000,
+        channels: 2,
+        mime_type: "audio/opus".to_owned(),
+        rtcp_feedback: vec![RTCPFeedback {
+            typ: "transport-cc".to_owned(),
+            parameter: String::new(),
+        }],
         rtp_header_extensions: vec![RTPHeaderExtension {
             uri: TRANSPORT_CC_URI.to_owned(),
             id: u16::from(TWCC_ID),
@@ -175,26 +198,31 @@ impl<I: Interceptor> Sender<I> {
     fn step(&mut self, now: Instant, millisecond: u64, ssrc: u32) -> Vec<Left> {
         if millisecond.is_multiple_of(20) {
             self.sequence_number = self.sequence_number.wrapping_add(1);
-            self.chain
-                .handle_write(TaggedPacket {
-                    now,
-                    transport: TransportContext::default(),
-                    message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
-                        header: rtp::header::Header {
-                            version: 2,
-                            payload_type: 96,
-                            sequence_number: self.sequence_number,
-                            timestamp: u32::from(self.sequence_number) * 3000,
-                            ssrc,
-                            ..Default::default()
-                        },
-                        payload: Bytes::from(vec![0u8; 1000]),
-                    })),
-                })
-                .unwrap();
+            self.write_media(now, ssrc, 96, self.sequence_number);
         }
         self.chain.handle_timeout(now).unwrap();
         self.pump(now)
+    }
+
+    /// One media packet of `ssrc`, 1000 octets of payload, written at `now`.
+    fn write_media(&mut self, now: Instant, ssrc: u32, payload_type: u8, sequence_number: u16) {
+        self.chain
+            .handle_write(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type,
+                        sequence_number,
+                        timestamp: u32::from(sequence_number) * 3000,
+                        ssrc,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0u8; 1000]),
+                })),
+            })
+            .unwrap();
     }
 
     /// Media flows until padding leaves for a probe cluster; returns the cluster's packets
@@ -405,6 +433,132 @@ fn a_cluster_nothing_can_send_is_not_asked_for_again_until_another_stream_sends(
         sender.requests.len() >= 2,
         "a cluster is asked for once a stream that can carry one sends: {:?}",
         sender.requests
+    );
+    assert_the_padding_is_the_cluster(&sender, &padding);
+}
+
+/// Media of a call from `from` to `to` milliseconds after `epoch`: audio every 20 ms, and
+/// from `video_from` on video every 33 ms (from `video_from`, then each 33 ms after). Stops at
+/// the first padding on the video's RTX stream and returns it with its millisecond.
+fn audio_and_video<I: Interceptor>(
+    sender: &mut Sender<I>,
+    epoch: Instant,
+    (from, to): (u64, u64),
+    video_from: u64,
+    sequences: &mut (u16, u16),
+) -> Option<(u64, Vec<Left>)> {
+    for millisecond in from..to {
+        let now = epoch + Duration::from_millis(millisecond);
+        if millisecond.is_multiple_of(20) {
+            sequences.0 = sequences.0.wrapping_add(1);
+            sender.write_media(now, AUDIO_SSRC, 111, sequences.0);
+        }
+        if millisecond >= video_from && (millisecond - video_from).is_multiple_of(33) {
+            sequences.1 = sequences.1.wrapping_add(1);
+            sender.write_media(now, VIDEO_SSRC, 96, sequences.1);
+        }
+        sender.chain.handle_timeout(now).unwrap();
+        let padding: Vec<Left> = sender
+            .pump(now)
+            .into_iter()
+            .filter(|packet| packet.ssrc == VIDEO_RTX_SSRC)
+            .collect();
+        if !padding.is_empty() {
+            return Some((millisecond, padding));
+        }
+    }
+    None
+}
+
+/// A peer connection's call order: audio and video with its RTX stream are bound before
+/// anything is sent, and the first audio packet leaves before the first video packet (audio
+/// every 20 ms from 0 ms, video every 33 ms from 10 ms). The first audio packet is media
+/// flowing, so the first start-up cluster is asked for then, when no stream with an RTX stream
+/// has sent and the responder has no header to pad with: nothing leaves for it, and the
+/// responder says so. The cluster is counted as never asked for, and the video's first packet
+/// asks for the same start-up cluster again: it leaves as padding on the video's RTX stream at
+/// 10 ms, as it would have had the video sent first. (On 0.2.0 the controller asked for
+/// nothing more and the sender climbed at 8% a second; with probe-1 alone the second start-up
+/// cluster was asked for a second later, when the first one's result was given up.)
+#[test]
+fn a_cluster_asked_for_before_the_video_sends_does_not_stop_the_probing() {
+    let epoch = Instant::now();
+    let mut sender = sender(&[audio(AUDIO_SSRC), video(VIDEO_SSRC, Some(VIDEO_RTX_SSRC))]);
+    let (at, padding) = audio_and_video(&mut sender, epoch, (0, 3_000), 10, &mut (0, 0))
+        .expect("padding left for a cluster");
+    let (first_at, first) = *sender.requests.first().expect("a cluster was asked for");
+    assert_eq!(
+        epoch, first_at,
+        "the first cluster is asked for with the first audio packet"
+    );
+    assert!(
+        padding
+            .iter()
+            .all(|packet| packet.cluster != Some(first.cluster)),
+        "nothing could be padded for the first cluster: {padding:?}"
+    );
+    assert_eq!(10, at, "the cluster leaves with the video's first packet");
+    let asked: Vec<(Duration, f64)> = sender
+        .requests
+        .iter()
+        .map(|(at, request)| (at.duration_since(epoch), request.bits_per_second))
+        .collect();
+    assert_eq!(
+        vec![
+            (Duration::ZERO, 3.0 * TARGET),
+            (Duration::from_millis(10), 3.0 * TARGET)
+        ],
+        asked,
+        "the first start-up cluster, asked for again when the video sends"
+    );
+    assert_the_padding_is_the_cluster(&sender, &padding);
+}
+
+/// A call of audio alone gains a video stream with RTX by renegotiation after three seconds.
+/// The audio's clusters leave no packet: the first one is asked for and no more (no stream to
+/// pad on), and the start-up sequence is not spent. When the video is bound, the controller's
+/// next wake-up asks again before the video has sent, and again nothing leaves; the video's first
+/// packet asks for the first start-up cluster, which leaves as padding on its RTX stream at
+/// once. (With probe-1 alone both start-up clusters were spent on the audio and the video was
+/// never probed for.)
+#[test]
+fn video_added_to_an_audio_call_is_probed_for_with_its_first_packet() {
+    let epoch = Instant::now();
+    let mut sender = sender(&[audio(AUDIO_SSRC)]);
+    let mut sequences = (0, 0);
+    assert!(
+        audio_and_video(&mut sender, epoch, (0, 3_001), u64::MAX, &mut sequences).is_none(),
+        "no padding for audio alone"
+    );
+    assert_eq!(
+        1,
+        sender.requests.len(),
+        "one cluster asked for, none again while nothing changes: {:?}",
+        sender.requests
+    );
+
+    sender
+        .chain
+        .bind_local_stream(&video(VIDEO_SSRC, Some(VIDEO_RTX_SSRC)));
+    let (at, padding) = audio_and_video(&mut sender, epoch, (3_001, 6_000), 3_025, &mut sequences)
+        .expect("padding left for a cluster");
+    assert_eq!(
+        3_025, at,
+        "the cluster leaves with the video's first packet"
+    );
+    let asked: Vec<(Duration, f64)> = sender
+        .requests
+        .iter()
+        .map(|(at, request)| (at.duration_since(epoch), request.bits_per_second))
+        .collect();
+    assert_eq!(
+        vec![
+            (Duration::ZERO, 3.0 * TARGET),
+            (Duration::from_millis(3_001), 3.0 * TARGET),
+            (Duration::from_millis(3_025), 3.0 * TARGET),
+        ],
+        asked,
+        "the first start-up cluster each time: the audio's spent none of the sequence"
     );
     assert_the_padding_is_the_cluster(&sender, &padding);
 }

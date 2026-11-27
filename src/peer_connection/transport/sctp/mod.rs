@@ -203,6 +203,10 @@ pub(crate) struct SctpTransport {
     // keeps RFC 9260's 10.
     pub(crate) max_retransmissions: Option<usize>,
 
+    // T1-init / T1-cookie expiries back off the RTO (RFC 9260 5.1, 6.3.3 E2;
+    // `SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto`). On by default.
+    pub(crate) handshake_timers_back_off_rto: bool,
+
     // RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
     // SHOULD limit the maximum message size to 16 KB to avoid monopolization." On by default:
     // on an association that did not negotiate interleaving, a message over
@@ -299,6 +303,7 @@ impl SctpTransport {
             max_streams: None,
             rto: None,
             max_retransmissions: None,
+            handshake_timers_back_off_rto: true,
             limit_message_size_without_interleaving: true,
             cookie_provider: None,
             path_mtu: None,
@@ -517,6 +522,13 @@ impl SctpTransport {
     /// Association.Max.Retrans of the association `start()` builds; `None` keeps the default.
     pub(crate) fn with_max_retransmissions(mut self, limit: Option<usize>) -> Self {
         self.max_retransmissions = limit;
+        self
+    }
+
+    /// Whether T1-init / T1-cookie expiries back off the RTO of the association `start()`
+    /// builds (RFC 9260 5.1).
+    pub(crate) fn with_handshake_timers_back_off_rto(mut self, enabled: bool) -> Self {
+        self.handshake_timers_back_off_rto = enabled;
         self
     }
 
@@ -867,6 +879,8 @@ impl SctpTransport {
             timers.max_t3_rtx_retrans = limit;
             sctp_transport_config = sctp_transport_config.with_timer_config(timers);
         }
+        sctp_transport_config = sctp_transport_config
+            .with_handshake_timers_back_off_rto(self.handshake_timers_back_off_rto);
         // RFC 9260 6.2 drops new DATA once a closed window was advertised. The SCTP handler
         // reads in parts (RFC 9260 6.9) and puts messages together above the association, so
         // a message larger than the receive buffer, or interleaved messages that fill it

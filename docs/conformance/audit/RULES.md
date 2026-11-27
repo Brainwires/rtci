@@ -17,6 +17,12 @@ an implementation of the kind this engine is (endpoint; client for TURN and STUN
 W3C specifications, the algorithm steps and API-observable requirements that apply to the engine
 under the JavaScript API.
 
+A test named in the Test cell of a MUST or SHOULD row is backticked (`name`, `file.rs::name`), and
+`scripts/check-test-inventory.py --check` (CI) fails when such a name is no `fn`, module, fuzz
+target or field in the tree, or a `file.rs::name` is a `fn` only in files of another name: a
+renamed or deleted test cannot stay cited. It checks that the name exists, not what the test
+asserts.
+
 ## Verdicts
 
 A verdict is decided by reading the code and the test, not names or comments. When unsure, the

@@ -68,6 +68,12 @@ impl Chunk for ChunkAbort {
             offset += e.length() + get_padding_size(e.length());
             error_causes.push(e);
         }
+        // RFC 9260 3.3.7: the value is error causes and the padding of the last one; bytes
+        // past that are no cause, a format error, and such an ABORT "MUST [be] silently
+        // discard[ed]". A value of one to three bytes used to read as an ABORT without causes.
+        if offset < end {
+            return Err(Error::ErrErrorCauseTooSmall);
+        }
 
         Ok(ChunkAbort {
             error_causes,

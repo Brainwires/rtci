@@ -319,6 +319,102 @@
     }));
   }
 
+  // The payload types of the sections a description accepts (port not 0, RFC 3264 section 6).
+  function sdpPayloadTypes(sdp) {
+    const pts = new Set();
+    for (const m of (sdp || "").matchAll(/^m=\S+ (\d+) \S+((?: \d+)*)\r?$/gm)) {
+      if (m[1] !== "0") m[2].trim().split(/\s+/).filter(Boolean).forEach((pt) => pts.add(Number(pt)));
+    }
+    return pts;
+  }
+
+  // What the Rust side received on a payload type description `sdp` does not have
+  // (interop-peer's `wireRtp.received`, counted from the SRTP header before the engine looks
+  // at it): [{ payloadType, packets }]. Against the answer: media an offerer must not send (RFC
+  // 3264 section 7: "It MUST send using a media format listed in the answer"), which the engine
+  // ignores (RFC 3550 section 5.1). Against the browser's own offer: also a format the answer
+  // added beyond the offer (RFC 9429 section 5.3.1), which the browser may send with.
+  function receivedOutside(report, sdp) {
+    const listed = sdpPayloadTypes(sdp);
+    return Object.entries(report?.wireRtp?.received || {})
+      .filter(([pt]) => !listed.has(Number(pt)))
+      .map(([pt, c]) => ({ payloadType: Number(pt), packets: c.packets }));
+  }
+
+  // The `kind` section's format lines (m=, a=rtpmap, a=fmtp) of a description.
+  function codecLines(sdp, kind) {
+    const section = (sdp || "").split(/\r?\n(?=m=)/).find((m) => m.startsWith(`m=${kind} `)) || "";
+    return section.split(/\r?\n/).filter((l) => /^(m=|a=rtpmap:|a=fmtp:)/.test(l));
+  }
+
+  // How this side sends `kind`, at one moment: the sender's negotiated codecs
+  // (RTCRtpSendParameters.codecs) and what its outbound-rtp says it sends with (codecId ->
+  // RTCCodecStats payloadType / mimeType / sdpFmtpLine, encoderImplementation), and every
+  // codec stats entry the browser reports.
+  async function codecView(pc, kind = "video") {
+    const view = { t: Math.round(performance.now()) };
+    const sender = pc.getSenders().find((x) => x.track && x.track.kind === kind);
+    try {
+      const p = sender.getParameters();
+      view.senderCodecs = (p.codecs || []).map((c) => `${c.payloadType} ${c.mimeType} ${c.sdpFmtpLine || ""}`.trim());
+      view.encodingCodecs = (p.encodings || []).map((e) => (e.codec ? e.codec.mimeType : null));
+    } catch (e) {
+      view.senderCodecs = String(e);
+    }
+    const stats = await pc.getStats();
+    const codecs = new Map();
+    stats.forEach((x) => {
+      if (x.type === "codec") codecs.set(x.id, x);
+    });
+    stats.forEach((x) => {
+      if (x.type === "outbound-rtp" && x.kind === kind) {
+        const c = codecs.get(x.codecId);
+        view.sending = {
+          ssrc: x.ssrc,
+          packetsSent: x.packetsSent,
+          encoderImplementation: x.encoderImplementation,
+          codec: c ? `${c.payloadType} ${c.mimeType} ${c.sdpFmtpLine || ""}`.trim() : x.codecId || null,
+        };
+      }
+    });
+    view.codecStats = [...codecs.values()].map((c) => `${c.payloadType} ${c.mimeType} ${c.sdpFmtpLine || ""}`.trim());
+    return view;
+  }
+
+  // The browser's own `kind` format table: the format lines of an offer made without codec
+  // preferences (what each payload type number means to it).
+  async function defaultCodecLines(kind = "video") {
+    const pc = new RTCPeerConnection();
+    try {
+      pc.addTransceiver(kind);
+      return codecLines((await pc.createOffer()).sdp, kind);
+    } finally {
+      pc.close();
+    }
+  }
+
+  // The BUNDLE layout of a description: its BUNDLE groups (lists of mids), whether it has
+  // a=cryptex (session or media level) and a session-level a=fingerprint and, per m= section,
+  // its kind, port, mid, a=bundle-only, a=rtcp-mux, a=ice-ufrag and a=sctp-port (null when
+  // absent).
+  function bundleLayout(sdp) {
+    const [session, ...media] = sdp.split(/\r?\nm=/);
+    return {
+      groups: [...session.matchAll(/^a=group:BUNDLE([^\r\n]*)/gm)].map((g) => g[1].split(" ").filter(Boolean)),
+      cryptex: /^a=cryptex\r?$/m.test(sdp),
+      sessionFingerprint: /^a=fingerprint:/m.test(session),
+      sections: media.map((m) => ({
+        kind: m.split(" ")[0],
+        port: Number(m.split(" ")[1]),
+        mid: (m.match(/^a=mid:(\S+)/m) || [, null])[1],
+        bundleOnly: /^a=bundle-only\r?$/m.test(m),
+        rtcpMux: /^a=rtcp-mux\r?$/m.test(m),
+        iceUfrag: (m.match(/^a=ice-ufrag:(\S+)/m) || [, null])[1],
+        sctpPort: (m.match(/^a=sctp-port:(\d+)/m) || [, null])[1],
+      })),
+    };
+  }
+
   async function transport(pc) {
     const stats = await pc.getStats();
     let t = null;
@@ -370,6 +466,7 @@
 
   window.Interop = {
     open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
-    selectedPair, wrongFingerprint, mlines, transportLines,
+    selectedPair, wrongFingerprint, mlines, transportLines, sdpPayloadTypes, receivedOutside, codecLines,
+    codecView, defaultCodecLines, bundleLayout,
   };
 })();

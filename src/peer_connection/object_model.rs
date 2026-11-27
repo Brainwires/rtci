@@ -232,7 +232,28 @@ impl RTCPeerConnection {
                     media,
                     remote,
                 );
+            // RFC 8834 section 10: the interceptors read a received stream's header extensions
+            // by its binding; an established stream whose section now negotiates other ones is
+            // bound again with them (a pending local offer's early streams are settled by the
+            // answer's own steps).
+            let before = transceiver
+                .receiver_mut()
+                .as_mut()
+                .filter(|receiver| !receiver.has_pending_offer())
+                .map(|receiver| receiver.remote_stream_infos(&self.media_engine));
             transceiver.set_negotiated_header_extensions(negotiated);
+            if let Some(before) = before
+                && let Some(receiver) = transceiver.receiver_mut().as_mut()
+            {
+                let after = receiver.remote_stream_infos(&self.media_engine);
+                if before != after {
+                    crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal::rebind_remote_streams(
+                        self.interceptor.as_mut(),
+                        &before,
+                        &after,
+                    );
+                }
+            }
         }
     }
 

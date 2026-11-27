@@ -782,6 +782,38 @@ pub enum RTCPeerConnectionEvent {
         /// What was detected.
         failure: interceptor::EcnFailure,
     },
+    /// One of the engine's TURN allocations over UDP has been let go: a Refresh of LIFETIME 0
+    /// (RFC 8656 section 8) was answered, or answered 437 (the server no longer held it), or
+    /// its STUN transaction timed out (RFC 8489 section 6.2.1; the server then drops it when
+    /// its lifetime runs out); or an Allocate still under way when the engine stopped needing
+    /// it was answered, its allocation deleted, or timed out. The engine sends nothing more
+    /// from `local_address` to that server: an application that bound that socket for it alone
+    /// may close it. Raised after `close()` too, which keeps the peer connection serving these
+    /// transactions (`poll_write`, `handle_read`, `poll_timeout`, `handle_timeout`) until the
+    /// last one is done: `poll_timeout` is then `None`. Not a W3C event: a fork addition.
+    OnTurnAllocationReleased {
+        /// The server's URL (`turn:host:port?transport=udp`).
+        url: String,
+        /// The local address (a UDP host candidate's base) the allocation was made from.
+        local_address: std::net::SocketAddr,
+        /// The relayed address, when an allocation had been made.
+        relayed_address: Option<std::net::SocketAddr>,
+    },
+    /// A request of one of the engine's TURN links was finally refused by the server (after
+    /// the retries the TURN client makes: 401 or 438 once more, RFC 8489 section 9.2.5), or,
+    /// for an Allocate, refused with 437 (Allocation Mismatch, RFC 8656 section 7.4: the
+    /// 5-tuple is held by an allocation the engine does not know: one a peer connection
+    /// closed without releasing, or another client's). Not a W3C event: a fork addition.
+    OnTurnRequestRejected {
+        /// The server's URL (`turn:host:port?transport=udp`).
+        url: String,
+        /// The relayed address of the allocation the request was for, if it has one.
+        relay: Option<std::net::SocketAddr>,
+        /// The request: `Allocate`, `Refresh`, `CreatePermission` or `ChannelBind`.
+        method: &'static str,
+        /// The STUN error code (401, 437, 438, 441, ...).
+        error_code: u16,
+    },
 }
 
 /// Reserved for future use.

@@ -800,6 +800,17 @@ impl Conn13 {
         }
     }
 
+    /// Renumbers this side's newest reading epoch to `epoch` (same keys): with
+    /// [`Self::set_send_epoch_for_test`] on the peer, for the tests of what a receiver does
+    /// at the last epoch (RFC 9147 section 8).
+    #[cfg(test)]
+    pub(crate) fn set_read_epoch_for_test(&mut self, epoch: u64) {
+        let newest = self.read.iter().map(|read| read.epoch).max();
+        if let Some(read) = self.read.iter_mut().find(|read| Some(read.epoch) == newest) {
+            read.epoch = epoch;
+        }
+    }
+
     /// Packs the queued records into datagrams no larger than the MTU, in order.
     fn flush(&mut self) {
         let mtu = self.cfg.maximum_transmission_unit;
@@ -1700,15 +1711,17 @@ impl Conn13 {
         };
         debug!("<- alert {description}");
         match *description {
-            alert::CLOSE_NOTIFY => {
-                // The peer has closed; the answer is this side's own close_notify.
+            // RFC 8446 section 6.1: both are closure alerts, and "Any data received after a
+            // closure alert has been received MUST be ignored" (RFC 9147 section 5.10). A
+            // user_canceled ends the reading as a close_notify does (the close_notify that
+            // "SHOULD" follow it is not read any more); the answer is this side's own
+            // close_notify.
+            alert::CLOSE_NOTIFY | alert::USER_CANCELED => {
                 self.closed_by_peer = true;
                 self.closed = true;
                 self.send_alert(alert::CLOSE_NOTIFY);
                 Ok(())
             }
-            // RFC 8446 section 6.1: user_canceled is followed by a close_notify.
-            alert::USER_CANCELED => Ok(()),
             // Section 6.2: every other alert is an error alert, whatever its level says.
             _ => {
                 self.fatal_alert_received = Some(*description);

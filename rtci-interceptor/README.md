@@ -26,6 +26,16 @@ Clause-by-clause status, with the test that proves each clause: [rfc3550](../doc
 derive macros of `rtci-interceptor-derive`. The crate documentation describes the chain's
 direction rules and has a quick-start example.
 
+**The congestion controller's target in a peer connection.** `rtci`'s default interceptors
+run the GCC estimator (`Gcc` in a `CongestionControlInterceptor`, one per transport) with the
+pacer. Read the target from the handles `rtci`'s
+`register_default_interceptors_with_handles` returns (`DefaultInterceptorHandles::
+congestion_control`, `CongestionControlHandle::target_bitrate`), or per encoding from
+`RTCRtpSender::target_bitrates`. `GccInterceptorBuilder` and its `GccHandle` are for a chain
+assembled by hand: `build()` returns a factory closure for `Interceptor::with`
+(`PassThroughInterceptor::new().with(builder.build())`), and a `GccInterceptor` put in a
+default registry replaces the per-transport controller (see `GccInterceptorBuilder`).
+
 ## Sans-I/O
 
 Each interceptor is a `sansio::Protocol`: packets in, packets out, timeouts polled and handled. The crate does no I/O and reads no clock: every call that depends on time takes an `Instant` from the caller.

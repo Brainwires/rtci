@@ -10,8 +10,10 @@
 //! The design follows Rust's derive pattern (similar to `#[derive(Default)]` with `#[default]`):
 //!
 //! ```ignore
-//! use rtci_interceptor::{Interceptor, interceptor, TaggedPacket, Packet, StreamInfo};
+//! use rtci_interceptor::{Interceptor, StreamInfo, TaggedPacket, interceptor};
+//! use shared::error::Error; // the `rtci-shared` crate (`rtci::shared::error::Error`)
 //! use std::collections::VecDeque;
+//! // and the `sansio` crate as a dependency (or `use rtci::sansio;`)
 //!
 //! #[derive(Interceptor)]
 //! pub struct MyInterceptor<P: Interceptor> {
@@ -48,15 +50,23 @@
 //!
 //! # Required Imports
 //!
-//! The macros require certain types to be in scope:
+//! The generated code names `Interceptor`, `TaggedPacket`, `StreamInfo`, `Error` and the
+//! `sansio` crate unqualified, so all five must be in scope where the macros are used:
 //!
 //! ```ignore
-//! use rtci_interceptor::{Interceptor, interceptor, TaggedPacket, Packet, StreamInfo};
-//! // Or through rtc umbrella crate:
-//! use rtci::interceptor::{Interceptor, interceptor, TaggedPacket, Packet, StreamInfo};
+//! use rtci_interceptor::{Interceptor, StreamInfo, TaggedPacket, interceptor};
+//! use shared::error::Error; // `rtci-shared`, a dependency of its own
+//! // `sansio` a dependency of its own
+//!
+//! // Or through the rtci crate:
+//! use rtci::interceptor::{Interceptor, StreamInfo, TaggedPacket, interceptor};
+//! use rtci::sansio;
 //! use rtci::shared::error::Error;
-//! use rtci::sansio;  // Required for macro-generated code
 //! ```
+//!
+//! (These examples are not compiled here: a procedural macro crate cannot use the crate
+//! that re-exports it. `rtci-interceptor`'s `GccInterceptor` and jitter buffer are built
+//! with them.)
 
 use proc_macro::TokenStream;
 use quote::quote;

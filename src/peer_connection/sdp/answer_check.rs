@@ -222,11 +222,13 @@ pub(crate) fn feedback_not_offered(
 ///   (section 7.3.3).
 ///
 /// The first difference is returned as [`Error::ErrAnswerDoesNotMatchOffer`]. An `a=rtcp-fb`
-/// line the offer did not have is not one of them: it is logged and never enabled (see
-/// [`feedback_not_offered`]).
+/// line the offer did not have is one of them only with `unoffered_feedback_refused` (RFC 9429
+/// section 5.11, `SettingEngineBuilder::with_unoffered_feedback_refused`); otherwise it is
+/// logged and never enabled (see [`feedback_not_offered`]).
 pub(crate) fn check_answer_against_offer(
     offer: &SessionDescription,
     answer: &SessionDescription,
+    unoffered_feedback_refused: bool,
 ) -> Result<()> {
     if offer.media_descriptions.len() != answer.media_descriptions.len() {
         return Err(Error::ErrAnswerDoesNotMatchOffer(format!(
@@ -273,6 +275,8 @@ pub(crate) fn check_answer_against_offer(
             ));
         }
 
+        // `answered` has no `a=bundle-only` (discarded from answers on parse,
+        // `discard_stray_bundle_only`), so this is its zero port: rejected (RFC 9143 7.3.3).
         if is_rejected_media(answered) {
             continue;
         }
@@ -288,7 +292,17 @@ pub(crate) fn check_answer_against_offer(
             ));
         }
 
-        for feedback in feedback_not_offered(offered, answered) {
+        let unoffered = feedback_not_offered(offered, answered);
+        if unoffered_feedback_refused && !unoffered.is_empty() {
+            return Err(mismatch(
+                index,
+                format!(
+                    "a=rtcp-fb:{} is not in the offer (RFC 9429 section 5.11)",
+                    unoffered.join(", a=rtcp-fb:")
+                ),
+            ));
+        }
+        for feedback in unoffered {
             log::warn!(
                 "m= section {index}: the answer has a=rtcp-fb:{feedback}, which the offer did \
                  not have; it is not enabled (RFC 4585 section 4.2)"
@@ -348,7 +362,7 @@ a=rtpmap:96 VP8/90000\r\na=rtpmap:97 H264/90000\r\n{extra}"
     }
 
     fn check(offer: &str, answer: &str) -> Result<()> {
-        check_answer_against_offer(&parse(offer), &parse(answer))
+        check_answer_against_offer(&parse(offer), &parse(answer), false)
     }
 
     /// The feedback of `answer`'s first section that `offer`'s first section did not have.
@@ -390,6 +404,27 @@ a=rtpmap:96 VP8/90000\r\na=rtpmap:97 H264/90000\r\n{extra}"
         // None of them refuses the answer.
         for answer in [&other_format, &wildcard, &added] {
             assert!(check(&offer, answer).is_ok());
+        }
+    }
+
+    /// RFC 9429 section 5.11: with `unoffered_feedback_refused` an answer that references
+    /// feedback its offer did not have is an error; one with a subset of the offer's is not.
+    #[test]
+    fn feedback_the_offer_did_not_have_refuses_the_answer_when_asked() {
+        let offer = format!(
+            "{HEAD}{}",
+            video("0", "a=rtcp-fb:96 nack\r\na=rtcp-fb:96 nack pli\r\n")
+        );
+        let refuse =
+            |answer: &str| check_answer_against_offer(&parse(&offer), &parse(answer), true);
+        let subset = format!("{HEAD}{}", video("0", "a=rtcp-fb:96 nack\r\n"));
+        assert!(refuse(&subset).is_ok());
+        let added = format!("{HEAD}{}", video("0", "a=rtcp-fb:96 ccm fir\r\n"));
+        match refuse(&added) {
+            Err(Error::ErrAnswerDoesNotMatchOffer(reason)) => {
+                assert!(reason.contains("96 ccm fir"), "{reason}")
+            }
+            other => panic!("{other:?}"),
         }
     }
 

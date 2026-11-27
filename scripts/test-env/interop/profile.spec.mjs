@@ -46,9 +46,28 @@ test("chrome profile: audio and video both ways", async ({ page }) => {
       return a && a.packetsReceived > 100 && a;
     }, 20000, "100 audio packets").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
     const report = await s.report();
+    // What Rust received on a payload type the browser's offer does not have: one the answer
+    // does not have either (RFC 3264 section 7), or a format the answer added (RFC 9429 section
+    // 5.3.1) that the browser switched to (WebKit, seen in the loss-recovery cells, common.mjs
+    // unlessOffFormat). Named rather than taken for video that stopped.
+    const offPt = Interop.receivedOutside(report, s.pc.localDescription.sdp);
+    const notInAnswer = Interop.receivedOutside(report, s.pc.remoteDescription.sdp);
+    const answerVideo = Interop.codecLines(s.pc.remoteDescription.sdp, "video");
+    const sending = (await Interop.codecView(s.pc)).sending;
     s.close();
-    return { video, audio, errors: report.errors };
+    return {
+      video, audio, errors: report.errors, offPt, notInAnswer, answerVideo, sending,
+      wire: report.wireRtp?.received, engineIgnored: report.unnegotiatedPayloadTypeRtp,
+    };
   }, CHROME);
+  console.log(
+    `[${test.info().project.name}] chrome profile payload types: answer ${JSON.stringify(r.answerVideo)}; received ${JSON.stringify(r.wire)}; ` +
+      `the engine ignored ${r.engineIgnored} for an unnegotiated payload type; the browser sending ${JSON.stringify(r.sending)}`,
+  );
+  expect(
+    r.offPt,
+    `the browser sent media on a payload type its offer does not have (${r.notInAnswer.length ? "nor the answer, RFC 3264 section 7" : "a format the answer added, RFC 9429 section 5.3.1"}): ${JSON.stringify(r)}`,
+  ).toEqual([]);
   expect(r.video.error, JSON.stringify(r)).toBeUndefined();
   expect(r.audio.error, JSON.stringify(r)).toBeUndefined();
   expect(r.video.mimeType.toLowerCase()).toBe("video/vp8");

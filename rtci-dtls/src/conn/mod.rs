@@ -637,7 +637,14 @@ impl DTLSConn {
                     self.sync_dtls13();
                     return VersionOutcome::Dtls13;
                 }
-                if !cfg.supports_dtls12() {
+                // RFC 8446 4.2.1: with supported_versions the server "MUST only select a
+                // version of TLS present in that extension" and does not negotiate by
+                // legacy_version; a list without DTLS 1.2 (unknown versions only, say) leaves
+                // nothing to select.
+                let dtls12_listed = hello
+                    .supported_versions()
+                    .is_none_or(|versions| versions.contains(&crate::dtls13::DTLS1_2_WIRE_VERSION));
+                if !cfg.supports_dtls12() || !dtls12_listed {
                     // RFC 8446 4.2.1: no version in common is a protocol_version.
                     return VersionOutcome::Refuse(
                         AlertDescription::ProtocolVersion,

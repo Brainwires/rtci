@@ -29,8 +29,8 @@ assert_eq!(receiver.decrypt(b"metadata", &ciphertext)?, b"an encoded frame");
   4.4.4).
 - Every registered cipher suite: `AES_128_CTR_HMAC_SHA256_80` / `_64` / `_32`,
   `AES_128_GCM_SHA256_128`, `AES_256_GCM_SHA512_128` (RFC 9605), and
-  `AES_256_CTR_HMAC_SHA512_80` / `_64` / `_32` (IANA values 0x0006 to 0x0008, listed by the W3C
-  Encoded Transform API).
+  `AES_256_CTR_HMAC_SHA512_80` / `_64` / `_32` (RFC 10079, IANA values 0x0006 to 0x0008, listed
+  by the W3C Encoded Transform API), checked against RFC 10079 Appendix A.2.
 - A key store in which a key encrypts or decrypts, never both. A sending key owns its counter:
   a (key, nonce) pair is never used twice, and a key that has used every counter stops.
 - Anti-replay per receiving key (section 9.3), on by default.

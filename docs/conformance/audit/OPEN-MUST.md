@@ -6,26 +6,26 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## Arithmetic
 
-- MUST rows: 5752; `n/a` (the clause does not bind this engine): 663; rows that
-  apply: 5089.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5082 of 5089 (99.9 %).
-- Tested as the default (`tested`): 5049 of 5089 (99.2 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 7: 1 untested, 3 partial, 3 missing, 0 violated.
+- MUST rows: 5757; `n/a` (the clause does not bind this engine): 663; rows that
+  apply: 5094.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5064 of 5094 (99.4 %).
+- Tested as the default (`tested`): 5032 of 5094 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 30: 17 untested, 11 partial, 2 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 1 | 0 |
-| C | partly implemented | 3 | 0 |
+| B | implemented, lacking a test that fails without it | 17 | 0 |
+| C | partly implemented | 9 | 1 |
 | D | not implemented | 2 | 0 |
-| E | cannot be met or observed inside this engine | 8 | 7 |
+| E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 40 | 26 |
+| all | | 62 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 6 rows, 4 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
+- Work in code and tests (classes B, C, D, F): 28 rows, 21 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
 Class C rows that say "Owner decision" are implemented as a setting whose default differs
@@ -36,11 +36,15 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
+| dtls-srtp | 6 | 1 | 0 | 1 | 0 | 8 | 7 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
-| ice | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 1 | 0 |
-| media (RTCP session) | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
+| ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
+| jsep | 4 | 3 | 0 | 0 | 0 | 7 | 5 | 2 | 0 |
+| jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
+| rtp | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
+| sctp | 3 | 0 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
+| sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 
 ## Rows
 
@@ -74,24 +78,46 @@ Sorted by class, then owner, size and ID.
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | setting | A | `setting` (measured, rtcpbudget-4): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; capacity instrument `tests/capacity_instrument.rs::measure`, chain `every` against `paced`, 1000 seeds: oldest picture 8.00 -> 8.53 s, target under the cap 209.8 -> 185.8 kbit/s, recovery over 20 s 81 -> 244 calls, 15 gate and 33 star statistics worse (RTCP 122 -> 149 kbit/s open); the setting's RTCP checked by `every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
-| RFC8108-5.3.2-5 | `rfc8108.md` | T_rr_interval suppression is not used in the step b calculation | untested | B | a test of `send_regular` step b under `T_rr_interval` > 0 with SSRCs whose T_rr_last differ (one joined after the others' first regular packet), fixed random numbers: tt_avg as reconsideration alone gives it; then a mutation applying the suppression in step b | S | media (RTCP session) |
+| RFC5746-3.6-5 | `rfc5746.md` | Server ignores unknown extensions and accepts higher version numbers | untested | B | A DTLS 1.2 server test handed a ClientHello with an unknown extension type that completes the handshake (audit-6 sweep) | S | dtls-srtp |
+| RFC9147-4-9 | `rfc9147.md` | Sending implementations MUST NOT mix records from multiple DTLS ... | untested | B | A test with two DTLS 1.3 associations on one endpoint flushing at once: every datagram holds records of one association only (audit-6 sample) | S | dtls-srtp |
+| RFC9147-5-1 | `rfc9147.md` | DTLS servers MUST NOT echo the "legacy_session_id" value from the ... | untested | B | A test handing the DTLS 1.3 server a ClientHello with a non-empty legacy_session_id: the ServerHello echoes none (audit-6 sample) | S | dtls-srtp |
+| RFC9147-5.5-1 | `rfc9147.md` | The ranges MUST NOT overlap. | untested | B | A test that the fragments of a handshake message sent at a small MTU are contiguous and do not overlap (offset of each = end of the previous) (audit-6 sample) | S | dtls-srtp |
+| RFC9147-5.8.1-2 | `rfc9147.md` | In addition, for at least twice the default MSL defined for ... | untested | B | A test whose client Finished retransmission reaches the server just before 240 s after completion and is still acknowledged (audit-7 sweep6) | S | dtls-srtp |
+| WEBRTC-5.5-3 | `w3c-webrtc-pc.md` | DTLS error (certificate validation failure, fatal alert): state ... | untested | B | A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep) | S | dtls-srtp |
+| WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
+| WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
+| RFC8851-6.3-5 | `rfc8851.md` | A line whose formats are all discarded is dropped; no pt= in the ... | untested | B | A test whose offer lists a `pt=` none of the answerer's formats keep: the answer drops that a=rid line (audit-6 sweep) | S | jsep |
+| RFC8853-5.2-1 | `rfc8853.md` | a=simulcast is not used at session level; one received there is ... | untested | B | A test of a remote offer with a=simulcast at session level only: taken, no simulcast negotiated for its sections (audit-6 sweep) | S | jsep |
+| WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
+| WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
+| RFC5576-9-1 | `rfc5576.md` | The sender is prepared for receivers that ignore its source ... | untested | B | An rtc2rtc test whose answerer is handed the offer with every a=ssrc / a=ssrc-group line removed: media and RTX still bound (MID, RID, RRID) (audit-6 sweep) | S | rtp |
+| RFC8834-4.1-24 | `rfc8834.md` | Ignore unknown RTP header extensions | untested | B | As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep) | S | rtp |
+| RFC6525-5.2.7-1 | `rfc6525.md` | H1: a response marks its request acknowledged; the timer stops when ... | untested | B | A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep) | S | sctp |
+| WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | B | A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep) | S | sctp |
+| WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep) | S | sctp |
+| RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
-| RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)` | S | media (media-25) |
-| RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
+| WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |
+| WEBRTC-5.6.4-9 | `w3c-webrtc-pc.md` | failed and completed need the end-of-remote-candidates indication | partial | C | As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep) | M | ice |
+| WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep) | S | jsep |
+| RFC9429-5.2.2-15 | `rfc9429.md` | a=rid lines of present transceivers stay the same | partial | C | W3C webrtc-pc 4.4.1.6 removes the encodings of rids an answer rejected, so the next offer drops their a=rid lines (JSEP: MUST stay the same); the W3C form is the default. Closes as conflict with a setting that keeps offering the rejected rids, and its mutation-checked test (jsep5 follow-up 3) | M | jsep |
+| RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | partial | C | As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3) | M | jsep |
+| RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
+| RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
+| RFC6347-4.2.1-8 | `rfc6347.md` | Server uses the same version in HelloVerifyRequest as in ServerHello | partial | E | Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2) | S | dtls-srtp |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Measured: every SRTP and DTLS key is left in no freed heap block (Linux, macOS, Windows; both providers, ring's key objects in ErasedOnDrop) and nowhere in process memory on Linux outside the dead stack frames of the thread that built the contexts. Not met: stack copies left by the compiler or provider. Found in train 34's test environment (rustc 1.99.1, run 45714962513): SRTCP encryption key, its round keys, SRTCP HMAC-SHA1 states and the master key in the dead stack frames of the thread that built the contexts (20 of 20 runs in the test-env image, 0 of 40 on GitHub's Ubuntu runners: environment-dependent); reported, not asserted; known_limit_*_building_an_srtp_context_leaves_keys_in_dead_stack_frames (ignored). scrub_stack runs where DTLS builds keys (zeroize m13); a copy moved onto the stack is seen by no test (zeroize2 m3, m5 survive): not guaranteed. Closes by an engine-side observation of stack residue, or the owner reading the clause as not binding stack temporaries | M | dtls-srtp / crypto |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
-| RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
-| RFC8830-3.2.5-1 | `rfc8830.md` | On a modified session: added msid values add stream memberships, ... | conflict | E | `conflict`: as RFC8830-3-7 (no msid left); memberships tested | S | jsep (running) |
+| RFC8830-3.2.5-1 | `rfc8830.md` | On a modified session: added msid values add stream memberships, ... | conflict | E | `conflict`: no msid left ends the track only with the setting (StrictRfc sets it); memberships tested. RFC8830-3-7, the same behaviour in section 3's words ("can"), is MAY since conf/audit-1 | S | jsep (running) |
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC9429-4.1.9-2 | `rfc9429.md` | Each answer line follows the answer rules of its defining spec | conflict | E | `conflict`: umbrella of 5.3.1-6 | S | jsep (running) |
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 
 ## Closed since classified
 
-48 rows: 10 of class B, 17 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+53 rows: 14 of class B, 18 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -101,9 +127,13 @@ Sorted by class, then owner, size and ID.
 | RFC6544-7-1 | `rfc6544.md` | TCP and UDP pairs share one checklist, checked in priority order | B | tested |
 | RFC7874-3-12 | `rfc7874.md` | Received tones/events are at least dropped gracefully | B | tested |
 | RFC7941-6-2 | `rfc7941.md` | The protection of the header extension is of commensurate strength ... | B | tested |
+| RFC8108-5.3.2-5 | `rfc8108.md` | T_rr_interval suppression is not used in the step b calculation | B | tested |
 | RFC8852-5-2 | `rfc8852.md` | The identifiers have integrity and source authentication | B | tested |
 | RFC9335-4-5 | `rfc9335.md` | Subsequent offers / answers use the same procedure for including the ... | B | tested |
 | RFC9335-5-2 | `rfc9335.md` | With two-byte extensions, the id carried in "appbits" (value 256) is ... | B | tested |
+| RFC9429-5.5-1 | `rfc9429.md` | setLocal(offer) only in stable or have-local-offer | B | tested |
+| RFC9429-5.5-2 | `rfc9429.md` | setLocal(pranswer or answer) only in have-remote-offer or ... | B | tested |
+| RFC9429-5.5-3 | `rfc9429.md` | Wrong type for the state: stop with an error | B | tested |
 | RFC9605-X-4 | `rfc9605.md` | Per-packet SFrame: an application can encrypt each RTP payload and ... | B | tested |
 | RFC4585-3.5.4-2 | `rfc4585.md` | avg_rtcp_size is updated for every RTCP packet sent or received, ... | C | tested |
 | RFC6544-9.2-1 | `rfc6544.md` | Close the selected pair's connection after an ICE restart | C | tested |
@@ -122,6 +152,7 @@ Sorted by class, then owner, size and ID.
 | RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | C | tested |
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | C | tested |
 | RFC9335-9.1-1 | `rfc9335.md` | a=cryptex: property attribute, no value, mux category TRANSPORT | C | tested |
+| RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | C | tested |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | D | n/a |
 | RFC5109-14.1-2 | `rfc5109.md` | SSRC of a separate FEC stream equals the protected stream's SSRC | D | tested |
 | RFC5109-14.1-5 | `rfc5109.md` | Separate-stream SDP: own m= line, a=rtpmap:<pt> ulpfec/<rate>, ... | D | tested |

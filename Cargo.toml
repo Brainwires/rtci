@@ -222,7 +222,6 @@ bytes.workspace = true
 rustc-hash.workspace = true
 log.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 rcgen.workspace = true
 # `tls12`: the engine's TURN-over-TLS client offers TLS 1.2 beside TLS 1.3 (RFC 8656 3.1 allows
 # both). Deployed servers still need it: coturn 4.6.1, which Ubuntu 24.04 and Debian 13 ship,
@@ -256,6 +255,8 @@ log.workspace = true
 ctrlc.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+# The statistics tests and the interop peer read and write JSON.
+serde_json.workspace = true
 
 # Interop tests against the independent (pre-sans-I/O) webrtc implementation. 0.17.3 is the
 # last release of that line, and the first whose DTLS uses p256 0.14 (crypto-bigint 0.7, past

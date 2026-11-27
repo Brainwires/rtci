@@ -187,6 +187,50 @@ pub struct ProbePacket {
     pub cluster: u32,
 }
 
+/// A cluster nothing in the chain could carry: the NACK responder had no stream to pad on and
+/// no pacer took the request on its way ([`ProbeFill`] absent), so no packet leaves for it.
+///
+/// The responder writes it wire-ward as an empty RTCP packet ([`ProbeUnsent::into_packet`]),
+/// tagged with the request's RTP session when it had one; the congestion controller takes it
+/// out of the chain and counts the cluster as never asked for
+/// ([`ProbeController::on_unsent`]), instead of waiting [`PROBE_RESULT_TIMEOUT`] for a result
+/// that cannot come and spending the cluster's place in the start-up sequence on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProbeUnsent {
+    /// The cluster ([`ProbeRequest::cluster`]).
+    pub(crate) cluster: u32,
+}
+
+impl ProbeUnsent {
+    /// The packet that carries this wire-ward from where it is written at `now`.
+    pub(crate) fn into_packet(self, now: Instant, session: Option<usize>) -> TaggedPacket {
+        let mut message =
+            AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(self)));
+        if let Some(session) = session {
+            message.add(crate::RtpSession(session).attribute());
+        }
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message,
+        }
+    }
+}
+
+/// What [`ProbeController::poll`] changed in asking for a cluster, to be put back when the
+/// cluster turns out to have left no packet ([`ProbeController::on_unsent`]).
+#[derive(Debug)]
+struct Asked {
+    cluster: u32,
+    initial: Vec<f64>,
+    started: bool,
+    last_probe: Option<Instant>,
+    further: Option<f64>,
+    drop_probe: bool,
+    last_drop_probe: Option<Instant>,
+    last_recovery: Option<Instant>,
+}
+
 /// How much a cluster at `bits_per_second` holds.
 pub(crate) fn cluster_octets(bits_per_second: f64) -> usize {
     let by_duration = (bits_per_second * PROBE_MIN_DURATION.as_secs_f64() / 8.0) as usize;
@@ -350,6 +394,8 @@ pub struct ProbeController {
     remembered: Option<(f64, Instant)>,
     /// When the last recovery cluster was asked for.
     last_recovery: Option<Instant>,
+    /// The state before the outstanding cluster was asked for.
+    asked: Option<Asked>,
 }
 
 impl ProbeController {
@@ -384,6 +430,7 @@ impl ProbeController {
             recovery: false,
             remembered: None,
             last_recovery: None,
+            asked: None,
         }
     }
 
@@ -541,6 +588,7 @@ impl ProbeController {
         // The rate remembered for recovery probing was the old path's.
         self.remembered = None;
         self.last_recovery = None;
+        self.asked = None;
     }
 
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
@@ -585,6 +633,16 @@ impl ProbeController {
             return None;
         }
 
+        let before = Asked {
+            cluster: 0,
+            initial: self.initial.clone(),
+            started: self.started,
+            last_probe: self.last_probe,
+            further: self.further,
+            drop_probe: self.drop_probe,
+            last_drop_probe: self.last_drop_probe,
+            last_recovery: self.last_recovery,
+        };
         self.started = true;
         let rate = if let Some(rate) = self.initial.pop() {
             Some(rate)
@@ -635,6 +693,7 @@ impl ProbeController {
         self.next_cluster = self.next_cluster.wrapping_add(1).max(1);
         self.outstanding = Some((cluster, rate, now));
         self.last_probe = Some(now);
+        self.asked = Some(Asked { cluster, ..before });
         Some(ProbeRequest {
             cluster,
             bits_per_second: rate,
@@ -741,6 +800,59 @@ impl ProbeController {
         }
     }
 
+    /// `cluster` left no packet: nothing in the chain could carry it ([`ProbeUnsent`]). It is
+    /// counted as never asked for: what asking for it used up (its place in the start-up
+    /// sequence, the further cluster it was, the time since the last cluster that spaces the
+    /// next one) is owed again, and the next poll at which something can carry it asks for it
+    /// at once. RFC 8836 section 2, requirement 4 asks for probing at the start of a flow; a
+    /// start-up cluster asked for while only audio has sent (no RTX stream to pad on, no
+    /// pacer) is not that probe, and the one the video can carry still is. Returns whether it
+    /// was the outstanding cluster.
+    pub fn on_unsent(&mut self, cluster: u32) -> bool {
+        if self.outstanding() != Some(cluster) {
+            return false;
+        }
+        self.outstanding = None;
+        if let Some(asked) = self.asked.take().filter(|asked| asked.cluster == cluster) {
+            self.initial = asked.initial;
+            self.started = asked.started;
+            self.last_probe = asked.last_probe;
+            self.further = asked.further;
+            self.drop_probe = asked.drop_probe;
+            self.last_drop_probe = asked.last_drop_probe;
+            self.last_recovery = asked.last_recovery;
+        }
+        true
+    }
+
+    /// A media stream sent its first packet after the call's start, at a target of `target`:
+    /// the start of a flow. When the start-up sequence is over, it is owed again, at three
+    /// and six times `target`, and goes on while the path carries what is asked, as at the
+    /// call's start.
+    ///
+    /// RFC 8836 section 2, requirement 4: the algorithm "SHOULD adapt as quickly as possible to
+    /// initial network conditions at the start of a flow" (draft-ietf-rmcat-gcc-02 has no
+    /// probing). The start-up clusters of a call that began with audio alone were spent on the
+    /// audio, which carries no cluster at its rate (the pacer releases what it holds, and
+    /// audio is a packet every 20 ms); when video is added nothing else asks for one, since a
+    /// sender that follows its target is not application limited: the video climbed at 8 % a
+    /// second (461 kbit/s six seconds after it started, paced or not). While the start-up
+    /// sequence is still owed or under way (the sources of a call starting within a few
+    /// milliseconds of each other) nothing changes. libwebrtc probes on a growth of the
+    /// allocated maximum instead (`ProbeController::OnMaxTotalAllocatedBitrate`); this rule
+    /// needs no allocation, only the flow's first packet.
+    pub fn on_new_flow(&mut self, target: f64) {
+        if !self.started || !self.initial.is_empty() {
+            return;
+        }
+        self.initial = INITIAL_PROBES
+            .iter()
+            .rev()
+            .map(|multiple| target * multiple)
+            .collect();
+        self.further = None;
+    }
+
     /// The number of the cluster whose result is awaited.
     pub fn outstanding(&self) -> Option<u32> {
         self.outstanding.map(|(cluster, _, _)| cluster)
@@ -761,6 +873,7 @@ impl ProbeController {
             return None;
         }
         self.outstanding = None;
+        self.asked = None;
         // The path carried what was asked of it: it may carry more. Not after a probe for the
         // rate before a drop: that asks only whether the path is back where it was.
         let drop_probe = std::mem::take(&mut self.drop_probe);
@@ -940,6 +1053,87 @@ mod tests {
             )
             .expect("second cluster");
         assert_eq!(1_800_000.0, second.bits_per_second);
+    }
+
+    /// A start-up cluster that left no packet ([`ProbeController::on_unsent`]) is owed again,
+    /// at once: the next poll asks for the same rate, without the spacing between clusters
+    /// and without waiting for the result's time-out. A cluster with a result is not undone.
+    #[test]
+    fn a_cluster_that_left_no_packet_is_asked_for_again_at_once() {
+        let epoch = Instant::now();
+        let mut controller = ProbeController::new(300_000.0, 100_000_000.0);
+        let first = controller
+            .poll(epoch, 300_000.0, 300_000.0, true)
+            .expect("first cluster");
+        assert!(controller.on_unsent(first.cluster));
+        assert_eq!(None, controller.outstanding());
+        assert!(!controller.on_unsent(first.cluster), "only once");
+
+        let at = epoch + Duration::from_millis(10);
+        let again = controller
+            .poll(at, 300_000.0, 300_000.0, true)
+            .expect("the first start-up cluster again");
+        assert_eq!(900_000.0, again.bits_per_second);
+        assert_ne!(first.cluster, again.cluster, "a new number");
+
+        assert_eq!(
+            Some(900_000.0),
+            controller.on_result(again.cluster, 900_000.0)
+        );
+        assert!(!controller.on_unsent(again.cluster), "it had a result");
+        let second = controller
+            .poll(at + Duration::from_millis(200), 900_000.0, 300_000.0, true)
+            .expect("second cluster");
+        assert_eq!(1_800_000.0, second.bits_per_second);
+    }
+
+    /// A flow that starts after the start-up sequence is over owes it again, at three and six
+    /// times the target then; one that starts while it is still owed changes nothing.
+    #[test]
+    fn a_flow_that_starts_later_starts_the_probing_again() {
+        let epoch = Instant::now();
+        let mut controller = ProbeController::new(300_000.0, 100_000_000.0);
+        controller.on_new_flow(300_000.0);
+        let first = controller
+            .poll(epoch, 300_000.0, 300_000.0, true)
+            .expect("first cluster");
+        controller.on_new_flow(300_000.0);
+        controller.on_result(first.cluster, 100_000.0);
+        let second = controller
+            .poll(
+                epoch + Duration::from_millis(200),
+                300_000.0,
+                300_000.0,
+                true,
+            )
+            .expect("second cluster");
+        assert_eq!(
+            1_800_000.0, second.bits_per_second,
+            "the sequence as it was"
+        );
+        controller.on_result(second.cluster, 100_000.0);
+        let later = epoch + Duration::from_millis(400);
+        assert_eq!(
+            None,
+            controller.poll(later, 300_000.0, 300_000.0, true),
+            "the start-up is over"
+        );
+
+        controller.on_new_flow(500_000.0);
+        let again = controller
+            .poll(later, 500_000.0, 500_000.0, true)
+            .expect("the start-up again");
+        assert_eq!(1_500_000.0, again.bits_per_second);
+        controller.on_result(again.cluster, 1_500_000.0);
+        let next = controller
+            .poll(
+                later + Duration::from_millis(200),
+                1_500_000.0,
+                500_000.0,
+                true,
+            )
+            .expect("its second cluster");
+        assert_eq!(3_000_000.0, next.bits_per_second);
     }
 
     /// A result that confirms the rate probed is followed by a cluster at twice the result; one

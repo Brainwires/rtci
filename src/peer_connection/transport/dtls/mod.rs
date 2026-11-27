@@ -2281,6 +2281,13 @@ mod tests {
             !extension_types.contains(&35),
             "no SessionTicket extension: {extension_types:?}"
         );
+        // RFC 6066 section 3: the HostName is the server's DNS name "as understood by the
+        // client"; a peer connection knows none (the peer is identified by its fingerprint)
+        // and sends no server_name extension, as libwebrtc's DTLS does not.
+        assert!(
+            !extension_types.contains(&0),
+            "no server_name extension: {extension_types:?}"
+        );
 
         // The engine as the server, against a DTLS 1.2 client that resumes where it can.
         let client_certificate = ::dtls::crypto::Certificate::generate_self_signed(

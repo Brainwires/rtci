@@ -38,6 +38,10 @@ for (const c of cells.filter((c) => c.status === "xfail")) {
 for (const c of cells.filter((c) => c.status === "na-env")) {
   console.log(`  not tested: ${c.test} [${c.browser}]: ${c.reason} [${c.cite}]`);
 }
+// A pass on a second attempt after a known browser defect (matrix.mjs `detail`).
+for (const c of cells.filter((c) => c.status === "pass" && c.detail)) {
+  console.log(`  passed after a retry: ${c.test} [${c.browser}]: ${c.detail.slice(0, 300)}`);
+}
 if (problems.length) {
   console.log("interop gate FAILED:");
   for (const p of problems) console.log(`  ${p}`);

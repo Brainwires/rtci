@@ -479,6 +479,116 @@ fn reduced_size_is_given_up_when_nacks_get_no_answer() {
     }
 }
 
+/// Runs the chain from `from` to `until` while media arrives from the remote source 200, a
+/// packet every 20 ms from sequence number `seq` on; returns the RTCP datagrams written.
+fn run_with_media(
+    chain: &mut impl Interceptor,
+    from: Instant,
+    until: Instant,
+    seq: &mut u16,
+) -> Vec<Sent> {
+    let mut sent = vec![];
+    let mut now = from;
+    while now < until {
+        now = (now + secs(0.02)).min(until);
+        sent.extend(run(chain, now));
+        chain
+            .handle_read(rtp(now, 200, *seq, u32::from(*seq) * 3000))
+            .unwrap();
+        read(chain);
+        *seq = seq.wrapping_add(1);
+    }
+    sent
+}
+
+/// Whether `sent` is a full compound packet (RFC 3550 6.1): an SR or RR first and an SDES
+/// that gives the reporting SSRC's CNAME.
+fn full_compound(sent: &Sent) -> bool {
+    sent.is_compound()
+        && sent
+            .cnames()
+            .iter()
+            .any(|(source, _)| Some(*source) == sent.leader())
+}
+
+/// RFC 5506 4.1: a reduced-size packet "MUST NOT be used for Regular (scheduled) RTCP report
+/// purposes"; 4.2.3: "all Regular RTCP MUST be full compound RTCP". With reduced-size RTCP
+/// negotiated and in use (the feedback that leaves early goes reduced-size), every packet the
+/// regular timer sends is still a full compound packet, an RR first with the report block of
+/// the source heard and the SDES with the CNAME: the one that carries feedback stored for it
+/// as well as those that carry none.
+#[test]
+fn regular_reports_stay_full_compound_when_reduced_size_is_negotiated() {
+    use rtcp::header::PacketType;
+
+    let mut chain = chain(builder().with_reduced_size(true));
+    let base = Instant::now();
+    chain.bind_remote_stream(&video(200));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut seq = 1000u16;
+
+    // The first RTCP packet of the session is compound (RFC 5506 4.2.2).
+    chain
+        .handle_write(rtcp(base + secs(0.01), pli(200)))
+        .unwrap();
+    let first = written(&mut chain);
+    assert!(full_compound(&first[0]));
+    let mut regular = run_with_media(&mut chain, base + secs(0.01), base + secs(2.0), &mut seq);
+
+    // Early feedback now goes reduced-size: the PLI alone.
+    let now = base + secs(2.0);
+    chain.handle_write(rtcp(now, pli(200))).unwrap();
+    let early = written(&mut chain);
+    assert_eq!(1, early.len());
+    assert!(!early[0].is_compound(), "reduced-size RTCP is in use");
+    assert_eq!(1, early[0].packets.len());
+
+    // No other Early packet is allowed now: a NACK waits for the regular packet, which is
+    // full compound with the NACK in it.
+    chain
+        .handle_write(rtcp(now + secs(0.001), nack(200, seq.wrapping_sub(1))))
+        .unwrap();
+    assert!(written(&mut chain).is_empty());
+    let after = run_with_media(&mut chain, now + secs(0.001), now + secs(12.0), &mut seq);
+    let carrier = after
+        .iter()
+        .find(|sent| sent.has::<TransportLayerNack>())
+        .expect("the stored NACK is sent");
+    assert_eq!(
+        carrier.at, after[0].at,
+        "with the next packet the timer sends"
+    );
+    assert!(
+        full_compound(carrier),
+        "the regular packet that carries feedback is full compound: {:?}",
+        carrier.packets
+    );
+    regular.extend(after);
+
+    // Thirty more seconds with no feedback: every packet is a regular one.
+    let now = base + secs(14.0);
+    regular.extend(run_with_media(&mut chain, now, now + secs(30.0), &mut seq));
+    let reports = regular
+        .iter()
+        .filter(|sent| sent.reported().contains(&200))
+        .count();
+    assert!(reports >= 5, "{reports} regular reports in 42 s");
+    for sent in &regular {
+        assert!(
+            full_compound(sent),
+            "a packet the regular timer sent is not full compound: {:?}",
+            sent.packets
+        );
+    }
+    // Reduced-size packets carry feedback only (RFC 5506 4.2.1).
+    for packet in &early[0].packets {
+        assert!(matches!(
+            packet.header().packet_type,
+            PacketType::TransportSpecificFeedback | PacketType::PayloadSpecificFeedback
+        ));
+    }
+}
+
 /// RFC 8108 5.4.2 and RFC 4585 3.5.2: with remote sources under more than one CNAME the
 /// session is multiparty, and an Early packet is dithered instead of leaving at once.
 #[test]

@@ -231,6 +231,41 @@ fn a_section_that_drops_its_msid_ends_the_track_only_when_asked() -> TestResult 
     Ok(())
 }
 
+/// RFC 8830 section 3.2.5: "If no such attribute is found, stop the MediaStreamTrack." The
+/// `StrictRfc` behaviour profile turns `with_msid_removal_ends_track` on; the default profile
+/// keeps the W3C form (the track stays live).
+#[test]
+fn the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid() -> TestResult {
+    use rtci::media_stream::MediaStreamTrackState::{Ended, Live};
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::BehaviourProfile;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    for (profile, expected) in [
+        (BehaviourProfile::Rfc, Live),
+        (BehaviourProfile::Chrome, Live),
+        (BehaviourProfile::StrictRfc, Ended),
+    ] {
+        let mut media_engine = MediaEngine::for_profile(profile);
+        media_engine.register_default_codecs()?;
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_behaviour_profile(profile)
+                    .build(),
+            )
+            .build(Instant::now())?;
+        assert_eq!(track_state(&mut pc, offer("a=msid:stream\n", ""))?, Live);
+        assert_eq!(
+            track_state(&mut pc, offer("", ""))?,
+            expected,
+            "{profile:?}"
+        );
+    }
+    Ok(())
+}
+
 /// RFC 9429 sections 5.2.2 and 5.3.2: for a transceiver that is not stopped "the 'a=msid'
 /// lines MUST stay the same regardless of changes to the transceiver's direction or track".
 /// After `remove_track` (no track, the direction no longer sends) the next offer and the
@@ -543,5 +578,99 @@ fn a_new_msid_appdata_is_a_new_track_only_when_asked() -> TestResult {
         assert_eq!(third, second, "renews {renews}: the same appdata again");
         assert_eq!(events(&mut pc), (vec![], vec![]), "renews {renews}");
     }
+    Ok(())
+}
+
+/// The appdata of each media-level `a=msid` line of each section of `sdp` (`None` for a
+/// line without one), and the section's lines.
+fn msid_appdata_per_section(sdp: &str) -> Vec<Vec<Option<String>>> {
+    jsep_common::media_sections(sdp)
+        .iter()
+        .map(|section| {
+            section
+                .iter()
+                .filter_map(|line| line.strip_prefix("a=msid:"))
+                .map(|value| value.split_once(' ').map(|(_, appdata)| appdata.to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+/// Asserts that every section of `sdp` whose msid lines carry appdata carries one: RFC 8830
+/// section 2, "the value of "msid-appdata" MUST be identical for all occurrences".
+fn assert_one_appdata_per_section(what: &str, sdp: &str) {
+    for (index, appdata) in msid_appdata_per_section(sdp).iter().enumerate() {
+        let mut distinct = appdata.clone();
+        distinct.dedup();
+        assert!(
+            distinct.len() <= 1,
+            "{what} section {index}: msid lines with different appdata {appdata:?}\n{sdp}"
+        );
+    }
+}
+
+/// RFC 8830 section 2: "There may be multiple "msid" attributes in a single media
+/// description. This represents the case where a single MediaStreamTrack is present in
+/// multiple MediaStreams; the value of "msid-appdata" MUST be identical for all
+/// occurrences." A track in three streams; one track sent by two transceivers, the second in
+/// a stream of the first's and one more, whose pair with the first stream repeats the first
+/// section's and is made unique (RFC8830-2-4, `-1`): both of its lines take the new appdata,
+/// not only the repeated one; an answerer's track in two streams; a later offer. Each
+/// section's `a=msid` lines carry one appdata.
+#[test]
+fn every_msid_line_of_a_section_carries_the_same_appdata() -> TestResult {
+    use jsep_common::video_track;
+    use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    let init = |streams: &[&str]| RTCRtpTransceiverInit {
+        direction: RTCRtpTransceiverDirection::Sendrecv,
+        streams: streams.iter().map(|s| (*s).to_owned()).collect(),
+        send_encodings: vec![],
+    };
+    let mut offerer = default_peer()?;
+    offerer.add_transceiver_from_track(
+        video_track("solo", 0x0101_0101),
+        Some(init(&["x", "y", "z"])),
+    )?;
+    offerer
+        .add_transceiver_from_track(video_track("same", 0x0202_0202), Some(init(&["shared"])))?;
+    offerer.add_transceiver_from_track(
+        video_track("same", 0x0303_0303),
+        Some(init(&["shared", "other"])),
+    )?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    let appdata = msid_appdata_per_section(&offer.sdp);
+    assert_eq!(3, appdata.len(), "{}", offer.sdp);
+    assert_eq!(3, appdata[0].len(), "three msid lines: {}", offer.sdp);
+    assert_eq!(2, appdata[2].len(), "two msid lines: {}", offer.sdp);
+    assert_eq!(Some("same"), appdata[1][0].as_deref(), "{}", offer.sdp);
+    assert_ne!(
+        Some("same"),
+        appdata[2][0].as_deref(),
+        "the repeated pair is made unique: {}",
+        offer.sdp
+    );
+    assert_one_appdata_per_section("offer", &offer.sdp);
+    offerer.set_local_description(now, offer.clone())?;
+
+    let mut answerer = default_peer()?;
+    answerer.set_remote_description(now, RTCSessionDescription::offer(offer.sdp.clone())?)?;
+    answerer.add_track_with_streams(
+        video_track("back", 0x0404_0404),
+        vec!["p".to_owned(), "q".to_owned()],
+    )?;
+    let answer = answerer.create_answer(None)?;
+    let answered = msid_appdata_per_section(&answer.sdp);
+    assert!(
+        answered.iter().any(|lines| lines.len() == 2),
+        "the answerer's track in two streams: {}",
+        answer.sdp
+    );
+    assert_one_appdata_per_section("answer", &answer.sdp);
+    answerer.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+
+    let later = offerer.create_offer(None)?;
+    assert_one_appdata_per_section("later offer", &later.sdp);
     Ok(())
 }

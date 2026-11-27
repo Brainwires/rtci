@@ -805,6 +805,78 @@ fn test_request_is_credited_to_the_host_candidate_not_its_reflexive_one() {
     assert_eq!(local.candidate_type(), CandidateType::Host);
 }
 
+/// Section 7.3.1.4: the local candidate has "the transport address (as seen by the agent) on
+/// which the STUN request was received". An unspecified local address (what a socket bound to
+/// `0.0.0.0` / `[::]` reports as its own) is no host candidate's: a request on it is discarded
+/// as before (no pair, no peer-reflexive candidate, no response), and the log line says why
+/// instead of the generic one. Matching is unchanged: a server-reflexive candidate whose
+/// related address is that unspecified address still takes it.
+#[test]
+fn test_a_request_on_an_unspecified_local_address_is_discarded_and_the_log_says_why() {
+    use super::agent_proto::unmatched_local_address_log;
+
+    let start = Instant::now();
+    let mut a = Agent::new(start, Arc::new(config(false)), provider()).unwrap();
+    a.add_local_candidate(host(addr(LOCAL))).unwrap();
+    a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(1)), Box::new(PriorityAttr(1000))],
+    );
+    for wildcard in ["0.0.0.0:1000", "[::]:1000"] {
+        let transport = TransportContext {
+            local_addr: addr(wildcard),
+            peer_addr: addr(REMOTE_A),
+            ecn: None,
+            transport_protocol: TransportProtocol::UDP,
+        };
+        let result = a.handle_read(TaggedBytesMut {
+            now: start,
+            transport,
+            message: BytesMut::from(&request.raw[..]),
+        });
+        assert_eq!(result.unwrap_err(), Error::ErrUnhandledStunpacket);
+        assert!(a.candidate_pairs.is_empty(), "{wildcard}: no pair");
+        assert!(a.remote_candidates.is_empty(), "{wildcard}: no prflx");
+        assert!(a.poll_write().is_none(), "{wildcard}: no response");
+
+        let line = unmatched_local_address_log("controlled", &transport);
+        assert!(
+            line.contains(&format!("its local address {wildcard} is unspecified"))
+                && line.contains("concrete address each datagram was received on")
+                && line.contains("relayed address"),
+            "{line}"
+        );
+    }
+
+    // A concrete address that is no candidate's keeps the generic line.
+    let concrete = TransportContext {
+        local_addr: addr("192.168.0.9:1000"),
+        peer_addr: addr(REMOTE_A),
+        ecn: None,
+        transport_protocol: TransportProtocol::UDP,
+    };
+    assert_eq!(
+        unmatched_local_address_log("controlled", &concrete),
+        "[controlled]: Discarded message, not a valid local candidate from UDP:192.168.0.9:1000"
+    );
+
+    // The same request on the host candidate's own address is taken.
+    deliver(&mut a, start, &request, REMOTE_A).unwrap();
+    assert_eq!(a.candidate_pairs.len(), 1);
+
+    // Matching is unchanged: the reflexive-on-base match still credits an unspecified address
+    // to a server-reflexive candidate whose related address it is.
+    let mut b = Agent::new(start, Arc::new(config(false)), provider()).unwrap();
+    b.add_local_candidate(srflx("203.0.113.5", 4000, addr("0.0.0.0:1000")))
+        .unwrap();
+    assert_eq!(
+        b.find_local_candidate(addr("0.0.0.0:1000"), TransportProtocol::UDP),
+        Some(0)
+    );
+}
+
 // --- Section 7.2.5: responses ---
 
 /// Section 7.2.5.2.1: the response must come from where the request went. One that carries
@@ -1188,6 +1260,63 @@ fn test_completed_needs_a_nominated_pair_and_both_ends_of_candidates() {
         Duration::from_secs(30),
     );
     assert_eq!(states(&mut a), vec![ConnectionState::Completed]);
+}
+
+/// Whether a check of `a` is in flight or queued: a pair In-Progress, or the triggered-check
+/// queue not empty (consent checks on the selected pair leave it Succeeded).
+fn checking_a_pair(a: &Agent) -> Option<String> {
+    if !a.triggered_queue.is_empty() {
+        return Some(format!("triggered queue {:?}", a.triggered_queue));
+    }
+    a.candidate_pairs
+        .iter()
+        .find(|p| p.state == CandidatePairState::InProgress)
+        .map(|p| format!("pair {p} In-Progress"))
+}
+
+/// Runs `a` from `from` to `until` in 1 ms steps, answering checks to `10.0.0.1` only, and
+/// fails when it is `Completed` while a check is in flight.
+fn run_asserting_completed_only_when_done(
+    a: &mut Agent,
+    start: Instant,
+    from: Duration,
+    until: Duration,
+) {
+    let mut t = from;
+    while t < until {
+        run_with(a, start, t, t + MS, |s| {
+            if s.to == remote_addr(1) {
+                Answer::Success(addr(LOCAL))
+            } else {
+                Answer::Silence
+            }
+        });
+        t += MS;
+        if a.state() == ConnectionState::Completed
+            && let Some(checking) = checking_a_pair(a)
+        {
+            panic!("Completed at {t:?} while checking: {checking}");
+        }
+    }
+}
+
+/// W3C webrtc 5.6.4 `RTCIceTransportState`: "completed": the transport "has finished
+/// gathering, received an indication that there are no more remote candidates, finished
+/// checking all candidate pairs and found a connection"; "connected": it "has found a usable
+/// connection, but is still checking other candidate pairs". Both sides are done with their
+/// candidates from the start; 1 answers, 2 and 3 never do. The agent is never `Completed`
+/// while one of its checks is in flight (RFC 8445 Section 8.1.2 ends the others' transactions
+/// at the nomination).
+#[test]
+fn test_completed_is_never_reported_while_a_check_is_in_flight() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400), (3, 300)]);
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    run_asserting_completed_only_when_done(&mut a, start, Duration::ZERO, Duration::from_secs(10));
+    assert_eq!(a.state(), ConnectionState::Completed);
+    let (_, remote) = a.get_selected_candidate_pair().unwrap();
+    assert_eq!(remote.addr(), remote_addr(1));
 }
 
 /// Section 7.2.5.4 with RFC 8838 Sections 8 and 14: when every pair has failed and none is

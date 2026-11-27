@@ -117,6 +117,7 @@ pub struct TransportConfig {
     zero_window_overcommit: bool,
     partial_delivery_point: Option<u32>,
     no_fragmentation: bool,
+    handshake_timers_back_off_rto: bool,
 }
 
 impl Default for TransportConfig {
@@ -144,6 +145,7 @@ impl Default for TransportConfig {
             zero_window_overcommit: false,
             partial_delivery_point: None,
             no_fragmentation: false,
+            handshake_timers_back_off_rto: true,
         }
     }
 }
@@ -375,7 +377,9 @@ impl TransportConfig {
     }
 
     /// Sets this endpoint's SCTP port, the source port of what it sends (RFC 8841 5: its own
-    /// `a=sctp-port`). Defaults to 5000.
+    /// `a=sctp-port`). Defaults to 5000. Port 0 MUST NOT be used (RFC 9260 section 3.1):
+    /// [`Endpoint::connect`](crate::Endpoint::connect) refuses a configuration with it
+    /// (`ConnectError::ZeroSctpPort`), and an accepting endpoint answers on the INIT's ports.
     pub fn with_sctp_port(mut self, value: u16) -> Self {
         self.sctp_port = value;
         self
@@ -383,7 +387,8 @@ impl TransportConfig {
 
     /// Sets the peer's SCTP port, the destination port of the INIT this endpoint sends when it
     /// initiates (RFC 8841 5: the remote `a=sctp-port`). Defaults to 5000. An endpoint that
-    /// accepts an association answers on the ports of the INIT it received.
+    /// accepts an association answers on the ports of the INIT it received. Port 0 is refused
+    /// by [`Endpoint::connect`](crate::Endpoint::connect) (RFC 9260 section 3.1).
     pub fn with_remote_sctp_port(mut self, value: u16) -> Self {
         self.remote_sctp_port = value;
         self
@@ -426,6 +431,29 @@ impl TransportConfig {
     pub fn with_max_num_inbound_streams(mut self, value: u16) -> Self {
         self.max_num_inbound_streams = value.max(1);
         self
+    }
+
+    /// Whether an expiry of T1-init or T1-cookie backs off the RTO of the path, as a T3-rtx
+    /// expiry does. On by default: RFC 9260 section 5.1, "The T1-init timer and T1-cookie
+    /// timer SHOULD follow the same rules given in Section 6.3", whose rule E2 (6.3.3) is "set
+    /// RTO = RTO * 2 ('back off the timer')" for the destination, bounded by RTO.Max. Each
+    /// timer is started with the path's RTO, so T1-cookie starts where T1-init's backoff
+    /// left the RTO, and the first DATA after the handshake does too, until a round trip is
+    /// measured (6.3.1 C2).
+    ///
+    /// `false` is what libwebrtc's dcSCTP does (`t1_init_` and `t1_cookie_` in
+    /// `net/dcsctp/socket/dcsctp_socket.cc`: each timer starts at its own 1 s and doubles by
+    /// itself): each timer starts at RTO.Initial and doubles on its own expiries, and the RTO
+    /// the data transfer uses is left alone, so the first DATA after a handshake that lost
+    /// packets is retransmitted an RTO.Initial after it is sent.
+    pub fn with_handshake_timers_back_off_rto(mut self, value: bool) -> Self {
+        self.handshake_timers_back_off_rto = value;
+        self
+    }
+
+    /// See [`with_handshake_timers_back_off_rto`](Self::with_handshake_timers_back_off_rto).
+    pub fn handshake_timers_back_off_rto(&self) -> bool {
+        self.handshake_timers_back_off_rto
     }
 
     /// Overrides the retransmission limits; see [`TimerConfig`].

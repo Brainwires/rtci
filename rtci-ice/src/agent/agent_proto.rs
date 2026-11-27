@@ -1,6 +1,31 @@
 use super::*;
 use mdns::MDNS_PORT;
 
+/// The line logged for a datagram whose local address is no local candidate's (RFC 8445
+/// Section 7.3.1.4: the local candidate has "the transport address (as seen by the agent) on
+/// which the STUN request was received"). An unspecified local address (`0.0.0.0:port`,
+/// `[::]:port`) is never a candidate's transport address: it is what a socket bound to the
+/// unspecified address reports as its own, and the line says so. The datagram is discarded
+/// either way; only the wording differs.
+pub(crate) fn unmatched_local_address_log(name: &str, transport: &TransportContext) -> String {
+    if transport.local_addr.ip().is_unspecified() {
+        format!(
+            "[{name}]: Discarded message from {}: its local address {} is unspecified. The local \
+             address of a datagram is the address of the local candidate it arrived on: a socket \
+             bound to the unspecified address must report the concrete address each datagram \
+             was received on (its destination address, IP_PKTINFO / IPV6_RECVPKTINFO), and a \
+             datagram relayed by a TURN allocation the application runs carries the relayed \
+             address",
+            transport.peer_addr, transport.local_addr,
+        )
+    } else {
+        format!(
+            "[{name}]: Discarded message, not a valid local candidate from {:?}:{}",
+            transport.transport_protocol, transport.local_addr,
+        )
+    }
+}
+
 impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
     type Rout = TaggedBytesMut;
     type Wout = TaggedBytesMut;
@@ -8,6 +33,13 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
     type Error = Error;
     type Time = Instant;
 
+    /// Reads one datagram. `msg.transport.local_addr` is the transport address of the local
+    /// candidate the datagram arrived on, matched exactly (RFC 8445 Section 7.3.1.4): the
+    /// address of a host candidate, or, for a datagram a TURN allocation relayed (taken out of
+    /// its Data indication or ChannelData), the relayed address of the relayed candidate. A
+    /// socket bound to the unspecified address reports the concrete address the datagram was
+    /// received on, not `0.0.0.0:port` / `[::]:port`. A datagram on an address that is no
+    /// local candidate's is discarded with [`Error::ErrUnhandledStunpacket`].
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<()> {
         self.clock = self.clock.max(msg.now);
         // The embedder's address policy: a datagram from a source it refuses is dropped before
@@ -54,10 +86,8 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
             self.handle_inbound_candidate_msg(local_index, msg)
         } else {
             warn!(
-                "[{}]: Discarded message, not a valid local candidate from {:?}:{}",
-                self.get_name(),
-                msg.transport.transport_protocol,
-                msg.transport.local_addr,
+                "{}",
+                unmatched_local_address_log(self.get_name(), &msg.transport)
             );
             Err(Error::ErrUnhandledStunpacket)
         }
@@ -71,6 +101,11 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
         Ok(())
     }
 
+    /// The next datagram to send. `transport.local_addr` is the base of the local candidate
+    /// it leaves from (RFC 8445 Section 6.1.2): a host candidate's address (send it from that
+    /// socket), or a relayed candidate's relayed address, in which case it goes through that
+    /// candidate's TURN allocation (a Send indication or ChannelData to `peer_addr`), not
+    /// directly from a socket. (mDNS datagrams leave from port 5353, the host's mDNS socket.)
     fn poll_write(&mut self) -> Option<Self::Wout> {
         if let Some(mdns_conn) = &mut self.mdns {
             while let Some(msg) = mdns_conn.poll_write() {

@@ -11,7 +11,7 @@ use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_receive_fec_format,
+    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_search, find_receive_fec_format,
     find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
@@ -104,6 +104,12 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// that carries a RID is bound by its rid, as without them.
     declared_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
+    /// The formats this endpoint's applied answer listed for the section beyond the offer's
+    /// (RFC 9429 section 5.3.1: "Any currently available media formats that are not present
+    /// in the current remote description MUST be added"), which it is therefore "willing to
+    /// receive" (RFC 3264 section 6.1) and the offerer may send with (section 7: "It MUST send
+    /// using a media format listed in the answer"). Empty when the last answer was the peer's.
+    answered_formats: Vec<RTCRtpCodecParameters>,
     /// What this endpoint's pending offer prepared the receiver for, which it must be ready
     /// to receive before the answer arrives (RFC 3264 section 5.1, RFC 9429 sections 4.1.11
     /// and 5.9); `None` outside `have-local-offer` and `have-remote-pranswer`.
@@ -113,6 +119,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     associated_media_stream_ids: Vec<MediaStreamId>,
     /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
     rtcp_reduced_size: bool,
+    /// The transceiver's `[[NegotiatedHeaderExtensions]]` (webrtc-extensions 4.1), set when an
+    /// answer is applied; empty before the section's first answer. What this receiver reads
+    /// from a stream's header extensions is restricted to what it negotiated for receiving
+    /// (RFC 8834 section 10: an extension that is not signalled is ignored).
+    negotiated_header_extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
     /// What the public `getParameters` returns while the negotiated direction does not
@@ -160,9 +171,11 @@ impl RTCRtpReceiverInternal {
             declared_codings: vec![],
 
             receive_codecs: vec![],
+            answered_formats: vec![],
             offered: None,
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
+            negotiated_header_extensions: vec![],
             last_returned_parameters: None,
             not_receiving_parameters: None,
             local_fmtp: Vec::new(),
@@ -277,6 +290,24 @@ impl RTCRtpReceiverInternal {
         &self.track
     }
 
+    /// The formats this endpoint's applied answer added for the section beyond the offer's
+    /// (see the field): received like the negotiated ones until the next answer.
+    pub(crate) fn set_answered_formats(&mut self, formats: Vec<RTCRtpCodecParameters>) {
+        self.answered_formats = formats;
+    }
+
+    /// Whether `payload_type` is receivable only as a format this endpoint's answer added
+    /// beyond the offer (not negotiated by both descriptions).
+    pub(crate) fn is_answer_added_only(&self, payload_type: PayloadType) -> bool {
+        self.answered_formats
+            .iter()
+            .any(|codec| codec.payload_type == payload_type)
+            && !self
+                .receive_codecs
+                .iter()
+                .any(|codec| codec.payload_type == payload_type)
+    }
+
     /// The local description's formats of this receiver's section, with their parameters.
     pub(crate) fn set_local_fmtp(&mut self, local: Vec<(PayloadType, String)>) {
         self.local_fmtp = local;
@@ -287,6 +318,33 @@ impl RTCRtpReceiverInternal {
     pub(crate) fn invalidate_parameters(&mut self) {
         self.last_returned_parameters = None;
         self.not_receiving_parameters = None;
+    }
+
+    /// See the field: the transceiver's negotiated header extensions, from its applied answer.
+    pub(crate) fn set_negotiated_header_extensions(
+        &mut self,
+        negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
+    ) {
+        if self.negotiated_header_extensions != negotiated {
+            self.negotiated_header_extensions = negotiated;
+            self.last_returned_parameters = None;
+        }
+    }
+
+    /// Whether a local offer that this receiver's section is in is pending (the early streams
+    /// are settled by the answer's own steps).
+    pub(crate) fn has_pending_offer(&self) -> bool {
+        self.offered.is_some()
+    }
+
+    /// Whether this receiver reads the header extension `uri`: the section negotiated it for
+    /// receiving, or no answer was applied to the section yet (the engine's mapping applies).
+    pub(crate) fn reads_header_extension(&self, uri: &str) -> bool {
+        self.negotiated_header_extensions.is_empty()
+            || self
+                .negotiated_header_extensions
+                .iter()
+                .any(|extension| extension.uri == uri && extension.direction.has_recv())
     }
 
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
@@ -612,8 +670,10 @@ impl RTCRtpReceiverInternal {
             {
                 continue;
             }
+            // The engine's format that is this preference (its parameters), not the first of
+            // its configuration: each H.264 level of a profile is a format of its own.
             let (c, match_type) =
-                codec_parameters_fuzzy_search(&codec.rtp_codec, &media_engine_codecs);
+                codec_parameters_search(&codec.rtp_codec, None, &media_engine_codecs);
             if match_type != CodecMatch::None
                 && !filtered_codecs
                     .iter()
@@ -827,21 +887,34 @@ impl RTCRtpReceiverInternal {
     /// section 5.9: "For each specified media format, establish a mapping between the payload
     /// type and the actual media format"). For a section that was never answered the receive
     /// codecs are local preferences, not a negotiated list: the offer's formats alone count.
+    /// The formats this endpoint's own answer added beyond the offer's are receivable too
+    /// (RFC 3264 sections 6.1 and 7: the answer lists them as formats the answerer is
+    /// willing to receive, and the offerer may send with any format of the answer).
     pub(crate) fn receivable_codecs(&self) -> impl Iterator<Item = &RTCRtpCodecParameters> {
         let offered = self.offered.as_ref();
         let negotiated = offered.is_none_or(|offered| offered.negotiated);
         let listed = &self.receive_codecs;
-        listed.iter().filter(move |_| negotiated).chain(
-            offered
-                .into_iter()
-                .flat_map(|offered| offered.codecs.iter())
-                .filter(move |codec| {
-                    !negotiated
-                        || !listed
-                            .iter()
-                            .any(|listed| listed.payload_type == codec.payload_type)
-                }),
-        )
+        let answered = self.answered_formats.iter().filter(move |codec| {
+            negotiated
+                && !listed
+                    .iter()
+                    .any(|listed| listed.payload_type == codec.payload_type)
+        });
+        listed
+            .iter()
+            .filter(move |_| negotiated)
+            .chain(answered)
+            .chain(
+                offered
+                    .into_iter()
+                    .flat_map(|offered| offered.codecs.iter())
+                    .filter(move |codec| {
+                        !negotiated
+                            || !listed
+                                .iter()
+                                .any(|listed| listed.payload_type == codec.payload_type)
+                    }),
+            )
     }
 
     /// [`Self::get_parameters`] as a stream is bound with: while a local offer is pending the
@@ -852,6 +925,15 @@ impl RTCRtpReceiverInternal {
         media_engine: &MediaEngine,
     ) -> RTCRtpReceiveParameters {
         let mut parameters = self.get_parameters(media_engine).clone();
+        // The header extensions the interceptors are told of: the section's (RFC 8834 section
+        // 10), not every id the engine ever negotiated.
+        if !self.negotiated_header_extensions.is_empty() {
+            crate::rtp_transceiver::header_extension_control::retain_negotiated(
+                &mut parameters.rtp_parameters.header_extensions,
+                &self.negotiated_header_extensions,
+                false,
+            );
+        }
         if let Some(offered) = self.offered.as_ref() {
             if offered.negotiated {
                 let extra: Vec<RTCRtpCodecParameters> = offered
@@ -977,7 +1059,7 @@ impl RTCRtpReceiverInternal {
         Self::rebind_remote_streams(interceptor, &before, &now);
     }
 
-    fn rebind_remote_streams(
+    pub(crate) fn rebind_remote_streams(
         interceptor: &mut dyn Interceptor,
         before: &[StreamInfo],
         now: &[StreamInfo],
@@ -1124,7 +1206,7 @@ impl RTCRtpReceiverInternal {
                 continue;
             }
             // The stream's codec is the negotiated format from here on, with its feedback.
-            let (negotiated, match_type) = codec_parameters_fuzzy_search(&coding.codec, &codecs);
+            let (negotiated, match_type) = codec_parameters_search(&coding.codec, None, &codecs);
             coding.codec = if match_type == CodecMatch::None {
                 Default::default()
             } else {
@@ -1300,7 +1382,7 @@ impl RTCRtpReceiverInternal {
 
         for coding in self.track().codings() {
             let (codec, match_type) =
-                codec_parameters_fuzzy_search(&coding.codec, &parameters.rtp_parameters.codecs);
+                codec_parameters_search(&coding.codec, None, &parameters.rtp_parameters.codecs);
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
                 && match_type != CodecMatch::None
             {

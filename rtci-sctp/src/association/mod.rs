@@ -45,7 +45,7 @@ use crate::param::{
     param_zero_checksum_acceptable::{EDMID_SCTP_OVER_DTLS, ParamZeroChecksumAcceptable},
 };
 use crate::queue::{
-    payload_queue::PayloadQueue,
+    payload_queue::{PayloadQueue, counted_wire_size},
     pending_queue::{PendingQueue, ResetMarker},
 };
 use crate::shared::{AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner};
@@ -374,6 +374,8 @@ pub struct Association {
     max_receive_message_size: u32,
     /// See [`TransportConfig::with_zero_window_overcommit`].
     zero_window_overcommit: bool,
+    /// See [`TransportConfig::with_handshake_timers_back_off_rto`].
+    handshake_timers_back_off_rto: bool,
     /// The partial delivery point (RFC 6458 8.1.21): see
     /// [`TransportConfig::with_partial_delivery_point`].
     partial_delivery_point: u32,
@@ -495,6 +497,9 @@ pub struct Association {
     /// When the last COOKIE ECHO was sent: the start of the COOKIE ECHO / ERROR exchange a
     /// Cookie Preservative is sized from (RFC 9260 5.2.6).
     cookie_echo_sent_at: Option<Instant>,
+    /// The TSN and wire size of DATA chunks acknowledged lately, for the bytes of the
+    /// duplicates a SACK reports (RFC 9260 7.2.2). Each counts once.
+    recently_acknowledged: VecDeque<(u32, u32)>,
     /// The first DATA chunk of an association is acknowledged at once (RFC 9260 5.1).
     first_data_received: bool,
     /// Set while a packet is processed whose DATA must be acknowledged at once: it came with
@@ -683,6 +688,7 @@ impl Default for Association {
             max_message_size: 0,
             max_receive_message_size: 0,
             zero_window_overcommit: false,
+            handshake_timers_back_off_rto: true,
             partial_delivery_point: 1,
             will_send_shutdown: false,
             bytes_received: 0,
@@ -745,6 +751,7 @@ impl Default for Association {
             stale_cookie_restarts: 0,
             t3_retransmitted: VecDeque::new(),
             cookie_echo_sent_at: None,
+            recently_acknowledged: VecDeque::new(),
             first_data_received: false,
             sack_packet_immediately: false,
             discard_rest_of_packet: false,
@@ -779,7 +786,7 @@ impl Default for Association {
             fwd_tsn_stream_map: FxHashMap::default(),
 
             rto_mgr: RtoManager::default(),
-            timers: TimerTable::default(),
+            timers: TimerTable::default().with_t1_following_rto(true),
 
             // Congestion control parameters
             max_receive_buffer_size: 0,
@@ -881,6 +888,7 @@ impl Association {
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
             zero_window_overcommit: config.zero_window_overcommit(),
+            handshake_timers_back_off_rto: config.handshake_timers_back_off_rto(),
             partial_delivery_point: config.partial_delivery_point(),
             transport_config: Some(config.clone()),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
@@ -904,7 +912,9 @@ impl Association {
             destination_port: config.remote_sctp_port(),
 
             rto_mgr: RtoManager::with_config(config.rto_config()),
-            timers: TimerTable::new(config.timer_config()).with_rto_config(config.rto_config()),
+            timers: TimerTable::new(config.timer_config())
+                .with_rto_config(config.rto_config())
+                .with_t1_following_rto(config.handshake_timers_back_off_rto()),
             pending_queue: {
                 let mut queue = PendingQueue::with_scheduler(config.stream_scheduler());
                 queue.set_packet_budget(mtu.saturating_sub(COMMON_HEADER_SIZE) as usize);
@@ -4086,7 +4096,8 @@ impl Association {
 
         // The bytes outstanding before this SACK: the congestion window may grow only when
         // it was in full use (RFC 9260 7.2.1, 7.2.2).
-        let flight_before = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+        let flight_before =
+            u32::try_from(self.inflight_queue.get_num_wire_bytes()).unwrap_or(u32::MAX);
         let marked_before = self.fast_retransmit_marked.len();
 
         // Process selective ack
@@ -4109,7 +4120,16 @@ impl Association {
         }
         // RFC 9260 7.2.4: the window growth of 7.2.1 and 7.2.2 comes before the adjustments
         // for loss this SACK may bring.
-        self.grow_congestion_window(total_bytes_acked, flight_before, cum_tsn_ack_point_advanced);
+        // RFC 9260 7.2.2: partial_bytes_acked also counts "the number of bytes of duplicated
+        // chunks reported in Duplicate TSNs". Only chunks this side sent and saw acknowledged
+        // count, each once, so a receiver cannot inflate the count by repeating TSNs.
+        let duplicate_bytes = self.duplicate_bytes(&d.duplicate_tsn);
+        self.grow_congestion_window(
+            total_bytes_acked,
+            duplicate_bytes,
+            flight_before,
+            cum_tsn_ack_point_advanced,
+        );
 
         self.release_stream_buffers(&bytes_acked_per_stream);
 
@@ -4480,11 +4500,17 @@ impl Association {
         //log::debug!("[{}] i={} d={}", self.name, i, d.cumulative_tsn_ack);
         while sna32lte(i, d.cumulative_tsn_ack) {
             if let Some(mut c) = self.inflight_queue.pop(i) {
+                let wire = counted_wire_size(&c);
+                if wire > 0 && !c.abandoned() {
+                    self.note_acknowledged(c.tsn, wire);
+                }
                 if c.acknowledge() {
                     newly_acked_data |= c.nsent > 0;
 
                     let n_bytes_acked = c.user_data.len() as i64;
-                    total_bytes_acked += n_bytes_acked;
+                    // RFC 9260 7.2, 7.2.1, 7.2.2: the congestion control counts the chunk with
+                    // its header and padding.
+                    total_bytes_acked += wire as i64;
                     // A late SACK for a retired stream must not release bytes
                     // belonging to a new channel that reused its SID.
                     if self.is_current_stream_data(&c) {
@@ -4577,6 +4603,11 @@ impl Association {
                 let tsn = d.cumulative_tsn_ack.wrapping_add(i as u32);
 
                 let newly_acknowledged = self.inflight_queue.acknowledge(tsn);
+                let wire = if newly_acknowledged {
+                    self.inflight_queue.get(tsn).map_or(0, counted_wire_size) as i64
+                } else {
+                    0
+                };
                 // The payload stays until the Cumulative TSN Ack covers it: the receiver
                 // may renege on what a Gap Ack Block acknowledged (RFC 9260 6.2.1).
                 let n_bytes_acked = if newly_acknowledged {
@@ -4588,7 +4619,7 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get(tsn) {
                     if newly_acknowledged {
                         newly_acked_data |= c.nsent > 0;
-                        total_bytes_acked += n_bytes_acked;
+                        total_bytes_acked += wire;
                         if self.is_current_stream_data(c) {
                             *bytes_acked_per_stream
                                 .entry(c.stream_identifier)
@@ -4673,6 +4704,7 @@ impl Association {
     fn grow_congestion_window(
         &mut self,
         total_bytes_acked: i64,
+        duplicate_bytes: u32,
         flight_before: u32,
         cum_tsn_ack_point_advanced: bool,
     ) {
@@ -4701,7 +4733,10 @@ impl Association {
             // acknowledges. Once it reaches cwnd, and cwnd was in full use, cwnd grows by one
             // PMDCS: at most one per round trip. When cwnd was not in full use the count is
             // held at cwnd.
-            self.partial_bytes_acked = self.partial_bytes_acked.saturating_add(acked);
+            self.partial_bytes_acked = self
+                .partial_bytes_acked
+                .saturating_add(acked)
+                .saturating_add(duplicate_bytes);
             if fully_utilized {
                 if self.partial_bytes_acked >= self.cwnd {
                     self.partial_bytes_acked -= self.cwnd;
@@ -4720,6 +4755,34 @@ impl Association {
         if self.inflight_queue.is_empty() {
             self.partial_bytes_acked = 0;
         }
+    }
+
+    /// Remembers that the chunk `tsn`, `wire` bytes on the wire, was acknowledged, for a
+    /// duplicate report of it later (`duplicate_bytes`).
+    fn note_acknowledged(&mut self, tsn: u32, wire: usize) {
+        const KEPT: usize = 4096;
+        if self.recently_acknowledged.len() >= KEPT {
+            self.recently_acknowledged.pop_front();
+        }
+        self.recently_acknowledged
+            .push_back((tsn, u32::try_from(wire).unwrap_or(u32::MAX)));
+    }
+
+    /// The wire bytes of the chunks a SACK reports as duplicates (RFC 9260 7.2.2), each chunk
+    /// this side saw acknowledged counted once.
+    fn duplicate_bytes(&mut self, duplicates: &[u32]) -> u32 {
+        let mut bytes = 0u32;
+        for tsn in duplicates {
+            if let Some(at) = self
+                .recently_acknowledged
+                .iter()
+                .position(|(acked, _)| acked == tsn)
+                && let Some((_, wire)) = self.recently_acknowledged.remove(at)
+            {
+                bytes = bytes.saturating_add(wire);
+            }
+        }
+        bytes
     }
 
     /// RFC 9260 7.2.1: a congestion window that is not used decays, to max(cwnd / 2,
@@ -6033,7 +6096,8 @@ impl Association {
             // plus Max.Burst packets before DATA is sent, so that a SACK for many chunks at
             // once does not release them all at once.
             if let Some(max_burst) = self.max_burst {
-                let flight = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+                let flight =
+                    u32::try_from(self.inflight_queue.get_num_wire_bytes()).unwrap_or(u32::MAX);
                 let limit = flight.saturating_add(max_burst.saturating_mul(self.pmdcs));
                 if limit < self.cwnd {
                     self.cwnd = limit;
@@ -6106,7 +6170,7 @@ impl Association {
                 // chunk that crosses cwnd is still sent (by less than one PMDCS), and it is
                 // the last: a window that the next chunk does not fit exactly would
                 // otherwise never be in full use, and so never grow.
-                if self.inflight_queue.get_num_bytes() >= self.cwnd as usize {
+                if self.inflight_queue.get_num_wire_bytes() >= self.cwnd as usize {
                     break; // cwnd is in full use
                 }
 
@@ -6575,9 +6639,22 @@ impl Association {
         self.awake_write_loop();
     }
 
+    /// RFC 9260 5.1: "The T1-init timer and T1-cookie timer SHOULD follow the same rules
+    /// given in Section 6.3": an expiry backs off the path's RTO (6.3.3 E2, bounded by
+    /// RTO.Max), which the timer is started again with, as the next handshake timer and the
+    /// first T3-rtx are, until a round trip is measured. Not with
+    /// `TransportConfig::with_handshake_timers_back_off_rto(false)` (dcSCTP's form), where
+    /// the timer doubles its own interval and the RTO is left alone.
+    fn back_off_rto_for_handshake_timer(&mut self) {
+        if self.handshake_timers_back_off_rto {
+            self.rto_mgr.backoff();
+        }
+    }
+
     fn on_retransmission_timeout(&mut self, timer_id: Timer, n_rtos: usize, now: Instant) {
         match timer_id {
             Timer::T1Init => {
+                self.back_off_rto_for_handshake_timer();
                 if let Err(err) = self.send_init() {
                     debug!(
                         "[{}] failed to retransmit init (n_rtos={}): {:?}",
@@ -6588,6 +6665,7 @@ impl Association {
 
             Timer::T1Cookie => {
                 self.cookie_echo_sent_at = Some(now);
+                self.back_off_rto_for_handshake_timer();
                 if let Err(err) = self.send_cookie_echo() {
                     debug!(
                         "[{}] failed to retransmit cookie-echo (n_rtos={}): {:?}",

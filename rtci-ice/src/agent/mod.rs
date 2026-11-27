@@ -1726,8 +1726,11 @@ impl Agent {
         // If we have a mDNS Candidate lets fully resolve it before adding it locally
         if c.candidate_type() == CandidateType::Host && c.address().ends_with(".local") {
             if self.mdns_mode == MulticastDnsMode::Disabled {
-                warn!(
-                    "remote mDNS candidate added, but mDNS is disabled: ({})",
+                // What the application asked for (`MulticastDnsMode::Disabled`), not a fault:
+                // debug, like an unresolved name.
+                debug!(
+                    "[{}]: ignoring remote mDNS candidate {}: mDNS is disabled",
+                    self.get_name(),
                     c.address()
                 );
                 // Ignored (draft Section 3.2.1, step 5), but the peer's checks from behind
@@ -1923,7 +1926,15 @@ impl Agent {
                     }
                     MdnsEvent::QueryTimeout(id) => {
                         if let Some(c) = self.mdns_queries.remove(&id) {
-                            error!("mDNS Query {} timed out for {}", id, c.address());
+                            // An expected outcome, not an engine error: a browser hides its
+                            // host addresses behind `<uuid>.local` names, and on many
+                            // networks they do not resolve. Logged once per query (its
+                            // retries log nothing), at debug.
+                            debug!(
+                                "mDNS query {} for {} ended without an address; the candidate is ignored",
+                                id,
+                                c.address()
+                            );
                             // Unresolved, and ignored (draft Section 3.2.1, step 5); the
                             // peer's checks may still come (Section 5.3).
                             UnpairedRemote::note(&mut self.unpaired_remotes, &c);
@@ -2055,7 +2066,7 @@ impl Agent {
     pub fn get_local_candidates_to_signal(&self) -> Vec<Candidate> {
         self.local_candidates
             .iter()
-            .filter(|c| c.candidate_type() != CandidateType::PeerReflexive)
+            .filter(|c| c.candidate_type() != CandidateType::PeerReflexive && !c.withdrawn)
             .cloned()
             .collect()
     }
@@ -2227,6 +2238,58 @@ impl Agent {
         let index = self
             .listed_pair(local, remote)
             .ok_or(Error::NotFoundError)?;
+        self.remove_pair_at(now, index);
+        Ok(())
+    }
+
+    /// Withdraws the local candidate whose transport address is `addr` (of `protocol`): no
+    /// session after the current one has it, and the current one keeps of it only what carries
+    /// its data. For a relayed candidate whose allocation is to be let go (its server left the
+    /// configuration), which a restart that keeps the local candidates would otherwise carry
+    /// into the next session. Returns whether such a candidate was there (and not withdrawn
+    /// already).
+    ///
+    /// What each part of the agent sees, whether or not a restart is staged (credentials
+    /// generated, not applied: `get_local_credentials` gives the staged ones):
+    ///
+    /// | | from the call | after the next `apply_restart` |
+    /// |---|---|---|
+    /// | the candidate | held, flagged withdrawn | dropped |
+    /// | its selected (or nominated) pair in the current session | kept: data and consent go on | gone with the session; the restart's previous media path still runs on it |
+    /// | its other pairs in the current session | removed (as `remove_candidate_pair`) | — |
+    /// | new pairs with it (remote candidates, checks that reach it) | none | — |
+    /// | `get_local_candidates_to_signal` | without it | without it |
+    /// | `discard_restart_credentials` | flag kept: the next restart drops it | — |
+    /// | `revert_restart` | the session restored as it was when the restart was applied (a withdrawal made after that is undone; the engine withdraws again) | — |
+    /// | the candidate gathered again | stays withdrawn | — |
+    pub fn withdraw_local_candidate(
+        &mut self,
+        now: Instant,
+        addr: SocketAddr,
+        protocol: TransportProtocol,
+    ) -> bool {
+        let Some(local_index) = self.local_candidates.iter().position(|c| {
+            !c.withdrawn && c.addr() == addr && c.network_type().to_protocol() == protocol
+        }) else {
+            return false;
+        };
+        self.local_candidates[local_index].withdrawn = true;
+        for index in 0..self.candidate_pairs.len() {
+            let pair = &self.candidate_pairs[index];
+            if pair.local_index != local_index
+                || pair.removed
+                || self.selected_pair == Some(index)
+                || self.nominated_pair == Some(index)
+            {
+                continue;
+            }
+            self.remove_pair_at(now, index);
+        }
+        true
+    }
+
+    /// Removes the pair `index` (`remove_candidate_pair`).
+    fn remove_pair_at(&mut self, now: Instant, index: usize) {
         self.clock = self.clock.max(now);
         let pair = self.candidate_pairs[index];
         self.cancel_pair_checks(pair.local_index, pair.remote_index);
@@ -2262,7 +2325,6 @@ impl Agent {
                 }
             }
         }
-        Ok(())
     }
 
     /// Whether this agent is the controlling one, which decides nomination.
@@ -2828,6 +2890,8 @@ impl Agent {
         if !keep_local_candidates {
             self.local_candidates.retain(|c| c.restart_generation);
         }
+        // A withdrawn candidate is not the new session's.
+        self.local_candidates.retain(|c| !c.withdrawn);
         self.delete_all_candidates(true);
         for c in &mut self.local_candidates {
             c.restart_generation = false;

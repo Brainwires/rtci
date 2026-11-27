@@ -289,6 +289,36 @@ fn a_payload_type_two_sections_receive_identifies_neither() {
     assert_eq!(opened, vec![(2, 0xbbbb)]);
 }
 
+/// A format a section has only because this endpoint's answer added it (RFC 9429 section
+/// 5.3.1) is not in the payload type table: the answer may number it as another section of the
+/// offer does (RFC 9143 section 9.1.1), and that section keeps the payload type to itself.
+#[test]
+fn a_format_only_the_answer_added_leaves_the_payload_type_to_the_section_that_negotiated_it() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Audio, "0", vec![codec("audio/opus", OPUS)]),
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(
+            RtpCodecKind::Video,
+            "2",
+            vec![codec("video/VP8", VP8), codec("video/VP9", VP9)],
+        ),
+    ];
+    transceivers[1]
+        .receiver_mut()
+        .as_mut()
+        .unwrap()
+        .set_answered_formats(vec![codec("video/VP9", VP9)]);
+    let (opened, _) = opened(
+        transceivers,
+        &[Arrival {
+            ssrc: 0xbbbb,
+            payload_type: VP9,
+            mid: None,
+        }],
+    );
+    assert_eq!(opened, vec![(2, 0xbbbb)]);
+}
+
 #[test]
 fn a_payload_type_no_section_receives_opens_nothing() {
     let (opened, _) = opened(

@@ -168,6 +168,7 @@ mod rejected_mline_tests {
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
+            bundle_only_browser_form: false,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -334,8 +335,8 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_fec_mime_type,
-    repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, codec_parameters_search,
+    is_fec_mime_type, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
@@ -1564,7 +1565,11 @@ impl RTCPeerConnection {
 
             // An answer has only feedback the offer has for the format (RFC 4585 section 4.2).
             let feedbacks = match &media_section.offered_codecs {
-                Some(offered) => match codec_parameters_fuzzy_search(&codec.rtp_codec, offered) {
+                Some(offered) => match codec_parameters_search(
+                    &codec.rtp_codec,
+                    Some(codec.payload_type),
+                    offered,
+                ) {
                     (offered, CodecMatch::Exact | CodecMatch::Partial) => {
                         rtcp_feedback_intersection(
                             &codec.rtp_codec.rtcp_feedback,
@@ -2087,10 +2092,14 @@ impl RTCPeerConnection {
                     let coding = &encoding.rtp_coding_parameters;
                     let (rid, listed) = if is_offer {
                         (
+                            // What the offer that negotiated the stream said, should an
+                            // answer have tightened it (RFC 9429 section 5.2.2).
                             SimulcastRid::from_restrictions(
                                 &coding.rid,
                                 SimulcastDirection::Send,
-                                &coding.rid_restrictions,
+                                sender
+                                    .offered_rid_restrictions(&coding.rid)
+                                    .unwrap_or(&coding.rid_restrictions),
                             ),
                             true,
                         )
@@ -2365,7 +2374,11 @@ fn reject_written_section(media: &mut MediaDescription) -> bool {
 /// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
 /// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
-fn make_bundle_only(media: &mut MediaDescription) {
+///
+/// With `rtcp_mux` (`SettingEngineBuilder::with_bundle_only_sections_in_browser_form`)
+/// an RTP section keeps one BUNDLE attribute, `a=rtcp-mux`, against RFC 9143 sections 7.1.3 and
+/// 9.3.1.1: Chromium, WebKit and Firefox refuse an offer whose bundle-only RTP section lacks it.
+fn make_bundle_only(media: &mut MediaDescription, rtcp_mux: bool) {
     media.media_name.port = RangedPort {
         value: 0,
         range: None,
@@ -2373,6 +2386,14 @@ fn make_bundle_only(media: &mut MediaDescription) {
     media
         .attributes
         .retain(|a| !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates");
+    if rtcp_mux && media.media_name.media != MEDIA_SECTION_APPLICATION {
+        media
+            .attributes
+            .push(sdp::description::common::Attribute::new(
+                ATTR_KEY_RTCPMUX.to_owned(),
+                None,
+            ));
+    }
     media
         .attributes
         .push(sdp::description::common::Attribute::new(
@@ -2700,6 +2721,11 @@ pub(crate) struct PopulateSdpParams {
     /// `SettingEngineBuilder::with_bundle_attributes_repeated(false)`: the form of RFC 9143
     /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
+    /// `SettingEngineBuilder::with_bundle_only_sections_in_browser_form`:
+    /// an initial offer's bundle-only RTP sections say `a=rtcp-mux`, every bundle-only section
+    /// says its group's ICE credentials, and when it has a bundle-only section its fingerprints
+    /// are at session level too.
+    pub(crate) bundle_only_browser_form: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -2813,6 +2839,8 @@ impl RTCPeerConnection {
         // The media types (`audio`, `video`, `application`) of the sections so far that carry
         // their own transport parameters, for the bundle policy.
         let mut with_transport: Vec<String> = vec![];
+        // Whether a section was made bundle-only (an initial offer).
+        let mut any_bundle_only = false;
 
         let answer_payload_types = answer_payload_types(media_engine, media_sections);
         let mut candidates_added = false;
@@ -3034,7 +3062,8 @@ impl RTCPeerConnection {
                             && group.is_some()
                             && let Some(desc) = d.media_descriptions.last_mut()
                         {
-                            make_bundle_only(desc);
+                            make_bundle_only(desc, params.bundle_only_browser_form);
+                            any_bundle_only = true;
                         } else {
                             with_transport.push(media_type);
                         }
@@ -3083,7 +3112,16 @@ impl RTCPeerConnection {
             }
         }
 
-        if !params.media_description_fingerprint {
+        // RFC 8122 section 5: "The fingerprint attribute may be either a session-level or a
+        // media-level SDP attribute"; RFC 9429 section 5.2.1: the m= sections "MUST all have the
+        // same fingerprint value or values [RFC8122], or these values MUST be session-level
+        // attributes". With the setting, an initial offer with a bundle-only section has them at
+        // session level as well, so the bundle-only sections (which carry none, RFC 9143 7.1.3)
+        // see one: Chromium and WebKit otherwise answer a bundle-only data section with port
+        // zero, and Firefox does not apply the offer.
+        if !params.media_description_fingerprint
+            || (params.bundle_only_browser_form && any_bundle_only)
+        {
             for fingerprint in dtls_fingerprints {
                 d = d.with_fingerprint(
                     fingerprint.algorithm.clone(),
@@ -3298,6 +3336,50 @@ impl RTCPeerConnection {
                 .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
         }
         make_msid_pairs_unique(&mut d);
+
+        // `SettingEngineBuilder::with_bundle_only_sections_in_browser_form`: each bundle-only
+        // section says its group's ICE credentials (the tagged section's), against RFC 9429
+        // section 5.2.1 ("Bundle-only "m=" sections MUST NOT contain any ICE credentials") and
+        // RFC 9143 section 7.1.3. Firefox compares each m= section's credentials in a later
+        // remote description with the ones of the current one (JsepSessionImpl
+        // IceCredentialsDiffer) and takes the credentials a later answer repeats in a section
+        // that had none for an ICE restart; it also refuses a later description without them
+        // in every section ("no ice-ufrag attribute at level 1"), so the tagged-only form of
+        // RFC 9143 7.1.3 for later descriptions does not help (test-env run 45908363443).
+        if params.bundle_only_browser_form && any_bundle_only {
+            let credentials: Vec<Option<(String, String)>> = d
+                .media_descriptions
+                .iter()
+                .map(|media| {
+                    if !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
+                        return None;
+                    }
+                    let tagged = tagged_section(&d, media)?;
+                    Some((
+                        tagged.attribute("ice-ufrag")??.to_owned(),
+                        tagged.attribute("ice-pwd")??.to_owned(),
+                    ))
+                })
+                .collect();
+            for (media, credentials) in d.media_descriptions.iter_mut().zip(credentials) {
+                let Some((ufrag, pwd)) = credentials else {
+                    continue;
+                };
+                let at = media
+                    .attributes
+                    .iter()
+                    .position(|a| a.key == ATTR_KEY_BUNDLE_ONLY)
+                    .unwrap_or(media.attributes.len());
+                media.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new("ice-pwd".to_owned(), Some(pwd)),
+                );
+                media.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new("ice-ufrag".to_owned(), Some(ufrag)),
+                );
+            }
+        }
 
         Ok(d)
     }
@@ -3667,6 +3749,15 @@ pub(crate) struct RemoteIceDetails {
 
 /// Whether an m-section is rejected: port zero without `a=bundle-only` (RFC 8843 §6, an
 /// m-section that is only reachable through its BUNDLE group also has port zero).
+///
+/// In an offer, port zero with `a=bundle-only` is a bundled section (RFC 9143 sections 7.2
+/// and 13). In an answer port zero is always a rejection (section 7.3.3): this reads so for
+/// answers only because no answer it is given carries `a=bundle-only`. This engine writes none
+/// (RFC 9429 section 5.3.1) and a remote answer's is discarded when it is parsed, inside a
+/// BUNDLE group too ([`discard_stray_bundle_only`] with `answers`). The callers that read
+/// answers (`check_answer_against_offer`, the answer passes of `set_remote_description` and
+/// `internal.rs`, `negotiated_sctp`, `describes_sctp_association`) rely on that; pinned by
+/// `tests/data_channel_max_bundle_rtc2rtc.rs::a_bundle_only_attribute_in_an_answer_does_not_keep_a_zero_port_section`.
 pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
     m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
 }
@@ -3998,7 +4089,8 @@ pub(crate) fn answered_extension_directions(
 ///   non-bundled 'm=' section, the offerer or answerer MUST discard the attribute." Without
 ///   it a port-zero section is what port zero says: rejected (RFC 3264 section 6).
 /// - RFC 9143 sections 7.3.2 and 7.3.3 and RFC 9429 section 5.3.1: no m= section of an
-///   answer has the attribute, so one in an answer is discarded too.
+///   answer has the attribute, so one in an answer is discarded too. [`is_rejected_media`]
+///   relies on this for every answer it reads: a zero port in an answer is a rejection.
 ///
 /// Only the parsed description changes: the SDP text stays as given.
 pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: bool) {
@@ -4844,7 +4936,9 @@ pub(crate) fn apply_voice_activity_detection(
             .any(|p| is_usedtx(p.trim()) && p.split_once('=').is_some_and(|(_, v)| v.trim() == "1"))
     }
     for media in &mut d.media_descriptions {
-        if media.media_name.media != "audio" || media.media_name.port.value == 0 {
+        // A bundle-only section of an offer (port zero, RFC 9143 section 7.2) is an audio
+        // section like the others; a rejected one is left as it is.
+        if media.media_name.media != "audio" || is_rejected_media(media) {
             continue;
         }
         let offered = offer.and_then(|offer| {
@@ -4955,10 +5049,16 @@ pub(crate) fn validate_application_media_section(desc: &SessionDescription) -> R
     }
 }
 
-/// A data channel section with port zero: rejected (RFC 3264 section 6) or, in an offer,
-/// closed (RFC 8841 section 10.5).
+/// A data channel section with port zero and no `a=bundle-only`: rejected (RFC 3264 section
+/// 6) or, in an offer, closed (RFC 8841 section 10.5). A zero port with `a=bundle-only` is a
+/// bundled section of an offer, not a rejected one (RFC 9143 sections 7.2 and 13): every
+/// section but the first of a `max-bundle` initial offer (RFC 9429 sections 5.2.1 and 7.2),
+/// so the data section beside media. An answer never carries `a=bundle-only` (RFC 9429
+/// section 5.3.1; a remote answer's is discarded, `discard_stray_bundle_only`), so a zero port
+/// there is a rejection. 0.2.0 read the zero port alone and took the data section of such an
+/// offer for a rejected one: no association, the channels failed.
 fn is_rejected_application_media(media_desc: &MediaDescription) -> bool {
-    media_desc.media_name.port.value == 0
+    is_rejected_media(media_desc)
 }
 
 /// What an offer/answer pair negotiated for the SCTP association (RFC 8841 section 10).
