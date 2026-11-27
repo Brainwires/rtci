@@ -243,6 +243,9 @@ fn a_remote_answer_that_does_not_answer_the_offer_changes_nothing() -> Result<()
         answer.contains("m=audio") && answer.contains("m=video"),
         "{answer}"
     );
+    // RFC 9429 section 5.11's refusal, the default of every profile but `Chrome` (which a
+    // `chrome-defaults` build takes as its default): stated, so the case below holds there too.
+    offerer.setting_engine.unoffered_feedback_refused = true;
     let events = offerer.pipeline_context.event_outs.len();
     let negotiated = (
         offerer.media_engine.negotiated_audio,
@@ -287,7 +290,7 @@ fn a_remote_answer_that_does_not_answer_the_offer_changes_nothing() -> Result<()
             answer.replace("a=group:BUNDLE ", "a=group:BUNDLE other "),
         ),
         (
-            "an a=rtcp-fb the offer did not have (RFC 9429 section 5.11), by default",
+            "an a=rtcp-fb the offer did not have (RFC 9429 section 5.11)",
             edit_section(&answer, 1, |lines| {
                 lines.push("a=rtcp-fb:* made-up".to_owned());
             }),
