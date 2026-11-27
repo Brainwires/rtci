@@ -127,6 +127,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// `SettingEngineBuilder::with_source_departure_ends_track`: a remote track whose SSRCs
     /// have all left (BYE, RTP timeout) ends instead of being muted (RFC 8830 section 3).
     source_departure_ends_track: bool,
+    /// `SettingEngineBuilder::with_rtp_timeout_mutes_track`: a remote source that timed out
+    /// mutes its track as a BYE does.
+    rtp_timeout_mutes_track: bool,
     /// The sequence number of the packet whose MID last moved each SSRC to another m=
     /// section (RFC 7941 section 4.2.6). Bounded by `MAX_REMOTE_CNAMES`.
     mid_moves: HashMap<SSRC, u16>,
@@ -145,6 +148,12 @@ impl InterceptorHandlerContext {
     /// `SettingEngineBuilder::with_source_departure_ends_track`.
     pub(crate) fn with_source_departure_ending_tracks(mut self, ends: bool) -> Self {
         self.source_departure_ends_track = ends;
+        self
+    }
+
+    /// `SettingEngineBuilder::with_rtp_timeout_mutes_track`.
+    pub(crate) fn with_rtp_timeout_muting(mut self, mutes: bool) -> Self {
+        self.rtp_timeout_mutes_track = mutes;
         self
     }
 
@@ -194,6 +203,7 @@ impl Default for InterceptorHandlerContext {
             srtp_keyed: Default::default(),
             newly_bound: None,
             source_departure_ends_track: false,
+            rtp_timeout_mutes_track: false,
             mid_moves: Default::default(),
             departed_sources: Default::default(),
             reporting_ssrc: None,

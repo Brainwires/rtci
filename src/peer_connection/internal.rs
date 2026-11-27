@@ -414,6 +414,7 @@ impl RTCPeerConnection {
             datachannel_handler_context: DataChannelHandlerContext::new(now),
             interceptor_handler_context: InterceptorHandlerContext::default()
                 .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track)
+                .with_rtp_timeout_muting(setting_engine.rtp_timeout_mutes_track)
                 .with_wall_clock(setting_engine.wall_clock),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),

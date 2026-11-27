@@ -184,19 +184,27 @@ fn a_bye_for_another_ssrc_changes_nothing() {
 }
 
 /// RFC 3550 6.3.5: a source not heard from for five report intervals has timed out (the RTCP
-/// session's `SourceTimedOut`); RFC 8830 section 3 has the track whose SSRCs are gone ended
-/// "(BYE, timeout)". Under W3C webrtc 9.3 the timeout does what a BYE does: the track is
-/// muted, not ended. Another source's timeout changes nothing.
+/// session's `SourceTimedOut`). W3C webrtc-pc Candidate Correction 57 (w3c/webrtc-pc PR #3082,
+/// merged 2025-10-23, "RTCP timeout is not a reason to mute a remote track", fixing #3077)
+/// took "or via timeout" out of section 9.3, which now mutes the track only "due to reception
+/// of a BYE": by default a timed-out source leaves its track live and unmuted, and no event
+/// fires. With `with_rtp_timeout_muting(true)` (the Recommendation of 13 March 2025 without the
+/// correction: "removed either due to reception of a BYE or via timeout, it MUST queue a task
+/// to set the muted state ... to true") the timeout mutes it as a BYE does. Another source's
+/// timeout changes nothing either way.
 #[test]
-fn a_timed_out_source_mutes_its_track_as_a_bye_does() {
-    for (ssrc, expected) in [
-        (SSRC, vec!["mute:remote-track".to_string()]),
-        (4242, vec![]),
+fn a_timed_out_source_mutes_its_track_only_when_asked() {
+    for (mutes, ssrc, expected) in [
+        (false, SSRC, vec![]),
+        (true, SSRC, vec!["mute:remote-track".to_string()]),
+        (false, 4242, vec![]),
+        (true, 4242, vec![]),
     ] {
         let mut ctx = InterceptorHandlerContext {
             is_dtls_handshake_complete: true,
             ..Default::default()
-        };
+        }
+        .with_rtp_timeout_muting(mutes);
         let mut transceivers = vec![transceiver()];
         let media_engine = MediaEngine::default();
         let mut chain = NullChain;
@@ -224,10 +232,14 @@ fn a_timed_out_source_mutes_its_track_as_a_bye_does() {
                 _ => None,
             })
             .collect();
-        assert_eq!(events, expected, "ssrc {ssrc}");
+        assert_eq!(events, expected, "muting {mutes}, ssrc {ssrc}");
         let track = transceivers[0].receiver().as_ref().unwrap().track();
         assert_eq!(MediaStreamTrackState::Live, track.ready_state());
-        assert_eq!(track.muted(), ssrc == SSRC);
+        assert_eq!(
+            track.muted(),
+            mutes && ssrc == SSRC,
+            "muting {mutes}, ssrc {ssrc}"
+        );
     }
 }
 

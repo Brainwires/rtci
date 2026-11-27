@@ -1486,6 +1486,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "off: a rollback keeps the proposed simulcast encodings of an offer-created sender a track was added to (W3C [[LastStableRidlessSendEncodings]] null), as Chrome 158 (wpt.fyi run 6329870674821120, webrtc/simulcast/negotiation-encodings.https.html?rest \"sRD(simulcast offer), addTrack, then rollback brings us back to having a single encoding\": FAIL, got [\"foo\", \"bar\"]); on is the WPT form, which Firefox 161 passes",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_rtp_timeout_mutes_track",
+        class: NotGovernedClass::Same,
+        note: "off: a remote SSRC that times out (RFC 3550 6.3.5) leaves its track unmuted (W3C webrtc-pc Candidate Correction 57, PR #3082, 2025-10-23: only a BYE mutes); no browser mutes on the RTP timeout: w3c/webrtc-pc#3077 (henbos, 2025-09-30, of the timeout sentence: \"This is demonstrably not implemented\"; Chrome's muting of a video track whose frames stop is a frame-rate heuristic, not this rule); on is the uncorrected Recommendation's muting",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_ignore_rid_pause_for_recv",
         class: NotGovernedClass::Same,
         note: "applies with rid pause marks only",
