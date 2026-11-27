@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5032 | 26 | 6 | 16 | 10 | 2 | 1 | 664 | 5757 |
+| MUST | 5030 | 26 | 6 | 17 | 11 | 2 | 1 | 664 | 5757 |
 | SHOULD | 915 | 3 | 3 | 1 | 42 | 23 | 0 | 325 | 1312 |
 | MAY | 500 | 0 | 1 | 12 | 21 | 71 | 0 | 177 | 782 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6519 | 29 | 10 | 30 | 76 | 97 | 1 | 1167 | 7929 |
+| all | 6517 | 29 | 10 | 31 | 77 | 97 | 1 | 1167 | 7929 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5093 | 5064 | 99.4 | 5032 | 98.8 |
+| MUST | 5093 | 5062 | 99.4 | 5030 | 98.8 |
 | SHOULD | 987 | 921 | 93.3 | 915 | 92.7 |
 | MAY | 605 | 501 | 82.8 | 500 | 82.6 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
@@ -138,7 +138,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc6188.md` | MUST | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 5 |
 | `rfc6188.md` | SHOULD | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 |
 | `rfc6188.md` | MAY | 12 | 0 | 0 | 0 | 0 | 1 | 0 | 1 | 14 |
-| `rfc6347.md` | MUST | 46 | 0 | 0 | 0 | 1 | 0 | 0 | 1 | 48 |
+| `rfc6347.md` | MUST | 45 | 0 | 0 | 0 | 2 | 0 | 0 | 1 | 48 |
 | `rfc6347.md` | SHOULD | 26 | 0 | 0 | 0 | 1 | 0 | 0 | 3 | 30 |
 | `rfc6347.md` | MAY | 8 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 10 |
 | `rfc6458.md` | PROC | 7 | 0 | 0 | 0 | 2 | 0 | 0 | 1 | 10 |
@@ -316,7 +316,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc9146.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 14 |
 | `rfc9146.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
 | `rfc9146.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `rfc9147.md` | MUST | 87 | 0 | 0 | 3 | 0 | 0 | 0 | 4 | 94 |
+| `rfc9147.md` | MUST | 86 | 0 | 0 | 4 | 0 | 0 | 0 | 4 | 94 |
 | `rfc9147.md` | SHOULD | 51 | 0 | 0 | 0 | 1 | 0 | 0 | 8 | 60 |
 | `rfc9147.md` | MAY | 19 | 0 | 0 | 0 | 0 | 0 | 0 | 5 | 24 |
 | `rfc9260.md` | MUST | 288 | 0 | 0 | 0 | 0 | 0 | 0 | 28 | 316 |

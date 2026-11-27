@@ -307,23 +307,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   illegal_parameter alert (4.2.11-14), unknown NewSessionTicket extensions (4.6.1-14, 9.3-6),
   unknown alert types (6-5), and RFC5246-7.4.1.3-3 (a DTLS 1.2 ServerHello suite the client did
   not offer).
-- **A completed DTLS 1.2 association answers the peer's repeated last flight for 240 s, not
-  seven times** (`conf/dtls-32-final-flight-answered-for-2-msl`; RFC 6347 section 4.2.4: "for at
-  least twice the default MSL defined for [TCP], when in the FINISHED state, the node that
-  transmits the last flight [...] MUST respond to a retransmit of the peer's last flight with a
-  retransmit of the last flight"). An authenticated repeat of the peer's Finished was answered
-  at most `DEFAULT_MAXIMUM_RETRANSMIT_NUMBER` (7) times and then never, however soon it came,
-  so a peer whose eighth retransmission came within the four minutes could be left without the
-  flight it needed. Each repeat is now answered, once, for 240 s after the handshake, and none
-  after (the same 240 s DTLS 1.3 keeps its handshake keys for, RFC 9147 section 5.8.1, whose
-  server answers each repeat with an ACK, now shown by a test). The bound against
-  amplification stays one answer per datagram carrying an authenticated repeat, which the
-  replay window admits once; plaintext handshake records draw none. Audit rows
-  RFC6347-4.2.4-5 `partial` -> `tested`, RFC9147-5.8.1-2 `untested` -> `tested`. Test
-  `endpoint.rs::authenticated_finished_repeats_are_answered_for_twice_the_msl` (it replaces
-  `authenticated_finished_repeats_still_obey_the_retry_budget`, which asserted the cut-off) and
-  `reliability_test.rs::the_clients_last_flight_is_acknowledged_for_twice_the_msl`. Behaviour
-  change, not breaking.
 - **The DTLS client's first flight leaves in the instant ICE selects the pair**
   (`conf/dtls-28-first-flight-at-once`; RFC 8842 section 5.3, RFC 6347 section 4.2.4, RFC 9147
   section 5.8; reported from code reading by a consumer, deno_webrtc). The ClientHello the

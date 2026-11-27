@@ -125,4 +125,6 @@ RFC8853-5.2-1	B	S	jsep	A test of a remote offer with a=simulcast at session leve
 RFC9147-4-9	B	S	dtls-srtp	A test with two DTLS 1.3 associations on one endpoint flushing at once: every datagram holds records of one association only (audit-6 sample)
 RFC9147-5-1	B	S	dtls-srtp	A test handing the DTLS 1.3 server a ClientHello with a non-empty legacy_session_id: the ServerHello echoes none (audit-6 sample)
 RFC9147-5.5-1	B	S	dtls-srtp	A test that the fragments of a handshake message sent at a small MTU are contiguous and do not overlap (offset of each = end of the previous) (audit-6 sample)
+RFC9147-5.8.1-2	B	S	dtls-srtp	A test whose client Finished retransmission reaches the server just before 240 s after completion and is still acknowledged (audit-7 sweep6)
 RFC6347-4.2.1-8	E	S	dtls-srtp	Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2)
+RFC6347-4.2.4-5	C	M	dtls-srtp	Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6)
