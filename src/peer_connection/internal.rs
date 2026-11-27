@@ -4846,7 +4846,7 @@ impl RTCPeerConnection {
             }
 
             let (codec, match_type) =
-                codec_parameters_fuzzy_search(&encoding.codec, &media_engine_codecs);
+                codec_parameters_search(&encoding.codec, None, &media_engine_codecs);
             if match_type == CodecMatch::None {
                 return Err(Error::ErrRTPTransceiverCodecUnsupported);
             }
