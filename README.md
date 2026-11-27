@@ -291,6 +291,10 @@ server URI without a port the engine first asks for its NAPTR and SRV records
 back-pressure signal: the engine holds a window of unacknowledged bytes per connection.
 `SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
 application that never polls the stream interface gets no TCP candidate and nothing changes.
+Poll it before adding the end of candidates: the end of gathering waits for the listeners only
+of an application that has served the interface; one that ends its candidates first gets no TCP
+candidate (none may follow the end of candidates, RFC 8838 section 13), a warning in the log,
+and a `StopListening` after each `Listen` once it does poll.
 
 **What is engine and what is driver.** The engine (`rtci`) decides and runs every protocol:
 which TCP candidates exist, which connections to open and when to close them, RFC 4571 and

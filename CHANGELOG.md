@@ -31,6 +31,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=ice-lite`); full mode stays the default, as 6.1 RECOMMENDS. New `Agent::is_remote_lite`,
   `Agent::awaits_lite_update` (additive). Conformance rows RFC6544-4.4-1, RFC6544-6.1-1,
   RFC6544-6.1-2 and RFC6544-6.1-3 (the last open MUST of RFC 6544) are `tested`.
+- **An end of candidates before the first stream poll releases the engine's TCP listeners**
+  (`conf/ice-33-lite-lite-nothing-closed-while-awaiting-the-update`). An application that adds
+  its UDP host candidate and its end of candidates before it first serves the stream interface
+  gets no TCP candidate: the end of gathering waits for listeners only of an application that
+  has served it, and none may follow the end of candidates (RFC 8838 section 13). That is
+  unchanged. Before, the listeners the engine had asked for were still bound once it polled and
+  stayed open, accepting connections no candidate announced, and only the agent's generic
+  "gathering was declared complete" line said anything. Now the engine warns at the end of
+  candidates, naming the cause and the fix (poll `poll_stream_command` first), and releases
+  those listeners: a driver that polls later sees each `Listen` followed by its
+  `StopListening`. An ICE restart gathers them afresh.
+
+### Tests
+
+- RFC 6544 section 6.1 / RFC 8445 section 8.2: two lite agents that select different pairs (the
+  answerer a UDP one, the offerer its active TCP candidate to the answerer's passive one): the
+  answerer closes nothing while the updated offer is awaited, then keeps the connection the
+  offerer opened in parallel and carries the data on it, without an ICE restart
+  (`two_lite_agents_close_nothing_while_the_updated_offer_is_awaited`; ice-30's untested arm in
+  RFC6544-6.1-2's note).
 
 ## [0.2.0] - 2026-11-26
 

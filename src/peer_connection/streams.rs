@@ -640,8 +640,46 @@ impl RTCPeerConnection {
     /// refused (RFC 8838 section 13); given at once otherwise.
     pub(crate) fn finish_local_gathering_after_streams(&mut self) {
         if !self.defer_end_of_gathering() {
+            self.release_unserved_tcp_listeners();
             self.finish_local_gathering();
         }
+    }
+
+    /// The end of candidates of the active transport came before the application first
+    /// served the stream interface (no `poll_stream_command` or `handle_stream_*` yet): the
+    /// engine cannot know a driver will bind its listeners, so the end of gathering does not
+    /// wait for them, and a TCP candidate made once one is bound would follow the
+    /// end-of-candidates indication, which RFC 8838 section 13 forbids ("an agent MUST NOT
+    /// convey any more candidates after it has conveyed an end-of-candidates indication").
+    /// Those listeners would listen for connections no candidate announces: they are
+    /// released (a driver that polls later sees each `Listen` followed by its
+    /// `StopListening`) and the application is told, at warn level, what to do instead. An
+    /// ICE restart gathers them afresh.
+    fn release_unserved_tcp_listeners(&mut self) {
+        if self.streams.driver_seen {
+            return;
+        }
+        let on = self.pipeline_context.transports.active_id();
+        let unserved: Vec<ListenerId> = self
+            .streams
+            .gathers
+            .iter()
+            .filter(|g| g.transport == on)
+            .flat_map(|g| g.listeners.iter().map(|l| l.id))
+            .collect();
+        if unserved.is_empty() {
+            return;
+        }
+        log::warn!(
+            "end of candidates before the stream interface was first served: the engine's TCP \
+             candidates are not gathered ({} listener(s) released); poll `poll_stream_command` \
+             before adding the end of candidates to have them (RFC 8838 section 13)",
+            unserved.len()
+        );
+        for listener in unserved {
+            self.streams.table.stop_listening(listener);
+        }
+        self.streams.gathers.retain(|g| g.transport != on);
     }
 
     /// Whether the end of gathering of the active transport waits for the engine's listeners
