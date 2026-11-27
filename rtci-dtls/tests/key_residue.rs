@@ -844,14 +844,22 @@ mod residue_tests {
         );
     }
 
+    /// The client closes (RFC 5246 section 7.2.1): its close_notify to the server, the
+    /// server's close_notify back. `Endpoint::close` has already forgotten the client's
+    /// association, so the reply reaches a client endpoint with no association for the server
+    /// and no server configuration, which refuses it (`NoServerConfig`): it is read and the
+    /// refusal ignored, as an application would drop it.
     fn close(c: &mut Carry, now: Instant) {
-        c.association
-            .as_mut()
-            .expect("an association")
-            .client
-            .close(now)
-            .expect("close_notify");
-        pump(c, now);
+        let association = c.association.as_mut().expect("an association");
+        association.client.close(now).expect("close_notify");
+        deliver(c, now, true);
+        let association = c.association.as_mut().expect("an association");
+        while let Some(packet) = association.server.poll_transmit() {
+            let _ =
+                association
+                    .client
+                    .read(now, server_addr(), packet.transport.ecn, packet.message);
+        }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1196,9 +1204,28 @@ mod residue_tests {
         };
         let mut digest = 0xcbf2_9ce4_8422_2325u64;
         let mut summary: Vec<(String, usize, usize)> = Vec::new();
+        // A scenario that fails (a panic in a step or a check) is reported and the others
+        // still measured; the test then fails on it after the inventory is printed.
+        let mut failed: Vec<String> = Vec::new();
         for provider in providers().into_iter().filter(|p| p.name() == name) {
             for (n, s) in Scenario::all().into_iter().enumerate() {
-                let m = scenario(&provider, s, n == 0);
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    scenario(&provider, s, n == 0)
+                }));
+                let m = match run {
+                    Ok(m) => m,
+                    Err(panic) => {
+                        let why = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                            .unwrap_or_default();
+                        let line = format!("{}|{}: {why}", provider.name(), s.name());
+                        println!("SCENARIO FAILED {line}");
+                        failed.push(line);
+                        continue;
+                    }
+                };
                 for stage in &m.stages {
                     println!(
                         "STAGE {}|{}|stack used {} bytes|{} key forms left",
@@ -1208,15 +1235,23 @@ mod residue_tests {
                         stage.residue.len()
                     );
                     if stage.kind == "control" {
-                        assert!(
-                            stage
-                                .residue
-                                .iter()
-                                .any(|r| m.needles[r.needle].key == "the exported keying material"),
-                            "CONTROL: the exported keying material left on the control step's \
-                             stack was not found: the search does not see what it must"
-                        );
-                        println!("CONTROL the exported keying material left on a stack is found");
+                        if stage
+                            .residue
+                            .iter()
+                            .any(|r| m.needles[r.needle].key == "the exported keying material")
+                        {
+                            println!(
+                                "CONTROL the exported keying material left on a stack is found"
+                            );
+                        } else {
+                            let line = format!(
+                                "{}: CONTROL: the exported keying material left on the control \
+                                 step's stack was not found: the search does not see what it must",
+                                m.session
+                            );
+                            println!("{line}");
+                            failed.push(line);
+                        }
                         continue;
                     }
                     for residue in &stage.residue {
@@ -1261,6 +1296,10 @@ mod residue_tests {
             } else {
                 "optimised"
             }
+        );
+        assert!(
+            failed.is_empty(),
+            "scenarios that did not complete their measurement: {failed:#?}"
         );
         inventory
     }

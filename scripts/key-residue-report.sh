@@ -44,7 +44,7 @@ if [ "$measure" = dtls ]; then
   echo "== tests"
   grep -h '^test ' "$out/live.log" "$out/known-limit-1.log"
   echo "== control"
-  grep -h '^CONTROL' "$out/live.log" | sort | uniq -c
+  grep -h '^CONTROL\|^SCENARIO FAILED\|CONTROL: ' "$out/live.log" | sort | uniq -c
   echo "== inventory digests (not ignored, then each repeat with the known limit included)"
   grep -h '^INVENTORY\|^NOT ASSERTED' "$out/live.log"
   grep -h '^INVENTORY' "$out"/known-limit-*.log | sort | uniq -c
