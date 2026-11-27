@@ -38,6 +38,10 @@ struct Trace {
     ignored: Vec<(Instant, TransactionId)>,
     /// The most consent transactions the agent held open at once.
     most_open_consent_transactions: usize,
+    /// When the agent's media path went away (consent expired, RFC 7675 Section 5.1), if it
+    /// did. The agent is `Failed` then or, within the PAC timer, when the timer expires (W3C
+    /// webrtc-pc 5.6.4).
+    lost: Option<Instant>,
 }
 
 impl Trace {
@@ -90,7 +94,11 @@ impl SlowPeer {
                 let (response, peer) = entry.remove();
                 Self::arrive(a, now, &response, peer, &mut trace);
             }
+            let had_path = a.media_path().is_some();
             a.handle_timeout(now).unwrap();
+            if had_path && a.media_path().is_none() {
+                trace.lost.get_or_insert(now);
+            }
             while let Some(t) = a.poll_write() {
                 let mut m = Message {
                     raw: t.message.to_vec(),
@@ -345,11 +353,8 @@ fn test_a_response_after_its_wait_renews_nothing_unless_the_wait_is_fixed() {
     let trace = peer.run(&mut a, now, now + 120 * S, |_, _, _| Some(9 * S));
     assert_eq!(trace.renewed, vec![], "an answer 9 s after its request");
     assert!(trace.ignored.len() >= 3);
-    assert!(
-        is_at(trace.at(ConnectionState::Failed), last + 30 * S),
-        "{:?}",
-        trace.states
-    );
+    assert!(is_at(trace.lost, last + 30 * S), "{:?}", trace.states);
+    assert!(trace.saw(ConnectionState::Failed), "{:?}", trace.states);
     assert!(a.pending_binding_requests.is_empty());
 
     let (mut a, mut peer, now) = connected(fixed(60 * S));
@@ -417,7 +422,8 @@ fn test_no_consent_transaction_is_kept_past_the_consent_expiry() {
 }
 
 /// A peer that stops answering: the agent is `Disconnected` when a consent request has gone
-/// 5 s without any response and `Failed` 30 s after the last response, and then holds no
+/// 5 s without any response, loses consent (its media path) 30 s after the last response and
+/// is `Failed` then or as the PAC timer expires (W3C webrtc-pc 5.6.4), and then holds no
 /// transaction (RFC 7675 Section 5.1: "All outstanding STUN consent transactions for a
 /// candidate pair MUST be discarded when consent expires"). Until then the open consent
 /// transactions are few: the requests are 4 to 6 s apart and each waits 8 s (the initial
@@ -441,10 +447,11 @@ fn test_unanswered_consent_transactions_are_bounded_and_end_with_the_consent() {
         // (The answers still on their way when the peer stopped arrive first.)
         let last = trace.renewed.last().map_or(before, |(at, _)| *at);
         assert!(
-            is_at(trace.at(ConnectionState::Failed), last + 30 * S),
+            is_at(trace.lost, last + 30 * S),
             "{:?} after the last response",
-            trace.at(ConnectionState::Failed).map(|at| at - last)
+            trace.lost.map(|at| at - last)
         );
+        assert!(trace.saw(ConnectionState::Failed), "{:?}", trace.states);
         if warm_up.is_none() {
             let first_unanswered = trace.requests[0].0;
             assert!(
@@ -570,8 +577,8 @@ fn test_only_a_matching_authenticated_response_renews_consent() {
 /// The selected pair's consent is its own. A check on another pair that is answered late
 /// (its transaction was cancelled at the nomination and waits out its time, RFC 8445 Section
 /// 7.3.1.4) makes that pair valid and says nothing about the selected one, whose peer
-/// address has stopped answering: the agent fails 30 s after the selected pair's last
-/// response.
+/// address has stopped answering: consent is lost (no media path) 30 s after the selected
+/// pair's last response, and the agent fails (then, or as the PAC timer expires).
 #[test]
 fn test_a_late_response_on_another_pair_does_not_renew_the_selected_pairs_consent() {
     let start = Instant::now();
@@ -627,10 +634,11 @@ fn test_a_late_response_on_another_pair_does_not_renew_the_selected_pairs_consen
     assert_eq!(other.len(), 1, "the other pair's late response was taken");
     assert!(other[0] > selected_last);
     assert!(
-        is_at(trace.at(ConnectionState::Failed), selected_last + 30 * S),
+        is_at(trace.lost, selected_last + 30 * S),
         "{:?}",
         trace.states
     );
+    assert!(trace.saw(ConnectionState::Failed), "{:?}", trace.states);
 }
 
 /// Consent is per 5-tuple (RFC 7675 Section 1: "Consent to send applies to a single
@@ -639,8 +647,8 @@ fn test_a_late_response_on_another_pair_does_not_renew_the_selected_pairs_consen
 /// candidates with bases of their own, one remote candidate: (L1, R) is selected while the
 /// check on (L2, R) is still open. From then on nothing sent from L1 is answered, and the
 /// open (L2, R) check is answered 10 s later, from the same remote address. That response
-/// is taken (it validates (L2, R)) but says nothing of the 5-tuple (L1, R): the agent fails
-/// 30 s after the last response on (L1, R).
+/// is taken (it validates (L2, R)) but says nothing of the 5-tuple (L1, R): consent is lost
+/// 30 s after the last response on (L1, R), and the agent fails.
 #[test]
 fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent() {
     const LOCAL_2: &str = "192.168.0.5:1001";
@@ -678,6 +686,9 @@ fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consen
     let mut l2_taken = false;
     let mut selected_local: Option<SocketAddr> = None;
     let mut failed_at: Option<Instant> = None;
+    // When the media path went away (consent expired): `Failed` then, or as the PAC timer
+    // expires when that is later (W3C webrtc-pc 5.6.4).
+    let mut lost_at: Option<Instant> = None;
     let mut now = start;
     let until = start + 120 * S;
     while now <= until && failed_at.is_none() {
@@ -695,7 +706,11 @@ fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consen
                 l2_taken = a.remote_candidates[remote].last_consent() == Some(now);
             }
         }
+        let had_path = a.media_path().is_some();
         a.handle_timeout(now).unwrap();
+        if had_path && a.media_path().is_none() {
+            lost_at.get_or_insert(now);
+        }
         while let Some(t) = a.poll_write() {
             let mut m = Message {
                 raw: t.message.to_vec(),
@@ -759,10 +774,11 @@ fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consen
     let l2_answered_at = l2_answered_at.expect("the open check on (L2, R) was answered");
     assert!(l2_answered_at > last_on_l1 + 5 * S);
     assert!(l2_taken, "the late response on (L2, R) was matched");
+    assert!(failed_at.is_some(), "the agent fails");
     assert!(
-        is_at(failed_at, last_on_l1 + 30 * S),
-        "failed at {:?}, last response on (L1, R) at {:?}, on (L2, R) at {:?}",
-        failed_at.map(|t| t - start),
+        is_at(lost_at, last_on_l1 + 30 * S),
+        "consent lost at {:?}, last response on (L1, R) at {:?}, on (L2, R) at {:?}",
+        lost_at.map(|t| t - start),
         last_on_l1 - start,
         l2_answered_at - start,
     );

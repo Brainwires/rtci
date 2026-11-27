@@ -106,10 +106,6 @@ fn sent_requests(a: &mut Agent) -> Vec<TransactionId> {
 fn test_peer_requests_alone_do_not_keep_consent() {
     let base = Instant::now();
     let mut a = connected_agent(base);
-    // No candidate is to come on either side: consent that expires fails the agent (W3C
-    // webrtc-pc 5.6.4; without the indications it would be disconnected).
-    a.set_local_gathering_complete();
-    a.set_remote_end_of_candidates();
     let remote: SocketAddr = REMOTE.parse().unwrap();
     for secs in 1..60 {
         let now = base + Duration::from_secs(secs);
@@ -117,15 +113,17 @@ fn test_peer_requests_alone_do_not_keep_consent() {
         let _ = a.handle_inbound(now, &mut req, 0, remote);
         let _ = sent_requests(&mut a); // our checks go unanswered
         a.validate_selected_pair(now);
-        if a.connection_state == ConnectionState::Failed {
+        if a.get_selected_candidate_pair().is_none() {
             break;
         }
     }
-    assert_eq!(
-        a.connection_state,
-        ConnectionState::Failed,
+    // Consent expired: the pair is no longer used (`Failed`, or `Disconnected` while the end
+    // of the candidates or the PAC timer is awaited, W3C webrtc-pc 5.6.4).
+    assert!(
+        a.get_selected_candidate_pair().is_none() && a.media_path().is_none(),
         "the peer's own requests kept consent alive"
     );
+    assert_ne!(a.connection_state, ConnectionState::Connected);
 }
 
 #[test]

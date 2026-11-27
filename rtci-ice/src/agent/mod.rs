@@ -2131,12 +2131,20 @@ impl Agent {
         self.remote_end_of_candidates || !self.remote_trickles
     }
 
-    /// Whether checks that have failed may make the agent `Failed` at `now` (W3C webrtc-pc
-    /// 5.6.4 "failed"): local gathering is complete and the peer has no more candidates, or
-    /// [`Agent::set_failed_without_end_of_candidates`] and the PAC timer has expired.
+    /// Whether checks that have failed, or consent that was lost, may make the agent `Failed`
+    /// at `now` (W3C webrtc-pc 5.6.4 "failed": the transport "has finished gathering, received
+    /// an indication that there are no more remote candidates, [...] and either zero local
+    /// candidates were gathered or the PAC timer has expired [RFC8863]"): local gathering is
+    /// complete and the peer has no more candidates, or
+    /// [`Agent::set_failed_without_end_of_candidates`]; and in both cases the PAC timer has
+    /// expired or the agent has no local candidate. That holds for consent lost after a
+    /// connection too: within the PAC timer the agent is `Disconnected` and fails as it
+    /// expires. A lite agent has no PAC timer (RFC 8863 Section 4 is for full agents).
     pub(crate) fn may_report_failed(&self, now: Instant) -> bool {
-        (self.local_gathering_complete && self.no_more_remote_candidates())
-            || (self.failed_without_end_of_candidates && !self.pac_running(now))
+        let pac_holds = self.pac_running(now) && !self.local_candidates.is_empty();
+        !pac_holds
+            && ((self.local_gathering_complete && self.no_more_remote_candidates())
+                || self.failed_without_end_of_candidates)
     }
 
     /// The checks have failed (`why`): `Failed` when [`Agent::may_report_failed`], else

@@ -889,8 +889,10 @@ fn test_connection_state_failed_delete_all_candidates() -> Result<()> {
     a.set_local_gathering_complete();
     a.set_remote_end_of_candidates();
 
-    // The network goes away: nothing `a` sends is answered.
-    for i in 1..=100u32 {
+    // The network goes away: nothing `a` sends is answered. Consent lapses after 2 s; the
+    // agent fails as the PAC timer expires, 39.5 s after the checks began (W3C webrtc-pc
+    // 5.6.4: "or the PAC timer has expired").
+    for i in 1..=500u32 {
         let now = connected_at + Duration::from_millis(100) * i;
         a.handle_timeout(now)?;
         drop_writes(&mut a);

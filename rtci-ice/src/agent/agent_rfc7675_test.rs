@@ -16,6 +16,9 @@ use crate::attributes::priority::PriorityAttr;
 struct Trace {
     requests: Vec<(Instant, Message, SocketAddr)>,
     states: Vec<(Instant, ConnectionState)>,
+    /// When the media path went away (consent expired), if it did. The agent is `Failed` then
+    /// or, within the PAC timer, when the timer expires (W3C webrtc-pc 5.6.4).
+    lost: Option<Instant>,
 }
 
 /// Runs the agent's timer from `from` to `until`, waking it exactly when it asks to be woken.
@@ -30,7 +33,11 @@ fn run_traced(
     let mut trace = Trace::default();
     let mut now = from;
     loop {
+        let had_path = a.media_path().is_some();
         a.handle_timeout(now).unwrap();
+        if had_path && a.media_path().is_none() {
+            trace.lost.get_or_insert(now);
+        }
         while let Some(t) = a.poll_write() {
             let mut m = Message {
                 raw: t.message.to_vec(),
@@ -158,16 +165,12 @@ fn test_consent_expires_after_thirty_seconds_whatever_the_timeouts() {
         let last_consent = a.remote_candidates[0].last_consent().unwrap();
         // The peer goes away.
         let trace = run_traced(&mut a, now, now + Duration::from_secs(120), |_, _| false);
-        let failed_at = trace
-            .states
-            .iter()
-            .find(|(_, s)| *s == ConnectionState::Failed)
-            .map(|(at, _)| *at)
-            .expect("consent expires");
+        let lost_at = trace.lost.expect("consent expires");
         assert_eq!(
-            failed_at.duration_since(last_consent),
+            lost_at.duration_since(last_consent),
             Duration::from_secs(30)
         );
+        assert_eq!(a.state(), ConnectionState::Failed);
         assert!(a.media_path().is_none(), "nothing is sent without consent");
         // "All outstanding STUN consent transactions [...] MUST be discarded".
         assert!(a.pending_binding_requests.is_empty());
@@ -189,15 +192,12 @@ fn test_shorter_timeouts_fail_a_silent_pair_sooner() {
     a.set_remote_end_of_candidates();
     let last_consent = a.remote_candidates[0].last_consent().unwrap();
     let trace = run_traced(&mut a, now, now + Duration::from_secs(60), |_, _| false);
-    let (failed_at, _) = trace
-        .states
-        .iter()
-        .find(|(_, s)| *s == ConnectionState::Failed)
-        .unwrap();
+    let lost_at = trace.lost.expect("consent expires");
     assert_eq!(
-        failed_at.duration_since(last_consent),
+        lost_at.duration_since(last_consent),
         Duration::from_secs(12)
     );
+    assert_eq!(a.state(), ConnectionState::Failed, "{:?}", trace.states);
 }
 
 /// The agent is Disconnected when a consent request has gone unanswered for

@@ -20,7 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   additional remote candidates"). The checking timeout (`disconnected_timeout +
   failed_timeout`), a failed nomination (RFC 8445 7.2.5.3.4) and consent expiry (RFC 7675
   5.1) failed the transport whether or not the end of the candidates had been indicated; they
-  now make it "disconnected" until it is, and "failed" the moment it is. The indication is:
+  now make it "disconnected" until it is, and "failed" the moment it is and the PAC timer has
+  expired (5.6.4 again: "and either zero local candidates were gathered or the PAC timer has
+  expired [RFC8863]"; so consent lost inside the first 39.5 s fails the transport as the timer
+  expires, the media path going at once as before). The indication is:
   gathering finished (the application's end-of-candidates local candidate, as before) and the
   peer's end-of-candidates (`add_remote_candidate` with an empty `candidate`, or
   `a=end-of-candidates`) or a remote description without `a=ice-options:trickle`
@@ -32,7 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for an application**: one that never relays the peer's end-of-candidates, or never adds its
   own when gathering is done, sees "disconnected", never "failed", when the path is lost or
   never found, and should restart ICE or close on its own timer; one that relays both (or
-  exchanges complete descriptions) sees "failed" as in 0.2.1. New
+  exchanges complete descriptions) sees "failed" as in 0.2.1. The examples that leave their
+  loop on "failed" (`examples/data-channels` and the others) add no end-of-candidates local
+  candidate, so they now stay "disconnected" when the browser goes away. The stream driver
+  (`rtci-stream-driver`) ends each generation's gathering itself and tears nothing down: the
+  application has to relay the end-of-candidates candidate the driver surfaces as an
+  `OnIceCandidateEvent` (as its tests now do) or keep a timer of its own. The transport
+  statistics drop the selected pair when consent is lost without the indications too
+  (`selectedCandidatePairId` gone, `selectedCandidatePairChanges` counted), as on "failed". New
   `SettingEngineBuilder::with_ice_failed_without_end_of_candidates(bool)` (default `false`;
   `true` in the `Chrome` behaviour profile, row `ice.failed-without-end-of-candidates`:
   libwebrtc fails a transport without the indication) makes the PAC timer the
@@ -46,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a_candidate_that_comes_after_the_checks_failed_is_checked`,
   `consent_lost_before_the_end_of_candidates_is_disconnected_and_then_failed`,
   `a_restart_of_an_agent_whose_checks_failed_checks_and_connects`,
+  `consent_lost_inside_the_pac_timer_is_failed_as_the_timer_expires`,
   `a_failed_nomination_before_the_end_of_candidates_is_disconnected`,
   `a_lite_agent_whose_peer_falls_silent_is_failed_only_after_the_end_of_candidates`,
   `the_pac_timer_ends_the_candidates_when_set_to`; `tests/states_events_rtc2rtc.rs`
@@ -53,7 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the candidates before "failed", `a_peer_that_cannot_trickle_is_the_indication_that_no_candidate_is_to_come`,
   `a_cut_link_fails_without_the_end_of_candidates_when_set_to`). Tests that expected "failed"
   after a lost path now signal the end of the candidates first (agent consent, nomination and
-  ported tests, `tests/lossy_link_rtc2rtc.rs`, stream-driver `virtual_time.rs`).
+  ported tests, `tests/lossy_link_rtc2rtc.rs`, `tests/stats_conformance_rtc2rtc.rs`,
+  `tests/webrtc_pc_transport_clauses_rtc2rtc.rs`, stream-driver `virtual_time.rs`); the
+  consent timing tests measure the loss of consent by the media path, and "failed" then or at
+  the PAC timer.
 
 ### Fixed
 

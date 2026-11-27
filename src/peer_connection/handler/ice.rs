@@ -457,6 +457,19 @@ impl<'a>
                     });
                 }
                 ::ice::Event::CandidatePairRemoved(local, remote) => {
+                    // The selected pair may be the one removed (the application removed it,
+                    // or its consent expired while the transport waits for the end of the
+                    // candidates, W3C webrtc-pc 5.6.4): with none left, the transport has no
+                    // selected pair (webrtc-stats `selectedCandidatePairChanges`).
+                    if self
+                        .ctx
+                        .ice_transport
+                        .agent
+                        .get_selected_candidate_pair()
+                        .is_none()
+                    {
+                        self.stats.on_selected_candidate_pair(None);
+                    }
                     let pair = self.ctx.ice_transport.exposed_pair(&local, &remote);
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
