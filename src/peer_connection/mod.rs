@@ -2752,11 +2752,14 @@ impl RTCPeerConnection {
         // narrowed (reducing the number of layers) in subsequent renegotiation, but cannot be
         // reexpanded"): once a sender has sent simulcast, a remote description whose section
         // asks it for a stream (`a=simulcast` `recv` rid) outside its encodings renegotiates
-        // the RIDs.
+        // the RIDs. Only an offer can: in an answer, RFC 8851 section 6.4 step 1 governs ("If no
+        // matching line can be located in the offer, the "a=rid" line is ignored"), and
+        // `apply_negotiated_simulcast` keeps only the offered rids, so the envelope can only
+        // narrow there.
         let transceiver_by_mid =
             RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
         for media in &parsed.media_descriptions {
-            if !is_live_rtp_section(media) {
+            if answers || !is_live_rtp_section(media) {
                 continue;
             }
             let Some(sender) = get_mid_value(media)

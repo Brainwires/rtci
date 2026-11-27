@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A remote answer that names a rid the offer did not offer is applied, not refused**
+  (`conf/jsep-87-reanswer-altering-rids`; RFC 8851 section 6.4 step 1: "If no matching line
+  can be located in the offer, the "a=rid" line is ignored"). Once a sender had sent simulcast,
+  the W3C rid-renegotiation check (webrtc-pc 4.4.1.6, "If the description attempted to
+  renegotiate RIDs ... InvalidAccessError") also refused a remote answer whose
+  `a=simulcast:recv` named a rid outside the sender's encodings: after an answer of
+  `recv 1;2` to an offer of `send 0;1;2`, a reanswer of `recv 0;2` to the re-offer of
+  `send 1;2` failed with InvalidAccessError (WPT `webrtc/simulcast/rid-manipulation.html`,
+  "Remote reanswer altering rids does not throw an exception"). The check now applies to
+  remote offers only; in an answer the unoffered rid is ignored and the sender keeps the
+  answered rids it offered (here 2; W3C "remove the dictionaries that correspond to the missing
+  layers"). Test `jsep_simulcast.rs::a_reanswer_naming_a_rid_outside_the_offer_ignores_it`;
+  audit rows WEBRTC-4.4.1.4-10 and RFC8851-6.4-1 (stay `tested`, the violation recorded in
+  their notes).
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
