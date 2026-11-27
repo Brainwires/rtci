@@ -138,7 +138,9 @@ Dropping a connection without `close()` sends nothing.
 client retries on the refused 5-tuple. RFC 8656 section 8.2 has the server delete an allocation
 as soon as it answers the Refresh of LIFETIME 0; coturn does not: it answers, keeps the
 allocation for one more second (`refresh_relay_connection` floors the lifetime at 1 s) and
-answers an Allocate on that 5-tuple meanwhile with 437.
+answers an Allocate on that 5-tuple meanwhile with 437. Observed live (a consumer, 2026-11-27,
+production coturn): on two back-to-back restarts an Allocate about 140 ms after a confirmed
+release got 437 and one 3.0 s later succeeded, both times.
 - *Engine-run TURN* (`RelayGathering::Engine`, the default): within one peer connection (an ICE
   restart with new TURN credentials and one UDP socket) the engine allocates again on a released
   5-tuple only once the server has answered the release, and

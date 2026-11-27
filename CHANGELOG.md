@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5-tuple again. Zero by default (RFC 8656 section 8.2: the server deletes the allocation when it
   answers). coturn answers a Refresh of LIFETIME 0 but keeps the allocation one second more
   (`refresh_relay_connection` floors the lifetime at 1 s) and answers an Allocate meanwhile with
-  437; 2 s covers it. A behaviour-profile "application input" row. turn-9.
+  437; 2 s covers it. Observed live by a consumer (2026-11-27, production coturn, two
+  back-to-back restarts): an Allocate about 140 ms after a confirmed release got 437, one 3.0 s
+  later succeeded, both times. A behaviour-profile "application input" row. turn-9.
 
 ### Documentation
 
