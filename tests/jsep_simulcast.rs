@@ -769,12 +769,121 @@ fn proposed_send_encodings_drop_a_repeated_rid() -> TestResult {
     Ok(())
 }
 
-/// W3C webrtc-pc 4.4.1.6 / 5.4.1: a sender's simulcast envelope "may be narrowed ... but cannot
-/// be reexpanded"; a remote description that asks it for a stream outside it "attempted to
-/// renegotiate RIDs" and is refused with InvalidAccessError. Naming fewer of its rids is fine.
+/// A simulcast sender (encodings f and h) whose envelope a first remote offer and the local
+/// answer established, and a later remote offer of `version` with `extra` lines.
+fn envelope_f_h() -> Result<(RTCPeerConnection, RTCRtpSenderId), Box<dyn std::error::Error>> {
+    let (mut pc, sender) = simulcast_sender(&[("f", None), ("h", None)])?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        remote_offer(
+            "recvonly",
+            "a=rid:f recv\na=rid:h recv\na=simulcast:recv f;h\n",
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+    Ok((pc, sender))
+}
+
+fn reoffer(version: u32, extra: &str) -> Result<RTCSessionDescription, Error> {
+    let offer = remote_offer("recvonly", extra)?;
+    RTCSessionDescription::offer(
+        offer
+            .sdp
+            .replace(" 2 IN IP4", &format!(" {version} IN IP4")),
+    )
+}
+
+/// W3C webrtc-pc Candidate Correction 37 (w3c/webrtc-pc PR #2794, merged 2022-12-08, "Don't
+/// fail sRD(offer) over rid mismatch, just answer with unicast"; issue #2724): a later remote
+/// offer that asks a sender with a simulcast envelope for rids outside it is applied, not
+/// refused. The correction removed the step that failed it ("This specification does not
+/// allow remotely initiated RID renegotiation"). The sender's [[SendEncodings]] stay (a found
+/// transceiver takes proposedSendEncodings only "If the length of ... [[SendEncodings]] is 1,
+/// and the lone encoding contains no rid member"); createAnswer leaves out "any RID not found
+/// in the corresponding transceiver's [[Sender]].[[SendEncodings]]"; setLocalDescription of
+/// the answer removes the layers it is missing, all but the first when it is missing all of
+/// them (section 5.4.1: the envelope "may be narrowed ... but cannot be reexpanded"). Issue
+/// #2762 (resolution 2022-10-18) records the same of browsers: "SRD never fails".
 #[test]
-fn a_remote_offer_that_renegotiates_rids_is_an_invalid_access_error() -> TestResult {
-    let (mut pc, _) = simulcast_sender(&[("f", None), ("h", None)])?;
+fn a_remote_offer_that_adds_or_renames_rids_is_answered_within_the_envelope() -> TestResult {
+    let (mut pc, sender) = envelope_f_h()?;
+    let now = Instant::now();
+
+    // Adds rid x: applied; answered with f and h; the encodings stay f and h.
+    pc.set_remote_description(
+        now,
+        reoffer(
+            3,
+            "a=rid:f recv\na=rid:h recv\na=rid:x recv\na=simulcast:recv f;h;x\n",
+        )?,
+    )?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("f", None), ("h", None)])
+    );
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:f send", "a=rid:h send"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send f;h"],
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(now, answer)?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("f", None), ("h", None)])
+    );
+
+    // Renames every rid: applied; answered with unicast; the first encoding is left.
+    pc.set_remote_description(
+        now,
+        reoffer(4, "a=rid:a recv\na=rid:b recv\na=simulcast:recv a;b\n")?,
+    )?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("f", None), ("h", None)])
+    );
+    let answer = pc.create_answer(None)?;
+    assert!(
+        lines_with(&answer.sdp, "a=rid:").is_empty()
+            && lines_with(&answer.sdp, "a=simulcast:").is_empty(),
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(now, answer)?;
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("f", None)]));
+    Ok(())
+}
+
+/// The form of W3C webrtc-pc before Candidate Correction 37 (the Recommendation of 13 March
+/// 2025 without its candidate corrections: "If applying description leads to modifying a
+/// transceiver ... the process of applying description fails. This specification does not
+/// allow remotely initiated RID renegotiation", then "If the description attempted to
+/// renegotiate RIDs, as described above, then reject p with a newly created
+/// InvalidAccessError"): with `with_remote_rid_renegotiation_refused(true)` a later remote
+/// offer that asks the sender for a rid outside its envelope is refused with
+/// InvalidAccessError and changes nothing; one naming fewer of its rids is applied.
+#[test]
+fn with_the_setting_a_remote_offer_that_adds_a_rid_is_an_invalid_access_error() -> TestResult {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_remote_rid_renegotiation_refused(true)
+                .build(),
+        )
+        .build(Instant::now())?;
+    let sender = pc.add_track(simulcast_track(&[("f", None), ("h", None)]))?;
     let now = Instant::now();
     pc.set_remote_description(
         now,
@@ -786,14 +895,6 @@ fn a_remote_offer_that_renegotiates_rids_is_an_invalid_access_error() -> TestRes
     let answer = pc.create_answer(None)?;
     pc.set_local_description(now, answer)?;
 
-    let reoffer = |version: u32, extra: &str| -> Result<RTCSessionDescription, Error> {
-        let offer = remote_offer("recvonly", extra)?;
-        RTCSessionDescription::offer(
-            offer
-                .sdp
-                .replace(" 2 IN IP4", &format!(" {version} IN IP4")),
-        )
-    };
     let expanded = pc.set_remote_description(
         now,
         reoffer(
@@ -802,6 +903,14 @@ fn a_remote_offer_that_renegotiates_rids_is_an_invalid_access_error() -> TestRes
         )?,
     );
     assert_eq!(expanded.err(), Some(Error::InvalidAccessError));
+    assert_eq!(
+        pc.signaling_state(),
+        rtci::peer_connection::state::RTCSignalingState::Stable
+    );
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("f", None), ("h", None)])
+    );
     pc.set_remote_description(now, reoffer(3, "a=rid:f recv\na=simulcast:recv f\n")?)?;
     Ok(())
 }

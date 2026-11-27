@@ -573,6 +573,8 @@ pub struct SettingEngine {
     pub(crate) rollback_content_ignored: bool,
     /// [`SettingEngineBuilder::with_rollback_resets_offer_created_senders`].
     pub(crate) rollback_resets_offer_created_senders: bool,
+    /// [`SettingEngineBuilder::with_remote_rid_renegotiation_refused`].
+    pub(crate) remote_rid_renegotiation_refused: bool,
     /// [`SettingEngineBuilder::with_strict_sdp_attribute_grammar`].
     pub(crate) strict_sdp_attribute_grammar: bool,
     /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
@@ -731,6 +733,7 @@ impl SettingEngine {
             rid_pause_marks: Default::default(),
             rollback_content_ignored: Default::default(),
             rollback_resets_offer_created_senders: Default::default(),
+            remote_rid_renegotiation_refused: Default::default(),
             strict_sdp_attribute_grammar: Default::default(),
             w3c_simulcast_answer: Default::default(),
             nominated_candidates_only: Default::default(),
@@ -3489,6 +3492,27 @@ impl SettingEngineBuilder {
     /// Firefox 161 has and Chrome 158 and Safari 27.2 do not (wpt.fyi).
     pub fn with_rollback_resets_offer_created_senders(mut self, resets: bool) -> Self {
         self.0.rollback_resets_offer_created_senders = resets;
+        self
+    }
+
+    /// Refuses, with `InvalidAccessError`, a remote offer that asks a sender with a simulcast
+    /// envelope for a stream (an `a=simulcast` `recv` rid) outside its encodings. The default
+    /// is `false`.
+    ///
+    /// W3C webrtc-pc Candidate Correction 37 (w3c/webrtc-pc PR #2794, 2022-12-08: "Don't fail
+    /// sRD(offer) over rid mismatch, just answer with unicast") removed the step of "set a
+    /// session description" that failed such an offer ("This specification does not allow
+    /// remotely initiated RID renegotiation"). By default the offer is applied: the sender's
+    /// encodings stay, the answer leaves out "any RID not found in the corresponding
+    /// transceiver's [[Sender]].[[SendEncodings]]", and applying the answer removes the
+    /// encodings it does not list (all but the first when it lists none). `true` takes the form
+    /// of the Recommendation of 13 March 2025 without its candidate corrections, which refused
+    /// the offer ("If the description attempted to renegotiate RIDs ... reject p with a newly
+    /// created InvalidAccessError"). Browsers do not refuse it (w3c/webrtc-pc#2762). A remote
+    /// answer is never refused for its rids: RFC 8851 section 6.4 ignores a rid the offer
+    /// lacks.
+    pub fn with_remote_rid_renegotiation_refused(mut self, refused: bool) -> Self {
+        self.0.remote_rid_renegotiation_refused = refused;
         self
     }
 

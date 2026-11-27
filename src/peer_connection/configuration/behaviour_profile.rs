@@ -1486,6 +1486,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "off: a rollback keeps the proposed simulcast encodings of an offer-created sender a track was added to (W3C [[LastStableRidlessSendEncodings]] null), as Chrome 158 (wpt.fyi run 6329870674821120, webrtc/simulcast/negotiation-encodings.https.html?rest \"sRD(simulcast offer), addTrack, then rollback brings us back to having a single encoding\": FAIL, got [\"foo\", \"bar\"]); on is the WPT form, which Firefox 161 passes",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_remote_rid_renegotiation_refused",
+        class: NotGovernedClass::Same,
+        note: "off: a later remote offer asking a simulcast sender for rids outside its envelope is applied and answered within it (W3C webrtc-pc Candidate Correction 37, PR #2794, 2022-12-08), as libwebrtc does: pc/sdp_offer_answer.cc @ a222406d has no rid check that fails a remote description, and w3c/webrtc-pc#2762 (resolution 2022-10-18) records that Chrome and Safari never fail it; on is the uncorrected Recommendation's InvalidAccessError",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_ignore_rid_pause_for_recv",
         class: NotGovernedClass::Same,
         note: "applies with rid pause marks only",
