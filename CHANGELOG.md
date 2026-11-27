@@ -31,7 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "disconnected" so, the agent keeps its candidates, nominates nothing more, checks again
   ("checking") when a new pair is formed, and an ICE restart starts it over as before. A pair
   whose consent expired is removed and the peer's requests on it go unanswered (RFC 7675 5.1:
-  "the same ICE credentials MUST NOT be used on the affected 5-tuple again"). **What changes
+  "the same ICE credentials MUST NOT be used on the affected 5-tuple again"), and no other
+  valid pair takes its place without a nomination (RFC 8445 8.1.2). A rollback gives back the
+  current remote description's word on trickling: `canTrickleIceCandidates` and the agent's
+  view of it are those of the current remote description again after a rolled-back
+  provisional answer (W3C "set a session description", rollback steps; RFC 9429 5.7; before, a rolled-back remote
+  pranswer without `a=ice-options:trickle` left the attribute `false`). **What changes
   for an application**: one that never relays the peer's end-of-candidates, or never adds its
   own when gathering is done, sees "disconnected", never "failed", when the path is lost or
   never found, and should restart ICE or close on its own timer; one that relays both (or
@@ -57,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `consent_lost_before_the_end_of_candidates_is_disconnected_and_then_failed`,
   `a_restart_of_an_agent_whose_checks_failed_checks_and_connects`,
   `consent_lost_inside_the_pac_timer_is_failed_as_the_timer_expires`,
+  `tests/states_events_rtc2rtc.rs::a_rolled_back_pranswer_that_cannot_trickle_is_no_indication_that_no_candidate_is_to_come`,
   `a_failed_nomination_before_the_end_of_candidates_is_disconnected`,
   `a_lite_agent_whose_peer_falls_silent_is_failed_only_after_the_end_of_candidates`,
   `the_pac_timer_ends_the_candidates_when_set_to`; `tests/states_events_rtc2rtc.rs`
