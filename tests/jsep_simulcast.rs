@@ -1087,29 +1087,92 @@ fn encodings_made_inactive_leave_the_next_offer_alone() -> TestResult {
     Ok(())
 }
 
-/// `add_track` after a remote offer to receive simulcast reuses the transceiver the offer
-/// created (W3C `addTrack`) and gives its sender the track's encodings; a rollback of the offer
-/// keeps the transceiver (the application touched it, RFC 9429 section 5.7) and those
-/// encodings, not the empty set the sender had before the offer proposed its own.
+/// W3C `addTrack` reusing a sender ("If sender is not null, run the following steps to use
+/// that sender: Set sender.[[SenderTrack]] to track ..."): nothing else of the sender changes,
+/// so a track added after a remote offer to receive simulcast, before the answer, is sent with
+/// the encodings the offer proposed (`[[SendEncodings]]` is proposedSendEncodings since that
+/// offer, "Create an RTCRtpSender ... using proposedSendEncodings"), and the answer sends them.
+/// WPT `webrtc/simulcast/negotiation-encodings.https.html`, "sRD(simulcast offer), addTrack,
+/// then rollback brings us back to having a single encoding", first half.
 #[test]
-fn a_track_added_after_a_simulcast_offer_survives_its_rollback() -> TestResult {
+fn a_track_added_after_a_simulcast_offer_keeps_the_proposed_encodings() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0089))?;
+    assert_eq!(
+        pc.get_transceivers().count(),
+        1,
+        "addTrack reuses the transceiver"
+    );
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    // The first takes the track's SSRC, as when the track comes before the offer.
+    let first_ssrc = pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc;
+    assert_eq!(first_ssrc, Some(0x0516_0089));
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send foo;bar;baz"],
+        "{}",
+        answer.sdp
+    );
+    Ok(())
+}
+
+/// The same for W3C `replaceTrack`, which sets only `[[SenderTrack]]` too.
+#[test]
+fn a_track_replaced_in_after_a_simulcast_offer_keeps_the_proposed_encodings() -> TestResult {
+    let (mut pc, sender) = wpt_answerer(WPT_SIMULCAST_RECV_OFFER)?;
+    pc.rtp_sender(sender)
+        .expect("sender")
+        .replace_track(Some(jsep_common::video_track("replaced", 0x0516_0189)))?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send foo;bar;baz"],
+        "{}",
+        answer.sdp
+    );
+    Ok(())
+}
+
+/// A rollback of that offer keeps the transceiver (the application touched it, RFC 9429
+/// section 5.7) and, by the W3C text, its encodings: the sender of a transceiver a remote
+/// offer created starts with `[[LastStableRidlessSendEncodings]]` "initialized to null"
+/// ("create an RTCRtpSender"), the slot is only set when the connection reaches stable, and the
+/// rollback restores it only "If [[LastStableRidlessSendEncodings]] is not null". WPT
+/// `negotiation-encodings.https.html` ("sRD(simulcast offer), addTrack, then rollback brings
+/// us back to having a single encoding") expects one rid-less encoding instead, which the text
+/// does not say.
+#[test]
+fn a_rollback_keeps_the_proposed_encodings_of_a_transceiver_the_offer_created() -> TestResult {
     let mut pc = default_peer()?;
     let now = Instant::now();
     pc.set_remote_description(
         now,
         RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
     )?;
-    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0086))?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0289))?;
     pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
     assert_eq!(pc.get_transceivers().count(), 1);
-    let ssrcs: Vec<_> = pc
-        .rtp_sender(sender)
-        .expect("sender")
-        .get_parameters()
-        .encodings
-        .iter()
-        .map(|e| e.rtp_coding_parameters.ssrc)
-        .collect();
-    assert_eq!(ssrcs, [Some(0x0516_0086)]);
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
     Ok(())
 }
