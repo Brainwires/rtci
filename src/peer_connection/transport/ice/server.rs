@@ -22,8 +22,12 @@ pub struct RTCIceServer {
 }
 
 impl RTCIceServer {
+    /// The URL as W3C "validate an ICE server URL" takes it. A `stuns:` URL whose host is an
+    /// IP address is taken: the algorithm has no condition that refuses it, and RFC 8489
+    /// section 8.1's "A 'stuns' URI containing an IP address MUST be rejected" binds the STUN
+    /// client that would use it, so gathering rejects it (`EngineSrflx`).
     pub(crate) fn parse_url(&self, url_str: &str) -> Result<ice::url::Url> {
-        ice::url::Url::parse_url(url_str)
+        ice::url::Url::parse_url_lenient(url_str)
     }
 
     /// W3C "set a configuration", for one server: `urls` is not empty, and each url passes

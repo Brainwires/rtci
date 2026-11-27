@@ -158,6 +158,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `stuns:` ICE server URL whose host is an IP address is taken by the configuration**
+  (`conf/w3c-4-stuns-url-with-ip-address-is-accepted-at-configuration`; audit rows
+  WEBRTC-4.4.1.5-24, RFC8489-8.1-1). The constructor and `set_configuration` threw `ErrHost`
+  for it, although W3C webrtc-pc "validate an ICE server URL" has no condition that refuses it.
+  RFC 8489 section 8.1 ("A 'stuns' URI containing an IP address MUST be rejected") is now met
+  where the URI would be used: the engine's server-reflexive gathering sends it nothing, reports
+  it once with an `icecandidateerror` of code 701 and no local address, and completes.
+  `turns:` with an IP address is taken as before (RFC 5928 section 3 step 1). `rtci-ice`
+  `Url::parse_url` keeps the RFC 8489 rule; the peer connection reads its servers with
+  `Url::parse_url_lenient`.
+
 - **A remote answer that names a rid the offer did not offer is applied, not refused**
   (`conf/jsep-87-reanswer-altering-rids`; RFC 8851 section 6.4 step 1: "If no matching line
   can be located in the offer, the "a=rid" line is ignored"). Once a sender had sent simulcast,

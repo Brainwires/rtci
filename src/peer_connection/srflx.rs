@@ -168,6 +168,15 @@ pub(crate) struct EngineSrflx {
     last_start: Option<Instant>,
     /// Mapped addresses announced: transport, address, base kind, ICE ufrag.
     announced: Vec<(TransportId, SocketAddr, Base, String)>,
+    /// Servers gathering rejected and has not reported yet (`stuns:` with an IP address).
+    rejected: Vec<String>,
+}
+
+/// RFC 8489 section 8.1: "A 'stuns' URI containing an IP address MUST be rejected" (the
+/// server's certificate cannot be checked against a name; "a future STUN extension or usage
+/// may relax this requirement, provided it demonstrates how to authenticate the STUN server").
+fn rejected_by_rfc8489(url: &Url) -> bool {
+    url.scheme == SchemeType::Stuns && url.host.parse::<IpAddr>().is_ok()
 }
 
 impl EngineSrflx {
@@ -190,6 +199,7 @@ impl EngineSrflx {
             application_bases: vec![],
             last_start: None,
             announced: vec![],
+            rejected: vec![],
         }
     }
 
@@ -242,6 +252,13 @@ impl EngineSrflx {
             }
         }
         for url in &servers {
+            if rejected_by_rfc8489(url) {
+                let text = url.to_string();
+                if !self.rejected.contains(&text) {
+                    self.rejected.push(text);
+                }
+                continue;
+            }
             let tls = url.scheme == SchemeType::Stuns;
             // `stuns:` is TLS over TCP (RFC 7064); STUN over DTLS is not run here.
             if tls && kind == Base::Udp {
@@ -418,6 +435,13 @@ impl RTCPeerConnection {
         if !self.srflx_wanted() {
             return;
         }
+        // The servers RFC 8489 section 8.1 rejects are reported when gathering would use
+        // them, whether or not this base would have asked them.
+        self.report_rejected_srflx_servers_after(|pc| pc.gather_srflx_for_base(&candidate));
+    }
+
+    /// [`Self::gather_srflx_for`] once `candidate` is a UDP host candidate to probe from.
+    fn gather_srflx_for_base(&mut self, candidate: &ice::candidate::Candidate) {
         let on = self.pipeline_context.transports.active_id();
         let base = candidate.addr();
         // A base whose host candidate the agent withheld (mDNS fails closed,
@@ -436,6 +460,27 @@ impl RTCPeerConnection {
                 self.announce_srflx(on, base, Base::Udp, mapped, &url);
             }
             self.drive_srflx(self.pipeline_context.now);
+        }
+    }
+
+    /// Runs `gather`, then reports each server it rejected (RFC 8489 section 8.1) as W3C
+    /// 4.8.3 has a failed server reported: an `icecandidateerror` of code 701, "If no host
+    /// candidate can reach the server" (none is asked), without a local address (none was
+    /// used), once per server URL while gathering (`report_ice_candidate_error`).
+    fn report_rejected_srflx_servers_after(&mut self, gather: impl FnOnce(&mut Self)) {
+        gather(self);
+        for url in std::mem::take(&mut self.streams.srflx.rejected) {
+            let error = crate::peer_connection::event::RTCPeerConnectionIceErrorEvent {
+                url,
+                error_code: crate::peer_connection::event::ICE_SERVER_UNREACHABLE,
+                error_text: "a stuns: URI whose host is an IP address is rejected \
+                             (RFC 8489 section 8.1)"
+                    .to_owned(),
+                ..Default::default()
+            };
+            if let Err(err) = self.report_ice_candidate_error(error) {
+                debug!("srflx: the rejected server is not reported: {err}");
+            }
         }
     }
 
@@ -460,15 +505,17 @@ impl RTCPeerConnection {
         if !self.srflx_wanted() || tcp_type == TcpType::Active {
             return;
         }
-        let ufrag = self.ice_username_fragment_of(transport);
-        for (mapped, url) in self
-            .streams
-            .srflx
-            .add(transport, base, Base::Tcp(tcp_type), &ufrag)
-        {
-            self.announce_tcp_srflx(transport, base, tcp_type, mapped, &url);
-        }
-        self.drive_srflx(self.pipeline_context.now);
+        self.report_rejected_srflx_servers_after(|pc| {
+            let ufrag = pc.ice_username_fragment_of(transport);
+            for (mapped, url) in pc
+                .streams
+                .srflx
+                .add(transport, base, Base::Tcp(tcp_type), &ufrag)
+            {
+                pc.announce_tcp_srflx(transport, base, tcp_type, mapped, &url);
+            }
+            pc.drive_srflx(pc.pipeline_context.now);
+        });
     }
 
     /// Starts what is due: names to resolve, races to start, transactions at most one per Ta.
