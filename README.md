@@ -56,7 +56,7 @@ WebRTC uses); every row names the code and the test that proves it. From
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5093 | 5065 (99.5 %) | 5033 (98.8 %) |
+| MUST | 5094 | 5066 (99.5 %) | 5034 (98.8 %) |
 | SHOULD | 987 | 921 (93.3 %) | 915 (92.7 %) |
 | MAY | 605 | 501 (82.8 %) | 500 (82.6 %) |
 

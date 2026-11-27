@@ -175,6 +175,11 @@ pub(crate) struct TurnLink {
     /// ALTERNATE-SERVER redirects followed in this resolution (RFC 8489 section 10: at most
     /// a few, against loops).
     redirects: u8,
+    /// A link whose server left the list a new ICE generation took (new credentials, say)
+    /// while its relayed candidate carried the data: kept, refreshed and relaying, until the
+    /// agent no longer uses that path (RFC 8445 section 9: "during the restart, data can
+    /// continue to be sent using existing data sessions"; section 5.1.1.4), then released.
+    retiring: bool,
 }
 
 impl TurnLink {
@@ -355,6 +360,7 @@ impl EngineTurn {
             let mut i = 0;
             while i < self.links.len() {
                 if self.links[i].transport == transport
+                    && !self.links[i].retiring
                     && !servers.iter().any(|u| same_url(u, &self.links[i].url))
                 {
                     dropped.push(self.links.remove(i));
@@ -368,7 +374,7 @@ impl EngineTurn {
                 && self
                     .links
                     .iter()
-                    .any(|l| l.transport == transport && same_url(&l.url, url))
+                    .any(|l| l.transport == transport && !l.retiring && same_url(&l.url, url))
             {
                 continue;
             }
@@ -413,6 +419,7 @@ impl EngineTurn {
                     held: HashMap::new(),
                     generation: None,
                     redirects: 0,
+                    retiring: false,
                 });
             }
         }
@@ -574,6 +581,20 @@ impl RTCPeerConnection {
         {
             return;
         }
+        self.release_retired_turn_links();
+        // Again for the links already retiring: an ICE restart taken back
+        // (`Agent::revert_restart`) restores a session as it was before the withdrawal.
+        let retiring: Vec<(TransportId, SocketAddr, bool)> = self
+            .streams
+            .turn
+            .links
+            .iter()
+            .filter(|l| l.retiring)
+            .filter_map(|l| l.relay.map(|r| (l.transport, r, l.relay_tcp)))
+            .collect();
+        for (transport, relay, tcp) in retiring {
+            self.withdraw_relay_candidate(transport, relay, tcp);
+        }
         let mut dropped = vec![];
         for transport in self.pipeline_context.transports.ids() {
             let ufrag = self
@@ -584,7 +605,29 @@ impl RTCPeerConnection {
                 .clone();
             dropped.extend(self.streams.turn.make_links(transport, &ufrag));
         }
-        self.close_turn_links(dropped);
+        // A dropped link whose relayed candidate carries the data stays until the restart has
+        // its own path (RFC 8445 section 9); the others close.
+        let mut closed = vec![];
+        for mut link in dropped {
+            if self.turn_relay_carries_data(&link) {
+                debug!(
+                    "{}: kept while its relayed candidate carries the data",
+                    link.url
+                );
+                // Its relayed candidate is the previous path's only: a restart that keeps the
+                // local candidates would carry it into the new session, which would pair (and
+                // nominate) it, and the allocation of the credentials just replaced would never
+                // be let go (`Agent::withdraw_local_candidate`).
+                if let Some(relay) = link.relay {
+                    self.withdraw_relay_candidate(link.transport, relay, link.relay_tcp);
+                }
+                link.retiring = true;
+                self.streams.turn.links.push(link);
+            } else {
+                closed.push(link);
+            }
+        }
+        self.close_turn_links(closed);
         let now = self.pipeline_context.now;
         let driver = self.streams.driver_seen;
         for index in 0..self.streams.turn.links.len() {
@@ -654,7 +697,7 @@ impl RTCPeerConnection {
         // A link released once ICE had completed allocates again for a new ICE generation.
         for i in 0..self.streams.turn.links.len() {
             let l = &self.streams.turn.links[i];
-            if !matches!(l.state, LinkState::Released | LinkState::Failed) {
+            if l.retiring || !matches!(l.state, LinkState::Released | LinkState::Failed) {
                 continue;
             }
             let ufrag = self
@@ -693,7 +736,7 @@ impl RTCPeerConnection {
                     .agent
                     .get_local_credentials()
                     .ufrag;
-                l.relay.is_some() && l.announced_ufrag.as_ref() != Some(ufrag)
+                !l.retiring && l.relay.is_some() && l.announced_ufrag.as_ref() != Some(ufrag)
             })
             .map(|(i, _)| i)
             .collect();
@@ -1149,6 +1192,9 @@ impl RTCPeerConnection {
             let LinkState::Open(id) = link.state else {
                 continue;
             };
+            if link.retiring {
+                continue;
+            }
             let completed = self
                 .ice_transport_of(link.transport)
                 .agent
@@ -1627,6 +1673,148 @@ impl RTCPeerConnection {
         }
         self.drive_turn_races(now);
         self.pump_turn(now);
+        self.release_retired_turn_links();
+    }
+
+    /// Whether the relayed candidate of `link` is the local end of the path the agent of its
+    /// transport sends data on, or still takes data on (the path an ICE restart replaced, for
+    /// `RETIRED_MEDIA_PATH_GRACE` after the restart selected its pair).
+    fn turn_relay_carries_data(&self, link: &TurnLink) -> bool {
+        let Some(relay) = link.relay else {
+            return false;
+        };
+        let agent = &self.ice_transport_of(link.transport).agent;
+        [agent.media_path(), agent.retired_media_path()]
+            .into_iter()
+            .flatten()
+            .any(|p| {
+                p.local_addr == relay
+                    || (link.relay_tcp
+                        && p.local_addr.ip() == relay.ip()
+                        && p.local_addr.port() == 9)
+            })
+    }
+
+    /// Withdraws the relayed candidate(s) of `relay` from the agent of `transport` (UDP, or
+    /// the passive and active TCP candidates of a TCP allocation).
+    fn withdraw_relay_candidate(&mut self, transport: TransportId, relay: SocketAddr, tcp: bool) {
+        let now = self.pipeline_context.now;
+        let targets: Vec<(SocketAddr, TransportProtocol)> = if tcp {
+            vec![
+                (relay, TransportProtocol::TCP),
+                (SocketAddr::new(relay.ip(), 9), TransportProtocol::TCP),
+            ]
+        } else {
+            vec![(relay, TransportProtocol::UDP)]
+        };
+        self.with_transport(transport, |pc| {
+            for (addr, protocol) in targets {
+                pc.ice_transport_mut()
+                    .agent
+                    .withdraw_local_candidate(now, addr, protocol);
+            }
+        });
+    }
+
+    /// Releases the retiring links whose relayed candidate no longer carries data (the
+    /// restart's pair is selected and the previous path's grace is over) or whose allocation is
+    /// gone: an allocation over UDP is deleted with a Refresh of LIFETIME 0 (RFC 8656 section
+    /// 7), a DTLS association says close_notify, a connection closes. The links are dropped.
+    pub(crate) fn release_retired_turn_links(&mut self) {
+        for i in 0..self.streams.turn.links.len() {
+            let link = &self.streams.turn.links[i];
+            if link.retiring
+                && link.client.is_some()
+                && link.state != LinkState::Failed
+                && !self.turn_relay_carries_data(link)
+            {
+                debug!(
+                    "{}: the data left its relayed candidate: released",
+                    link.url
+                );
+                self.release_turn_link_in_place(i);
+            }
+        }
+        self.streams
+            .turn
+            .links
+            .retain(|l| !(l.retiring && (l.client.is_none() || l.state == LinkState::Failed)));
+    }
+
+    /// Releases link `i` where it is (its index stays valid): its connections end, a DTLS
+    /// association says close_notify, an allocation over UDP is deleted with a Refresh of
+    /// LIFETIME 0; it holds no client or relayed address afterwards.
+    fn release_turn_link_in_place(&mut self, i: usize) {
+        let now = self.pipeline_context.now;
+        let out = &mut self.pipeline_context.write_outs;
+        let link = &mut self.streams.turn.links[i];
+        let mut ended: Vec<StreamId> = std::mem::take(&mut link.attempts);
+        ended.extend(
+            std::mem::take(&mut link.data)
+                .iter()
+                .filter_map(|c| c.stream()),
+        );
+        if let LinkState::Open(id) = link.state {
+            ended.push(id);
+        }
+        for a in link.dtls.iter_mut().chain(link.dtls_attempts.iter_mut()) {
+            let _ = a.endpoint.close(now);
+            a.flush(out);
+        }
+        release_udp_allocation(link, now, out);
+        link.client = None;
+        link.relay = None;
+        link.dtls = None;
+        link.dtls_attempts.clear();
+        link.udp_attempts.clear();
+        link.permitted.clear();
+        link.held.clear();
+        link.state = LinkState::Released;
+        for id in ended {
+            self.streams.table.close(id);
+        }
+    }
+
+    /// The UDP base of `transport` a new link to `server` starts from: one no other link holds
+    /// an allocation or a DTLS association from to that address, since an allocation is its
+    /// 5-tuple's (RFC 8656 section 2.2: a second allocation "must" use "a different 5-tuple";
+    /// an Allocate on one in use is answered 437, section 7.2). When every base is taken by a
+    /// retiring link (one socket, the same server), that link is released first and its base
+    /// is used: break before make.
+    fn turn_free_udp_base(
+        &mut self,
+        transport: TransportId,
+        server: SocketAddr,
+    ) -> Option<SocketAddr> {
+        let taken = |links: &[TurnLink], base: SocketAddr| {
+            links.iter().any(|l| {
+                l.on_datagrams()
+                    && l.client.is_some()
+                    && l.link_local == Some(base)
+                    && l.server == Some(server)
+            })
+        };
+        if let Some(base) = self.streams.turn.udp_base(transport, server, |base| {
+            self.turn_base_usable(transport, base) && !taken(&self.streams.turn.links, base)
+        }) {
+            return Some(base);
+        }
+        let base = self.turn_udp_base(transport, server)?;
+        for i in 0..self.streams.turn.links.len() {
+            let l = &self.streams.turn.links[i];
+            if l.retiring
+                && l.client.is_some()
+                && l.link_local == Some(base)
+                && l.server == Some(server)
+            {
+                debug!(
+                    "{}: its 5-tuple ({base} to {server}) is needed by a new allocation: released first",
+                    l.url
+                );
+                self.release_turn_link_in_place(i);
+            }
+        }
+        Some(base)
     }
 }
 
@@ -1741,7 +1929,7 @@ impl RTCPeerConnection {
             let l = &self.streams.turn.links[index];
             (l.transport, l.url.host.clone())
         };
-        let Some(base) = self.turn_udp_base(transport, addr) else {
+        let Some(base) = self.turn_free_udp_base(transport, addr) else {
             debug!("TURN over DTLS to {addr}: no UDP base of that family");
             return false;
         };
@@ -1961,7 +2149,7 @@ impl RTCPeerConnection {
     /// transport's UDP base of that family (RFC 8656 section 3.9). Returns whether it started.
     fn start_udp_attempt(&mut self, now: Instant, index: usize, addr: SocketAddr) -> bool {
         let transport = self.streams.turn.links[index].transport;
-        let Some(base) = self.turn_udp_base(transport, addr) else {
+        let Some(base) = self.turn_free_udp_base(transport, addr) else {
             debug!("TURN over UDP to {addr}: no UDP base of that family");
             return false;
         };

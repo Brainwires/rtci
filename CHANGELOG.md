@@ -363,6 +363,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server's failure as a refusal is (RFC 5928 section 3: the next SRV target, or the link fails
   until a new ICE generation). Reached by a silent server before, and now by one whose only
   answer is an unsigned 400. Test `tests/turn_resolution.rs::an_unsigned_400_to_the_first_allocate_fails_the_server_when_the_allocate_times_out`.
+- **An ICE restart with new TURN credentials no longer deletes the allocation that carries the
+  data** (RFC 8445 sections 9 and 5.1.1.4). `set_configuration` with new credentials for a
+  `turn:` server and an ICE restart (the W3C recipe for new servers) deleted the engine's
+  allocation with a Refresh of LIFETIME 0 as soon as the restart offer was applied, while the
+  agent still sent on the relayed path until the restart selected its pair: relayed data stopped
+  for the whole offer / answer exchange. The link is now kept, refreshed and relaying until the
+  agent no longer uses that path (the restart's pair is selected and the previous path's grace
+  is over), then deleted. The new allocation needs another 5-tuple (RFC 8656 section 2.2; an
+  Allocate on one in use is answered 437): it is made from another UDP base of the transport
+  when there is one (a second socket of the application, a host candidate added while the
+  restart is staged); with one base and the same server the old allocation is deleted first
+  (break before make, as before). A restart that keeps the local candidates kept the old relayed
+  candidate in the new session, which then paired and nominated it again: it is withdrawn from
+  the new session (new `rtci_ice::Agent::withdraw_local_candidate`: its pairs removed except
+  the one carrying the data, never paired or signalled again, dropped at the next restart; a
+  restart staged, abandoned or taken back does not cut the current session's path). Tests on an in-memory coturn-like server
+  (`tests/common/turn_server.rs`). turn-5.
 
 ### Documentation
 

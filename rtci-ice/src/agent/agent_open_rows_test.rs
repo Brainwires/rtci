@@ -719,6 +719,243 @@ fn test_local_candidates_are_refused_after_the_nomination() {
     assert!(a.add_local_candidate(udp("192.168.0.21", 1000, 0)).unwrap());
 }
 
+// `Agent::withdraw_local_candidate` and the staged ICE restart, one test per row of the table
+// in its documentation (with or without a restart staged, before and after `apply_restart`,
+// discard, revert, gathered again). The other "which generation" questions while a restart is
+// staged have their own tests: the staged credentials are what `get_local_credentials` gives
+// while the live session keeps authenticating with its own
+// (`agent_ported_test.rs::test_staged_ice_restart_keeps_live_session_authenticating`, and
+// `test_staged_credentials_are_the_next_generation_s` below); a candidate gathered while staged
+// is the next generation's
+// (`test_a_candidate_gathered_for_a_staged_restart_is_kept_and_not_paired_before_it`).
+
+const OTHER: &str = "192.168.0.22:1000";
+
+/// A controlling agent with `LOCAL` and `OTHER`, its pair `LOCAL`-`REMOTE_A` selected.
+fn selected_agent(now: Instant) -> Agent {
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(a.add_local_candidate(udp("192.168.0.22", 1000, 0)).unwrap());
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    assert!(
+        a.get_selected_candidate_pair().is_some(),
+        "a pair is selected"
+    );
+    a
+}
+
+fn selected_local(a: &Agent) -> Option<SocketAddr> {
+    a.get_selected_candidate_pair().map(|(l, _)| l.addr())
+}
+
+fn pairs_of(a: &Agent, local: SocketAddr) -> usize {
+    a.get_candidate_pairs()
+        .iter()
+        .filter(|(l, _)| l.addr() == local)
+        .count()
+}
+
+fn signalled(a: &Agent, local: SocketAddr) -> bool {
+    a.get_local_candidates_to_signal()
+        .iter()
+        .any(|c| c.addr() == local)
+}
+
+fn held(a: &Agent, local: SocketAddr) -> bool {
+    a.get_local_candidates().iter().any(|c| c.addr() == local)
+}
+
+const UDP: shared::TransportProtocol = shared::TransportProtocol::UDP;
+
+/// Row "its other pairs" and "new pairs": a candidate that carries no data loses its pairs,
+/// forms none with a later remote candidate, is not signalled, and the next restart drops it;
+/// the selected pair is untouched.
+#[test]
+fn test_withdrawing_a_candidate_that_carries_no_data_removes_its_pairs() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    let other = [addr(LOCAL), addr(OTHER)]
+        .into_iter()
+        .find(|c| *c != selected)
+        .unwrap();
+    assert!(pairs_of(&a, other) > 0);
+    assert!(a.withdraw_local_candidate(now, other, UDP));
+    assert_eq!(pairs_of(&a, other), 0, "its pairs are removed");
+    assert!(!a.withdraw_local_candidate(now, other, UDP), "once");
+    a.add_remote_candidate(udp("10.0.0.9", 7000, 0)).unwrap();
+    assert_eq!(
+        pairs_of(&a, other),
+        0,
+        "no pair with a later remote candidate"
+    );
+    assert!(signalled(&a, selected) && !signalled(&a, other));
+    assert_eq!(
+        selected_local(&a),
+        Some(selected),
+        "the selected pair is untouched"
+    );
+    a.restart(now, String::new(), String::new(), true).unwrap();
+    assert!(!held(&a, other), "the next restart drops it");
+    assert!(held(&a, selected));
+}
+
+/// Row "its selected pair", no restart staged: the pair that carries the data stays (data and
+/// consent go on), the candidate's other pairs go, it forms no new ones, it is not signalled;
+/// the next restart drops it and runs its previous media path on it.
+#[test]
+fn test_withdrawing_the_candidate_of_the_selected_pair_keeps_that_pair() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    a.add_remote_candidate(udp("10.0.0.9", 7000, 0)).unwrap();
+    assert!(a.withdraw_local_candidate(now, selected, UDP));
+    assert_eq!(
+        selected_local(&a),
+        Some(selected),
+        "the selected pair stays"
+    );
+    assert_eq!(pairs_of(&a, selected), 1, "only the selected pair is left");
+    assert!(a.media_path().is_some_and(|p| p.local_addr == selected));
+    assert!(!signalled(&a, selected));
+    a.restart(now, String::new(), String::new(), true).unwrap();
+    assert!(!held(&a, selected), "the next session does not have it");
+    assert!(
+        a.media_path().is_some_and(|p| p.local_addr == selected),
+        "the restart's previous media path runs on it until the new pair"
+    );
+}
+
+/// The same with a restart staged (the case of a host candidate added between createOffer
+/// and setLocalDescription, which makes the engine start the next generation's links): the
+/// staged credentials are what `get_local_credentials` gives, the current session keeps its
+/// selected pair and media path, and `apply_restart` drops the candidate.
+#[test]
+fn test_a_candidate_withdrawn_while_a_restart_is_staged_leaves_the_current_session() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    assert!(a.withdraw_local_candidate(now, selected, UDP));
+    assert_eq!(
+        selected_local(&a),
+        Some(selected),
+        "the current session keeps it"
+    );
+    assert!(a.media_path().is_some_and(|p| p.local_addr == selected));
+    a.apply_restart(now, true).unwrap();
+    assert!(!held(&a, selected), "the new session does not have it");
+    assert!(
+        a.media_path().is_some_and(|p| p.local_addr == selected),
+        "the previous path stays until the restart selects a pair"
+    );
+}
+
+/// Row "staged credentials": while a restart is staged `get_local_credentials` gives the staged
+/// credentials (the generation new candidates and the engine's gathering belong to), the live
+/// session's stay in force, and `apply_restart` makes the staged ones current.
+#[test]
+fn test_staged_credentials_are_the_next_generation_s() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let live = a.ufrag_pwd.local_credentials.ufrag.clone();
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    let staged = a.get_local_credentials().ufrag.clone();
+    assert_ne!(staged, live);
+    assert_eq!(
+        a.ufrag_pwd.local_credentials.ufrag, live,
+        "the live session's stay"
+    );
+    a.apply_restart(now, true).unwrap();
+    assert_eq!(a.ufrag_pwd.local_credentials.ufrag, staged);
+    assert_eq!(a.get_local_credentials().ufrag, staged);
+}
+
+/// Row "after the next apply_restart" for a candidate withdrawn only once the new session has
+/// it (a restart that keeps the local candidates carried it over): its pairs in the new session
+/// go, it forms none, and the previous media path, which is not a pair of the session, is not
+/// affected.
+#[test]
+fn test_a_candidate_withdrawn_after_the_restart_leaves_the_new_session_only() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    a.restart(now, String::new(), String::new(), true).unwrap();
+    assert!(held(&a, selected), "kept into the new session");
+    a.add_remote_candidate(udp("10.0.0.9", 7000, 0)).unwrap();
+    assert!(pairs_of(&a, selected) > 0, "paired in the new session");
+    assert!(a.withdraw_local_candidate(now, selected, UDP));
+    assert_eq!(pairs_of(&a, selected), 0, "no pair of the new session");
+    assert!(
+        a.media_path().is_some_and(|p| p.local_addr == selected),
+        "the previous path is untouched"
+    );
+}
+
+/// Row `discard_restart_credentials`: a staged restart abandoned after the withdrawal leaves the
+/// current session as it was (its selected pair), the candidate withdrawn, and the next restart
+/// drops it.
+#[test]
+fn test_a_withdrawal_outlives_an_abandoned_staged_restart() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    assert!(a.withdraw_local_candidate(now, selected, UDP));
+    a.discard_restart_credentials();
+    assert_eq!(selected_local(&a), Some(selected));
+    assert!(!signalled(&a, selected));
+    a.restart(now, String::new(), String::new(), true).unwrap();
+    assert!(!held(&a, selected), "the next restart drops it");
+}
+
+/// Row `revert_restart`: a restart taken back restores the session as it was when the restart
+/// was applied, so a withdrawal made after that is undone (the engine withdraws again); a
+/// withdrawal then keeps the restored selected pair.
+#[test]
+fn test_a_reverted_restart_restores_the_session_and_a_new_withdrawal_keeps_its_pair() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    a.apply_restart_revertible(now, true).unwrap();
+    assert!(a.withdraw_local_candidate(now, selected, UDP));
+    assert!(a.revert_restart(now));
+    assert_eq!(selected_local(&a), Some(selected), "the session is back");
+    assert!(signalled(&a, selected), "as it was before the withdrawal");
+    assert!(
+        a.withdraw_local_candidate(now, selected, UDP),
+        "withdrawn again"
+    );
+    assert_eq!(
+        selected_local(&a),
+        Some(selected),
+        "its selected pair stays"
+    );
+}
+
+/// Row "gathered again": a withdrawn candidate added again is not taken back.
+#[test]
+fn test_a_withdrawn_candidate_gathered_again_stays_withdrawn() {
+    let now = Instant::now();
+    let mut a = selected_agent(now);
+    let selected = selected_local(&a).unwrap();
+    let other = [addr(LOCAL), addr(OTHER)]
+        .into_iter()
+        .find(|c| *c != selected)
+        .unwrap();
+    assert!(a.withdraw_local_candidate(now, other, UDP));
+    assert!(
+        !a.add_local_candidate(udp(&other.ip().to_string(), other.port(), 0))
+            .unwrap()
+    );
+    assert!(!signalled(&a, other));
+    assert_eq!(pairs_of(&a, other), 0);
+}
+
 /// The same rule binds the session the nomination was made in, not the one a staged restart
 /// begins: a candidate gathered while the restart is staged is taken, but not paired with the
 /// current session's remote candidates, and the restart keeps it even when it discards the
