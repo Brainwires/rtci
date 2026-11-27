@@ -259,6 +259,9 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 # The statistics tests and the interop peer read and write JSON.
 serde_json.workspace = true
+# The mDNS interop tests probe whether the host delivers multicast to itself
+# (tests/mdns_query_and_gather_interop.rs, `host_loops_multicast`).
+socket2.workspace = true
 
 # Interop tests against the independent (pre-sans-I/O) webrtc implementation. 0.17.3 is the
 # last release of that line, and the first whose DTLS uses p256 0.14 (crypto-bigint 0.7, past

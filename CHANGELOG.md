@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- **The real-multicast mDNS tests probe the host first** (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`).
+  `examples/stream-driver/tests/mdns.rs` and the two QueryAndGather tests of
+  `tests/mdns_query_and_gather_interop.rs` resolve `.local` names over the host's mDNS group;
+  on a self-hosted Windows VM whose network did not loop multicast back (NAT address
+  10.0.2.15, master push run 45956791846: no mDNS datagram arrived on its interface nor on
+  loopback) all five failed, saying nothing about the engine. Each now first sends a probe to
+  224.0.0.251:5353 on its interface and waits up to two seconds for it on a socket of its own
+  joined there; if it does not come back the test is skipped with the reason printed, except on
+  Linux, where the hosted runners always deliver and a failing probe fails the test (the
+  real-socket coverage is guaranteed there). The shared mDNS budget of two drivers (draft
+  section 7.1) moves to virtual time
+  (`mdns_virtual_time.rs::two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time`),
+  where it does not depend on multicast at all; the real-socket file keeps the two smoke tests
+  (egress interface, loopback). `socket2` becomes a dev-dependency of `rtci` (already in the
+  tree through `rtci-mdns`). No engine change.
+
 ### Security
 
 - **SRTP keys are no longer left in dead stack frames by the default provider**

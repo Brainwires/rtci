@@ -103,6 +103,89 @@ fn mdns_egress_ip() -> Option<std::net::IpAddr> {
         .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
+/// Whether the host delivers a datagram sent to the mDNS group (224.0.0.251:5353) from `ip`'s
+/// interface back to a socket of this process joined to the group there, within two seconds.
+/// The QueryAndGather tests resolve each peer's `.local` name over the host's mDNS group: a
+/// host that does not loop multicast back (seen on a self-hosted Windows VM, NAT address
+/// 10.0.2.15: no mDNS datagram arrived) fails them whatever the engine does. The probe is a DNS
+/// response with no records and a random ID (other responders ignore it), sent up to ten times
+/// 200 ms apart; it asks the host one question before the test, which runs once. (The same
+/// probe is in `examples/stream-driver/tests/mdns.rs`.)
+fn host_loops_multicast(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, SocketAddr};
+    let IpAddr::V4(interface) = ip else {
+        return false;
+    };
+    let probe = || -> std::io::Result<bool> {
+        let group = SocketAddr::from((rtci::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT));
+        let receiver: std::net::UdpSocket = MulticastSocket::new()
+            .with_interface(interface)
+            .into_std()?;
+        receiver.set_nonblocking(false)?;
+        receiver.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let sender = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        sender.set_multicast_if_v4(&interface)?;
+        sender.set_multicast_loop_v4(true)?;
+        sender.bind(&SocketAddr::new(ip, 0).into())?;
+        let sender: std::net::UdpSocket = sender.into();
+        let nonce = std::process::id()
+            ^ std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or_default();
+        let [id0, id1, ..] = nonce.to_be_bytes();
+        let message = [id0, id1, 0x84, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut buf = [0u8; 1500];
+        for _ in 0..10 {
+            sender.send_to(&message, group)?;
+            let until = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < until {
+                match receiver.recv_from(&mut buf) {
+                    Ok((n, _)) if buf[..n] == message => return Ok(true),
+                    Ok(_) => continue,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(false)
+    };
+    probe().unwrap_or_else(|e| {
+        log::warn!("multicast probe on {ip}: {e}");
+        false
+    })
+}
+
+/// [`host_loops_multicast`] on the interface the mDNS group traffic of these tests uses (the
+/// egress interface, else loopback), or the test is skipped with the reason printed; on Linux,
+/// where the hosted runners always deliver, a failing probe fails the test (so the skip cannot
+/// become universal).
+fn multicast_or_skip(test: &str) -> bool {
+    let ip = mdns_egress_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    if host_loops_multicast(ip) {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        panic!(
+            "{test}: this Linux host does not deliver multicast to itself on {ip}; the Linux \
+             runners must (they are where the real-socket mDNS tests are guaranteed to run)"
+        );
+    }
+    println!("SKIPPED {test}: the host does not loop multicast on {ip} back to this process");
+    false
+}
+
 /// Helper function to create a webrtc peer connection with QueryAndGather mDNS mode
 async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
     let mut media_engine = MediaEngine::default();
@@ -550,6 +633,9 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
 #[tokio::test]
 async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> {
     let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
+    if !multicast_or_skip("test_mdns_query_and_gather_webrtc_offerer_rtc_answerer") {
+        return Ok(());
+    }
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -882,6 +968,9 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
 #[tokio::test]
 async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> {
     let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
+    if !multicast_or_skip("test_mdns_query_and_gather_rtc_offerer_webrtc_answerer") {
+        return Ok(());
+    }
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)

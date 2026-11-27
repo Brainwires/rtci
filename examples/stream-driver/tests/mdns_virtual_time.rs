@@ -10,7 +10,7 @@ mod common;
 
 use common::{Peer, Result, negotiate, run_until};
 use rtci::ice::mdns::MulticastDnsMode;
-use rtci::mdns::MDNS_PORT;
+use rtci::mdns::{MDNS_PORT, MdnsRateLimit};
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::transport::RTCIceCandidateType;
 use rtci_stream_driver::peer::PeerDriverConfig;
@@ -237,6 +237,64 @@ fn drivers_on_a_lan_of_public_addresses_resolve_each_other() -> Result<()> {
         a.selected_remote_type(),
         b.driver.pc().connection_state(),
         b.selected_remote_type()
+    );
+    Ok(())
+}
+
+/// draft-ietf-mmusic-mdns-ice-candidates section 7.1: one rate limit over all mDNS queries and
+/// responses. Two connections whose drivers share a small budget (1 at once, then 1 a second)
+/// send together no more than it allows over the whole exchange (probes, announcements,
+/// queries and answers of both), and still connect: what the budget refused waited, and
+/// leaves later at the budget's rate. (On the mock network and clock: it was a test of
+/// `tests/mdns.rs` on the host's mDNS group, where it failed whenever the host did not
+/// deliver multicast to itself, which says nothing of the budget.)
+#[test]
+fn two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time() -> Result<()> {
+    const BURST: u32 = 1;
+    const PER_SECOND: u32 = 1;
+    let runtime = MockRuntime::new();
+    let shared: Arc<dyn Runtime> = Arc::new(runtime.clone());
+    let limit = MdnsRateLimit::new(BURST, PER_SECOND);
+    let config = |ip: IpAddr| PeerDriverConfig {
+        mdns_rate_limit: Some(limit.clone()),
+        ..PeerDriverConfig::on(vec![ip])
+    };
+    let mut a = Peer::with_config(shared.clone(), publishing(), config(A))?;
+    let mut b = Peer::with_config(shared, publishing(), config(B))?;
+    let start = runtime.now();
+    let up = runtime.run(async {
+        negotiate(&mut a, &mut b)?;
+        let up = run_until(&mut a, &mut b, STEP, 10_000, |a, b| {
+            a.connected() && b.connected()
+        })
+        .await?;
+        // The exchange goes on for a while, and what the budget held leaves at its rate.
+        run_until(&mut a, &mut b, STEP, 10_000, |a, _| {
+            a.now().duration_since(start) >= Duration::from_secs(4)
+        })
+        .await?;
+        Ok::<bool, Box<dyn std::error::Error>>(up)
+    })?;
+    let elapsed = runtime.now().duration_since(start);
+    let sent = a.driver.mdns_datagrams_sent() + b.driver.mdns_datagrams_sent();
+    let allowed = u64::from(BURST) + (elapsed.as_secs_f64() * f64::from(PER_SECOND)).ceil() as u64;
+    assert!(
+        elapsed >= Duration::from_secs(4),
+        "the exchange ran {elapsed:?} of virtual time"
+    );
+    assert!(
+        sent <= allowed,
+        "{sent} mDNS datagrams in {elapsed:?}: the shared budget allows {allowed}"
+    );
+    assert!(
+        sent > u64::from(BURST),
+        "the held mDNS left after the burst: {sent}"
+    );
+    assert!(
+        up,
+        "connected, the held mDNS sent as the budget allowed: a {:?} / b {:?}",
+        a.driver.pc().connection_state(),
+        b.driver.pc().connection_state()
     );
     Ok(())
 }
