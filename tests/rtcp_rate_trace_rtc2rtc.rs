@@ -490,11 +490,21 @@ struct Measured {
 }
 
 fn measure(sc: Scenario, profile: BehaviourProfile, drop_at: Option<u64>) -> Result<Measured> {
+    measure_seeded(sc, profile, drop_at, SEEDS)
+}
+
+/// [`measure`] with the peers' random sources seeded with `seeds`.
+fn measure_seeded(
+    sc: Scenario,
+    profile: BehaviourProfile,
+    drop_at: Option<u64>,
+    seeds: [u64; 2],
+) -> Result<Measured> {
     let start = Instant::now();
     let mut world = World {
         peers: [
-            Peer::new("10.0.0.1:5000", profile, SEEDS[0], start)?,
-            Peer::new("10.0.0.2:5000", profile, SEEDS[1], start)?,
+            Peer::new("10.0.0.1:5000", profile, seeds[0], start)?,
+            Peer::new("10.0.0.2:5000", profile, seeds[1], start)?,
         ],
         now: start,
         delay: Duration::from_millis(20),
@@ -865,5 +875,51 @@ fn the_performance_profile_keeps_low_rate_rtcp_inside_five_percent() -> Result<(
     assert!(performance.sides[1].cc_gap_ms <= 550.0, "{performance:?}");
     // Regular reports go on (RFC 5506 4: compound RTCP is kept up), at most five seconds apart.
     assert!(performance.sides[1].regular > 0.0, "{performance:?}");
+    Ok(())
+}
+
+/// A measurement, not a check: the `Performance` profile's RTCP share of the 24 kbit/s audio
+/// call over many seed pairs (RFC 3550 6.3.1 randomises each report interval over [0.5, 1.5]
+/// times the computed one and divides by e - 3/2, so that the long-run mean is the budget of
+/// 6.2; a window of a few intervals can lie on either side of it). `RTCP_SHARE_RUNS` lists
+/// `<call seconds>:<seed pairs>` (default `15:200,30:50,60:25`; the checks measure from 5 s to
+/// the end of a 15 s call). Prints one line per seed pair and a summary per call length. Run
+/// with `cargo test --release --test rtcp_rate_trace_rtc2rtc -- --ignored --nocapture
+/// rtcp_share_over_seed_pairs`.
+#[test]
+#[ignore = "a measurement: run with --ignored --nocapture"]
+fn rtcp_share_over_seed_pairs() -> Result<()> {
+    let runs = std::env::var("RTCP_SHARE_RUNS").unwrap_or_else(|_| "15:200,30:50,60:25".into());
+    for spec in runs.split(',') {
+        let (seconds, pairs) = spec
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("RTCP_SHARE_RUNS: {spec}"))?;
+        let (seconds, pairs): (u64, u64) = (seconds.parse()?, pairs.parse()?);
+        let sc = Scenario {
+            seconds,
+            ..AUDIO_24K
+        };
+        let mut shares = vec![];
+        for i in 0..pairs {
+            let seeds = [0x5eed_0001 + 2 * i, 0x5eed_0002 + 2 * i];
+            let m = measure_seeded(sc, BehaviourProfile::Performance, None, seeds)?;
+            println!(
+                "SEED-SHARE {seconds}s pair {i} seeds {:#x}/{:#x}: {:?}",
+                seeds[0], seeds[1], m.share
+            );
+            shares.push(m.share);
+        }
+        let n = shares.len() as f64;
+        let mean = shares.iter().sum::<f64>() / n;
+        let min = shares.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = shares.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let over = shares.iter().filter(|s| **s > 0.05).count();
+        let sd = (shares.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n).sqrt();
+        println!(
+            "SEED-SHARE-SUMMARY {seconds}s call ({} s measured), {pairs} pairs: min {min:.5} mean \
+             {mean:.5} max {max:.5} sd {sd:.5}, {over} above 0.05",
+            seconds.saturating_sub(5)
+        );
+    }
     Ok(())
 }
