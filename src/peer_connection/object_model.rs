@@ -101,6 +101,9 @@ impl RTCPeerConnection {
         if let Some(sender) = transceiver.sender_mut() {
             if !sender.has_send_encodings() || !sender.is_negotiated() {
                 sender.set_send_encodings(send_encodings);
+                // The track's encodings replace any a remote offer proposed: a rollback of
+                // that offer keeps them rather than restore the sender's earlier ones.
+                sender.forget_ridless_send_encodings();
             }
             sender.attach_track(track, streams);
             if !send_codecs_from_remote {

@@ -942,3 +942,174 @@ fn a_subsequent_offer_keeps_the_rid_line_an_answer_tightened() -> TestResult {
     );
     Ok(())
 }
+
+/// The remote offer of WPT `webrtc/protocol/simulcast-answer.html` (`offer_sdp`): one recvonly
+/// VP8 section that asks to receive simulcast streams foo, bar and baz.
+const WPT_SIMULCAST_RECV_OFFER: &str = "v=0
+o=- 3840232462471583827 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=msid-semantic: WMS
+m=video 9 UDP/TLS/RTP/SAVPF 96
+c=IN IP4 0.0.0.0
+a=rtcp:9 IN IP4 0.0.0.0
+a=ice-ufrag:Li6+
+a=ice-pwd:3C05CTZBRQVmGCAq7hVasHlT
+a=ice-options:trickle
+a=fingerprint:sha-256 5B:D3:8E:66:0E:7D:D3:F3:8E:E6:80:28:19:FC:55:AD:58:5D:B9:3D:A8:DE:45:4A:E7:87:02:F8:3C:0B:3B:B3
+a=setup:actpass
+a=mid:0
+a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=recvonly
+a=rtcp-mux
+a=rtpmap:96 VP8/90000
+a=rtcp-fb:96 goog-remb
+a=rtcp-fb:96 transport-cc
+a=rtcp-fb:96 ccm fir
+a=rid:foo recv
+a=rid:bar recv
+a=rid:baz recv
+a=simulcast:recv foo;bar;baz
+";
+
+/// A peer without transceivers that applied `offer`, with the transceiver the offer created
+/// (W3C webrtc-pc "set the RTCSessionDescription": "If no suitable transceiver was found ...
+/// Create an RTCRtpSender, sender, from the media description using proposedSendEncodings")
+/// set to sendonly, as the WPT does (`transceiver.direction = 'sendonly'`).
+fn wpt_answerer(
+    offer: &str,
+) -> Result<(RTCPeerConnection, RTCRtpSenderId), Box<dyn std::error::Error>> {
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(crlf(offer))?)?;
+    let ids: Vec<_> = pc.get_transceivers().collect();
+    assert_eq!(ids.len(), 1, "the offer creates one transceiver");
+    let mut transceiver = pc.rtp_transceiver(ids[0]).expect("the transceiver");
+    transceiver.set_direction(rtci::rtp_transceiver::RTCRtpTransceiverDirection::Sendonly)?;
+    let sender = transceiver.sender().expect("its sender");
+    Ok((pc, sender))
+}
+
+/// WPT `webrtc/protocol/simulcast-answer.html`, "createAnswer() with multiple send encodings
+/// should create simulcast answer". W3C webrtc-pc "set the RTCSessionDescription": a remote
+/// offer to receive simulcast gives the sender of the transceiver it creates
+/// `proposedSendEncodings`, one per offered rid in the offer's order ("Create an RTCRtpSender
+/// ... using proposedSendEncodings"); `createAnswer` then answers each with `a=rid ... send`
+/// and `a=simulcast:send` (RFC 8853 section 5.3.2: the answerer "SHALL reverse directionality
+/// ... and include it in the answer"). A rollback removes the transceiver again.
+#[test]
+fn a_transceiver_a_simulcast_offer_creates_sends_the_offered_streams() -> TestResult {
+    let (mut pc, sender) = wpt_answerer(WPT_SIMULCAST_RECV_OFFER)?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    assert_eq!(
+        sent_scales(&mut pc, sender),
+        [Some(4.0), Some(2.0), Some(1.0)]
+    );
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:foo send", "a=rid:bar send", "a=rid:baz send"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send foo;bar;baz"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(lines_with(&answer.sdp, "a=sendonly"), vec!["a=sendonly"]);
+    pc.set_local_description(Instant::now(), answer)?;
+    assert_eq!(sent_layers(&mut pc, sender).len(), 3);
+
+    let mut pc = default_peer()?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.get_transceivers().count(), 0);
+    Ok(())
+}
+
+/// WPT `webrtc/protocol/simulcast-answer.html`, "Using the ~rid SDP syntax in a remote offer
+/// does not control the local encodings active flag": W3C `proposedSendEncodings` has an
+/// encoding per offered stream, paused (`~bar`) or not, and leaves `active` alone.
+#[test]
+fn an_offered_pause_mark_leaves_the_proposed_encoding_active() -> TestResult {
+    let offer = edited(
+        WPT_SIMULCAST_RECV_OFFER,
+        "a=simulcast:recv foo;bar;baz",
+        "a=simulcast:recv foo;~bar;baz",
+    );
+    let (mut pc, sender) = wpt_answerer(&offer)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(Instant::now(), answer)?;
+    let mut s = pc.rtp_sender(sender).expect("sender");
+    let bar = s
+        .get_parameters()
+        .encodings
+        .iter()
+        .find(|e| e.rtp_coding_parameters.rid == "bar")
+        .cloned()
+        .expect("an encoding for bar");
+    assert!(bar.active);
+    Ok(())
+}
+
+/// WPT `webrtc/protocol/simulcast-answer.html`, "Disabling encodings locally does not change
+/// the SDP": after the answer, encodings made inactive by `set_parameters` are still offered
+/// as they were (RFC 9429 section 5.2.2: the `a=simulcast` line "MUST stay the same"; without
+/// RFC 7728 no stream is marked paused, RFC 8853 section 5.3.2).
+#[test]
+fn encodings_made_inactive_leave_the_next_offer_alone() -> TestResult {
+    let (mut pc, sender) = wpt_answerer(WPT_SIMULCAST_RECV_OFFER)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(Instant::now(), answer)?;
+    let mut s = pc.rtp_sender(sender).expect("sender");
+    let mut parameters = s.get_parameters().clone();
+    for encoding in &mut parameters.encodings {
+        encoding.active = false;
+    }
+    s.set_parameters(parameters, None)?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        lines_with(&offer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send foo;bar;baz"],
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
+
+/// `add_track` after a remote offer to receive simulcast reuses the transceiver the offer
+/// created (W3C `addTrack`) and gives its sender the track's encodings; a rollback of the offer
+/// keeps the transceiver (the application touched it, RFC 9429 section 5.7) and those
+/// encodings, not the empty set the sender had before the offer proposed its own.
+#[test]
+fn a_track_added_after_a_simulcast_offer_survives_its_rollback() -> TestResult {
+    let mut pc = default_peer()?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0086))?;
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.get_transceivers().count(), 1);
+    let ssrcs: Vec<_> = pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings
+        .iter()
+        .map(|e| e.rtp_coding_parameters.ssrc)
+        .collect();
+    assert_eq!(ssrcs, [Some(0x0516_0086)]);
+    Ok(())
+}

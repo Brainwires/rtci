@@ -2217,7 +2217,9 @@ impl RTCPeerConnection {
     /// is discarded, so its stream goes.
     /// W3C webrtc-pc "set the RTCSessionDescription", a remote offer that asks to receive
     /// simulcast (`a=simulcast:recv`, the first alternative of each stream) on a section whose
-    /// transceiver's sender has a lone encoding without a rid: the sender is "promoted to
+    /// transceiver's sender has a lone encoding without a rid, or no encodings yet (the sender
+    /// of a transceiver the offer created, "from the media description using
+    /// proposedSendEncodings", or of one that has not sent): the sender is "promoted to
     /// simulcast" with `proposedSendEncodings`, one encoding per offered rid in the offer's
     /// order, duplicates removed, at most [`MAX_SEND_ENCODINGS`], the one at `index` of `n`
     /// scaled down by 2^(n - index - 1) (video). The lone encoding is kept as
@@ -2254,16 +2256,33 @@ impl RTCPeerConnection {
                 continue;
             }
             let kind = self.rtp_transceivers[i].kind();
-            let Some(base) = self.rtp_transceivers[i]
+            let Some(encodings) = self.rtp_transceivers[i]
                 .sender()
                 .as_ref()
-                .and_then(|sender| match sender.send_encodings() {
-                    [lone] if lone.rtp_coding_parameters.rid.is_empty() => Some(lone.clone()),
-                    _ => None,
-                })
+                .map(|sender| sender.send_encodings().to_vec())
             else {
                 continue;
             };
+            let base = match encodings.as_slice() {
+                [lone] if lone.rtp_coding_parameters.rid.is_empty() => lone.clone(),
+                // A sender without encodings yet: one made with its transceiver by this offer
+                // ("Create an RTCRtpSender, sender, from the media description using
+                // proposedSendEncodings"), or one of a transceiver that has not sent. The W3C
+                // sender has its one default encoding from creation; the engine gives it when
+                // first needed, here.
+                [] => match self.new_send_encodings(kind, vec![]) {
+                    Ok((mut defaults, _)) if !defaults.is_empty() => defaults.swap_remove(0),
+                    Ok(_) => continue,
+                    Err(err) => {
+                        log::warn!("no encodings for the proposed simulcast envelope: {err}");
+                        continue;
+                    }
+                },
+                _ => continue,
+            };
+            minted.extend(base.rtp_coding_parameters.ssrc);
+            minted.extend(base.rtp_coding_parameters.rtx.as_ref().map(|rtx| rtx.ssrc));
+            minted.extend(base.rtp_coding_parameters.fec.as_ref().map(|fec| fec.ssrc));
             let n = rids.len();
             let mut proposed = Vec::with_capacity(n);
             for (index, rid) in rids.into_iter().enumerate() {
