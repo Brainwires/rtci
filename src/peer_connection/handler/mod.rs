@@ -1199,6 +1199,12 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
+        // Closed: only the answers to the TURN releases still under way are read (RFC 8656
+        // section 8: the Refresh of LIFETIME 0 is a transaction like any other).
+        if self.is_closed() {
+            let _ = self.take_turn_release(msg);
+            return Ok(());
+        }
         // A record of one of the engine's DTLS associations to a TURN server (RFC 7350).
         let Some(msg) = self.take_turn_dtls(msg) else {
             return Ok(());
@@ -1326,6 +1332,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
         self.pipeline_context.observe(now);
+        // Closed: only the TURN releases still under way have timers.
+        if self.is_closed() {
+            self.turn_releases_handle_timeout(now);
+            return Ok(());
+        }
         // RFC 8837 section 5: the association's congestion control starts over when its
         // codepoint changed (a channel of another priority came or went).
         self.restart_sctp_congestion_control_on_dscp_change(now);
@@ -1368,6 +1379,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
     }
 
     fn poll_timeout(&mut self) -> Option<Instant> {
+        // Closed: the TURN releases still under way are all that is left; `None` once they
+        // are done (nothing more will be sent or read).
+        if self.is_closed() {
+            return self.turn_releases_poll_timeout();
+        }
         let mut eto: Option<Instant> = None;
         for_each_handler!(forward: process_handler!(self, handler, {
             if let Some(next) = handler.poll_timeout() {

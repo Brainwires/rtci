@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jitter buffer's late or early packets, RFC 7002 section 3.2), and it is not counted in
   `discarded_rtp_packets` (media no section could take, RFC 8830 section 3.1). Engine
   behaviour change no; API addition only.
+- **`RTCPeerConnectionEvent::OnTurnAllocationReleased { url, local_address, relayed_address }`
+  and `OnTurnRequestRejected { url, relay, method, error_code }`** (fork events, not W3C): an
+  engine TURN allocation over UDP has been let go (the local address is free), and a TURN request
+  was finally refused (for now: a 437 to an Allocate). turn-6.
 
 ### Fixed
 
@@ -380,6 +384,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the one carrying the data, never paired or signalled again, dropped at the next restart; a
   restart staged, abandoned or taken back does not cut the current session's path). Tests on an in-memory coturn-like server
   (`tests/common/turn_server.rs`). turn-5.
+- **`close()` releases the engine's TURN allocations reliably** (RFC 8656 section 8, RFC 8489
+  section 6.2.1). It sent one Refresh of LIFETIME 0 per established UDP allocation and never
+  drove the TURN client again: a lost datagram or a 438 left the allocation for its lifetime, an
+  Allocate under way at `close()` was not followed (its allocation stayed), and the next peer
+  connection on the same socket was refused with 437 and held the server back for two minutes.
+  The release is now a transaction run to its end, after `close()` too: a closed connection
+  serves `poll_write`, `handle_read`, `poll_timeout` and `handle_timeout` for those
+  transactions only, until `poll_timeout()` is `None` (README: what to do after `close()`);
+  an Allocate under way is followed and an allocation it makes is deleted. The same applies to
+  every other release of an engine allocation (a removed transport, a restart's retired link).
+  A 437 to an Allocate has the link allocate from another UDP base of the transport, up to
+  three (RFC 8656 section 7.4), and raises `OnTurnRequestRejected`. turn-6.
 
 ### Documentation
 
