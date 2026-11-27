@@ -169,6 +169,7 @@ mod rejected_mline_tests {
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
             bundle_only_browser_form: false,
+            answer_offered_formats_only: false,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -1448,6 +1449,9 @@ pub(crate) struct AddTransceiverSdpParams {
     /// The payload type each format an answer may add (RFC 9429 section 5.3.1) takes, by
     /// (SFrame numbering, kind, the format's own payload type): see `answer_payload_types`.
     answer_payload_types: HashMap<(bool, RtpCodecKind, u8), u8>,
+    /// `SettingEngineBuilder::with_answer_offered_formats_only`: an answer lists only formats
+    /// the offer has.
+    answer_offered_formats_only: bool,
 }
 
 impl RTCPeerConnection {
@@ -1529,6 +1533,16 @@ impl RTCPeerConnection {
             transceiver.get_offer_codecs(media_engine)
         } else {
             transceiver.get_codecs(media_engine)
+        };
+        // `SettingEngineBuilder::with_answer_offered_formats_only`: the answer lists the
+        // offered formats only (RFC 9429 section 5.3.1 "MAY include formats that are locally
+        // supported but not present in the offer"; libwebrtc's form), also when codec
+        // preferences name a format the offer lacks.
+        let codecs = match &media_section.offered_codecs {
+            Some(offered) if !is_offer && params.answer_offered_formats_only => {
+                offered_formats_only(codecs, offered)
+            }
+            _ => codecs,
         };
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
         // described only then (codec preferences may leave either out). The FEC flow is the
@@ -1635,7 +1649,9 @@ impl RTCPeerConnection {
         // section 6). The numbers come from `answer_payload_types`, the same for every section
         // of the answer: a payload type the offer uses for another format is never taken,
         // which in a BUNDLE group would give it two configurations (RFC 9143 section 9.1.1).
+        // `SettingEngineBuilder::with_answer_offered_formats_only` leaves them out.
         if !is_offer
+            && !params.answer_offered_formats_only
             && !transceiver.has_application_codec_preferences()
             && let Some(offered) = &media_section.offered_codecs
             && !codecs.is_empty()
@@ -2726,6 +2742,9 @@ pub(crate) struct PopulateSdpParams {
     /// says its group's ICE credentials, and when it has a bundle-only section its fingerprints
     /// are at session level too.
     pub(crate) bundle_only_browser_form: bool,
+    /// `SettingEngineBuilder::with_answer_offered_formats_only`: an answer lists only formats
+    /// the offer has.
+    pub(crate) answer_offered_formats_only: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -2965,6 +2984,7 @@ impl RTCPeerConnection {
                     rtcp_mux_only_renegotiated: params.rtcp_mux_only_renegotiated,
                     ecn: params.ecn,
                     answer_payload_types: answer_payload_types.clone(),
+                    answer_offered_formats_only: params.answer_offered_formats_only,
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,
@@ -5243,6 +5263,67 @@ fn answer_payload_types(
         }
     }
     numbers
+}
+
+/// The formats of `codecs` (an answer's, in its order) that `offered` has
+/// (`SettingEngineBuilder::with_answer_offered_formats_only`), matched as a remote description
+/// is (`RTCRtpTransceiverInternal::match_remote_codecs`): an exact match, or a match by name
+/// for a format whose parameters are not its configuration. A repair format stays only with
+/// what it repairs: an RTX format when the offer has RTX and its `apt` names a kept format, a
+/// RED format when the formats its fmtp line names are kept (or it names none), a FEC format
+/// when a media format is kept.
+fn offered_formats_only(
+    codecs: Vec<RTCRtpCodecParameters>,
+    offered: &[RTCRtpCodecParameters],
+) -> Vec<RTCRtpCodecParameters> {
+    use crate::peer_connection::configuration::media_engine::{
+        has_symmetric_configuration, red_block_payload_types,
+    };
+    use crate::rtp_transceiver::rtp_sender::rtp_codec::parse_rtx_apt;
+    let is_offered = |codec: &RTCRtpCodecParameters| match codec_parameters_search(
+        &codec.rtp_codec,
+        Some(codec.payload_type),
+        offered,
+    ) {
+        (_, CodecMatch::Exact) => true,
+        (found, CodecMatch::Partial) => {
+            !has_symmetric_configuration(&codec.rtp_codec)
+                || found.rtp_codec.sdp_fmtp_line.trim().is_empty()
+        }
+        (_, CodecMatch::None) => false,
+    };
+    let offer_has_rtx = offered
+        .iter()
+        .any(|codec| repair_family(&codec.rtp_codec) == "rtx");
+    let mut kept: Vec<RTCRtpCodecParameters> = codecs
+        .into_iter()
+        .filter(|codec| repair_family(&codec.rtp_codec) == "rtx" || is_offered(codec))
+        .collect();
+    let media: HashSet<PayloadType> = kept
+        .iter()
+        .filter(|codec| repair_family(&codec.rtp_codec).is_empty())
+        .map(|codec| codec.payload_type)
+        .collect();
+    kept.retain(|codec| match repair_family(&codec.rtp_codec) {
+        "" => true,
+        "red" => red_block_payload_types(&codec.rtp_codec.sdp_fmtp_line)
+            .is_none_or(|blocks| blocks.iter().all(|block| media.contains(block))),
+        "ulpfec" | "flexfec" => !media.is_empty(),
+        _ => true,
+    });
+    // RTX: its `apt` names a kept primary (a media format, or a kept RED format).
+    let primaries: HashSet<PayloadType> = kept
+        .iter()
+        .filter(|codec| repair_family(&codec.rtp_codec) != "rtx")
+        .map(|codec| codec.payload_type)
+        .collect();
+    kept.retain(|codec| {
+        repair_family(&codec.rtp_codec) != "rtx"
+            || (offer_has_rtx
+                && parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
+                    .is_some_and(|apt| primaries.contains(&apt)))
+    });
+    kept
 }
 
 pub(crate) fn codecs_from_media_description(

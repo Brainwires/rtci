@@ -573,6 +573,13 @@ more than one m= section (nor, by the same rule, a `balanced` offer with two sec
 `SettingEngineBuilder::with_bundle_only_sections_in_browser_form(true)` alone, or `balanced`
 with one section of each type. Offers from browsers and answers are not affected.
 
+**Answers list formats the offer lacks by default.** Without codec preferences, an answer lists the offered formats
+this endpoint supports and then every other media format it has registered for the kind (RFC 9429 5.3.1, "MUST be
+added after all existing formats"; RFC 3264 6.1, MAY), and it receives on them. Browsers answer with the offered
+formats only, which the same RFC 9429 5.3.1 rule list allows ("MAY include formats that are locally supported but not
+present in the offer"), and web-platform-tests such as `webrtc/protocol/h265-level-id.https.html` assume it. The
+`Chrome` profile, or `SettingEngineBuilder::with_answer_offered_formats_only(true)` alone, answers in that form.
+
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads
 one from configuration. **At build time**, two cargo features of `rtci` change `BehaviourProfile::default()`, and with it

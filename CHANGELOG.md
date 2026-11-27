@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SettingEngineBuilder::with_answer_offered_formats_only`, on in the `Chrome` profile: an
+  answer lists only the formats the offer has** (`conf/jsep-88-answer-lists-offered-formats-only`;
+  RFC 9429 section 5.3.1, RFC 3264 section 6.1). By default an answer to a section without codec
+  preferences lists the offered formats this endpoint supports, in the offer's order, and then
+  every other media format registered for the kind (RFC 9429 5.3.1: "Any currently available
+  media formats that are not present in the current remote description MUST be added after all
+  existing formats"), and it receives on them (0.2.1). With the setting the answer is the
+  intersection, in the offer's order, each RTX / RED / FEC format only with the primary it
+  repairs, as libwebrtc answers (`pc/codec_vendor.cc::NegotiateCodecs` @ a222406d) and as the
+  same RFC 9429 5.3.1 rule list allows: "MAY include formats that are locally supported but not
+  present in the offer". Codec preferences that name a format the offer lacks add none either
+  with the setting. Asked for by a consumer running the web-platform-tests:
+  `webrtc/protocol/h265-level-id.https.html`, "Offer to send H265, answer to receive
+  level-id=30 results in level-id=30", which an engine answer with the added formats failed
+  ("expected 1 but got 14"). The default is unchanged (pinned answers unchanged). Engine
+  behaviour change NO by default; API addition only. Tests:
+  `tests/jsep_answer_offered_formats_only.rs` (both values, the profiles, the WPT scenario).
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
