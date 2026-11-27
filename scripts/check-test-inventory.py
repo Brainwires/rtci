@@ -19,8 +19,19 @@ stale.
 It also checks every test that ``docs/conformance.md`` and ``docs/conformance/*.md`` name in
 their "Test" column exists (criterion C5).
 
-Usage: ``python3 scripts/check-test-inventory.py [--list]``. ``--list`` prints every finding,
-excluded or not, in the exclusion table's format.
+With ``--check`` (how CI runs it) it also checks the clause audit (``docs/conformance/audit/*.md``):
+every backticked name in the Test cell of a MUST or SHOULD row must name something in the tree, so
+a renamed or deleted test cannot stay cited as evidence. A name is the last ``::`` segment of the
+backticked text (``name``, ``file.rs::name``, ``mod::tests``; a trailing ``(...)`` is dropped) when
+it is a snake_case identifier with an underscore; it is found when it is a ``fn``, a module (a
+``mod`` declaration or a ``.rs`` file stem, test files included), a fuzz target (a file under a
+``fuzz_targets`` directory) or a struct field. Backticked text that is not such an identifier
+(paths, SDP lines, constants, short variable names such as ``hd`` or ``prov``) is not a test name
+and is not checked. A ``dir/file.rs::name`` whose name is a ``fn`` only in files of another name is reported
+too (the directory is not compared: cells abbreviate it).
+
+Usage: ``python3 scripts/check-test-inventory.py [--list | --check]``. ``--list`` prints every
+finding, excluded or not, in the exclusion table's format.
 """
 
 from __future__ import annotations
@@ -233,6 +244,70 @@ def test_exists(ref: str, tests: dict[str, set[str]]) -> bool:
     return ref in tests
 
 
+AUDIT_LEVELS = re.compile(r"^(MUST|SHALL|REQUIRED|SHOULD|RECOMMENDED|NOT RECOMMENDED)\b")
+AUDIT_NAME = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+FIELD_DEF = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?P<name>[a-z_][a-z0-9_]*)\s*:\s*[A-Za-z(&\[]")
+MOD_ANY = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def tree_names(root: Path) -> tuple[dict[str, set[str]], set[str]]:
+    """Every `fn` in the tree's Rust sources (name -> files, fuzz crates included), and the other
+    names an audit Test cell may cite: modules (declared or by file stem), fuzz targets, fields."""
+    fns: dict[str, set[str]] = {}
+    other: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in {"target", ".git", "node_modules"} and not d.startswith(".")]
+        for name in filenames:
+            if not name.endswith(".rs"):
+                continue
+            path = Path(dirpath) / name
+            other.add(path.stem)
+            relpath = path.relative_to(root).as_posix()
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                m = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+                if m:
+                    fns.setdefault(m.group(1), set()).add(relpath)
+                m = MOD_ANY.match(line) or FIELD_DEF.match(line)
+                if m:
+                    other.add(m.group("name"))
+    return fns, other
+
+
+def audit_dead_names(root: Path) -> list[str]:
+    """The backticked names in the Test cells of the audit's MUST and SHOULD rows that name
+    nothing in the tree (see the module docstring for what counts as a name)."""
+    fns, other = tree_names(root)
+    errors = []
+    for doc in sorted((root / "docs" / "conformance" / "audit").glob("*.md")):
+        for n, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.startswith("| ") or line.startswith("| ID "):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
+            if len(cells) < 8 or not AUDIT_LEVELS.match(cells[2].strip("`").upper()):
+                continue
+            for ref in backticked(cells[6]):
+                ref = re.sub(r"\(.*$", "", ref.strip()).strip()
+                file, _, name = ref.rpartition("::")
+                if not AUDIT_NAME.fullmatch(name):
+                    continue
+                if name in fns:
+                    base = re.split(r"[/\s]", file)[-1]
+                    if base.endswith(".rs") and not any(p.rsplit("/", 1)[-1] == base for p in fns[name]):
+                        errors.append(
+                            f"{rel_to(doc, root)}:{n}: {cells[0]} cites `{ref}`: `{name}` is in"
+                            f" {', '.join(sorted(fns[name]))}, not in {file}"
+                        )
+                    continue
+                if name in other:
+                    continue
+                errors.append(f"{rel_to(doc, root)}:{n}: {cells[0]} cites `{ref}`, which names no fn in the tree")
+    return errors
+
+
+def rel_to(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
 def main() -> int:
     files = rust_files()
     findings: list[Finding] = []
@@ -293,6 +368,9 @@ def main() -> int:
             for ref in backticked(cells[column]):
                 if not test_exists(ref, tests):
                     errors.append(f"{rel(doc)}: the test `{ref}` does not exist")
+
+    if "--check" in sys.argv:
+        errors.extend(audit_dead_names(ROOT))
 
     if errors:
         print("Test inventory check failed:\n")

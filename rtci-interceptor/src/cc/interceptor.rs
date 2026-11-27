@@ -3,8 +3,8 @@
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::probe::{
-    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, burst_estimate,
-    probe_estimate,
+    AfterDropProbe, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, ProbeUnsent,
+    burst_estimate, probe_estimate,
 };
 use super::tmmbr::{self, TmmbrState};
 use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
@@ -294,6 +294,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 probe_asked: None,
                 probe_marked: None,
                 probe_unanswered: false,
+                probe_chain_changed: false,
                 probe_senders: std::collections::HashSet::new(),
                 sent: VecDeque::new(),
                 last_target: None,
@@ -491,6 +492,11 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     /// NACK responder to pad on). No cluster is asked for while this is so; it ends when
     /// another stream is bound or starts to send.
     probe_unanswered: bool,
+    /// Whether a stream was bound or sent its first packet since the last cluster was asked
+    /// for. A cluster asked for before then was asked of a chain that may not have been able
+    /// to send it (the first audio packet asks before the video, whose RTX stream carries the
+    /// padding, has sent): its going unanswered says nothing of the chain as it is now.
+    probe_chain_changed: bool,
     /// The SSRCs that have sent since probing began.
     probe_senders: std::collections::HashSet<u32>,
     /// Departures of the last second with their sizes, for the rate being sent.
@@ -1079,7 +1085,9 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             && now.saturating_duration_since(asked) >= PROBE_RESULT_TIMEOUT
         {
             self.probe_asked = None;
-            if self.probe_marked != Some(cluster) {
+            // Only when the chain is as it was when the cluster was asked for: a stream that
+            // was bound or started to send since then may carry the next one.
+            if self.probe_marked != Some(cluster) && !self.probe_chain_changed {
                 self.probe_unanswered = true;
             }
         }
@@ -1102,7 +1110,22 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         probing.set_usage(usage);
         if let Some(request) = probing.poll(now, target, sending, media_flowing) {
             self.probe_asked = Some((request.cluster, now));
+            self.probe_chain_changed = false;
             self.read_queue.push_back(request.into_packet(now));
+        }
+    }
+
+    /// `cluster` left no packet ([`ProbeUnsent`]): it is counted as never asked for, and no
+    /// cluster is asked for until a stream is bound or sends its first packet (one that can
+    /// carry it may then be there). A chain that never has one (video without an RTX stream,
+    /// no pacer) asks once and no more, as it does when a result times out.
+    fn on_probe_unsent(&mut self, cluster: u32) {
+        let Some(probing) = self.probing.as_mut() else {
+            return;
+        };
+        if probing.on_unsent(cluster) {
+            self.probe_asked = None;
+            self.probe_unanswered = true;
         }
     }
 
@@ -1239,6 +1262,12 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // The NACK responder had nothing to pad a cluster with, and no pacer sent it: the
+        // cluster was never sent. Taken out of the chain here, where it was asked for.
+        if let Some(unsent) = msg.message.custom::<ProbeUnsent>().copied() {
+            self.on_probe_unsent(unsent.cluster);
+            return Ok(());
+        }
         if let Some(control) = msg.message.custom::<TmmbrControl>().copied() {
             let own_ssrc = self.own_ssrc();
             self.tmmbr_requests.on_control(control, own_ssrc);
@@ -1289,6 +1318,15 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                     // where none was (video with its RTX stream after audio alone).
                     if self.probe_senders.insert(rtp_packet.header.ssrc) {
                         self.probe_unanswered = false;
+                        self.probe_chain_changed = true;
+                        // A media stream's first packet is the start of its flow (not one of
+                        // a repair stream: RTX, FEC).
+                        if self.local_ssrcs.contains(&rtp_packet.header.ssrc) {
+                            let target = self.estimator.target_bitrate();
+                            if let Some(probing) = self.probing.as_mut() {
+                                probing.on_new_flow(target);
+                            }
+                        }
                     }
                     self.sent.push_back((msg.now, size));
                     if self.sent.len() > 4096 {
@@ -1403,6 +1441,7 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
         };
         // Another stream may bring what a probe cluster needs (an RTX stream to pad on).
         self.probe_unanswered = false;
+        self.probe_chain_changed = true;
         for ssrc in flow_ssrcs(info) {
             self.streams.insert(
                 ssrc,

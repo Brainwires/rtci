@@ -374,6 +374,7 @@ impl RTCPeerConnection {
         .with_inbound_reassembly_limit(setting_engine.sctp_inbound_reassembly_limit)
         .with_rto(setting_engine.sctp_rto)
         .with_max_retransmissions(setting_engine.sctp_max_retransmissions)
+        .with_handshake_timers_back_off_rto(setting_engine.sctp_handshake_timers_back_off_rto)
         .with_path_mtu_discovery(setting_engine.sctp_path_mtu_discovery.unwrap_or(Some(
             crate::peer_connection::transport::sctp::SctpPath::DEFAULT_MAX_IP_PACKET,
         )))
@@ -901,6 +902,7 @@ impl RTCPeerConnection {
             bundle_attributes_in_tagged_section_only: self
                 .setting_engine
                 .bundle_attributes_tagged_only,
+            bundle_only_browser_form: self.setting_engine.bundle_only_sections_in_browser_form,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: self.offers_sctp_over_tcp(&candidates),
@@ -1418,6 +1420,8 @@ impl RTCPeerConnection {
             bundle_attributes_in_tagged_section_only: self
                 .setting_engine
                 .bundle_attributes_tagged_only,
+            // Only an initial offer has bundle-only sections (RFC 9429 section 5.2.2).
+            bundle_only_browser_form: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             offered_tag_rtcp_mux_only: !include_unmatched
@@ -2183,6 +2187,11 @@ impl RTCPeerConnection {
                 self.rtp_transceivers[i].take_send_fmtp_from_remote(remote);
                 self.rtp_transceivers[i].take_receive_fmtp_from_local(local);
             }
+            // RFC 3264 sections 6.1 and 7: the formats this endpoint's answer added beyond the
+            // offer's are received (the offerer may send with any format of the answer).
+            self.rtp_transceivers[i].take_answered_formats(
+                (!we_offered && !is_rejected_media(answered)).then_some((answered, offered)),
+            );
             // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
             // the offer and the answer both have `a=extmap-allow-mixed`.
             let mixed = !is_rejected_media(answered)
@@ -3025,6 +3034,7 @@ impl RTCPeerConnection {
         } else {
             vec![]
         };
+        let appdata_names_the_track = self.setting_engine.msid_appdata_change_renews_track;
 
         for incoming_track in incoming_tracks.into_iter() {
             if let Some(transceiver) = self.rtp_transceivers.iter_mut().find(|transceiver| {
@@ -3038,7 +3048,7 @@ impl RTCPeerConnection {
                 // The MediaStreams the track is in, one per `a=msid` line (RFC 8830 section 2).
                 receiver.set_streams(incoming_track.stream_ids.clone());
 
-                if is_same_remote_track(receiver, &incoming_track) {
+                if is_same_remote_track(receiver, &incoming_track, appdata_names_the_track) {
                     // Keep SSRCs and codecs learned from RTP; the sender may no longer attach
                     // the MID/RID header extension needed to learn them again.
                     continue;
@@ -4836,7 +4846,7 @@ impl RTCPeerConnection {
             }
 
             let (codec, match_type) =
-                codec_parameters_fuzzy_search(&encoding.codec, &media_engine_codecs);
+                codec_parameters_search(&encoding.codec, None, &media_engine_codecs);
             if match_type == CodecMatch::None {
                 return Err(Error::ErrRTPTransceiverCodecUnsupported);
             }
@@ -5073,14 +5083,21 @@ impl RTCPeerConnection {
     }
 }
 
+/// Whether `incoming_track` describes the track `receiver` already has, so that what RTP
+/// taught the receiver (SSRCs bound by RID, their codecs) is kept. The msid-appdata counts
+/// only when `appdata_names_the_track` (`with_msid_appdata_change_renews_track`, RFC 8830
+/// section 3's model); by default it is ignored, as RFC 9429 section 5.8.2 reads `a=msid`
+/// ("ignoring any "appdata" field").
 fn is_same_remote_track(
     receiver: &RTCRtpReceiverInternal,
     incoming_track: &sdp::TrackDetails,
+    appdata_names_the_track: bool,
 ) -> bool {
     let track = receiver.track();
     // A description without msid-appdata leaves the track id to this side: any id it gave
     // the track is the same track.
-    if (!incoming_track.track_id.is_empty()
+    if (appdata_names_the_track
+        && !incoming_track.track_id.is_empty()
         && receiver.remote_track_id() != incoming_track.track_id)
         || track.track_id().is_empty()
         || track.stream_id() != &incoming_track.stream_id
@@ -5788,7 +5805,8 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
 
 /// Whether `sd` describes an SCTP association (RFC 8841 section 10.2: a data section that is
 /// not rejected, with a non-zero `a=sctp-port`), and whether it closes one (sections 10.3,
-/// 10.4: its data section is rejected or has `a=sctp-port:0`).
+/// 10.4: its data section is rejected or has `a=sctp-port:0`). A bundle-only data section of
+/// an offer (port zero with `a=bundle-only`, RFC 9143 section 7.2) is not rejected.
 fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
     let Some(section) = have_data_channel(sd) else {
         return (false, false);
@@ -5797,7 +5815,7 @@ fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
         .attributes
         .iter()
         .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
-    let closed = section.media_name.port.value == 0 || zero_port;
+    let closed = is_rejected_media(section) || zero_port;
     (!closed, closed)
 }
 

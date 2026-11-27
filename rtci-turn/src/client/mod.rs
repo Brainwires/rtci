@@ -76,7 +76,7 @@ use stun::xoraddr::*;
 
 use allocation::FamilyBlock;
 pub use allocation::{AllocateOptions, RelayTransport};
-use credential::{Credential, Login};
+use credential::{Checked, Credential, Login};
 pub use error::{ErrorResponse, RequestError};
 use transaction::*;
 
@@ -618,10 +618,18 @@ impl Client {
         let crypto = self.crypto_provider.crypto();
         let checked = match &tr.credential {
             Some(credential) => credential.check_response(&msg, &validator(), crypto),
-            None => validator().unauthenticated(&msg),
+            None => validator().unauthenticated(&msg).map(Checked::Valid),
         };
         let valid = match checked {
-            Ok(valid) => valid,
+            Ok(Checked::Valid(valid)) => valid,
+            Ok(Checked::NeverReceived) => {
+                // RFC 8489 §9.2.5: an unsigned 400, or a response whose nonce cookie promises
+                // PASSWORD-ALGORITHMS it lacks. Not a response at all: the transaction and
+                // its retransmissions go on, over a reliable transport too, and it is not
+                // counted as discarded for its integrity (it ends in a timeout).
+                debug!("discarding {} as never received (RFC 8489 §9.2.5)", msg);
+                return Ok(());
+            }
             Err(Rejection::IntegrityMissing | Rejection::IntegrityMismatch) => {
                 // A response to a signed request is believed only if it is signed with the
                 // same key (RFC 8489 §9.2.5). Over UDP it is dropped as if never received,

@@ -49,21 +49,26 @@ whole session reproducible in a test without a socket or a sleep.
 
 ## Status
 
-As of 2026-11-23 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
+As of 2026-11-26 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
 API, statistics, extensions, encoded transform and SVC specifications, and the IETF RFCs and drafts
 WebRTC uses); every row names the code and the test that proves it. From
 [docs/conformance/audit/COUNTS.md](docs/conformance/audit/COUNTS.md), of the rows that bind this engine:
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5080 | 5064 (99.7 %) | 5033 (99.1 %) |
-| SHOULD | 968 | 851 (87.9 %) | 851 (87.9 %) |
-| MAY | 607 | 445 (73.3 %) | 445 (73.3 %) |
+| MUST | 5094 | 5064 (99.4 %) | 5032 (98.8 %) |
+| SHOULD | 988 | 922 (93.3 %) | 916 (92.7 %) |
+| MAY | 605 | 501 (82.8 %) | 500 (82.6 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. 16 MUST rows are open (1 untested,
-10 partial, 5 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
-is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
+browser or a deployed peer cannot interoperate with it by default. 30 MUST rows are open (17 untested,
+11 partial, 2 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by the
+owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a MUST"),
+each with the setting that gives the RFC form (the `StrictRfc` profile sets all three): the H.264 de-interleaving order
+(**this default does not follow RFC 6184 section 7.2**: PDON does not start at 0, which would deliver a stream's DON 0
+last), the RTP circuit breaker's packet size (RFC 8083 section 3), and an answer with RTCP feedback its offer lacked,
+which is applied rather than refused (**this default does not follow RFC 9429 section 5.11**). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/rtci/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
 
@@ -115,6 +120,17 @@ The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnecti
 | `handle_write(TaggedRTCMessage)` | in | Queue an outbound RTP/RTCP/data-channel message |
 | `close()` | in | Shut the connection down |
 
+After `close()` keep the loop running for the connection until `poll_timeout()` returns `None`:
+drain `poll_write` onto the socket, feed what arrives with `handle_read`, call `handle_timeout`
+at `poll_timeout`. A closed connection does nothing else, but the engine's TURN allocations over
+UDP are deleted with a Refresh of LIFETIME 0 that is an ordinary STUN transaction (RFC 8656
+section 8, RFC 8489 section 6.2.1): it is retransmitted, a 438 is answered with the new nonce,
+and an Allocate still under way is followed and its allocation deleted. Each one done raises
+`OnTurnAllocationReleased` with the local address it used; when `poll_timeout()` is `None` the
+socket is free for another connection, whose Allocate on the same 5-tuple would otherwise be
+refused with 437 while the old allocation lives (up to its lifetime, 10 minutes by default).
+Dropping a connection without `close()` sends nothing.
+
 `handle_event` is also part of the trait, but `RTCEvent` is currently uninhabited: no value of it can be constructed,
 so there is nothing to call it with. It exists so the signature is already right when the first inbound event variant
 is added.
@@ -161,8 +177,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   let answer = RTCSessionDescription::answer(answer_sdp)?;
     //   pc.set_remote_description(Instant::now(), answer)?;
 
-    // 3. You own the socket.
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    // 3. You own the socket. Bind a concrete local address, the one you add as a host
+    //    candidate ("Feeding ICE Candidates"): `local_addr` below must be a local candidate's
+    //    address, and a socket bound to 0.0.0.0 reports 0.0.0.0:port, which none is.
+    let socket = UdpSocket::bind("192.168.1.100:0").await?;
     let local_addr = socket.local_addr()?;
     let mut buf = vec![0u8; 2000];
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(86400);
@@ -249,6 +267,40 @@ needed only when the engine is to run TCP (ICE-TCP candidates, TURN over TCP or 
 tagged `TransportProtocol::TCP` there is one the application framed itself, for a TCP candidate
 it added on its own.
 
+**The local address of a datagram.** The `local_addr` of a datagram given to `handle_read` is
+the address of the local *candidate* it arrived on, not necessarily the socket's own address:
+the ICE agent matches it exactly against its local candidates (RFC 8445 section 7.3.1.4) and
+discards anything else with "Discarded message, not a valid local candidate". Two cases trip
+ported code:
+
+- **A socket bound to the unspecified address** (`0.0.0.0:port`, `[::]:port`) must report the
+  concrete local address each datagram was received on (its destination address, from
+  `IP_PKTINFO` / `IPV6_RECVPKTINFO` or the platform's equivalent), which is the host
+  candidate's address; `socket.local_addr()` matches no host candidate. Or bind one socket per
+  local address, as `rtci-stream-driver`'s `PeerDriver` does (`PeerDriverConfig::addresses`).
+  A datagram that only "works" on `0.0.0.0:port` does so by accident: a server-reflexive
+  candidate whose related address is `0.0.0.0:port` matches it.
+- **A datagram relayed by a TURN allocation the application runs**
+  (`with_relay_gathering(RelayGathering::Application)`, relay candidate added with
+  `add_local_candidate`) carries `local_addr` = the relayed address (the relay candidate's
+  address), `peer_addr` = the peer from the Data indication or the channel. In the other
+  direction, a datagram from `poll_write` whose `transport.local_addr` is the relayed address
+  goes through the allocation (Send indication or ChannelData to `transport.peer_addr`), not
+  out of a socket. This is what the engine does for the allocations it runs itself.
+
+```text
+// wildcard-bound socket: the destination address of the datagram, not 0.0.0.0:port
+let local_addr = SocketAddr::new(destination_ip /* IP_PKTINFO */, socket.local_addr()?.port());
+// relayed by the application's TURN client
+pc.handle_read(TaggedBytesMut { now, message: payload, transport: TransportContext {
+    local_addr: relayed_addr, peer_addr: peer, transport_protocol: TransportProtocol::UDP, ecn: None } })?;
+// and out
+while let Some(msg) = pc.poll_write() {
+    if msg.transport.local_addr == relayed_addr { turn.send_to(&msg.message, msg.transport.peer_addr)?; }
+    else { socket_of(msg.transport.local_addr).send_to(&msg.message, msg.transport.peer_addr)?; }
+}
+```
+
 **Streams** (`rtci::shared::stream`): the engine names its TCP connections and listeners by id
 and the application only owns the sockets. After each input:
 
@@ -324,7 +376,9 @@ routes between connections: by the ufrag the first Binding request names (RFC 84
 
 Because RTC does no I/O, it also does no candidate gathering: **you** bind the sockets, so **you** tell the connection
 which local candidates exist. Build them with the `rtci-ice` candidate constructors and hand each one to
-`add_local_candidate`:
+`add_local_candidate`. A host candidate's address is a concrete local address, and it is the `local_addr` of every
+datagram you then feed for it (see "The local address of a datagram" above: not `0.0.0.0:port` for a wildcard-bound
+socket; the relayed address for a datagram relayed by your own TURN client):
 
 ```rust,no_run
 use rtci::peer_connection::RTCPeerConnectionBuilder;
@@ -359,12 +413,64 @@ Remote candidates arrive over your signaling channel and go in through `add_remo
 description to have been set first. For `srflx` and `relay` candidates, set `RTCIceCandidateInit::url` to the
 STUN/TURN server the candidate was gathered from so it is attributed correctly in `getStats`.
 
+After an ICE restart, send your local candidates to the peer again: a candidate the engine kept across the restart is
+not announced again, and without them a peer reached only through a relay never selects a pair in the new generation.
+(The restarted generation keeps its local candidates by default;
+`SettingEngineBuilder::with_discard_local_candidates_during_ice_restart(true)` drops them instead.)
+
+Browsers often send their host candidates under `<uuid>.local` names
+(draft-ietf-mmusic-mdns-ice-candidates). By default (`MulticastDnsMode::QueryOnly`) the connection resolves such a
+name with an mDNS query, which leaves through `poll_write` to `224.0.0.251:5353`, as the draft's processing procedure
+says (section 3.2.1, step 3). A name that does not resolve, the usual case when the peer is not on your link, is
+ignored when its query ends (10 s by default, `SettingEngineBuilder::with_multicast_dns_timeout`) and logged at debug
+level only; the peer's checks can still reach you as a peer-reflexive candidate. To send no mDNS at all and ignore
+remote `.local` candidates at once, set `SettingEngineBuilder::with_multicast_dns_mode(MulticastDnsMode::Disabled)`.
+
 ## Back-Pressure
 
 `poll_read` is the throttle. Undrained data-channel messages leave bytes in SCTP's reassembly queue, which lowers the
 receiver-window credit advertised in every SACK, which tells the peer to slow down. **Declining to call `poll_read` is
 how you apply back-pressure**; resume when the application catches up. Media is never throttled this way: RTP arrives
 over SRTP and is subject to none of SCTP's flow control.
+
+## Porting from webrtc-rs `rtc` / older forks
+
+Behaviour that differs from webrtc-rs `rtc` (and from this fork before the `rtci` names) and
+that ported code trips over first:
+
+- **`add_remote_candidate` needs `sdp_mid` or `sdp_mline_index`.** A non-empty candidate with
+  neither is refused with `Error::TypeError` (W3C webrtc-pc `addIceCandidate`). If your
+  signalling carries bare `candidate:` lines, set `sdp_mline_index` (under BUNDLE the index of
+  the group's tagged m= section, usually 0: the transport's candidates name it) or `sdp_mid`.
+- **The bare builder has no congestion control.** `RTCPeerConnectionBuilder::new()` without
+  `with_interceptor_registry` runs the RTCP session and key-frame requests only: no NACK, no
+  transport-wide feedback, no GCC, no pacer, no circuit breaker. Build the registry with
+  `register_default_interceptors_with_handles` (or `register_default_interceptors_with_options`)
+  and keep its `DefaultInterceptorHandles`: the encoder's target is
+  `handles.congestion_control.target_bitrate()`, per encoding `RTCRtpSender::target_bitrates()`.
+  `GccInterceptorBuilder` / `GccHandle` are for a chain assembled by hand.
+- **The target before feedback is a seed.** Until the first congestion feedback,
+  `CongestionControlHandle::target_bitrate()` returns the estimator's start (300 kbit/s by
+  default), never zero, and `stats().delay_based_bitrate` / `loss_based_bitrate` are already
+  `Some`; `stats().packet_loss` is `None` until feedback was folded in.
+- **Data channel messages to browsers are capped at 16 KiB under the `Rfc` profile.** Toward
+  a peer that does not announce interleaving (I-DATA, RFC 8260; no browser does) `send` of a
+  larger message returns `Error::ErrMessageTooLargeWithoutInterleaving` (RFC 8831 section 6.6,
+  a SHOULD). `with_sctp_message_size_limit_without_interleaving(false)` lifts it; see "Read
+  this first" in FORK.md.
+- **After `close()`, keep draining `poll_write`.** `close()` queues the last datagrams (DTLS
+  `close_notify`, a TURN Refresh of lifetime 0 that releases the allocation); call
+  `poll_write` until it returns `None` and send them. Dropping the connection sends nothing.
+- **The engine gathers server-reflexive and relay candidates itself by default.**
+  `ReflexiveGathering::Engine` and `RelayGathering::Engine` are the defaults: with `stun:` /
+  `turn:` servers configured the engine sends the Binding and Allocate requests through
+  `poll_write` from the UDP host candidates you add. Code that ran its own STUN / TURN
+  client sets `SettingEngineBuilder::with_server_reflexive_gathering(ReflexiveGathering::
+  Application)` and `with_relay_gathering(RelayGathering::Application)`, or the engine
+  gathers too.
+- **Two ways to restart ICE.** `RTCOfferOptions { ice_restart: true, .. }` restarts ICE in the
+  one offer `create_offer` is called with; `restart_ice()` (W3C `restartIce`) marks the
+  restart until an offer carries it and fires negotiation-needed. Both stage the same restart.
 
 ## Features
 
@@ -406,8 +512,9 @@ over SRTP and is subject to none of SCTP's flow control.
   `configure_ulpfec` (opt-in, not in the default codecs)
 - **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
   encoder, decoder or playout are left out, not reported as 0)
-- **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
-  bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
+- **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC and RFC 8888 feedback,
+  bandwidth estimation (GCC) with a pacer, the RTP circuit breaker and key-frame requests by default; the jitter buffer, FlexFEC and ULPFEC are opt-in.
+  The encoder's target: `register_default_interceptors_with_handles` (`DefaultInterceptorHandles::congestion_control`) or `RTCRtpSender::target_bitrates`
 - **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
@@ -417,7 +524,8 @@ I-DATA, a TURN server and others).
 ## Behaviour profiles
 
 The defaults follow the RFCs, MUST and SHOULD alike, except where a named browser or deployed peer cannot
-interoperate with the RFC form. Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
+interoperate with the RFC form, and the standing departures listed in [docs/conformance.md](docs/conformance.md)
+(for example, the H.264 de-interleaving default does not follow RFC 6184 section 7.2). Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
 differently is a setting, and a `BehaviourProfile` sets all of them in one call:
 
 ```rust,no_run
@@ -450,11 +558,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `Chrome`: libwebrtc's choice wherever both do a thing and choose differently (a timer, an order, a form on the wire,
   a lenient or strict acceptance rule). Capabilities the engine has and Chrome lacks stay on (SCTP interleaving,
   RFC 8888 feedback, FlexFEC, ...), so its offers are a superset of Chrome's.
-- `StrictRfc`: the RFC form even where the default is the interoperable one; for conformance testing, it **does not
-  interoperate with browsers**.
+- `StrictRfc`: the RFC form even where the default is the interoperable one or a standing departure; for conformance
+  testing, it **does not interoperate with browsers**.
 - `Performance`: the defaults, with each behaviour where an RFC permits a cheaper form that does the same thing set to
   it (RTCP `T_rr_interval` 1 s, congestion control feedback and reports inside RFC 3550's 5%), each value with its
   measured saving and cost. It never turns a capability off or leaves what the RFCs permit.
+
+**Known limit of the default profile: bundle-only sections and browsers.** An initial offer's bundle-only m= sections
+are written in the RFC 9143 / RFC 9429 form (RFC 9143 7.1.3 and 9.3.1.1, RFC 9429 5.2.1: no `a=rtcp-mux`, no ICE
+credentials, no other BUNDLE attribute), which
+Chromium, WebKit and Firefox refuse. With the default profile no browser accepts an rtci offer under `max-bundle` with
+more than one m= section (nor, by the same rule, a `balanced` offer with two sections of one media type). Use the
+`Chrome` profile, or
+`SettingEngineBuilder::with_bundle_only_sections_in_browser_form(true)` alone, or `balanced`
+with one section of each type. Offers from browsers and answers are not affected.
 
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads
@@ -531,7 +648,7 @@ The engine is the root crate, `rtci`; each protocol is a crate of its own, usabl
 
 These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
 `rtci-signal`, the examples' signalling helper; `rtci-video`, the video pipeline (in development, not part of
-the 0.2.0 release); the fuzz crates, the benchmark and the test environment's peers.
+the 0.2.1 release); the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 

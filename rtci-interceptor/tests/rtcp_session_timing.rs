@@ -410,6 +410,103 @@ fn several_local_ssrcs_report_together_once_per_interval() {
     }
 }
 
+/// RFC 8108 5.3.2 step b: the transmission time an aggregated SSRC "would have had if it had
+/// not been aggregated" is its tn after reconsideration alone: "suppression based on
+/// T_rr_interval MUST NOT be used in this calculation".
+///
+/// SSRC A reports alone at t1 (its T_rr_last); at a 2 Mbit/s session its interval T is a few
+/// tens of milliseconds, so its timer keeps expiring and being suppressed until t1 + 1 s
+/// (`T_rr_interval` one second, dithered by exactly 1.0 here). SSRC B joins at t1 + 0.3 s,
+/// has no T_rr_last, and sends its first regular packet a moment later at tB, carrying A
+/// (aggregated: A's timer is in the future). By reconsideration alone A would have sent
+/// within one T of tB, so tt_avg is within T/2 of tB, and the next regular packet, held
+/// until tt_avg + T_rr_interval, leaves about one second after tB. With the suppression in
+/// step b, A's tt would be at least t1 + 1 s, tt_avg some 0.35 s after tB and the next
+/// packet as late.
+#[test]
+fn an_aggregated_ssrcs_transmission_time_ignores_t_rr_interval_suppression() {
+    let mut chain = chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(2_000_000),
+        ..Default::default()
+    }));
+    let base = Instant::now();
+    chain.bind_local_stream(&video(10));
+    control(&mut chain, base, RtcpSessionControl::Start);
+
+    let step = secs(0.01);
+    let mut sent: Vec<Sent> = vec![];
+    let mut b_joined: Option<Instant> = None;
+    let mut b_at: Option<Instant> = None;
+    let mut sequence = 0u16;
+    let mut now = base;
+    while now < base + secs(6.0) {
+        // B joins 0.3 s after one of A's regular packets, once A has sent a few.
+        if b_at.is_none()
+            && sent.len() >= 2
+            && let Some(last) = sent.last()
+        {
+            b_at = Some(last.at + secs(0.3));
+        }
+        if b_joined.is_none()
+            && let Some(at) = b_at
+            && now >= at
+        {
+            chain.bind_local_stream(&video(20));
+            b_joined = Some(now);
+        }
+        sequence = sequence.wrapping_add(1);
+        chain
+            .handle_write(rtp(now, 10, sequence, u32::from(sequence) * 900))
+            .unwrap();
+        if b_joined.is_some() {
+            chain
+                .handle_write(rtp(now, 20, sequence, u32::from(sequence) * 900))
+                .unwrap();
+        }
+        sent.extend(run(&mut chain, now));
+        now += step;
+    }
+
+    let joined = b_joined.expect("B joined");
+    let senders = |sent: &Sent| -> Vec<u32> {
+        let mut ssrcs: Vec<u32> = sent
+            .get::<rtcp::sender_report::SenderReport>()
+            .iter()
+            .map(|sr| sr.ssrc)
+            .collect();
+        ssrcs.sort_unstable();
+        ssrcs
+    };
+    let at = offsets(&sent, base);
+    let t1 = sent
+        .iter()
+        .rev()
+        .find(|sent| sent.at < joined)
+        .expect("A's last regular packet before B joined")
+        .at;
+    let first_b = sent
+        .iter()
+        .position(|sent| sent.at >= joined)
+        .expect("a packet after B joined");
+    let tb = sent[first_b].at;
+    // B's first regular packet, inside A's suppression window, led by B and carrying A.
+    assert_eq!(Some(20), sent[first_b].leader(), "{at:?}");
+    assert_eq!(vec![10, 20], senders(&sent[first_b]), "{at:?}");
+    let window = tb.duration_since(t1).as_secs_f64();
+    assert!((0.3..0.5).contains(&window), "{window} {at:?}");
+
+    // The next regular packet: about T_rr_interval after tt_avg, which is within T/2 of tB.
+    let next = sent.get(first_b + 1).expect("the next regular packet");
+    assert_eq!(vec![10, 20], senders(next), "{at:?}");
+    let gap = next.at.duration_since(tb).as_secs_f64();
+    assert!(
+        (1.0..1.15).contains(&gap),
+        "next regular packet {gap} s after B's first; t1 {} s, tB {} s: {at:?}",
+        t1.duration_since(base).as_secs_f64(),
+        tb.duration_since(base).as_secs_f64(),
+    );
+}
+
 /// RFC 8108 5.2: when an endpoint's SSRCs cannot all report in one packet, "the initial
 /// ones ... SHOULD be those most useful to the peers": the senders. Four SSRCs that only
 /// receive join first, four that send join a second later; the first compound packet, with

@@ -112,9 +112,13 @@ fn group_has_cryptex(d: &SessionDescription, tags: &[&str]) -> bool {
     rtp.peek().is_some() && rtp.all(|m| m.has_attribute(ATTR_KEY_CRYPTEX))
 }
 
+/// An audio or video section that is not rejected. A bundle-only section of an offer (port
+/// zero with `a=bundle-only`, RFC 9143 section 7.2) is live: it is a section of the BUNDLE
+/// group, and the only kind of RTP section an offer whose tagged section is the data section
+/// has. It used to be counted out by its zero port.
 fn is_live_rtp_section(m: &MediaDescription) -> bool {
     let kind = m.media_name.media.to_ascii_lowercase();
-    (kind == "audio" || kind == "video") && m.media_name.port.value != 0
+    (kind == "audio" || kind == "video") && !crate::peer_connection::sdp::is_rejected_media(m)
 }
 
 impl RTCPeerConnection {

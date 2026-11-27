@@ -24,6 +24,11 @@ fn silence_suppression(sdp: &str) -> (bool, Option<String>) {
         .into_iter()
         .find(|s| s[0].starts_with("m=audio"))
         .expect("an audio section");
+    section_silence_suppression(&section)
+}
+
+/// [`silence_suppression`] of one section.
+fn section_silence_suppression(section: &[String]) -> (bool, Option<String>) {
     let cn = section
         .iter()
         .any(|l| l.starts_with("a=rtpmap:") && l.contains(" CN/"));
@@ -112,5 +117,44 @@ fn an_answer_has_silence_suppression_only_where_the_offer_had_it() -> TestResult
         (false, Some("0".to_owned())),
         "{refused}"
     );
+    Ok(())
+}
+
+/// RFC 9429 section 5.2.3.2 applies to every audio section of the offer, the bundle-only ones
+/// of an initial offer included (RFC 9143 section 7.2: port zero with `a=bundle-only` is a
+/// section the answerer accepts in the BUNDLE group, not a rejected one). The second audio
+/// section of a `balanced` initial offer is bundle-only (RFC 9429 section 5.2.1); 0.2.0 read
+/// its zero port as a rejection and left its formats as the media engine had them.
+#[test]
+fn a_bundle_only_audio_section_follows_the_option_too() -> TestResult {
+    for (vad, expected) in [
+        (true, (true, Some("1".to_owned()))),
+        (false, (false, Some("0".to_owned()))),
+    ] {
+        let mut pc = audio_peer()?;
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, Some(RTCRtpTransceiverInit::recvonly()))?;
+        let offer = pc
+            .create_offer(Some(RTCOfferOptions {
+                voice_activity_detection: Some(vad),
+                ..Default::default()
+            }))?
+            .sdp;
+        let audio: Vec<Vec<String>> = media_sections(&offer)
+            .into_iter()
+            .filter(|s| s[0].starts_with("m=audio"))
+            .collect();
+        assert_eq!(audio.len(), 2, "{offer}");
+        assert!(
+            audio[1][0].starts_with("m=audio 0 ") && audio[1].iter().any(|l| l == "a=bundle-only"),
+            "the second audio section is bundle-only: {offer}"
+        );
+        for section in &audio {
+            assert_eq!(
+                section_silence_suppression(section),
+                expected,
+                "vad {vad}: {offer}"
+            );
+        }
+    }
     Ok(())
 }

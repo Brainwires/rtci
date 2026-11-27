@@ -1,13 +1,16 @@
 // Browser <-> rtci interop beyond plain media and data: Cryptex, loss recovery with a
 // browser sender, TURN relay, ICE-TCP, the browser as the answerer, transceiver stop and m-line
 // reuse, direction changes, rollback and glare, large messages, a wrong fingerprint either way,
-// simulcast with RTX, the browser's getStats() against the Rust side's counters, and a
-// transport per section when the browser's offer is not bundled.
+// simulcast with RTX, the browser's getStats() against the Rust side's counters, a
+// transport per section when the browser's offer is not bundled, and max-bundle with audio,
+// video and a data channel from either side.
 //
 // Every skip goes through na.mjs with its kind and citation (gate.mjs fails an uncited one).
 import { test, expect } from "@playwright/test";
 import { naBrowser, naEnv } from "./na.mjs";
-import { WS, TURN, setupPage, rustUdpPort, impair, netemDrops, impairFromRust, netemDropsFromRust } from "./common.mjs";
+import {
+  WS, TURN, setupPage, rustUdpPort, impair, netemDrops, impairFromRust, netemDropsFromRust, unlessOffFormat,
+} from "./common.mjs";
 
 setupPage();
 
@@ -55,7 +58,11 @@ test("cryptex: header extensions encrypted both ways", async ({ page }) => {
 
 // ---- loss recovery with a browser sender (NACK + RTX, RFC 4585 / RFC 4588) ----
 
-test("loss recovery: NACK and RTX repair a browser's video under netem", async ({ page }) => {
+// One attempt of the cell below: the call, 12 s under netem, and what both sides counted.
+// The video's payload types are sampled with the other figures (Interop.codecView), and
+// `offPt` is what Rust received on a payload type the browser's offer does not have, and
+// `notInAnswer` on one the answer does not have either (common.mjs unlessOffFormat).
+async function lossRecoveryAttempt(page) {
   await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "reflect", video: "VP8" });
     window.S = s;
@@ -96,16 +103,25 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
           totalFreezesDuration: x.totalFreezesDuration,
         };
       const inbound = [pick(await Interop.inbound(S.pc, "video"))];
+      const views = [await Interop.codecView(S.pc)];
       await Interop.sleep(6000);
       inbound.push(pick(await Interop.inbound(S.pc, "video")));
+      views.push(await Interop.codecView(S.pc));
       await Interop.sleep(6000);
       inbound.push(pick(await Interop.inbound(S.pc, "video")));
+      views.push(await Interop.codecView(S.pc));
       let out = null;
       (await S.pc.getStats()).forEach((x) => {
         if (x.type === "outbound-rtp" && x.kind === "video") out = x;
       });
       const report = await S.report();
-      return { out, inbound, report, rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx };
+      const offPt = Interop.receivedOutside(report, S.pc.localDescription.sdp);
+      const notInAnswer = Interop.receivedOutside(report, S.pc.remoteDescription.sdp);
+      const defaults = offPt.length ? await Interop.defaultCodecLines("video") : null;
+      return {
+        out, inbound, report, views, offPt, notInAnswer, defaults, descriptions: S.descriptions,
+        rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx,
+      };
     });
   } finally {
     restore();
@@ -114,6 +130,13 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   const drops = netemDrops() - dropsBefore;
   const dropsToBrowser = netemDropsFromRust() - dropsToBrowserBefore;
   await page.evaluate(() => S.close());
+  return { r, drops, dropsToBrowser };
+}
+
+test("loss recovery: NACK and RTX repair a browser's video under netem", async ({ page }) => {
+  // Room for the second attempt of a WebKit payload type switch.
+  test.setTimeout(120_000);
+  const { r, drops, dropsToBrowser } = await unlessOffFormat(page, await lossRecoveryAttempt(page), lossRecoveryAttempt);
   expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
   expect(dropsToBrowser, "netem dropped nothing on the way to the browser: the filter did not apply").toBeGreaterThan(0);
   expect(r.rtx, "the Rust answer negotiates no RTX for the video").toBe(true);
@@ -964,6 +987,394 @@ test("balanced, video answered outside the group: a rollback of Rust's offer kee
   expectBalancedUnbundled(r);
 });
 
+// ---- bundlePolicy "max-bundle" with audio, video and a data channel (RFC 9429 4.1.1, 5.2.1, 5.3.1; RFC 9143 7.2, 13; W3C webrtc-pc 4.2.5) ----
+
+// Under max-bundle (RFC 9429 4.1.1 must-bundle) an initial offer gives every m= section but the
+// first port zero and `a=bundle-only` (5.2.1). Such a section is bundled, not rejected (RFC 9143
+// 7.2, 13): the answer accepts it with a port and no `a=bundle-only` (RFC 9429 5.3.1). 0.1.0 and
+// 0.2.0 took a bundle-only data section for a rejected one and closed the channel, and missed
+// Cryptex when every RTP section was bundle-only (the data section first); nothing caught it,
+// since browsers default to balanced and no cell asked them for max-bundle (handoff
+// bundleonly.md). Each cell asserts the channel opens and carries messages both ways, the SCTP
+// association is connected on both sides, and audio and video flow. What the browser wrote
+// (section order, ports, bundle-only) is the `max-bundle-offer` / `max-bundle-answer`
+// annotation, not asserted: browsers differ in where they place the data section.
+
+// The browser offers under max-bundle: audio, video (VP8) and a channel, the channel created
+// first when `dataFirst`; Rust reflects the media (`cryptex`: both sides negotiate Cryptex,
+// RFC 9335). With `renegotiate` the browser then offers again and Rust offers a new channel.
+async function maxBundleBrowserOffers(page, { dataFirst = false, cryptex = false, renegotiate = false } = {}) {
+  return page.evaluate(async ([ws, dataFirst, cryptex, renegotiate]) => {
+    const s = await Interop.open(
+      ws,
+      { media: "reflect", video: "VP8", audio: true, ...(cryptex ? { cryptex: "negotiate" } : {}) },
+      { rtc: { bundlePolicy: "max-bundle", ...(cryptex ? { rtpHeaderEncryptionPolicy: "negotiate" } : {}) } },
+    );
+    // Rust's descriptions as Rust wrote them (the browser's remoteDescription is its own
+    // serialisation: libwebrtc writes the fingerprint and a=rtcp-mux per section whatever it got).
+    const received = (type) => {
+      const d = [...s.descriptions].reverse().find(([dir, t]) => dir === "received" && t === type);
+      return d ? d[2] : "";
+    };
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    const closed = [];
+    const channel = () => {
+      const c = s.pc.createDataChannel("max-bundle", { ordered: true });
+      c.addEventListener("close", () => closed.push("close"));
+      c.addEventListener("error", (e) => closed.push(`error ${e.error?.message || ""}`));
+      return c;
+    };
+    const tracks = () => {
+      s.pc.addTransceiver(Interop.audioStream().getAudioTracks()[0], { direction: "sendrecv" });
+      const video = s.pc.addTransceiver(Interop.canvasStream().getVideoTracks()[0], { direction: "sendrecv" });
+      Interop.prefer(video, "video", "video/VP8");
+    };
+    let dc;
+    if (dataFirst) {
+      dc = channel();
+      tracks();
+    } else {
+      tracks();
+      dc = channel();
+    }
+    await s.negotiate();
+    const offer = Interop.bundleLayout(s.pc.localDescription.sdp);
+    const answer = Interop.bundleLayout(received("answer"));
+    await s.connected();
+    const opened = await Interop.until(() => dc.readyState === "open" || closed.length > 0, 15000, "the channel to open")
+      .then(() => dc.readyState === "open")
+      .catch(() => false);
+    // Messages both ways: the browser's, and Rust's echo of each.
+    const exchange = async (n) => {
+      if (dc.readyState !== "open") return 0;
+      const e = await Interop.echo(dc, n);
+      await e.wait(n, 10000).catch(() => {});
+      return e.got.length;
+    };
+    const media = async (frames, packets) => {
+      const video = await Interop.until(async () => {
+        const v = await Interop.inbound(s.pc, "video");
+        return v && v.framesDecoded > frames && v;
+      }, 25000, `${frames} decoded frames`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+      const audio = await Interop.until(async () => {
+        const a = await Interop.inbound(s.pc, "audio");
+        return a && a.packetsReceived > packets && a;
+      }, 15000, `${packets} audio packets`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
+      return {
+        video: video.error ? video : { framesDecoded: video.framesDecoded, mimeType: video.mimeType },
+        audio: audio.error ? audio : { packetsReceived: audio.packetsReceived },
+      };
+    };
+    const echoed = await exchange(5);
+    const first = await media(15, 50);
+    let later = null;
+    if (renegotiate) {
+      // A subsequent offer from the browser (no section is bundle-only now, RFC 9143 7.5.1).
+      await s.negotiate();
+      const reoffer = Interop.bundleLayout(s.pc.localDescription.sdp);
+      const reanswer = Interop.bundleLayout(received("answer"));
+      // Rust offers: its new channel `from-rust` on the same association.
+      const fromRust = new Promise((res) => {
+        s.pc.ondatachannel = (e) => {
+          e.channel.onmessage = (m) => res([e.channel.label, m.data]);
+        };
+      });
+      const offers = s.remoteOffers;
+      s.send({ type: "request-offer" });
+      await Interop.until(() => s.remoteOffers > offers && s.pc.signalingState === "stable", 15000, "Rust's offer").catch(() => {});
+      const rustOffer = Interop.bundleLayout(received("offer"));
+      const hello = await Promise.race([fromRust, Interop.sleep(15000).then(() => "timeout")]);
+      later = {
+        reoffer,
+        reanswer,
+        rustOffer,
+        hello,
+        open: dc.readyState === "open",
+        echoed: await exchange(5),
+        media: await media((first.video.framesDecoded || 15) + 15, (first.audio.packetsReceived || 50) + 50),
+      };
+    }
+    const report = await s.report();
+    const sctp = s.pc.sctp ? s.pc.sctp.state : undefined;
+    const closedBefore = [...closed];
+    const ports = (dirs) => [...new Set(s.descriptions.filter(([d]) => dirs.includes(d))
+      .flatMap(([, , sdp]) => Interop.bundleLayout(sdp).sections.map((m) => m.sctpPort).filter(Boolean)))];
+    s.close();
+    return {
+      offer, answer, opened, echoed, closed: closedBefore, first, later, sctp,
+      sctpPorts: { browser: ports(["sent", "local"]), rust: ports(["received"]) },
+      rust: { sctp: report.sctp, cryptex: report.cryptex, rtp: report.rtp, dcReceived: report.dcReceived },
+      errors: report.errors.concat(s.errors),
+      descriptions: Interop.transportLines(s.descriptions),
+    };
+  }, [WS, dataFirst, cryptex, renegotiate]);
+}
+
+// Rust offers under max-bundle (`?bundle_policy=max-bundle`): audio, video and its channel
+// `from-rust`, created before the tracks (`dataChannel` "before") or after them ("after"); it
+// streams the fixtures and the browser answers. With `renegotiate` the browser then offers and
+// Rust offers a second channel. `profile` is the interop peer's behaviour profile (`?profile=`):
+// "chrome" writes the bundle-only sections in the form browsers accept
+// (`with_bundle_only_sections_in_browser_form`: a=rtcp-mux, the group's ICE credentials, a
+// session-level fingerprint), null the default, the
+// RFC 9143 form, which Chromium, WebKit and Firefox refuse (test-env run 45900172027).
+async function maxBundleRustOffers(page, { dataChannel, renegotiate = false, profile = "chrome" }) {
+  return page.evaluate(async ([ws, dataChannel, renegotiate]) => {
+    const s = await Interop.open(ws, {});
+    // Rust's descriptions as Rust wrote them (the browser's remoteDescription is its own
+    // serialisation: libwebrtc writes the fingerprint and a=rtcp-mux per section whatever it got).
+    const received = (type) => {
+      const d = [...s.descriptions].reverse().find(([dir, t]) => dir === "received" && t === type);
+      return d ? d[2] : "";
+    };
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    // Every channel Rust opens, with its first message (`hello-from-rust`) and its close events.
+    const channels = [];
+    s.pc.ondatachannel = (e) => {
+      const c = { channel: e.channel, closed: [] };
+      c.hello = new Promise((res) => e.channel.addEventListener("message", (m) => res(m.data), { once: true }));
+      e.channel.addEventListener("close", () => c.closed.push("close"));
+      e.channel.addEventListener("error", (ev) => c.closed.push(`error ${ev.error?.message || ""}`));
+      channels.push(c);
+    };
+    const helloOf = async (i) => {
+      await Interop.until(() => channels.length > i, 15000, `Rust's channel ${i + 1}`).catch(() => {});
+      return channels[i] ? Promise.race([channels[i].hello, Interop.sleep(15000).then(() => "timeout")]) : "no channel";
+    };
+    // The browser's messages on Rust's first channel, counted by Rust (`dcReceived`).
+    const toRust = async (n) => {
+      const c = channels[0];
+      if (!c || c.channel.readyState !== "open") return 0;
+      const before = (await s.report()).dcReceived;
+      for (let i = 0; i < n; i++) c.channel.send(`to-rust-${i}`);
+      return Interop.until(async () => {
+        const got = (await s.report()).dcReceived - before;
+        return got >= n && got;
+      }, 10000, `${n} messages at Rust`).catch(async () => (await s.report()).dcReceived - before);
+    };
+    const media = async (frames, packets) => {
+      const video = await Interop.until(async () => {
+        const v = await Interop.inbound(s.pc, "video");
+        return v && v.framesDecoded > frames && v;
+      }, 25000, `${frames} decoded frames`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+      const audio = await Interop.until(async () => {
+        const a = await Interop.inbound(s.pc, "audio");
+        return a && a.packetsReceived > packets && a;
+      }, 15000, `${packets} audio packets`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
+      return {
+        video: video.error ? video : { framesDecoded: video.framesDecoded, mimeType: video.mimeType },
+        audio: audio.error ? audio : { packetsReceived: audio.packetsReceived },
+      };
+    };
+    s.send({ type: "request-offer", tracks: ["OPUS", "VP8"], data_channel: dataChannel });
+    await Interop.until(() => s.remoteOffers > 0 && (s.pc.signalingState === "stable" || s.errors.length > 0), 15000, "Rust's offer")
+      .catch(() => {});
+    // The browser did not take Rust's offer (or Rust made none): what it said, and the offer.
+    if (s.errors.length > 0 || !s.pc.remoteDescription || s.pc.signalingState !== "stable") {
+      const received = s.descriptions.find(([d, t]) => d === "received" && t === "offer");
+      const refused = {
+        errors: s.errors,
+        signalingState: s.pc.signalingState,
+        remoteOffers: s.remoteOffers,
+        layout: received ? Interop.bundleLayout(received[2]) : null,
+        offer: received ? received[2] : null,
+      };
+      s.close();
+      return { refused };
+    }
+    const offer = Interop.bundleLayout(received("offer"));
+    const answer = Interop.bundleLayout(s.pc.localDescription.sdp);
+    await s.connected();
+    const hello = await helloOf(0);
+    const sent = await toRust(5);
+    const first = await media(15, 50);
+    let later = null;
+    if (renegotiate) {
+      await s.negotiate();
+      const reoffer = Interop.bundleLayout(s.pc.localDescription.sdp);
+      const reanswer = Interop.bundleLayout(received("answer"));
+      const offers = s.remoteOffers;
+      s.send({ type: "request-offer" });
+      await Interop.until(() => s.remoteOffers > offers && s.pc.signalingState === "stable", 15000, "Rust's second offer").catch(() => {});
+      const rustOffer = Interop.bundleLayout(received("offer"));
+      later = {
+        reoffer,
+        reanswer,
+        rustOffer,
+        hello: await helloOf(1),
+        open: channels[0]?.channel.readyState === "open",
+        sent: await toRust(5),
+        media: await media((first.video.framesDecoded || 15) + 15, (first.audio.packetsReceived || 50) + 50),
+      };
+    }
+    const report = await s.report();
+    const sctp = s.pc.sctp ? s.pc.sctp.state : undefined;
+    const closedBefore = channels[0] ? [...channels[0].closed] : ["no channel"];
+    const ports = (dirs) => [...new Set(s.descriptions.filter(([d]) => dirs.includes(d))
+      .flatMap(([, , sdp]) => Interop.bundleLayout(sdp).sections.map((m) => m.sctpPort).filter(Boolean)))];
+    s.close();
+    return {
+      offer, answer, hello, sent, first, later, sctp,
+      closed: closedBefore,
+      sctpPorts: { browser: ports(["sent", "local"]), rust: ports(["received"]) },
+      rust: { sctp: report.sctp, rtp: report.rtp, dcReceived: report.dcReceived },
+      errors: report.errors.concat(s.errors),
+      descriptions: Interop.transportLines(s.descriptions),
+    };
+  }, [`${WS}/?bundle_policy=max-bundle${profile ? `&profile=${profile}` : ""}`, dataChannel, renegotiate]);
+}
+
+// An answer accepts every section of the offer: in order and of the same kinds, each with a
+// port and none `a=bundle-only` (RFC 9429 5.3.1, RFC 9143 7.3.3), one BUNDLE group naming every
+// mid (RFC 9143 7.3), the data section with its `a=sctp-port` (RFC 8841 5.1).
+function expectAcceptsEverySection(offer, answer, ctx) {
+  expect(answer.sections.map((m) => m.kind), ctx).toEqual(offer.sections.map((m) => m.kind));
+  for (const m of answer.sections) {
+    expect(m.port, `${m.kind} ${m.mid} answered with port zero: ${ctx}`).not.toBe(0);
+    expect(m.bundleOnly, `${m.kind} ${m.mid} answered a=bundle-only: ${ctx}`).toBe(false);
+  }
+  expect(answer.groups.length, ctx).toBe(1);
+  expect([...answer.groups[0]].sort(), ctx).toEqual(answer.sections.map((m) => m.mid).sort());
+  const data = answer.sections.find((m) => m.kind === "application");
+  expect(data?.sctpPort, ctx).toBeTruthy();
+}
+
+// What both directions share: the channel never closed, the association is connected on both
+// sides, each side's a=sctp-port is the same in all its descriptions (RFC 8841 5.1, 10.4), audio
+// and video flow, and no side reported an error.
+function expectMaxBundleSession(r, ctx) {
+  expect(r.closed, ctx).toEqual([]);
+  expect(r.rust.sctp?.state, ctx).toBe("connected");
+  if (r.sctp !== undefined) expect(r.sctp, ctx).toBe("connected");
+  expect(r.sctpPorts.browser.length, ctx).toBe(1);
+  expect(r.sctpPorts.rust.length, ctx).toBe(1);
+  expect(r.first.video.error, ctx).toBeUndefined();
+  expect(r.first.video.mimeType.toLowerCase()).toBe("video/vp8");
+  expect(r.first.audio.error, ctx).toBeUndefined();
+  if (r.later) {
+    expectAcceptsEverySection(r.later.reoffer, r.later.reanswer, ctx);
+    // Rust's later offer disables no section: each has a port or is bundle-only (RFC 9143 7.2).
+    for (const m of r.later.rustOffer.sections) {
+      expect(m.port !== 0 || m.bundleOnly, `Rust's later offer disables ${m.kind} ${m.mid}: ${ctx}`).toBe(true);
+    }
+    expect(r.later.open, `the channel is open after the renegotiation: ${ctx}`).toBe(true);
+    expect(r.later.media.video.error, ctx).toBeUndefined();
+    expect(r.later.media.audio.error, ctx).toBeUndefined();
+  }
+  expect(r.errors, ctx).toEqual([]);
+}
+
+function expectMaxBundleBrowserOffer(r) {
+  test.info().annotations.push({ type: "max-bundle-offer", description: JSON.stringify(r.offer) });
+  const ctx = JSON.stringify({ offer: r.offer, answer: r.answer, closed: r.closed, rust: r.rust, sctp: r.sctp, sctpPorts: r.sctpPorts, later: r.later, descriptions: r.descriptions });
+  expect(r.offer.sections.filter((m) => m.kind === "application").length, ctx).toBe(1);
+  expectAcceptsEverySection(r.offer, r.answer, ctx);
+  expect(r.opened, `the channel opened: ${ctx}`).toBe(true);
+  expect(r.echoed, `5 messages each way: ${ctx}`).toBe(5);
+  // Cryptex offered for RTP sections that are all bundle-only when the data section is first
+  // (RFC 9335 4 with RFC 9143 7.2) is answered and negotiated.
+  if (r.offer.cryptex) {
+    expect(r.answer.cryptex, `the offer has a=cryptex, the answer must: ${ctx}`).toBe(true);
+    expect(r.rust.cryptex, ctx).toBe(true);
+  }
+  expectMaxBundleSession(r, ctx);
+  if (r.later) {
+    expect(r.later.hello, ctx).toEqual(["from-rust", "hello-from-rust"]);
+    expect(r.later.echoed, `5 messages each way after the renegotiation: ${ctx}`).toBe(5);
+  }
+}
+
+function expectMaxBundleRustOffer(r, { browserForm = true } = {}) {
+  if (r.refused) {
+    test.info().annotations.push({ type: "max-bundle-refused-offer", description: r.refused.offer || "no offer" });
+    throw new Error(
+      `the browser did not apply Rust's max-bundle offer: errors ${JSON.stringify(r.refused.errors)}; ` +
+        `signalingState ${r.refused.signalingState}, offers ${r.refused.remoteOffers}; ` +
+        `layout ${JSON.stringify(r.refused.layout)}\n${r.refused.offer}`,
+    );
+  }
+  test.info().annotations.push({ type: "max-bundle-answer", description: JSON.stringify(r.answer) });
+  const ctx = JSON.stringify({ offer: r.offer, answer: r.answer, hello: r.hello, sent: r.sent, closed: r.closed, rust: r.rust, sctp: r.sctp, sctpPorts: r.sctpPorts, later: r.later, descriptions: r.descriptions });
+  // Rust's initial offer under max-bundle (must-bundle by default, RFC 9429 4.1.1): the first
+  // section has a port, every other is port zero and bundle-only (5.2.1), the data section is
+  // last ("Lastly", 5.2.1) and names its sctp-port, one group names every mid.
+  expect(r.offer.sections.map((m) => m.kind).sort(), ctx).toEqual(["application", "audio", "video"]);
+  expect(r.offer.sections[0].port, ctx).not.toBe(0);
+  expect(r.offer.sections[0].bundleOnly, ctx).toBe(false);
+  for (const m of r.offer.sections.slice(1)) {
+    expect([m.port, m.bundleOnly], `${m.kind} ${m.mid}: ${ctx}`).toEqual([0, true]);
+  }
+  expect(r.offer.sections.at(-1).kind, ctx).toBe("application");
+  expect(r.offer.sections.at(-1).sctpPort, ctx).toBeTruthy();
+  expect(r.offer.groups.length, ctx).toBe(1);
+  expect([...r.offer.groups[0]].sort(), ctx).toEqual(r.offer.sections.map((m) => m.mid).sort());
+  // The browser form (Chrome profile): a=rtcp-mux in the bundle-only RTP sections, the tagged
+  // section's ICE credentials in every bundle-only section, the fingerprint at session level
+  // too; the RFC 9143 7.1.3 form: none of them.
+  for (const m of r.offer.sections.slice(1)) {
+    expect(m.rtcpMux, `${m.kind} ${m.mid} a=rtcp-mux: ${ctx}`).toBe(browserForm && m.kind !== "application");
+    expect(m.iceUfrag, `${m.kind} ${m.mid} a=ice-ufrag: ${ctx}`).toBe(browserForm ? r.offer.sections[0].iceUfrag : null);
+  }
+  expect(r.offer.sessionFingerprint, `session-level a=fingerprint: ${ctx}`).toBe(browserForm);
+  expectAcceptsEverySection(r.offer, r.answer, ctx);
+  expect(r.hello, `Rust's message on its channel: ${ctx}`).toBe("hello-from-rust");
+  expect(r.sent, `5 messages from the browser reached Rust: ${ctx}`).toBe(5);
+  expectMaxBundleSession(r, ctx);
+  if (r.later) {
+    expect(r.later.hello, ctx).toBe("hello-from-rust");
+    expect(r.later.sent, `5 messages from the browser after the renegotiation: ${ctx}`).toBe(5);
+  }
+}
+
+test("max-bundle: the browser offers audio, video and a data channel, Rust answers", async ({ page }) => {
+  expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page));
+});
+
+// The channel created before the tracks. Cryptex is negotiated too (when the browser offers it:
+// none in the image does, rtpHeaderEncryptionPolicy unsupported). No browser puts the data
+// section first even so (recorded offers, test-env 45898141031): Chromium and WebKit write
+// audio, video, application, all ported; Firefox audio first, video and data bundle-only.
+test("max-bundle: the browser offers a data channel created before audio and video, Rust answers", async ({ page }) => {
+  expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page, { dataFirst: true, cryptex: true }));
+});
+
+test("max-bundle: Rust offers audio, video and a data channel (Chrome profile), the browser answers", async ({ page }) => {
+  expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "after" }));
+});
+
+test("max-bundle: Rust offers a data channel created before audio and video (Chrome profile), the browser answers", async ({ page }) => {
+  expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "before" }));
+});
+
+test("max-bundle: after the browser's offer, a renegotiation from each side keeps the data channel open", async ({ page }) => {
+  expectMaxBundleBrowserOffer(await maxBundleBrowserOffers(page, { renegotiate: true }));
+});
+
+test("max-bundle: after Rust's offer (Chrome profile), a renegotiation from each side keeps the data channel open", async ({ page }) => {
+  expectMaxBundleRustOffer(await maxBundleRustOffers(page, { dataChannel: "after", renegotiate: true }));
+});
+
+// Rust's default profile writes the bundle-only sections in the RFC 9143 7.1.3 / 9.3.1.1 form
+// (no a=rtcp-mux, no BUNDLE attribute at all). Every browser in the matrix refuses it
+// (test-env 45900172027): the cell records that refusal as na-browser, with the browser's own
+// error text, and passes in full if a browser ever takes the offer. A refusal for any other
+// reason fails the cell.
+const RTCP_MUX_REFUSAL = /rtcp-mux must be enabled when BUNDLE is enabled|missing a=rtcp-mux, which is required by rtcpMuxPolicy/;
+test("max-bundle: Rust offers audio, video and a data channel in the RFC 9143 form (default profile), the browser answers or refuses", async ({ page }) => {
+  const r = await maxBundleRustOffers(page, { dataChannel: "after", profile: null });
+  if (r.refused) {
+    test.info().annotations.push({ type: "max-bundle-refused-offer", description: r.refused.offer || "no offer" });
+    const said = r.refused.errors.join(" ");
+    expect(said, `refused for another reason: ${JSON.stringify(r.refused)}`).toMatch(RTCP_MUX_REFUSAL);
+    naBrowser(
+      true,
+      `this browser refuses an initial offer whose bundle-only RTP section has no a=rtcp-mux (the RFC form): ${said}`,
+      "RFC 9143 7.1.3 (no IDENTICAL / TRANSPORT attribute in a bundle-only m= section) and 9.3.1.1 (a=rtcp-mux \"excluding any bundle-only m= sections\"); observed at run time, first in test-env 45900172027; SettingEngineBuilder::with_bundle_only_sections_in_browser_form (Chrome profile) is the form browsers take",
+    );
+  }
+  expectMaxBundleRustOffer(r, { browserForm: false });
+});
+
 // ---- a wrong DTLS fingerprint (RFC 5763 5, RFC 8122 5) ----
 
 test("wrong fingerprint in Rust's answer: the browser fails the connection", async ({ page }) => {
@@ -1309,7 +1720,8 @@ test("a codec of another clock rate mid-stream, the browser offering, an SSRC pe
 // only by the RTX payload type's apt in that single-stream section; RTX that arrives before
 // any original (a browser's early padding probes) is dropped. NACK and RTX must still repair
 // what netem drops.
-test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by its payload type", async ({ page }) => {
+// One attempt of the cell below (see lossRecoveryAttempt).
+async function unsignalledLossRecoveryAttempt(page) {
   await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "reflect", video: "VP8" });
     window.S = s;
@@ -1325,20 +1737,36 @@ test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by i
   let r;
   try {
     r = await page.evaluate(async () => {
-      await Interop.sleep(12000);
+      const views = [await Interop.codecView(S.pc)];
+      await Interop.sleep(6000);
+      views.push(await Interop.codecView(S.pc));
+      await Interop.sleep(6000);
+      views.push(await Interop.codecView(S.pc));
       let out = null;
       (await S.pc.getStats()).forEach((x) => {
         if (x.type === "outbound-rtp" && x.kind === "video") out = x;
       });
       const report = await S.report();
       const frames = (await Interop.inbound(S.pc, "video"))?.framesDecoded || 0;
-      return { out, report, frames, rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx };
+      const offPt = Interop.receivedOutside(report, S.pc.localDescription.sdp);
+      const notInAnswer = Interop.receivedOutside(report, S.pc.remoteDescription.sdp);
+      const defaults = offPt.length ? await Interop.defaultCodecLines("video") : null;
+      return {
+        out, report, frames, views, offPt, notInAnswer, defaults, descriptions: S.descriptions,
+        rtx: Interop.mlines(S.pc.remoteDescription.sdp)[0].rtx,
+      };
     });
   } finally {
     restore();
   }
   const drops = netemDrops() - dropsBefore;
   await page.evaluate(() => S.close());
+  return { r, drops };
+}
+
+test("loss recovery with the browser's SSRCs unsignalled: RTX is associated by its payload type", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { r, drops } = await unlessOffFormat(page, await unsignalledLossRecoveryAttempt(page), unsignalledLossRecoveryAttempt);
   expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
   expect(r.rtx, "the Rust answer negotiates no RTX for the video").toBe(true);
   expect(r.report.errors).toEqual([]);

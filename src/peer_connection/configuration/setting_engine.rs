@@ -453,6 +453,9 @@ pub struct SettingEngine {
     pub(crate) dtls_new_association_on_previous_addresses: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
+    /// [`SettingEngineBuilder::with_unoffered_feedback_refused`]: RFC 9429 section 5.11, an
+    /// answer with `a=rtcp-fb` the offer did not have is an error.
+    pub(crate) unoffered_feedback_refused: bool,
     /// RFC 8830 section 3: a new msid-appdata in a section is a new track: the receiver's
     /// track ends and a new one takes its place.
     pub(crate) msid_appdata_change_renews_track: bool,
@@ -482,6 +485,8 @@ pub struct SettingEngine {
     pub(crate) max_bundle_ignored: bool,
     /// `with_rtcp_mux_only_in_subsequent_offers`.
     pub(crate) rtcp_mux_only_in_subsequent_offers: bool,
+    /// [`SettingEngineBuilder::with_bundle_only_sections_in_browser_form`].
+    pub(crate) bundle_only_sections_in_browser_form: bool,
     /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
     /// connection gets ICE credentials of its own. The derived default `false` shares the first
     /// transport's.
@@ -532,6 +537,9 @@ pub struct SettingEngine {
     pub(crate) sctp_rto: Option<sctp::RtoConfig>,
     /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
     pub(crate) sctp_max_retransmissions: Option<usize>,
+    /// [`SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto`]. `true` (the
+    /// default) is RFC 9260 5.1's.
+    pub(crate) sctp_handshake_timers_back_off_rto: bool,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
@@ -675,12 +683,14 @@ impl SettingEngine {
             disable_sdp_tls_id: Default::default(),
             dtls_new_association_without_ice_restart: Default::default(),
             msid_removal_ends_track: Default::default(),
+            unoffered_feedback_refused: Default::default(),
             stopping_transceiver_rejected_in_answer: Default::default(),
             dtls_use_srtp_only_with_media: Default::default(),
             accept_lowercase_fingerprints: Default::default(),
             bundle_attributes_tagged_only: Default::default(),
             max_bundle_ignored: Default::default(),
             rtcp_mux_only_in_subsequent_offers: false,
+            bundle_only_sections_in_browser_form: false,
             unique_transport_credentials: Default::default(),
             separate_fec_sessions: false,
             explicit_rollback_only: Default::default(),
@@ -703,6 +713,7 @@ impl SettingEngine {
             sctp_max_streams: Default::default(),
             sctp_rto: Default::default(),
             sctp_max_retransmissions: Default::default(),
+            sctp_handshake_timers_back_off_rto: true,
             sctp_message_size_limit_without_interleaving: Default::default(),
             data_channel_max_buffer_size: Default::default(),
             data_channel_send_before_ack: Default::default(),
@@ -1369,6 +1380,16 @@ impl SettingEngineBuilder {
     }
 
     /// set_ice_multicast_dns_mode controls if ice queries and generates mDNS ICE Candidates
+    ///
+    /// The default is [`MulticastDnsMode::QueryOnly`]: a remote host candidate with a
+    /// `<uuid>.local` name (as browsers send) is resolved with an mDNS query, and the
+    /// connection's own host candidates go out with their addresses
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 3.2.1, step 3: "Otherwise, resolve the
+    /// candidate using mDNS"). The query datagrams leave through `poll_write` to
+    /// 224.0.0.251:5353; a name that gets no answer is ignored when the query ends (step 5),
+    /// logged at debug. To turn resolution off, so that no query is made and remote `.local`
+    /// candidates are ignored at once, pass [`MulticastDnsMode::Disabled`]; the peer's checks
+    /// from behind such a name can still connect as a peer-reflexive candidate (section 5.3).
     pub fn with_multicast_dns_mode(mut self, multicast_dns_mode: MulticastDnsMode) -> Self {
         self.0.multicast_dns.mode = multicast_dns_mode;
         self
@@ -2225,8 +2246,9 @@ impl SettingEngineBuilder {
     ///
     /// RFC 8830 section 3: "When a session description is updated to no longer list any
     /// 'msid' attribute on a specific media description, the recipient can signal to its
-    /// application that the corresponding MediaStreamTrack has ended." In this API the W3C
-    /// webrtc-pc object model governs the track's state (RFC 9429 defers to it), and its
+    /// application that the corresponding MediaStreamTrack has ended." Section 3.2.5 states
+    /// the procedure: "If no such attribute is found, stop the MediaStreamTrack. This will set
+    /// its state to 'ended'." In this API the W3C webrtc-pc object model governs the track's state (RFC 9429 defers to it), and its
     /// "process remote tracks" keeps the track, moved to the session's default stream; it is
     /// muted when the section stops sending. That is the default (`false`). With `true` the
     /// receiver's track ends ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)).
@@ -2243,6 +2265,25 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_msid_removal_ends_track(mut self, ends: bool) -> Self {
         self.0.msid_removal_ends_track = ends;
+        self
+    }
+
+    /// Refuses a remote answer whose media section has an `a=rtcp-fb` line its offer did not
+    /// have. The default is `false`; the `StrictRfc` behaviour profile sets it.
+    ///
+    /// RFC 9429 section 5.11: "If the 'm=' section references RTCP feedback mechanisms that
+    /// were not present in the corresponding 'm=' section in the offer, this indicates a
+    /// negotiation problem and MUST result in an error" (RFC 4585 section 4.2: "The answerer
+    /// MUST NOT add feedback parameters"). With `true`, `set_remote_description` returns
+    /// [`Error::ErrAnswerDoesNotMatchOffer`](shared::error::Error::ErrAnswerDoesNotMatchOffer)
+    /// for such an answer and leaves the offer pending.
+    ///
+    /// **This default does not follow RFC 9429 section 5.11** (owner decision; `docs/conformance.md`,
+    /// "Standing departures from a MUST"): the answer is applied, the extra feedback is logged
+    /// and never enabled, since what is negotiated is the intersection with this endpoint's own
+    /// feedback for the format. libwebrtc does the same: it raises no error and intersects.
+    pub fn with_unoffered_feedback_refused(mut self, refused: bool) -> Self {
+        self.0.unoffered_feedback_refused = refused;
         self
     }
 
@@ -2485,6 +2526,45 @@ impl SettingEngineBuilder {
     /// New sections of an offer say it either way (RFC 9429 section 4.1.1).
     pub fn with_rtcp_mux_only_in_subsequent_offers(mut self, repeated: bool) -> Self {
         self.0.rtcp_mux_only_in_subsequent_offers = repeated;
+        self
+    }
+
+    /// Whether an initial offer writes its bundle-only m= sections in the form browsers
+    /// accept: each bundle-only RTP section says `a=rtcp-mux`, each bundle-only section says
+    /// its BUNDLE group's ICE credentials (the tagged section's `a=ice-ufrag` and `a=ice-pwd`),
+    /// and the offer, when it has a bundle-only section, carries its `a=fingerprint` lines at
+    /// session level as well as in the sections with a transport. The default is `false`; the
+    /// `Chrome` behaviour profile sets `true`. Later offers and answers are not affected: they
+    /// have no bundle-only sections (RFC 9429 section 5.2.2).
+    ///
+    /// The default is the RFC form. RFC 9143 section 7.1.3: "In the initial BUNDLE offer, the
+    /// offerer MUST NOT include IDENTICAL and TRANSPORT multiplexing category SDP attributes
+    /// (BUNDLE attributes) in bundle-only "m=" sections", and section 9.3.1.1: "the offerer
+    /// MUST include an SDP 'rtcp-mux' attribute [RFC5761] in each bundled "m=" section
+    /// (excluding any bundle-only "m=" sections)" (`rtcp-mux` is IDENTICAL, RFC 8859). Chromium,
+    /// WebKit and Firefox refuse that form (browser matrix, test-env run 45900172027):
+    /// Chromium and WebKit with "Failed to set local answer sdp: rtcp-mux must be enabled when
+    /// BUNDLE is enabled.", Firefox with "m-section at level 1 is missing a=rtcp-mux, which is
+    /// required by rtcpMuxPolicy"; with `a=rtcp-mux` alone Chromium and WebKit answer a
+    /// bundle-only data section with port zero (no fingerprint applies to it) and Firefox
+    /// stops (run 45902077847). With `a=rtcp-mux` and the session-level fingerprints all three
+    /// take the offer (45903674595), but Firefox then refuses the engine's answer to its own
+    /// next offer, "Remote description indicates ICE restart but offer did not request ICE
+    /// restart" (45905096237): it compares each section's credentials with the ones the section
+    /// had in the current remote description, and a bundle-only section had none. Writing the
+    /// later descriptions with the credentials in the tagged section only does not help:
+    /// "Invalid description, no ice-ufrag attribute at level 1" (45908363443). So the
+    /// credentials go into the bundle-only sections, against RFC 9429 section 5.2.1:
+    /// "Bundle-only "m=" sections MUST NOT contain any ICE credentials". The `a=rtcp-mux` and
+    /// ICE credential lines are the departure; the session-level
+    /// fingerprints are RFC form (RFC 8122 section 5: "either a session-level or a media-level
+    /// SDP attribute"; RFC 9429 section 5.2.1: the m= sections "MUST all have the same
+    /// fingerprint value or values [RFC8122], or these values MUST be session-level
+    /// attributes"). With the default, a browser takes no initial offer of this engine that
+    /// has a bundle-only section: `max-bundle` with more than one m= section, or `balanced`
+    /// with two sections of one media type.
+    pub fn with_bundle_only_sections_in_browser_form(mut self, browser_form: bool) -> Self {
+        self.0.bundle_only_sections_in_browser_form = browser_form;
         self
     }
 
@@ -3037,6 +3117,21 @@ impl SettingEngineBuilder {
     /// [`Self::with_sctp_max_retransmissions`] (or a profile that set it).
     pub fn without_sctp_max_retransmissions(mut self) -> Self {
         self.0.sctp_max_retransmissions = None;
+        self
+    }
+
+    /// Whether an expiry of the SCTP handshake timers (T1-init, T1-cookie) backs off the
+    /// association's RTO, as a retransmission timeout of DATA does. On by default: RFC 9260
+    /// section 5.1, "The T1-init timer and T1-cookie timer SHOULD follow the same rules given
+    /// in Section 6.3" (rule E2: "set RTO = RTO * 2"), so after a handshake that lost packets
+    /// the first DATA waits the backed-off RTO until a round trip is measured.
+    ///
+    /// `false` is libwebrtc's (dcSCTP's `t1_init_` and `t1_cookie_` in
+    /// `net/dcsctp/socket/dcsctp_socket.cc` double their own 1 s), the `Chrome` behaviour
+    /// profile's value: each handshake timer starts at RTO.Initial and doubles by itself,
+    /// and the RTO is left alone. See `sctp::TransportConfig::with_handshake_timers_back_off_rto`.
+    pub fn with_sctp_handshake_timers_back_off_rto(mut self, enabled: bool) -> Self {
+        self.0.sctp_handshake_timers_back_off_rto = enabled;
         self
     }
 

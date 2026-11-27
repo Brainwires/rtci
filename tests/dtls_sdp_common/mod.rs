@@ -48,6 +48,9 @@ pub struct Peer {
     /// The RTP packets it received, as (the id of the track they were delivered to, header),
     /// in order.
     pub packets: Vec<(String, rtci::rtp::header::Header)>,
+    /// The RTCP packets it received, as (the id of the track they were delivered with,
+    /// packet), in order.
+    pub rtcp: Vec<(String, Box<dyn rtci::rtcp::Packet>)>,
 }
 
 impl Peer {
@@ -83,6 +86,7 @@ impl Peer {
             events: Vec::new(),
             rtp: Vec::new(),
             packets: Vec::new(),
+            rtcp: Vec::new(),
         })
     }
 
@@ -264,6 +268,9 @@ impl World {
                                 .push((packet.header.payload_type, packet.header.ssrc));
                             peer.packets.push((track, packet.header));
                         }
+                        RTCMessage::RtcpPacket(track, packets) => peer
+                            .rtcp
+                            .extend(packets.into_iter().map(|packet| (track.clone(), packet))),
                         _ => {}
                     }
                 }

@@ -9,14 +9,21 @@ use std::sync::Arc;
 
 use crypto::{RTCCrypto, SecretVec};
 use shared::error::Result;
-use stun::attributes::{ATTR_MESSAGE_INTEGRITY, ATTR_MESSAGE_INTEGRITY_SHA256, ATTR_REALM};
-use stun::error_code::{CODE_STALE_NONCE, ErrorCodeAttribute};
+use stun::attributes::{
+    ATTR_MESSAGE_INTEGRITY, ATTR_MESSAGE_INTEGRITY_SHA256, ATTR_NONCE, ATTR_PASSWORD_ALGORITHMS,
+    ATTR_REALM,
+};
+use stun::error_code::{
+    CODE_BAD_REQUEST, CODE_STALE_NONCE, CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute,
+};
 use stun::integrity::long_term_key;
 use stun::long_term::{ChallengeError, LongTermCredentials, LongTermResponse};
 use stun::message::{CLASS_ERROR_RESPONSE, Getter, Message, Setter};
+use stun::nonce_cookie::SecurityFeatures;
 use stun::password_algorithm::{
     PASSWORD_ALGORITHM_MD5, PASSWORD_ALGORITHM_SHA256, PasswordAlgorithms,
 };
+use stun::textattrs::TextAttribute;
 use stun::validated::{Rejection, ValidatedMessage, Validator};
 
 /// What the application gave the client to authenticate with.
@@ -187,9 +194,19 @@ impl Credential {
 
     /// Checks the response to a request made with this credential (RFC 8489 §9.2.5).
     ///
-    /// A request that carried no credential takes any response, less what follows an
-    /// integrity attribute. One that carried it takes a response signed with the same key and
-    /// attribute, or a 401 or 438, which a server cannot always sign; a 401 or 438 that is
+    /// Two kinds of response are discarded "as if [they] were never received"
+    /// ([`Checked::NeverReceived`]), whatever the request carried: a 400 (Bad Request)
+    /// without an integrity attribute, and, for a request without a credential, a response
+    /// other than a 401 or 438 whose NONCE has the nonce cookie with the "password
+    /// algorithms" bit and no PASSWORD-ALGORITHMS ("MUST be ignored"; a request with the
+    /// credential has it checked by [`LongTermCredentials`]). Neither ends the transaction,
+    /// nor counts as a response that failed its integrity check: a request answered by
+    /// nothing else times out, as the RFC's note to the 400 rule says.
+    ///
+    /// Otherwise a request that carried no credential takes any response, less what follows
+    /// an integrity attribute: it has no key to check one with, and the 401 that asks for the
+    /// credential is unsigned. One that carried it takes a response signed with the same key
+    /// and attribute, or a 401 or 438, which a server cannot always sign; a 401 or 438 that is
     /// signed all the same must verify.
     ///
     /// # Errors
@@ -200,26 +217,77 @@ impl Credential {
         response: &Message,
         validator: &Validator<'_>,
         crypto: &dyn RTCCrypto,
-    ) -> std::result::Result<ValidatedMessage, Rejection> {
+    ) -> std::result::Result<Checked, Rejection> {
+        if is_unsigned_bad_request(response) {
+            return Ok(Checked::NeverReceived);
+        }
         let Some(session) = &self.session else {
-            return validator.unauthenticated(response);
+            let valid = validator.unauthenticated(response)?;
+            if !is_challenge(&valid) && promises_password_algorithms_it_lacks(&valid) {
+                return Ok(Checked::NeverReceived);
+            }
+            return Ok(Checked::Valid(valid));
         };
-        match session
+        let valid = match session
             .credentials
             .check_response(response, validator, crypto)?
         {
-            LongTermResponse::Authenticated(valid) => Ok(valid),
+            LongTermResponse::Authenticated(valid) => valid,
             LongTermResponse::Challenge(unsigned) => {
                 if response.contains(ATTR_MESSAGE_INTEGRITY)
                     || response.contains(ATTR_MESSAGE_INTEGRITY_SHA256)
                 {
-                    validator.authenticate(response, session.key.as_ref(), crypto)
+                    validator.authenticate(response, session.key.as_ref(), crypto)?
                 } else {
-                    Ok(unsigned)
+                    unsigned
                 }
             }
-        }
+        };
+        Ok(Checked::Valid(valid))
     }
+}
+
+/// What [`Credential::check_response`] makes of a response it does not reject.
+pub(crate) enum Checked {
+    /// The response, to act on: the attributes ahead of its integrity attribute.
+    Valid(ValidatedMessage),
+    /// RFC 8489 §9.2.5 has it discarded as if it had never arrived: the transaction goes on
+    /// (retransmissions continue) and, answered by nothing else, ends in a timeout.
+    NeverReceived,
+}
+
+/// The code of the ERROR-CODE attribute of `m`, when it is an error response that has one.
+fn error_code_of(m: &Message) -> Option<ErrorCode> {
+    if m.typ.class != CLASS_ERROR_RESPONSE {
+        return None;
+    }
+    let mut code = ErrorCodeAttribute::default();
+    code.get_from(m).ok()?;
+    Some(code.code)
+}
+
+/// RFC 8489 §9.2.5: "If the response is an error response with an error code of 400 (Bad
+/// Request) and does not contain either the MESSAGE-INTEGRITY or MESSAGE-INTEGRITY-SHA256
+/// attribute, then the response MUST be discarded, as if it were never received."
+fn is_unsigned_bad_request(response: &Message) -> bool {
+    error_code_of(response) == Some(CODE_BAD_REQUEST)
+        && !response.contains(ATTR_MESSAGE_INTEGRITY)
+        && !response.contains(ATTR_MESSAGE_INTEGRITY_SHA256)
+}
+
+/// A 401 (Unauthenticated) or 438 (Stale Nonce): the responses §9.2.5 has a client act on
+/// unsigned, under their own rules ([`Credential::challenged`]).
+fn is_challenge(response: &Message) -> bool {
+    matches!(error_code_of(response), Some(c) if c == CODE_UNAUTHORIZED || c == CODE_STALE_NONCE)
+}
+
+/// RFC 8489 §9.2.5: "For all other responses, if the NONCE attribute starts with the "nonce
+/// cookie" with the STUN Security Feature "Password algorithms" bit set to 1 but
+/// PASSWORD-ALGORITHMS is not present, the response MUST be ignored."
+fn promises_password_algorithms_it_lacks(response: &Message) -> bool {
+    TextAttribute::get_from_as(response, ATTR_NONCE).is_ok_and(|nonce| {
+        SecurityFeatures::from_nonce(&nonce.text).is_some_and(|f| f.password_algorithms())
+    }) && !response.contains(ATTR_PASSWORD_ALGORITHMS)
 }
 
 /// The password algorithms the client takes from the PASSWORD-ALGORITHMS of `challenge`.

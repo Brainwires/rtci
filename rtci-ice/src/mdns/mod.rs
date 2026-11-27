@@ -24,9 +24,13 @@ use shared::error::Result;
 #[non_exhaustive]
 pub enum MulticastDnsMode {
     /// Means remote mDNS candidates will be discarded, and local host candidates will use IPs.
+    /// No mDNS message is sent: the mode for an application that wants no mDNS traffic.
     Disabled,
 
     /// Means remote mDNS candidates will be accepted, and local host candidates will use IPs.
+    /// The default (draft-ietf-mmusic-mdns-ice-candidates Section 3.2.1 step 3: "Otherwise,
+    /// resolve the candidate using mDNS"): a remote `<uuid>.local` name is queried, and one
+    /// that does not resolve is ignored when its query ends (step 5), logged at debug.
     #[default]
     QueryOnly,
 

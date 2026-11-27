@@ -32,7 +32,7 @@ a=fmtp:115 0-15
 a=extmap:1 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
 a=recvonly
 a=fingerprint:sha-256 <certificate>
-m=video 9 UDP/TLS/RTP/SAVPF 96 98 100 102 127 125 108 123 41 126
+m=video 9 UDP/TLS/RTP/SAVPF 96 98 100 102 127 125 108 123 118 119 120 121 41 126
 c=IN IP4 0.0.0.0
 a=setup:active
 a=mid:1
@@ -95,6 +95,34 @@ a=rtcp-fb:123 ccm fir
 a=rtcp-fb:123 nack
 a=rtcp-fb:123 nack pli
 a=rtcp-fb:123 transport-cc
+a=rtpmap:118 H264/90000
+a=fmtp:118 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028
+a=rtcp-fb:118 goog-remb
+a=rtcp-fb:118 ccm fir
+a=rtcp-fb:118 nack
+a=rtcp-fb:118 nack pli
+a=rtcp-fb:118 transport-cc
+a=rtpmap:119 H264/90000
+a=fmtp:119 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640029
+a=rtcp-fb:119 goog-remb
+a=rtcp-fb:119 ccm fir
+a=rtcp-fb:119 nack
+a=rtcp-fb:119 nack pli
+a=rtcp-fb:119 transport-cc
+a=rtpmap:120 H264/90000
+a=fmtp:120 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a
+a=rtcp-fb:120 goog-remb
+a=rtcp-fb:120 ccm fir
+a=rtcp-fb:120 nack
+a=rtcp-fb:120 nack pli
+a=rtcp-fb:120 transport-cc
+a=rtpmap:121 H264/90000
+a=fmtp:121 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640033
+a=rtcp-fb:121 goog-remb
+a=rtcp-fb:121 ccm fir
+a=rtcp-fb:121 nack
+a=rtcp-fb:121 nack pli
+a=rtcp-fb:121 transport-cc
 a=rtpmap:41 AV1/90000
 a=fmtp:41 profile=0
 a=rtcp-fb:41 goog-remb
@@ -112,7 +140,7 @@ a=rtcp-fb:126 transport-cc
 a=extmap:1 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
 a=recvonly
 a=fingerprint:sha-256 <certificate>
-m=video 9 UDP/TLS/RTP/SAVPF 96 98 100 102 127 125 108 123 41 126
+m=video 9 UDP/TLS/RTP/SAVPF 96 98 100 102 127 125 108 123 118 119 120 121 41 126
 c=IN IP4 0.0.0.0
 a=setup:active
 a=mid:2
@@ -175,6 +203,34 @@ a=rtcp-fb:123 ccm fir
 a=rtcp-fb:123 nack
 a=rtcp-fb:123 nack pli
 a=rtcp-fb:123 transport-cc
+a=rtpmap:118 H264/90000
+a=fmtp:118 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028
+a=rtcp-fb:118 goog-remb
+a=rtcp-fb:118 ccm fir
+a=rtcp-fb:118 nack
+a=rtcp-fb:118 nack pli
+a=rtcp-fb:118 transport-cc
+a=rtpmap:119 H264/90000
+a=fmtp:119 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640029
+a=rtcp-fb:119 goog-remb
+a=rtcp-fb:119 ccm fir
+a=rtcp-fb:119 nack
+a=rtcp-fb:119 nack pli
+a=rtcp-fb:119 transport-cc
+a=rtpmap:120 H264/90000
+a=fmtp:120 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a
+a=rtcp-fb:120 goog-remb
+a=rtcp-fb:120 ccm fir
+a=rtcp-fb:120 nack
+a=rtcp-fb:120 nack pli
+a=rtcp-fb:120 transport-cc
+a=rtpmap:121 H264/90000
+a=fmtp:121 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640033
+a=rtcp-fb:121 goog-remb
+a=rtcp-fb:121 ccm fir
+a=rtcp-fb:121 nack
+a=rtcp-fb:121 nack pli
+a=rtcp-fb:121 transport-cc
 a=rtpmap:41 AV1/90000
 a=fmtp:41 profile=0
 a=rtcp-fb:41 goog-remb

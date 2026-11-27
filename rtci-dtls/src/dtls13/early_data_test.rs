@@ -25,6 +25,7 @@ fn store() -> Arc<MemorySessionStore> {
 fn client(store: &Arc<MemorySessionStore>) -> Result<Arc<HandshakeConfig>> {
     Ok(Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .build(true, None)?,
     ))
@@ -173,6 +174,7 @@ fn after_a_hello_retry_request_there_is_no_early_data() -> Result<()> {
     assert!(early_data(&pair.to_server).is_empty());
     assert_eq!(accepted(&pair), (Some(false), None));
     assert!(pair.server_conn().resumed);
+    not_resent(&mut pair, b"too early");
     Ok(())
 }
 
@@ -204,7 +206,22 @@ fn a_ticket_age_out_of_the_window_rules_out_early_data() -> Result<()> {
     assert!(early_data(&pair.to_server).is_empty());
     assert_eq!(accepted(&pair), (Some(false), Some(false)));
     assert!(pair.server_conn().resumed);
+    not_resent(&mut pair, b"stale");
     Ok(())
+}
+
+/// RFC 8446 section 4.2.10: "A TLS implementation MUST NOT automatically resend early data
+/// unless the negotiated connection selects the same ALPN protocol." This one never resends
+/// it: 0-RTT data the server did not take does not reach it as application data, neither
+/// during the handshake nor once the client writes again.
+fn not_resent(pair: &mut Pair, early: &[u8]) {
+    assert!(
+        application_data(&pair.to_server)
+            .iter()
+            .all(|data| data != early),
+        "the rejected early data was sent again"
+    );
+    assert_eq!(pair.client_sends(b"after"), vec![b"after".to_vec()]);
 }
 
 /// RFC 8446 section 4.6.1: more 0-RTT data than the ticket allows ends the handshake with
@@ -228,7 +245,9 @@ fn more_early_data_than_allowed_is_an_unexpected_message() -> Result<()> {
 }
 
 /// RFC 8446 section 4.2.11: early_data in EncryptedExtensions with a selected_identity
-/// other than 0 is an illegal_parameter.
+/// other than 0 is an illegal_parameter ("If any other value is returned, the client MUST
+/// abort the handshake with an "illegal_parameter" alert"): the client fails with that
+/// alert sent, and none received.
 #[test]
 fn accepted_early_data_with_another_identity_is_an_illegal_parameter() -> Result<()> {
     let store = store();
@@ -246,6 +265,10 @@ fn accepted_early_data_with_another_identity_is_an_illegal_parameter() -> Result
     pair.deliver_to_client(vec![BytesMut::from(&flight[0][split..])]);
     assert!(pair.client.is_connection_failed(&server_addr()));
     assert!(!pair.client_complete);
+    assert_eq!(
+        pair.client.connection_fatal_alerts(&server_addr()),
+        Some((Some(alert::ILLEGAL_PARAMETER), None))
+    );
     Ok(())
 }
 
@@ -261,6 +284,7 @@ fn early_data_needs_the_suite_of_the_ticket() -> Result<()> {
     let _ = early_pair(client(&store)?, server.clone(), now, &[])?.complete();
     let chacha_first = Arc::new(
         client_builder()
+            .with_server_name(NAME.to_owned())
             .with_session_store(Some(store.clone()))
             .with_cipher_suites(vec![
                 CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,

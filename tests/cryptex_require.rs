@@ -427,3 +427,76 @@ fn require_refuses_the_recorded_firefox_offer() -> TestResult {
     assert!(answer.sdp.contains("m=video 9 "), "{}", answer.sdp);
     Ok(())
 }
+
+/// An initial offer whose first BUNDLE section is the data section, so that every RTP section
+/// is bundle-only: Chromium's form under `max-bundle` when the data channel is created before
+/// the tracks (its sections follow the order of creation). RFC 9429 section 7.2 has the data
+/// section last, but a remote offer may have this order (RFC 9143 section 7.2.1 only keeps a
+/// bundle-only section from being the tagged one). `a=cryptex` is at the session level
+/// (RFC 9335 section 4). The audio section keeps `a=rtcp-mux`, as Chromium writes it.
+const DATA_TAGGED_OFFER: &str = "v=0\r\n\
+o=- 8490950831739317391 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+a=extmap-allow-mixed\r\n\
+a=msid-semantic: WMS\r\n\
+a=cryptex\r\n\
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:QwQB\r\n\
+a=ice-pwd:tOn0RB6FrcSYzfnZIDlWSXtF\r\n\
+a=ice-options:trickle\r\n\
+a=fingerprint:sha-256 B6:B6:C4:EF:FC:EF:D5:63:72:4D:C4:1C:AE:C1:E5:FC:D6:B4:B5:A0:1D:65:C0:D9:1E:20:CA:55:8D:F5:FB:6C\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=sctp-port:5000\r\n\
+a=max-message-size:262144\r\n\
+m=audio 0 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=bundle-only\r\n\
+a=mid:1\r\n\
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+a=sendrecv\r\n\
+a=msid:- 96c45fbe-5e47-49b1-99eb-6ff28b2698ef\r\n\
+a=rtcp-mux\r\n\
+a=rtcp-rsize\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+a=ssrc:3658638092 cname:YmhmZ0Dm8r6a5166\r\n";
+
+/// RFC 9335 section 4 with RFC 9143 section 7.2: a bundle-only RTP section (port zero with
+/// `a=bundle-only`) of an offer is a live RTP section of the BUNDLE group, so Cryptex applies to
+/// it as to any other. With every RTP section bundle-only, the default answerer answers
+/// `a=cryptex` and negotiates it, and a `Require` answerer takes the offer. 0.2.0 counted only
+/// RTP sections with a port: such an offer had no RTP section, so no Cryptex; the answer
+/// went without it and `Require` refused the offer (ErrSessionDescriptionMissingCryptex).
+#[test]
+fn cryptex_applies_to_bundle_only_rtp_sections_of_a_data_tagged_offer() -> TestResult {
+    let offer =
+        || rtci::peer_connection::sdp::RTCSessionDescription::offer(DATA_TAGGED_OFFER.to_owned());
+    let now = Instant::now();
+
+    let mut answerer = default_peer()?;
+    answerer.set_remote_description(now, offer()?)?;
+    let answer = answerer.create_answer(None)?;
+    assert!(
+        answer.sdp.contains("\r\nm=audio 9 "),
+        "the bundle-only audio section is accepted: {}",
+        answer.sdp
+    );
+    assert!(
+        answer.sdp.contains("\r\na=cryptex\r\n"),
+        "the offer has Cryptex for its only RTP section, which is bundle-only: {}",
+        answer.sdp
+    );
+    answerer.set_local_description(now, answer)?;
+    assert!(answerer.cryptex_negotiated());
+
+    let mut required = default_peer()?;
+    required.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
+    required.set_remote_description(now, offer()?)?;
+    let answer = required.create_answer(None)?;
+    assert!(answer.sdp.contains("\r\na=cryptex\r\n"), "{}", answer.sdp);
+    Ok(())
+}

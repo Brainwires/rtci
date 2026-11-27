@@ -203,6 +203,41 @@ pub struct Setup {
     /// Whether the default chains probe back towards the rate before a large drop
     /// (`DefaultInterceptorOptions::recovery_probing`; off as the engine has it).
     pub recovery_probing: bool,
+    /// Which of the peers' sources writes its first frame first once the call starts; the
+    /// same instant for both ([`StartOrder::Together`]) unless said.
+    pub start_order: StartOrder,
+}
+
+/// When the audio and the video sources of both peers write their first frame, from the
+/// instant the peers are connected. Every later frame keeps its source's clock (audio every
+/// 20 ms, video every 33.3 ms) from that first one.
+///
+/// [`StartOrder::Together`] is what every run had before this setting: both sources write in
+/// the same instant, the audio's frame first and the video's after it, before anything leaves
+/// either peer. An engine that does something with the first packet of a call (a start-up
+/// probe asked for by it) then finds the video already written, which a real application,
+/// whose camera delivers its first frame some milliseconds after its microphone, does not
+/// give it (the start-up probe of a chain without a pacer before
+/// `conf/probe-1-start-up-probe-before-the-video`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StartOrder {
+    /// Both in the same instant (audio, then video).
+    Together,
+    /// The audio's first frame this long before the video's.
+    AudioFirst(Duration),
+    /// The video's first frame this long before the audio's.
+    VideoFirst(Duration),
+}
+
+impl StartOrder {
+    /// How long after the connection (audio, video) write their first frame.
+    pub fn offsets(self) -> (Duration, Duration) {
+        match self {
+            Self::Together => (Duration::ZERO, Duration::ZERO),
+            Self::AudioFirst(lead) => (Duration::ZERO, lead),
+            Self::VideoFirst(lead) => (lead, Duration::ZERO),
+        }
+    }
 }
 
 /// What a run may change that no call's quality should depend on: the length of the ICE
@@ -234,7 +269,7 @@ pub const SOFTWARE_40: &str = "rtci-ice 0.2.0-dev (perturbation: 40 B).";
 const _: () = assert!(SOFTWARE_27.len() == 27 && SOFTWARE_40.len() == 40);
 
 /// The perturbations of the measurement, by name. The engine's own SOFTWARE text is
-/// `rtci-ice 0.2.0` (14 bytes).
+/// `rtci-ice 0.2.1` (14 bytes).
 pub const PERTURBATIONS: [(&str, Perturbation); 6] = [
     ("none", Perturbation::None),
     ("nosw", Perturbation::NoSoftware),
@@ -266,7 +301,14 @@ impl Setup {
             reverse_loss: 0,
             bandwidth_probing: None,
             recovery_probing: false,
+            start_order: StartOrder::Together,
         }
+    }
+
+    /// The sources start in `order` ([`StartOrder`]).
+    pub fn start_order(mut self, order: StartOrder) -> Self {
+        self.start_order = order;
+        self
     }
 
     /// The default chains' pacer keeps (`Keep`) or flushes (`Flush`) its backlog at a collapse.
@@ -1196,6 +1238,9 @@ pub struct World {
     pub next_audio: Instant,
     pub next_video: Instant,
     pub next_target: Instant,
+    /// How long after [`World::start`] the video's first frame is written
+    /// ([`Setup::start_order`]); its frames follow at 30 a second from then.
+    pub video_offset: Duration,
     pub frame: u64,
     pub media: bool,
     /// Whether each peer's camera is on: its video source produces frames.
@@ -1458,8 +1503,9 @@ impl World {
         }
         if self.media && now >= self.next_video {
             self.frame += 1;
-            self.next_video =
-                self.start + Duration::from_micros(self.frame * 1_000_000 / u64::from(VIDEO_FPS));
+            self.next_video = self.start
+                + self.video_offset
+                + Duration::from_micros(self.frame * 1_000_000 / u64::from(VIDEO_FPS));
             let ignore = IGNORE_TARGET.with(|i| i.get());
             for (i, peer) in self.peers.iter_mut().enumerate() {
                 peer.media_elapsed = at;
@@ -1695,6 +1741,7 @@ impl World {
             next_audio: start,
             next_video: start,
             next_target: start,
+            video_offset: Duration::ZERO,
             frame: 0,
             media: false,
             video_on: setup.video,
@@ -1730,11 +1777,14 @@ impl World {
             let t = world.now + Duration::from_millis(10);
             world.advance(t)?;
         }
-        // Media from the connection on; times are counted from here.
+        // Media from the connection on; times are counted from here. Each source's first
+        // frame at its offset ([`Setup::start_order`]: zero for both unless said).
+        let (audio_offset, video_offset) = setup.start_order.offsets();
         world.media = true;
         world.start = world.now;
-        world.next_audio = world.now;
-        world.next_video = world.now;
+        world.next_audio = world.now + audio_offset;
+        world.video_offset = video_offset;
+        world.next_video = world.now + video_offset;
         world.next_target = world.now;
         Ok(world)
     }

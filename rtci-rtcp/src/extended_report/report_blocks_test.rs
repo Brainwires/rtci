@@ -840,3 +840,91 @@ fn an_ecn_summary_block_whose_length_is_not_a_multiple_of_five_is_discarded() {
     let parsed = ExtendedReport::unmarshal(&mut Bytes::from(bad)).unwrap();
     assert!(!parsed.reports[0].as_any().is::<EcnSummaryReportBlock>());
 }
+
+// RFC 3611 4.3: the four rsvd. bits before T "MUST be set to zero and MUST be ignored by the
+// receiver". Read with all four set, the block is the one with them clear; written, they are
+// zero, even from a block whose t has bits above the four of T.
+#[test]
+fn reserved_bits_of_a_packet_receipt_times_block_are_ignored() {
+    let parsed = parse(&[
+        0x80, 0xcf, 0x00, 0x05, 0, 0, 0, 9, // XR
+        0x03, 0xf1, 0x00, 0x03, // BT=3, rsvd 0xf, T=1, block length 3
+        0x0a, 0x0b, 0x0c, 0x0d, 0x00, 0x07, 0x00, 0x08, 0x11, 0x11, 0x11, 0x11,
+    ])
+    .unwrap();
+    let block = PacketReceiptTimesReportBlock {
+        t: 1,
+        ssrc: 0x0a0b0c0d,
+        begin_seq: 7,
+        end_seq: 8,
+        receipt_time: vec![0x11111111],
+    };
+    assert_eq!(xr(block.clone()).reports, parsed.reports);
+    assert_eq!(0x01, parsed.marshal().unwrap()[9]);
+    let raw = xr(PacketReceiptTimesReportBlock { t: 0xf1, ..block })
+        .marshal()
+        .unwrap();
+    assert_eq!(0x01, raw[9], "rsvd. sent as zero");
+}
+
+// RFC 3611 4.6: the three rsvd. bits after ToH "MUST be set to zero and MUST be ignored by the
+// receiver". Read with all three set, the block is the one with them clear (L, D, J and ToH
+// read as they are); written, they are zero.
+#[test]
+fn reserved_bits_of_a_statistics_summary_block_are_ignored() {
+    let parsed = parse(&[
+        0x80, 0xcf, 0x00, 0x0b, 0, 0, 0, 9, // XR
+        0x06, 0xf7, 0x00, 0x09, // BT=6, L D J, ToH=2, rsvd 7, block length 9
+        0x0a, 0x0b, 0x0c, 0x0d, 0, 1, 0, 2, // ssrc, begin_seq, end_seq
+        0, 0, 0, 3, 0, 0, 0, 4, // lost, dup
+        0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, // jitter
+        9, 10, 11, 12, // hop limit
+    ])
+    .unwrap();
+    let block = StatisticsSummaryReportBlock {
+        loss_reports: true,
+        duplicate_reports: true,
+        jitter_reports: true,
+        ttl_or_hop_limit: TTLorHopLimitType::IPv6,
+        ssrc: 0x0a0b0c0d,
+        begin_seq: 1,
+        end_seq: 2,
+        lost_packets: 3,
+        dup_packets: 4,
+        min_jitter: 5,
+        max_jitter: 6,
+        mean_jitter: 7,
+        dev_jitter: 8,
+        min_ttl_or_hl: 9,
+        max_ttl_or_hl: 10,
+        mean_ttl_or_hl: 11,
+        dev_ttl_or_hl: 12,
+    };
+    assert_eq!(xr(block).reports, parsed.reports);
+    assert_eq!(0xf0, parsed.marshal().unwrap()[9], "rsvd. sent as zero");
+}
+
+// RFC 3611 4.7: the reserved octet of the block header "MUST be set to zero and MUST be
+// ignored by the receiver" (and so the reserved octet after RX config, 4.7.6). Read with both
+// set, the block is the one with them clear; written, both are zero, also from a block whose
+// `reserved` field is not.
+#[test]
+fn reserved_octets_of_a_voip_metrics_block_are_ignored() {
+    let parsed = parse(&[
+        0x80, 0xcf, 0x00, 0x0a, 0, 0, 0, 9, // XR
+        0x07, 0xff, 0x00, 0x08, // BT=7, reserved 0xff, block length 8
+        0x0a, 0x0b, 0x0c, 0x0d, 1, 2, 3, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0xe2, 0xba, 55, 16, 93, 127,
+        44, 41, 0xb0, 0xaa, 0, 40, 0, 80, 0, 120, // reserved after RX config 0xaa
+    ])
+    .unwrap();
+    assert_eq!(xr(voip_metrics()).reports, parsed.reports);
+    let raw = parsed.marshal().unwrap();
+    assert_eq!((0, 0), (raw[9], raw[8 + 4 + 4 + 20 + 1]), "sent as zero");
+    let raw = xr(VoIPMetricsReportBlock {
+        reserved: 0x55,
+        ..voip_metrics()
+    })
+    .marshal()
+    .unwrap();
+    assert_eq!((0, 0), (raw[9], raw[8 + 4 + 4 + 20 + 1]), "sent as zero");
+}

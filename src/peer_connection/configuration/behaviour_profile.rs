@@ -386,6 +386,7 @@ macro_rules! governed_behaviours {
     };
 }
 
+use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionEncryption;
 use ice::{ConsentResponseWait, FailedNomination, NominationAcceptance};
 use interceptor::{
     CongestionFeedbackCadence, EcnInitiation, EcnMarking, ReceivedRateBound, ThresholdTimeBase,
@@ -550,6 +551,18 @@ governed_behaviours! {
         apply_setting: |b: SettingEngineBuilder, v| b.with_srtp_protection_profiles(v),
         read: |s: &SettingEngine| srtp_profiles_shown(&s.srtp_protection_profiles),
     },
+    {
+        id: "dtls.session-resumption",
+        setting: "SettingEngineBuilder::with_dtls_session_resumption",
+        clause: "RFC 5764 3 (SHOULD)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc rtc_base/openssl_stream_adapter.cc @ a222406d sets SSL_OP_NO_TICKET (line 1223) with an SSL_CTX per adapter (line 1149): no ticket is issued or offered, and no session is shared between transports. Off in `Rfc` too, measured: the clause's strategy has the other transports wait for the first, which on links with latency costs connection time (tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency, three unbundled transports, time until all are connected: round trip 100 ms off 453 ms, on 703 ms between two engines, 753 ms against a peer that issues no ticket; round trip 300 ms 1.353 s, 2.103 s, 2.253 s) to save one signature and one verification per other transport. `StrictRfc` runs the SHOULD: the transports of unbundled sections share one DTLS session, the others waiting for the first (at most three flight intervals and never more than 3 s) and resuming it with DTLS 1.3 tickets (psk_dhe_ke only). With BUNDLE it does nothing",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_dtls_session_resumption(v),
+        read: |s: &SettingEngine| s.dtls_session_resumption,
+    },
     // ---- JSEP / SDP ----
     {
         id: "sdp.bundle-attributes-repeated",
@@ -600,6 +613,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| !s.max_bundle_ignored,
     },
     {
+        id: "jsep.unoffered-feedback-refused",
+        setting: "SettingEngineBuilder::with_unoffered_feedback_refused",
+        clause: "RFC 9429 5.11 (MUST; the default departs, docs/conformance.md)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc @ a222406d: a remote answer is not checked for a=rtcp-fb lines the offer lacked (the only feedback check, lines 5957-6061, compares the congestion control feedback types and logs \"ignoring all\" on a mismatch); pc/codec_vendor.cc::IntersectCodecConfigurations (merged_config.codec.IntersectFeedbackParams, line 1118) intersects the send and receive feedback, and NegotiateCodecs (line 819) answers with the intersection",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_unoffered_feedback_refused(v),
+        read: |s: &SettingEngine| s.unoffered_feedback_refused,
+    },
+    {
         id: "jsep.rtcp-mux-only-in-subsequent-offers",
         setting: "SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers",
         clause: "RFC 8858 4.5 (RFC 9429 5.2.2 MUST NOT add it)",
@@ -610,6 +635,18 @@ governed_behaviours! {
         evidence: Observed,
         apply_setting: |b: SettingEngineBuilder, v| b.with_rtcp_mux_only_in_subsequent_offers(v),
         read: |s: &SettingEngine| s.rtcp_mux_only_in_subsequent_offers,
+    },
+    {
+        id: "jsep.bundle-only-sections-browser-form",
+        setting: "SettingEngineBuilder::with_bundle_only_sections_in_browser_form",
+        clause: "RFC 9143 7.1.3, 9.3.1.1, RFC 9429 5.2.1 (RFC 8122 5 and RFC 9429 5.2.1 allow the session-level fingerprint)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "browser matrix test-env 45900172027: Chromium and WebKit refuse an initial offer whose bundle-only RTP section has no a=rtcp-mux (\"Failed to set local answer sdp: rtcp-mux must be enabled when BUNDLE is enabled.\"), Firefox too (\"m-section at level 1 is missing a=rtcp-mux, which is required by rtcpMuxPolicy\"); with a=rtcp-mux alone Chromium and WebKit answer the bundle-only data section with port zero and Firefox's page crashes (45902077847); with a=rtcp-mux and the fingerprint at session level all three apply the offer, open the channel and carry media (45903674595, probe P4); Firefox then refuses the answer to its next offer (\"Remote description indicates ICE restart but offer did not request ICE restart\", 45905096237: the bundle-only sections had no ICE credentials) unless the bundle-only sections carry the group's ICE credentials, as Firefox's own do (45908363443, probe R1; later descriptions with credentials in the tagged section only are refused: \"Invalid description, no ice-ufrag attribute at level 1\"). Firefox's own max-bundle offers have a session-level a=fingerprint (test-env 45898141031, browser-sdp firefox--max-bundle-*)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_bundle_only_sections_in_browser_form(v),
+        read: |s: &SettingEngine| s.bundle_only_sections_in_browser_form,
     },
     {
         id: "jsep.stopping-transceiver-rejected-in-answer",
@@ -727,6 +764,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| sctp_max_retransmissions_shown(s.sctp_max_retransmissions),
     },
     {
+        id: "sctp.handshake-timers-back-off-rto",
+        setting: "SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto",
+        clause: "RFC 9260 5.1 (SHOULD), 6.3.3 E2",
+        rfc: true => "true",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::DcSctpSocket @ a222406d: t1_init_ and t1_cookie_ are timers of their own (TimerOptions(options.t1_init_timeout / t1_cookie_timeout, TimerBackoffAlgorithm::kExponential, max_init_retransmits)), 1 s each (net/dcsctp/public/dcsctp_options.h); their expiries touch no RTO",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_sctp_handshake_timers_back_off_rto(v),
+        read: |s: &SettingEngine| s.sctp_handshake_timers_back_off_rto,
+    },
+    {
         id: "datachannel.send-before-ack",
         setting: "SettingEngineBuilder::with_data_channel_send_before_ack",
         clause: "RFC 8832 6 (MAY), W3C webrtc-pc 6.2 send()",
@@ -762,6 +811,18 @@ governed_behaviours! {
         evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_source_departure_ends_track(v),
         read: |s: &SettingEngine| s.source_departure_ends_track,
+    },
+    {
+        id: "track.msid-removal-ends-track",
+        setting: "SettingEngineBuilder::with_msid_removal_ends_track",
+        clause: "RFC 8830 3.2.5 (W3C webrtc-pc 4.4.1.5)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc::SdpOfferAnswerHandler::ApplyRemoteDescriptionUpdateTransceiverState @ a222406d (lines 2815-2838): a receiving section without a=msid gives the receiver an empty stream id list (stream_ids stays empty when media_desc->streams() is empty) through SetAssociatedRemoteStreams; the track is removed only when the direction stops receiving (ProcessRemovalOfRemoteTrack, lines 2844-2851), as W3C process remote tracks has it",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_msid_removal_ends_track(v),
+        read: |s: &SettingEngine| s.msid_removal_ends_track,
     },
     {
         id: "rtp.ssrc-per-clock-rate",
@@ -848,6 +909,18 @@ governed_behaviours! {
         apply_media: |m: &mut MediaEngine, v| m.set_vp8_ignore_partitions(v),
         read: |m: &MediaEngine| m.vp8_ignore_partitions,
     },
+    {
+        id: "h264.literal-pdon",
+        setting: "MediaEngine::set_h264_literal_pdon",
+        clause: "RFC 6184 7.2.2 (MUST; the default departs, docs/conformance.md)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc has no interleaved mode, so nothing of Chrome's to follow and the engine's value stands: modules/rtp_rtcp/source/video_rtp_depacketizer_h264.cc @ a222406d (VideoRtpDepacketizerH264::Parse) reads FU-A and otherwise STAP-A or a single NAL unit, no STAP-B, MTAP, FU-B or DON; rtp_format_h264.cc RTC_CHECKs packetization mode NonInterleaved or SingleNalUnit. This default does not follow RFC 6184 section 7.2: PDON starts at the DON before the earliest one buffered, not at 0 (owner decision 2026-11-26)",
+        evidence: Source,
+        apply_media: |m: &mut MediaEngine, v| m.set_h264_literal_pdon(v),
+        read: |m: &MediaEngine| m.h264_literal_pdon,
+    },
     // ---- interceptors ----
     {
         id: "rtcp.t-rr-interval",
@@ -874,6 +947,18 @@ governed_behaviours! {
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_immediate_congestion_feedback = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_immediate_congestion_feedback,
+    },
+    {
+        id: "rtp.audio-level-encryption",
+        setting: "DefaultInterceptorOptions::audio_level_encryption",
+        clause: "RFC 8834 5.2.2, 5.2.3; RFC 6904 4.1",
+        rfc: RTCRtpHeaderExtensionEncryption::BestEffort => "BestEffort",
+        chrome: RTCRtpHeaderExtensionEncryption::Clear => "Clear",
+        strict_rfc: RTCRtpHeaderExtensionEncryption::BestEffort => "BestEffort",
+        chrome_source: "libwebrtc pc/media_session.cc @ a222406d (RtpExtensionFromCapability: an offered extension is encrypted only when its capability's preferred_encrypt is set, false by default in api/rtp_parameters.h RtpHeaderExtensionCapability, set when the application asks through the header extension API; NegotiateRtpHeaderExtensions answers an offered form only when its encrypt flag equals its own, so a best-effort offer is answered in the clear). Encryption is allowed: api/crypto/crypto_options.h @ a222406d enable_encrypted_rtp_header_extensions = true, and Chromium's kWebRtcEncryptedRtpHeaderExtensions is FEATURE_ENABLED_BY_DEFAULT (third_party/blink/renderer/modules/peerconnection/peer_connection_features.cc @ Chromium 8dafa8bc: \"enables encrypting RTP header extensions using RFC 6904, if requested\"), read in rtc_peer_connection_handler.cc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.audio_level_encryption = v,
+        read: |o: &DefaultInterceptorOptions| o.audio_level_encryption,
     },
     {
         id: "rtcp.congestion-feedback-in-budget",
@@ -1334,11 +1419,6 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "on, as browsers (perfect negotiation); RFC 9429 does not forbid it",
     },
     NotGoverned {
-        setting: "SettingEngineBuilder::with_msid_removal_ends_track",
-        class: NotGovernedClass::Same,
-        note: "off: W3C process remote tracks, what Chrome does; RFC 8830 3 is a \"can\"",
-    },
-    NotGoverned {
         setting: "SettingEngineBuilder::with_nominated_candidates_only",
         class: NotGovernedClass::Same,
         note: "off: RFC 9429 5.2.2 (every gathered candidate), as Chromium; RFC 8839 4.4.1.2.2 says the opposite",
@@ -1629,7 +1709,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "MediaEngine::set_header_extension_encryption",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 6904 encrypted header extensions offered beside the clear ones; libwebrtc's CryptoOptions has them on (api/crypto/crypto_options.h @ a222406d) but Chromium turns them on only with the kWebRtcEncryptedRtpHeaderExtensions feature (rtc_peer_connection_handler.cc @ Chromium 8dafa8bc), and takes the clear ones",
+        note: "RFC 6904 form of an extension the application registers: in the clear unless it asks, in every profile, as libwebrtc (preferred_encrypt false unless asked, pc/media_session.cc). The audio level extensions the default interceptors register are the governed row rtp.audio-level-encryption",
     },
     // ---- interceptor options ----
     NotGoverned {
@@ -1681,11 +1761,6 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_dtls_alpn",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228)",
-    },
-    NotGoverned {
-        setting: "SettingEngineBuilder::with_dtls_session_resumption",
-        class: NotGovernedClass::EngineOnly,
-        note: "RFC 5764 3 (SHOULD, \"as an optimization\"): the transports of unbundled sections share one DTLS session, the others waiting for the first (at most three flight intervals and never more than 3 s) and resuming it with DTLS 1.3 tickets (psk_dhe_ke only; no DTLS 1.2 session id or ticket in any configuration). Off in every profile, an opt-in (`true`), a standing departure from the SHOULD because it costs connection time and no browser can take part. Measured (tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency, three unbundled transports, time until all are connected): round trip 100 ms: off 453 ms, on against a peer that issues no ticket 753 ms (+300 ms, about 3 round trips, nothing resumed), on between two engines with tickets 703 ms (+250 ms, about 2.5 round trips); round trip 300 ms: 1.353 s, 2.253 s (+900 ms), 2.103 s (+750 ms); one datagram lost on the first handshake delays every transport. It saves one signature and one verification per other transport. No browser issues or offers a ticket: libwebrtc rtc_base/openssl_stream_adapter.cc @ a222406d sets SSL_OP_NO_TICKET (line 1223) with an SSL_CTX per adapter (line 1149); Firefox dom/media/webrtc/transport/transportlayerdtls.cpp TransportLayerDtls::Setup() sets SSL_ENABLE_SESSION_TICKETS to PR_FALSE and SSL_NO_CACHE to PR_TRUE (read by the second review, 2026-11-24). With BUNDLE (one transport, Chrome's connection in every bundle policy) it does nothing: no wait, no ticket",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_connection_id",
@@ -1822,6 +1897,11 @@ pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
         behaviour: "SCTP INIT retransmissions",
         chrome: "unlimited (max_init_retransmits none, media/sctp/dcsctp_transport.cc::CreateDcSctpOptions @ a222406d)",
         needed: "a Max.Init.Retransmits setting on the setting engine; the engine keeps RFC 9260's 8",
+    },
+    NotExpressible {
+        behaviour: "ICE completed",
+        chrome: "RTCIceTransport.state is never completed (p2p/base/p2p_transport_channel.cc::ComputeIceTransportState @ a222406d, line 458: \"TODO(bugs.webrtc.org/9218): Start signaling kCompleted once we have implemented end-of-candidates signalling\"). iceConnectionState is completed only on the controlling side, when every transport is writable, has at most one active connection per network (ComputeState, lines 420-453) and has gathered all its candidates; a received end-of-candidates plays no part (pc/jsep_transport_controller.cc::UpdateAggregateStates @ a222406d, lines 1517-1521 and 1578-1581, bugs.webrtc.org/10356). connected is always signalled before completed (\"Ensure that we never skip over the connected state\", line 1596)",
+        needed: "a completed policy on the setting engine (never / libwebrtc's criterion) and a connected signalled before completed. The engine follows W3C webrtc 5.6.4: completed once a pair is selected, its consent is fresh, local gathering is complete and the remote side has signalled end-of-candidates (rtci-ice agent healthy_state), on either role; when both sides have finished before a pair is selected it goes from checking to completed with no connected between (W3C requires no connected first)",
     },
 ];
 

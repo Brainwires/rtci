@@ -259,6 +259,11 @@ pub struct Candidate {
     /// current session had nominated a pair: it is not paired in that session (RFC 8838
     /// Section 13), only in the one the restart begins.
     pub(crate) awaiting_restart: bool,
+    /// A local candidate withdrawn
+    /// ([`Agent::withdraw_local_candidate`](crate::agent::Agent::withdraw_local_candidate)):
+    /// never paired again, nor signalled; its pairs other than the one carrying the data are
+    /// removed; the next restart drops it.
+    pub(crate) withdrawn: bool,
 
     pub(crate) network: String,
 
@@ -292,6 +297,7 @@ impl Default for Candidate {
             unconveyed: false,
             restart_generation: false,
             awaiting_restart: false,
+            withdrawn: false,
             network: String::new(),
 
             url: None,
@@ -380,7 +386,7 @@ impl Candidate {
     /// A local candidate the agent does not pair yet: not conveyed to the peer, or waiting
     /// for the restart it was gathered for.
     pub(crate) fn held_from_pairing(&self) -> bool {
-        self.unconveyed || self.awaiting_restart
+        self.unconveyed || self.awaiting_restart || self.withdrawn
     }
 
     /// When traffic was last received on this candidate.

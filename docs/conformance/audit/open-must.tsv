@@ -75,9 +75,8 @@ RFC9605-X-6	C	S	sframe	Stale in part: the Dependency Descriptor is offered by de
 RFC9628-6-1	A	S	media (running)	`setting`: VP9 receiver limits
 RFC9653-4-3	E	S	sctp	Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate
 RFC8830-3-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
-RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
-RFC8830-3.2.5-1	E	S	jsep (running)	`conflict`: as RFC8830-3-7 (no msid left); memberships tested
+RFC8830-3.2.5-1	E	S	jsep (running)	`conflict`: no msid left ends the track only with the setting (StrictRfc sets it); memberships tested. RFC8830-3-7, the same behaviour in section 3's words ("can"), is MAY since conf/audit-1
 RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-4.1.8-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella of 5.2.2-10, -27)
@@ -93,10 +92,38 @@ RFC9429-5.3-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged sect
 RFC9429-5.3.1-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.8-1	A	S	jsep (running)	`setting`: trailing white space in attribute values (webrtc-rs 0.17)
+RFC9429-5.11-6	C	S	jsep (running)	Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named
 RFC7160-4.1-1	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC7160-4.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC7160-4.1-3	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC8834-4.3-6	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC8083-3-3	A	S	media (running)	`setting` (measured): `CircuitBreakerBuilder::with_packet_size(PacketSize::LastFrames)`, RFC test both forms; section 3's s ceased a talking call in 14 of 24 sweep cells (5 % loss: after 3.8 to 5.0 s), the default in none (`circuit_breaker_reordering_rtc2rtc.rs`)
 RFC4585-3.5.4-2	C	S	media (running)	Count the congestion control feedback sent at once in `avg_rtcp_size` as the received is, or decide with RFC4585-3.5.2-5 (now `setting`)
-RFC6184-7.2.2-1	C	S	media (media-25)	Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)`
+RFC6184-7.2.2-1	C	S	media (media-25)	Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp)
+RFC9429-5.2.2-15	C	M	jsep	W3C webrtc-pc 4.4.1.6 removes the encodings of rids an answer rejected, so the next offer drops their a=rid lines (JSEP: MUST stay the same); the W3C form is the default. Closes as conflict with a setting that keeps offering the rejected rids, and its mutation-checked test (jsep5 follow-up 3)
+RFC9429-5.2.2-16	C	M	jsep	As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3)
+RFC9429-5.5-1	B	S	jsep	Implemented (check_next_signaling_state is a whitelist), no test refuses setLocal(offer) in have-remote-offer or a pranswer state (audit-3 sweep)
+RFC9429-5.5-2	B	S	jsep	Implemented, no test refuses a local answer / pranswer in stable or have-local-offer; needs the last-created answer in a refusing state (e.g. after a rollback) so the 5.4 check does not mask it (audit-3 sweep)
+RFC9429-5.5-3	B	S	jsep	As 5.5-1 / 5.5-2: a test that a local description of the wrong type for the state stops with an error (audit-3 sweep)
+WEBRTC-4.4.1.4-7	B	S	jsep	A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep)
+WEBRTC-4.4.1.5-23	B	S	ice	A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep)
+WEBRTC-4.4.2-46	B	S	jsep	A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep)
+WEBRTC-4.5.1-1	C	S	jsep	Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep)
+WEBRTC-4.8.3-2	B	S	ice	A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep)
+WEBRTC-5.5-3	B	S	dtls-srtp	A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep)
+WEBRTC-5.6.4-2	C	M	ice	W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep)
+WEBRTC-5.6.4-9	C	M	ice	As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep)
+WEBRTC-6.1.2-3	B	S	sctp	A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep)
+WEBRTC-6.2.8-1	B	S	sctp	A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep)
+RFC8851-6.3-5	B	S	jsep	A test whose offer lists a `pt=` none of the answerer's formats keep: the answer drops that a=rid line (audit-6 sweep)
+RFC8834-4.1-24	B	S	rtp	As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep)
+RFC5746-3.6-5	B	S	dtls-srtp	A DTLS 1.2 server test handed a ClientHello with an unknown extension type that completes the handshake (audit-6 sweep)
+RFC6525-5.2.7-1	B	S	sctp	A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep)
+RFC5576-9-1	B	S	rtp	An rtc2rtc test whose answerer is handed the offer with every a=ssrc / a=ssrc-group line removed: media and RTX still bound (MID, RID, RRID) (audit-6 sweep)
+RFC8853-5.2-1	B	S	jsep	A test of a remote offer with a=simulcast at session level only: taken, no simulcast negotiated for its sections (audit-6 sweep)
+RFC9147-4-9	B	S	dtls-srtp	A test with two DTLS 1.3 associations on one endpoint flushing at once: every datagram holds records of one association only (audit-6 sample)
+RFC9147-5-1	B	S	dtls-srtp	A test handing the DTLS 1.3 server a ClientHello with a non-empty legacy_session_id: the ServerHello echoes none (audit-6 sample)
+RFC9147-5.5-1	B	S	dtls-srtp	A test that the fragments of a handshake message sent at a small MTU are contiguous and do not overlap (offset of each = end of the previous) (audit-6 sample)
+RFC9147-5.8.1-2	B	S	dtls-srtp	A test whose client Finished retransmission reaches the server just before 240 s after completion and is still acknowledged (audit-7 sweep6)
+RFC6347-4.2.1-8	E	S	dtls-srtp	Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2)
+RFC6347-4.2.4-5	C	M	dtls-srtp	Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6)

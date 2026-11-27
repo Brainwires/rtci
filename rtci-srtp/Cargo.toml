@@ -28,7 +28,6 @@ rtp.workspace = true
 rtcp.workspace = true
 crypto.workspace = true
 
-byteorder.workspace = true
 bytes.workspace = true
 zeroize.workspace = true
 
