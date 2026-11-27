@@ -2137,8 +2137,19 @@ impl Agent {
     /// checklist stays Running (RFC 8838 Section 8: "MUST keep each checklist in the Running
     /// state as long as it expects candidate pairs to be incrementally added") and the
     /// agent's timeout ends it if none comes.
+    ///
+    /// A lite agent has no checklist to fail: RFC 8445 Section 6.2, "Lite implementations
+    /// skip most of the steps in Section 6 except for verifying the peer's ICE support and
+    /// determining its role in the ICE processing" (the checklist and its Failed state,
+    /// Section 6.1.2.1, are a full agent's), and it "do[es] not generate connectivity checks"
+    /// (Section 2.5), so none of its pairs fails by a check. With no pair yet its pair comes
+    /// from the peer: a full peer's check (a peer-reflexive pair, RFC 8838 Appendix B), or, a
+    /// lite peer, a candidate it still sends (the engine trickles its TCP candidates once their
+    /// listeners are bound, whatever the description said). Its checking timeout still ends
+    /// it, with the indications that no candidate is to come.
     pub(crate) fn update_checklist_failure(&mut self, now: Instant) {
-        if self.connection_state != ConnectionState::Checking
+        if self.lite
+            || self.connection_state != ConnectionState::Checking
             || self.selected_pair.is_some()
             || self.pac_running(now)
             || !self.no_more_remote_candidates()

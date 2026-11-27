@@ -269,6 +269,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A lite agent with no pair is not failed by its empty checklist**
+  (`conf/ice-34-lite-agents-and-failed-after-end-of-candidates`; RFC 8445 section 6.2: "Lite
+  implementations skip most of the steps in Section 6 except for verifying the peer's ICE
+  support and determining its role"). A lite description carries no `a=ice-options:trickle`, so
+  since ice-32 a lite peer's description is itself the indication that no candidate is to come;
+  with its own gathering complete, a lite agent with no pair yet then failed the (empty)
+  checklist at its first look, although its pair was still to come: the TCP candidate a lite
+  peer trickles once its listener is bound (two lite agents over TCP,
+  `two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer`, red on train 36
+  round 10, run 46038516696), or a full peer's check (RFC 8838 Appendix B). The checklist rule
+  (section 6.1.2.1) is a full agent's and is no longer applied to a lite agent; its checking
+  timeout still fails it, with the indications that no candidate is to come.
 - **A remote answer that names a rid the offer did not offer is applied, not refused**
   (`conf/jsep-87-reanswer-altering-rids`; RFC 8851 section 6.4 step 1: "If no matching line
   can be located in the offer, the "a=rid" line is ignored"). Once a sender had sent simulcast,
@@ -487,7 +499,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reliable DCEP DATA_CHANNEL_OPEN (RFC 8832 section 5) went again after the first message (its
   SACK lost while the peer's DATA_CHANNEL_ACK opened the channel; run 46050142067). Unit test
   `a_reliable_message_sent_again_is_not_counted_as_a_partially_reliable_retransmission`.
-
+- **The test environment relays the end of candidates**
+  (`conf/ice-34-lite-agents-and-failed-after-end-of-candidates`; `tests/testenv/mod.rs`
+  `negotiate` / `negotiate_with` now end each peer's gathering and hand each the other's
+  end-of-candidates, as applications do since ice-32). `nat_matrix_without_turn` expects
+  `failed` on NATs with no path, which W3C webrtc-pc 5.6.4 gives only with that indication
+  (`portrestricted_symmetric` and `symmetric_symmetric` stayed `disconnected` on train 36 round
+  10, run 46038516659). New `negotiate_without_end_of_candidates` and two tests pin both sides on
+  real NATs: without the indication the agents stay `disconnected`; with
+  `with_ice_failed_without_end_of_candidates(true)` they fail.
 - **A measurement of key residue in stack frames that does not depend on the C library**
   (`rtci-srtp/tests/key_residue.rs`, `owned_stack/`, `process_scan/`;
   `scripts/key-residue-report.sh`; CI job `key_residue`). Each step of a session (building the
