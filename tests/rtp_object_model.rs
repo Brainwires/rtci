@@ -627,6 +627,74 @@ fn add_track_with_streams_associates_exactly_those_streams() -> TestResult {
     Ok(())
 }
 
+/// W3C webrtc-pc 5.2 / 5.3: `getCapabilities` is "the list of implemented send codecs" ("receive
+/// codecs"), "the most optimistic view of the codecs the user agent supports", whatever was
+/// negotiated: after an exchange that negotiated VP8 alone (an answer with the offered formats
+/// only, the default since 0.3.0) it still lists VP9, H.264, AV1 and H.265.
+#[test]
+fn get_capabilities_is_the_same_after_a_negotiation_that_narrowed_the_formats() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let id = offerer
+        .add_transceiver_from_kind(RtpCodecKind::Video, Some(RTCRtpTransceiverInit::recvonly()))?;
+    let names = |pc: &mut RTCPeerConnection, id: RTCRtpTransceiverId| -> Vec<String> {
+        let mut out: Vec<String> = pc
+            .rtp_receiver(id.into())
+            .expect("receiver")
+            .get_capabilities(RtpCodecKind::Video)
+            .expect("video")
+            .codecs
+            .iter()
+            .map(|c| format!("{} {}", c.mime_type.to_ascii_lowercase(), c.sdp_fmtp_line))
+            .collect();
+        out.sort();
+        out
+    };
+    let before = names(&mut offerer, id);
+    let vp8 = offerer
+        .rtp_sender(id.into())
+        .expect("sender")
+        .get_capabilities(RtpCodecKind::Video)
+        .expect("video")
+        .codecs
+        .into_iter()
+        .filter(|c| c.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP8))
+        .map(|rtp_codec| RTCRtpCodecParameters {
+            rtp_codec,
+            payload_type: 0,
+        })
+        .collect();
+    offerer
+        .rtp_transceiver(id)
+        .expect("transceiver")
+        .set_codec_preferences(vp8)?;
+    let (_, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert!(
+        !answer.contains("VP9/90000"),
+        "VP8 alone is negotiated: {answer}"
+    );
+    let after = names(&mut offerer, id);
+    assert_eq!(after, before, "getCapabilities after the negotiation");
+    assert!(
+        after.iter().any(|c| c.starts_with("video/vp9")),
+        "{after:?}"
+    );
+    let sender_after: Vec<String> = offerer
+        .rtp_sender(id.into())
+        .expect("sender")
+        .get_capabilities(RtpCodecKind::Video)
+        .expect("video")
+        .codecs
+        .iter()
+        .map(|c| c.mime_type.to_ascii_lowercase())
+        .collect();
+    assert!(
+        sender_after.iter().any(|m| m == "video/vp9"),
+        "the sender's capabilities too: {sender_after:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn get_capabilities_lists_the_engine_codecs_without_any_negotiation() -> TestResult {
     let mut media_engine = MediaEngine::default();

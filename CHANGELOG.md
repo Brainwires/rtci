@@ -165,6 +165,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`RTCRtpSender::get_capabilities` / `RTCRtpReceiver::get_capabilities` list the implemented
+  formats after a negotiation too** (`conf/jsep-95-answers-list-offered-formats-by-default`; W3C
+  webrtc-pc 5.2 / 5.3: "the list of implemented send codecs", "the most optimistic view of the
+  codecs the user agent supports"). From 0.1.0 they returned the negotiated list once a kind was
+  negotiated, so a format left out of the last answer could no longer be found to put in codec
+  preferences; answers that added every registered format (up to 0.2.x) mostly hid it, and the
+  offered-only default made it visible
+  (`tests/early_media_rtc2rtc.rs::a_format_a_later_offer_adds_is_received_as_that_format_before_the_answer`
+  found no VP9). Test
+  `tests/rtp_object_model.rs::get_capabilities_is_the_same_after_a_negotiation_that_narrowed_the_formats`.
+  Header extensions are still the negotiated ones after a negotiation (follow-up).
 - **The offerer sends with the answer's most preferred format it can send, also one its codec
   preferences left out of the offer** (`conf/jsep-91-offerer-sends-answers-preferred-format`;
   RFC 9429 section 5.11, in steps that "MUST be performed": "choose the media format to send as

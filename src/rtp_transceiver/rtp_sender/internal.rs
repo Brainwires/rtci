@@ -1798,7 +1798,10 @@ pub(crate) fn rtp_capabilities(
         return None;
     }
     let mut codecs: Vec<RTCRtpCodec> = vec![];
-    for codec in media_engine.get_codecs_by_kind(kind) {
+    // W3C webrtc-pc 5.2 / 5.3 getCapabilities: "the list of implemented send codecs" ("receive
+    // codecs"), "the most optimistic view of the codecs the user agent supports": the
+    // registered formats, never the list a negotiation narrowed them to.
+    for codec in media_engine.registered_codecs_by_kind(kind).iter().cloned() {
         let mut codec = codec.rtp_codec;
         if is_repair_codec(&codec) && repair_family(&codec) == "rtx" {
             codec.sdp_fmtp_line = String::new();
