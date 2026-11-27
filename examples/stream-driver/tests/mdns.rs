@@ -338,18 +338,18 @@ async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() ->
 async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> Result<()> {
     let _group = MDNS_GROUP_IN_USE.lock().await;
     let ip = IpAddr::from(Ipv4Addr::LOCALHOST);
-    // Windows keeps the group joined on the loopback pseudo-interface after this process has
-    // exited (`netsh interface ipv4 show joins`: references 0, still listed 90 s later), and from
-    // then on answers 127.0.0.1 to every process that asks which address reaches the group
-    // (agent-test run 46045692164): on a runner that lives on (our self-hosted Windows VM) the
-    // next job's mDNS tests would bind loopback. Not run there until the driver can undo it;
+    // On Windows mDNS sent on loopback leaves the group's destination-cache route on loopback
+    // after this process (`netsh interface ipv4 show destinationcache address=224.0.0.251`),
+    // and every process then gets 127.0.0.1 for the group (agent-test runs 46045692164,
+    // 46049295359; the fleet's Windows PC): on a runner that lives on (our self-hosted Windows
+    // VM) the next job's mDNS tests would bind loopback. Not run there;
     // the same exchange on loopback's rules runs on virtual time
     // (`mdns_virtual_time.rs::drivers_whose_link_is_not_the_default_multicast_interface_resolve_each_other`).
     if cfg!(windows) {
         println!(
             "SKIPPED drivers_on_loopback_resolve_each_other_on_the_loopback_interface: on \
-             Windows a loopback join outlives the process and changes the group's route for \
-             the whole host"
+             Windows mDNS on loopback leaves the group's destination-cache route on loopback \
+             for the whole host"
         );
         return Ok(());
     }

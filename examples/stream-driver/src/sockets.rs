@@ -153,9 +153,10 @@ pub struct AddressFilter {
     /// Only these addresses (bind addresses); empty: every address of every interface.
     pub bind_addresses: Vec<IpAddr>,
     /// Loopback addresses too (off by default: RFC 8445 section 5.1.1.1 says they SHOULD NOT
-    /// be included unless needed). On Windows a driver with mDNS on a loopback address leaves
-    /// the mDNS group joined on the loopback interface after the process exits, and the system
-    /// then routes 224.0.0.251 by loopback for other processes (`peer` module documentation).
+    /// be included unless needed). On Windows a driver with mDNS on a loopback address leaves a
+    /// destination-cache route for 224.0.0.251 via loopback after the process exits, and the
+    /// system then routes the group by loopback for other processes until the entry is deleted
+    /// (`peer` module documentation).
     pub include_loopback: bool,
     /// IPv6 link-local addresses too (off by default).
     pub include_link_local: bool,

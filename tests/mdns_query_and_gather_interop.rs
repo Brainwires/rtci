@@ -94,13 +94,13 @@ fn rtc_bind_ip() -> std::net::IpAddr {
 /// connected to the group sends from. `None` if there is none (or it is loopback).
 ///
 /// On Windows the default route's address instead (a socket connected to a documentation
-/// address sends nothing): there the system's answer for the group follows the interfaces the
-/// group has been joined on, and a join on the loopback pseudo-interface stays listed after its
-/// process has exited (`netsh interface ipv4 show joins`: references 0, hosted Windows, still
-/// there 90 s later), so after any earlier process joined on loopback (the stream driver's
-/// loopback test) a fresh process got 127.0.0.1 for the group, bound loopback, and could not
-/// reach the upstream peer's LAN candidates: every test of this file timed out (agent-test run
-/// 46045692164). The default route stayed the LAN address throughout.
+/// address sends nothing): there the system's answer for the group comes from its destination
+/// cache, and a process that joined the group on loopback and sent to it there leaves the
+/// group's entry on loopback after it has exited (`netsh interface ipv4 show destinationcache
+/// address=224.0.0.251`: source 127.0.0.1), so after the stream driver's loopback test a fresh
+/// process got 127.0.0.1 for the group, bound loopback, and could not reach the upstream peer's
+/// LAN candidates: every test of this file timed out (agent-test run 46045692164). The default
+/// route stayed the LAN address throughout.
 fn mdns_egress_ip() -> Option<std::net::IpAddr> {
     let target: std::net::SocketAddr = if cfg!(windows) {
         std::net::SocketAddr::from(([192, 0, 2, 1], 9))
