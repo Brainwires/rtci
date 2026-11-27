@@ -408,11 +408,12 @@ fn with_the_setting_the_h265_level_id_scenario_answers_one_h265_format() -> Test
 }
 
 /// The same scenario with the default answerer: the answer lists H.265 and then the other
-/// registered video formats (one of them H.265 at most: the offered one), and the offerer still
-/// sends with the one codec it offered: an added format is not in its send codecs (RFC 3264
-/// section 7 lets it send one; this endpoint does not).
+/// registered video formats (one of them H.265 at most: the offered one). The offerer's send
+/// codecs are the answer's formats it can send, the answer's first leading (RFC 9429 section
+/// 5.11, RFC 3264 section 7: conf/jsep-91): H.265 at level-id 30 first, one codec per media
+/// format of the answer's m= line (its repair formats, RTX / RED / FEC, are not send codecs).
 #[test]
-fn by_default_the_h265_level_id_scenario_adds_formats_the_offerer_does_not_send() -> TestResult {
+fn by_default_the_h265_level_id_scenario_lists_the_answers_formats_h265_first() -> TestResult {
     let (answer, codecs) = h265_level_id_scenario(&mut peer(false)?, &mut peer(false)?)?;
     let section = &media_sections(&answer)[0];
     let answered = formats(section);
@@ -426,7 +427,23 @@ fn by_default_the_h265_level_id_scenario_adds_formats_the_offerer_does_not_send(
         1,
         "{answer}"
     );
-    assert_eq!(codecs.len(), 1, "{codecs:?}");
+    let media_formats = answered
+        .iter()
+        .filter(|pt| {
+            !matches!(
+                encoding_name(section, pt).as_str(),
+                "rtx" | "red" | "ulpfec" | "flexfec-03"
+            )
+        })
+        .count();
+    assert_eq!(codecs.len(), media_formats, "{answer}\n{codecs:?}");
+    assert!(
+        codecs[0]
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_HEVC),
+        "{codecs:?}"
+    );
     assert_eq!(level_id(&codecs[0]).as_deref(), Some("30"), "{codecs:?}");
     Ok(())
 }
