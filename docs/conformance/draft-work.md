@@ -7,6 +7,7 @@ editor's draft and its merged pull requests and issue resolutions (candidate cor
 included), IETF "bis" Internet-Drafts and the working group's tracker, RFC errata. Where no
 draft work exists, the entry says so. `audit/RULES.md` ("Contradictions") states the rule; this
 file is the register, re-checked before each release (`docs/releasing.md`, "Before").
+Every defect found in a specification, these contradictions included, is listed in [spec-issues.md](spec-issues.md).
 
 Checked 2026-11-27 (copies in the coordinator's scratch area, `specs-extra/drafts-2026-11-27/`):
 

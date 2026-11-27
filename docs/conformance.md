@@ -77,6 +77,7 @@ section 4.2.3), off by default and in no profile.
 What the maintainers' current draft work says of each contradiction and departure below (W3C
 candidate corrections and issues, IETF errata and bis drafts, with dates), and whether the
 default matches it, is in the register [conformance/draft-work.md](conformance/draft-work.md).
+Defects found in the specifications themselves, and their upstream state, are listed in [conformance/spec-issues.md](conformance/spec-issues.md).
 
 | Clause | The MUST | The default | The RFC form | Why the default departs | Test |
 |---|---|---|---|---|---|
