@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conf/w3c-1 test for W3C 6.2.8 (`data_channel_receive_not_open_rtc2rtc.rs`) is carried along,
   but WEBRTC-6.2.8-1 stays `untested`: the test passes with both of the handler's discard
   checks lifted, so its message never reaches them.
+- **W3C webrtc-pc 6.2.8 is tested: a message read while a channel is closing reaches no
+  application message** (`conf/sctp-28-data-on-a-channel-that-is-not-open`, on conf/sctp-27;
+  `tests/data_channel_receive_while_closing_rtc2rtc.rs::a_message_read_after_close_is_called_is_discarded`;
+  test and audit only, no engine change; mutation checked). `close()` makes the channel
+  "closing" and queues the stream reset behind what was sent, so a datagram read before the
+  next flush carries user data for a closing channel on a stream that still reads; it is
+  discarded while its sibling's message is delivered. The only state that is not "open" in
+  which user data can reach the channel (see the test's notes). WEBRTC-6.2.8-1 `tested`.
 
 ## [0.2.1] - 2026-11-27
 
