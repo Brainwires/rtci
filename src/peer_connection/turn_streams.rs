@@ -118,6 +118,38 @@ pub enum RelayGathering {
     #[default]
     Engine,
     /// The application: the engine sends nothing to a `turn:` server over UDP.
+    ///
+    /// The application runs the TURN client and adds the relayed candidate
+    /// (`add_local_candidate`, with `url` set to the server). The engine then treats the
+    /// relayed address as a local address of its own, and the application carries datagrams
+    /// between it and the allocation, as the engine does for an allocation it runs itself:
+    ///
+    /// - **In**: a datagram the allocation relayed (the payload of a Data indication or of
+    ///   ChannelData) goes to `handle_read` with `local_addr` = the relayed address (the relay
+    ///   candidate's address, the XOR-RELAYED-ADDRESS of the Allocate response) and
+    ///   `peer_addr` = the peer (XOR-PEER-ADDRESS, or the channel's peer). Not the address of
+    ///   the socket that talks to the TURN server: the ICE agent matches `local_addr` exactly
+    ///   against its local candidates (RFC 8445 section 7.3.1.4), and a datagram on any other
+    ///   address is discarded ("Discarded message, not a valid local candidate").
+    /// - **Out**: a datagram from `poll_write` whose `transport.local_addr` is the relayed
+    ///   address leaves through the allocation (a Send indication, or ChannelData on a bound
+    ///   channel, to `transport.peer_addr`; RFC 8656 sections 11 and 12), not from a socket.
+    ///
+    /// ```text
+    /// // in: what the TURN client unwrapped
+    /// pc.handle_read(TaggedBytesMut { now, message: payload, transport: TransportContext {
+    ///     local_addr: relayed_addr,  // the relay candidate's address
+    ///     peer_addr: peer,           // XOR-PEER-ADDRESS / the channel's peer
+    ///     transport_protocol: TransportProtocol::UDP, ecn: None } })?;
+    /// // out
+    /// while let Some(msg) = pc.poll_write() {
+    ///     if msg.transport.local_addr == relayed_addr {
+    ///         turn.send_to(&msg.message, msg.transport.peer_addr)?;  // Send / ChannelData
+    ///     } else {
+    ///         socket_for(msg.transport.local_addr).send_to(&msg.message, msg.transport.peer_addr)?;
+    ///     }
+    /// }
+    /// ```
     Application,
 }
 

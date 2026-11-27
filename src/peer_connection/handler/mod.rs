@@ -1197,6 +1197,30 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
     type Error = Error;
     type Time = Instant;
 
+    /// Feeds one received datagram.
+    ///
+    /// `msg.transport.local_addr` is the address of the local candidate the datagram arrived
+    /// on, and the ICE agent matches it exactly against its local candidates (RFC 8445 section
+    /// 7.3.1.4); a datagram on any other address is discarded ("Discarded message, not a valid
+    /// local candidate"). Two cases where that is not the socket's own address:
+    ///
+    /// - **A socket bound to the unspecified address** (`0.0.0.0:port`, `[::]:port`) passes
+    ///   the concrete address the datagram was received on (its destination address, e.g.
+    ///   `IP_PKTINFO` / `IPV6_RECVPKTINFO`; that is the host candidate's address), not
+    ///   `socket.local_addr()`. Binding one socket per local address, as
+    ///   `rtci-stream-driver`'s `PeerDriver` does, avoids the question.
+    /// - **A datagram relayed by a TURN allocation the application runs**
+    ///   ([`RelayGathering::Application`](crate::peer_connection::turn_streams::RelayGathering::Application)):
+    ///   the payload of the Data indication or ChannelData, with `local_addr` = the relayed
+    ///   address (the relay candidate's address) and `peer_addr` = the peer.
+    ///
+    /// ```text
+    /// let (n, peer, destination_ip) = recv_with_pktinfo(&socket, &mut buf)?;  // wildcard-bound
+    /// pc.handle_read(TaggedBytesMut { now, message: BytesMut::from(&buf[..n]),
+    ///     transport: TransportContext {
+    ///         local_addr: SocketAddr::new(destination_ip, socket_port),  // not 0.0.0.0:port
+    ///         peer_addr: peer, transport_protocol: TransportProtocol::UDP, ecn: None } })?;
+    /// ```
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
         // A record of one of the engine's DTLS associations to a TURN server (RFC 7350).
@@ -1272,6 +1296,15 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         })
     }
 
+    /// The next datagram to send; drain until `None`.
+    ///
+    /// Send it from `transport.local_addr` to `transport.peer_addr`: from the socket of that
+    /// host address, or, when `local_addr` is the relayed address of a relay candidate the
+    /// application added
+    /// ([`RelayGathering::Application`](crate::peer_connection::turn_streams::RelayGathering::Application)),
+    /// through that TURN allocation (a Send indication, or ChannelData on a bound channel;
+    /// RFC 8656 sections 11 and 12), not directly. Datagrams of the engine's own allocations
+    /// are already wrapped: they leave from a host address to the TURN server.
     fn poll_write(&mut self) -> Option<Self::Wout> {
         self.flush_writes();
         // A datagram for one of the engine's own TCP candidates goes on its connection

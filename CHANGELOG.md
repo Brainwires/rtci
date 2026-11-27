@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **The local address of a fed datagram** (`conf/docs-5-local-address-of-fed-datagrams`;
+  consumer-reported on 0.2.0 with application-run TURN): the `local_addr` of a datagram given
+  to `handle_read` is the address of the local candidate it arrived on, which the ICE agent
+  matches exactly (RFC 8445 section 7.3.1.4). A datagram relayed by a TURN allocation the
+  application runs (`RelayGathering::Application`) carries the relayed address, and a datagram
+  from `poll_write` whose `local_addr` is the relayed address goes through that allocation
+  (Send indication / ChannelData), as the engine does for its own allocations; a socket bound
+  to `0.0.0.0` / `[::]` reports the concrete address each datagram was received on
+  (`IP_PKTINFO` / `IPV6_RECVPKTINFO`), not its own. In the README ("Driving the Engine", "The
+  local address of a datagram"; "Feeding ICE Candidates"), on `RTCPeerConnection`'s and the ICE
+  `Agent`'s `handle_read` / `poll_write`, on `RelayGathering::Application` and on
+  `TransportContext::local_addr`. The README's and the crate documentation's event-loop
+  examples bind a concrete address instead of `0.0.0.0:0`.
+
+### Changed
+
+- **ICE: a datagram on an unspecified local address says why it is discarded.** A datagram
+  whose `local_addr` is `0.0.0.0:port` / `[::]:port` and matches no local candidate is
+  discarded as before (`Error::ErrUnhandledStunpacket`, same WARN level), with a log line that
+  names the unspecified address and the rule instead of "Discarded message, not a valid local
+  candidate". No matching change: a datagram that matched a candidate before still does.
+  `agent_checklist_test.rs::test_a_request_on_an_unspecified_local_address_is_discarded_and_the_log_says_why`.
+
 ## [0.2.0] - 2026-11-26
 
 The second release under the `rtci` names. Since 0.1.0: trains 21 to 34 of the
