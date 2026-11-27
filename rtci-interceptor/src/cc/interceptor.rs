@@ -11,6 +11,7 @@ use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
 use crate::Interceptor;
 use crate::circuit_breaker::CircuitBreakerHandle;
 use crate::never_sent::NeverSent;
+use crate::rtcp_session::RegularTiming;
 use crate::rtpfb::acknowledgement::PacketReport;
 use crate::rtpfb::convert::FeedbackTimeline;
 use crate::rtpfb::history::History;
@@ -699,10 +700,17 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                 })
                 .collect(),
         };
+        let mut message = AttributedPacket::new(Packet::Rtcp(vec![Box::new(request)]));
+        if self.tmmbr_requests.repeats_only() {
+            // RFC 5104 section 4.2.1.3: "Any repetition of a request message SHOULD use
+            // regular RTCP mode for its transmission timing": the RTCP session holds it for
+            // its next Regular compound packet.
+            message = message.with(Attribute::Custom(Arc::new(RegularTiming)));
+        }
         self.write_queue.push_back(TaggedPacket {
             now,
             transport: shared::TransportContext::default(),
-            message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(request)])),
+            message,
         });
     }
 

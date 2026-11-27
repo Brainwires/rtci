@@ -57,6 +57,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key expansion per packet).
   Performance: zeroize-3
 
+### Behaviour changes
+
+- **RTCP session: a NACK larger than the MTU is split; a repeated TMMBR waits for a Regular
+  packet** (`conf/rtcp-session-3-split-nack-regular-tmmbr`). (1) RFC 3550 section 6.1: "If the overall
+  length of a compound packet would exceed the MTU of the network path, it SHOULD be segmented
+  into multiple shorter compound packets". A NACK too large for one compound packet
+  (`RtcpSessionBuilder::with_mtu`, 1200 octets by default: about 280 PID/BLP pairs) used to
+  leave whole, in one datagram over the MTU; its pairs are now cut into NACKs that fit, the
+  first in the compound packet being built and the rest, at the same instant, in compound
+  packets of their own (the leading SSRC's report without blocks, its CNAME, the NACK). Any
+  other single packet larger than the MTU still leaves as it is: it cannot be split. (2) RFC 5104
+  section 4.2.1.3: "Any repetition of a request message SHOULD use regular RTCP mode for its
+  transmission timing". The congestion control interceptor's repetitions of an unacknowledged
+  TMMBR (`TMMBR_REPEAT_INTERVAL`) used to enter the RTCP session as any feedback and leave in
+  an Early packet when RFC 4585 3.5.2 allowed one; they are now held for the next Regular
+  compound packet (a newer TMMBR replaces the held entries for the same media senders). The
+  first TMMBR still goes at once. API unchanged. Tests
+  `rtcp_session_feedback.rs::a_nack_larger_than_the_mtu_is_split_into_several_compound_packets`,
+  `rtcp_session_feedback.rs::a_repeated_tmmbr_waits_for_the_regular_compound_packet`.
+
 ### Changed
 
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
