@@ -174,6 +174,10 @@ STUN packet and can move capacity figures. It did at the rename (train 18) and a
 which re-drew 2931 of the instrument's 3200 rows (capacity-compare run 45690259846; every
 requirement met on both sides). The release pull request re-records
 `tests/fixtures/capacity-instrument-baseline.tsv` on the bumped tree (ledger row `release-0.2.0`).
+0.2.1: `rtci-ice 0.2.1` is as long as `rtci-ice 0.2.0` (14 bytes), so no STUN packet changes
+size. The release pull request's instrument runs A, B and C are to give rows byte-identical to
+those of the train-35 head 2495e62d (runs 45927526905, 45927534365, 45927538527), with no baseline
+re-record and no ledger row.
 
 ## Publish
 

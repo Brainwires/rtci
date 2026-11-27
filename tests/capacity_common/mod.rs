@@ -269,7 +269,7 @@ pub const SOFTWARE_40: &str = "rtci-ice 0.2.0-dev (perturbation: 40 B).";
 const _: () = assert!(SOFTWARE_27.len() == 27 && SOFTWARE_40.len() == 40);
 
 /// The perturbations of the measurement, by name. The engine's own SOFTWARE text is
-/// `rtci-ice 0.2.0` (14 bytes).
+/// `rtci-ice 0.2.1` (14 bytes).
 pub const PERTURBATIONS: [(&str, Perturbation); 6] = [
     ("none", Perturbation::None),
     ("nosw", Perturbation::NoSoftware),

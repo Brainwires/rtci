@@ -648,7 +648,7 @@ The engine is the root crate, `rtci`; each protocol is a crate of its own, usabl
 
 These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
 `rtci-signal`, the examples' signalling helper; `rtci-video`, the video pipeline (in development, not part of
-the 0.2.0 release); the fuzz crates, the benchmark and the test environment's peers.
+the 0.2.1 release); the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 
