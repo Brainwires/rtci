@@ -226,6 +226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Draft-work register** (`docs/conformance/draft-work.md`, `conf/audit-8-draft-work-register`):
+  for each `conflict` row, standing departure and recorded ambiguity, the clauses in conflict,
+  what the maintainers' current draft work says (W3C webrtc-pc candidate corrections, PRs and
+  issues; IETF errata, bis drafts and trackers) with its date, and whether the engine's default
+  matches. Two defaults did not and change on their own branches (`conf/jsep-96`: a later
+  remote offer with new rids is answered, Candidate Correction 37; `conf/jsep-97`: an RTP
+  timeout no longer mutes a remote track, Candidate Correction 57). `audit/RULES.md` gains the
+  rule ("Contradictions": resolved from current draft work, cited with its number and date) and
+  `docs/releasing.md` a check of the register before each release.
+
 - **Releasing: what the 0.2.1 publish ran into** (`docs/releasing.md`): `cargo generate-lockfile`
   is an explicit step after the dry run (the dry run left no `Cargo.lock` on the current
   toolchain); a release script must not test first-parent membership with `rev-list | grep -q`
