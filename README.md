@@ -56,13 +56,13 @@ WebRTC uses); every row names the code and the test that proves it. From
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5094 | 5066 (99.5 %) | 5034 (98.8 %) |
+| MUST | 5095 | 5068 (99.5 %) | 5036 (98.8 %) |
 | SHOULD | 988 | 924 (93.5 %) | 918 (92.9 %) |
-| MAY | 605 | 501 (82.8 %) | 500 (82.6 %) |
+| MAY | 605 | 503 (83.1 %) | 502 (83.0 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. 28 MUST rows are open (15 untested,
-11 partial, 2 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+browser or a deployed peer cannot interoperate with it by default. 27 MUST rows are open (15 untested,
+11 partial, 1 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by the
 owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a MUST"),
 each with the setting that gives the RFC form (the `StrictRfc` profile sets all three): the H.264 de-interleaving order
@@ -343,6 +343,10 @@ server URI without a port the engine first asks for its NAPTR and SRV records
 back-pressure signal: the engine holds a window of unacknowledged bytes per connection.
 `SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
 application that never polls the stream interface gets no TCP candidate and nothing changes.
+Poll it before adding the end of candidates: the end of gathering waits for the listeners only
+of an application that has served the interface; one that ends its candidates first gets no TCP
+candidate (none may follow the end of candidates, RFC 8838 section 13), a warning in the log,
+and a `StopListening` after each `Listen` once it does poll.
 
 **What is engine and what is driver.** The engine (`rtci`) decides and runs every protocol:
 which TCP candidates exist, which connections to open and when to close them, RFC 4571 and

@@ -76,6 +76,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first TMMBR still goes at once. API unchanged. Tests
   `rtcp_session_feedback.rs::a_nack_larger_than_the_mtu_is_split_into_several_compound_packets`,
   `rtcp_session_feedback.rs::a_repeated_tmmbr_waits_for_the_regular_compound_packet`.
+- **ICE-TCP between two lite agents (RFC 6544 section 6.1)** (`conf/ice-30-lite-lite-tcp`, a
+  re-cut of the parked `conf/ice-22-lite-tcp` on 0.2.0). Before, two lite agents could not use a
+  TCP pair at all: nothing opened its connection, since neither sends connectivity checks. Now
+  the side whose candidate of the selected pair is `tcptype active` opens the connection (the
+  TCP role; 6.1's `a=setup:active` is read as that, `a=setup` being the DTLS role in WebRTC):
+  the controlling agent as soon as it selects the pair, in parallel with its updated offer
+  (6.1's MAY), the controlled one once its pair is final. The answerer carries the pair on the
+  connection it accepted on the pair's passive candidate from the active candidate's IP,
+  closes nothing while the updated offer is awaited, keeps the matching connection once the
+  offer is applied, and closes a connection that does not match and restarts ICE (6.1's MUST
+  and SHOULD), whether the connection came before the offer or after it. On the way: a lite
+  agent takes one UDP, one passive TCP and one active TCP candidate per address, no
+  simultaneous-open one (section 4.4; before, its UDP candidate shut every TCP one on the
+  address out, so a lite agent had no TCP candidate and could not connect over TCP even with a
+  full peer; it can now); two lite agents keep each other's active TCP candidates as remote candidates
+  (a full agent, or a lite one with a full peer, still drops them and notes that the peer may
+  dial); the peer's `a=ice-lite` reaches the agent before the first description's candidate
+  lines; and between two lite agents a first non-STUN message on a connection the agent opened
+  does not reset it. Only when both sides are lite (`with_lite(true)` and the peer's
+  `a=ice-lite`); full mode stays the default, as 6.1 RECOMMENDS. New `Agent::is_remote_lite`,
+  `Agent::awaits_lite_update` (additive). Conformance rows RFC6544-4.4-1, RFC6544-6.1-1,
+  RFC6544-6.1-2 and RFC6544-6.1-3 (the last open MUST of RFC 6544) are `tested`.
+- **An end of candidates before the first stream poll releases the engine's TCP listeners**
+  (`conf/ice-33-lite-lite-nothing-closed-while-awaiting-the-update`). An application that adds
+  its UDP host candidate and its end of candidates before it first serves the stream interface
+  gets no TCP candidate: the end of gathering waits for listeners only of an application that
+  has served it, and none may follow the end of candidates (RFC 8838 section 13). That is
+  unchanged. Before, the listeners the engine had asked for were still bound once it polled and
+  stayed open, accepting connections no candidate announced, and only the agent's generic
+  "gathering was declared complete" line said anything. Now the engine warns at the end of
+  candidates, naming the cause and the fix (poll `poll_stream_command` first), and releases
+  those listeners: a driver that polls later sees each `Listen` followed by its
+  `StopListening`. An ICE restart gathers them afresh.
 
 ### Changed
 
@@ -362,6 +395,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clause (section 9.3 is "Confidentiality of the RTP Payload"; section 3.2.1 has the master
   key "kept secret"). The clause is RFC 7714 section 13.1, which has two items: a secret
   master salt, and all keys. Corrected in docs/key-erasure.md and the sources' comments.
+- RFC 6544 section 6.1 / RFC 8445 section 8.2: two lite agents that select different pairs (the
+  answerer a UDP one, the offerer its active TCP candidate to the answerer's passive one): the
+  answerer closes nothing while the updated offer is awaited, then keeps the connection the
+  offerer opened in parallel and carries the data on it, without an ICE restart
+  (`two_lite_agents_close_nothing_while_the_updated_offer_is_awaited`; ice-30's untested arm in
+  RFC6544-6.1-2's note).
 
 ## [0.2.1] - 2026-11-27
 

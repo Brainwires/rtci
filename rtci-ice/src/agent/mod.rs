@@ -596,6 +596,9 @@ pub struct Agent {
     pub(crate) remote_lite: bool,
     /// The `LiteCandidateUpdate` event of this generation was raised.
     pub(crate) lite_update_raised: bool,
+    /// Two lite agents, controlled: the updated candidate exchange of this generation was
+    /// taken ([`Agent::replace_remote_candidates`]).
+    pub(crate) lite_update_taken: bool,
     /// Two lite agents, controlled: the local transport address an updated candidate
     /// exchange named in `a=remote-candidates` (RFC 8839 Section 4.4.2.2), which the pair
     /// takes as its local candidate. See [`Agent::replace_remote_candidates_pinning`].
@@ -903,6 +906,7 @@ impl Agent {
 
             remote_lite: false,
             lite_update_raised: false,
+            lite_update_taken: false,
             pinned_local_addr: None,
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
@@ -1350,13 +1354,22 @@ impl Agent {
 
         // RFC 8445 Section 5.2: a lite implementation has only host candidates, "zero or one
         // candidate per IP address": another type, or a second candidate on an address it
-        // already has a candidate on, is not taken.
+        // already has a candidate on, is not taken. RFC 6544 Section 4.4 adds TCP to it: "In
+        // the lite mode, for TCP candidates, only passive host candidates are gathered, unless
+        // active candidates are needed as the default candidates. Otherwise, the procedures
+        // described for lite mode ... also apply to TCP candidates": one candidate per IP
+        // address for each of UDP, passive TCP and active TCP (the active one is the default
+        // candidate of the updated offer of two lite agents whose offerer connects, Section
+        // 6.1, and a lite agent cannot add it later without a restart, RFC 8839 Section
+        // 4.4.1.3); no simultaneous-open candidate.
         if self.lite
             && (c.candidate_type() != CandidateType::Host
-                || self
-                    .local_candidates
-                    .iter()
-                    .any(|cand| cand.addr().ip() == c.addr().ip()))
+                || c.tcp_type() == TcpType::SimultaneousOpen
+                || self.local_candidates.iter().any(|cand| {
+                    cand.addr().ip() == c.addr().ip()
+                        && cand.network_type().is_tcp() == c.network_type().is_tcp()
+                        && cand.tcp_type() == c.tcp_type()
+                }))
         {
             warn!(
                 "[{}]: ignoring local candidate {}: a lite agent has one host candidate per IP address",
@@ -1713,8 +1726,14 @@ impl Agent {
         // connection's real source port, is kept. (RFC 6544 Section 6.2 pairs it with a passive
         // candidate and then prunes "any pair for which the local candidate is a passive TCP
         // candidate".) The agent notes that the peer may dial: its checklist does not fail
-        // while that connection may still come.
-        if c.tcp_type() == TcpType::Active && c.candidate_type() != CandidateType::PeerReflexive {
+        // while that connection may still come. Two lite agents send no checks (RFC 8445
+        // Section 6.1.1) and pair without them (Section 8.2): there the active candidate is
+        // the remote side of a pair, whose connection the peer opens itself (RFC 6544 Section
+        // 6.1); it is taken as a remote candidate, not noted as one only checks could pair.
+        if c.tcp_type() == TcpType::Active
+            && c.candidate_type() != CandidateType::PeerReflexive
+            && !(self.lite && self.remote_lite)
+        {
             debug!(
                 "Ignoring remote candidate with tcptype active: {}",
                 c.address()
@@ -2367,6 +2386,24 @@ impl Agent {
         self.lite
     }
 
+    /// Whether the peer is a lite implementation ([`Agent::set_remote_lite`]).
+    pub fn is_remote_lite(&self) -> bool {
+        self.remote_lite
+    }
+
+    /// Two lite agents, this one controlled, with several pairs: the controlling agent's
+    /// updated candidate exchange is still to come (RFC 8445 Section 8.2: "ICE processing is
+    /// complete after and only after the updated candidate exchange is complete"), and with
+    /// it the pair. A TCP connection the controlling agent opened in parallel with that
+    /// exchange waits for it (RFC 6544 Section 6.1).
+    pub fn awaits_lite_update(&self) -> bool {
+        self.lite
+            && self.remote_lite
+            && !self.is_controlling
+            && !self.lite_update_taken
+            && self.candidate_pairs.len() > 1
+    }
+
     /// Tells the agent whether the peer is a lite implementation (in SDP, `a=ice-lite`).
     ///
     /// It matters to a lite agent: with a full peer it answers checks and waits for the
@@ -2431,6 +2468,7 @@ impl Agent {
             return false;
         }
         self.pinned_local_addr = local;
+        self.lite_update_taken = true;
         self.set_selected_pair(Some(now), None);
         self.announce_all_pairs_removed();
         self.candidate_pairs = Vec::new();
@@ -2877,6 +2915,7 @@ impl Agent {
         self.triggered_queue.clear();
         // A new generation: its candidates and its end-of-candidates are still to come.
         self.lite_update_raised = false;
+        self.lite_update_taken = false;
         self.pinned_local_addr = None;
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;

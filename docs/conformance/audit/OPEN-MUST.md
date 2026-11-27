@@ -6,25 +6,25 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## Arithmetic
 
-- MUST rows: 5757; `n/a` (the clause does not bind this engine): 663; rows that
-  apply: 5094.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5066 of 5094 (99.5 %).
-- Tested as the default (`tested`): 5034 of 5094 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 28: 15 untested, 11 partial, 2 missing, 0 violated.
+- MUST rows: 5757; `n/a` (the clause does not bind this engine): 662; rows that
+  apply: 5095.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5068 of 5095 (99.5 %).
+- Tested as the default (`tested`): 5036 of 5095 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 27: 15 untested, 11 partial, 1 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 15 | 0 |
 | C | partly implemented | 9 | 1 |
-| D | not implemented | 2 | 0 |
+| D | not implemented | 1 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 60 | 26 |
+| all | | 59 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 26 rows, 19 of size S, 6 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 25 rows, 19 of size S, 5 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -38,7 +38,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 6 | 1 | 0 | 1 | 0 | 8 | 7 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
-| ice | 2 | 3 | 1 | 0 | 0 | 6 | 3 | 3 | 0 |
+| ice | 2 | 3 | 0 | 0 | 0 | 5 | 3 | 2 | 0 |
 | jsep | 2 | 3 | 0 | 0 | 0 | 5 | 3 | 2 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -102,7 +102,6 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | partial | C | As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3) | M | jsep |
 | RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
-| RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC6347-4.2.1-8 | `rfc6347.md` | Server uses the same version in HelloVerifyRequest as in ServerHello | partial | E | Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2) | S | dtls-srtp |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Tested (default provider ring, optimised build, x86-64 Linux with the oldest supported compiler and stable, AArch64 macOS, CI job key_residue): no key an SRTP session derives is found in any form in the dead stack frames of the thread after building, packets, re-keying or tearing down, nor (Linux) anywhere else in the process after the teardown; either provider, unoptimised and optimised builds, the same compilers: building and tearing down leave nothing on the stack (the overwrite is 128 KiB deep unoptimised, 32 KiB optimised) and every heap copy is erased. Not met or not shown: the AWS-LC provider's packet path leaves HMAC-SHA1 states and a GHASH table entry in dead stack frames for every packet (its own frames; known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames, ignored); the packet path in unoptimised builds measured, not asserted (rustc 1.99.1 leaves per-packet AES-CTR round keys); CPU registers and what saves them (signal frames, lazy thread-local set-up); Windows and other architectures not measured; a provider deeper than the overwrite; DTLS secrets on the stack scrubbed, not measured. Closes by the AWS-LC packet path erased or the provider taken out of the claim, and the owner accepting the remaining items as outside the clause for an engine | M | dtls-srtp / crypto |
@@ -115,7 +114,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-53 rows: 14 of class B, 18 of class C, 7 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+54 rows: 14 of class B, 18 of class C, 8 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -156,6 +155,7 @@ Sorted by class, then owner, size and ID.
 | RFC5109-14.1-5 | `rfc5109.md` | Separate-stream SDP: own m= line, a=rtpmap:<pt> ulpfec/<rate>, ... | D | tested |
 | RFC5109-14.3-1 | `rfc5109.md` | Offerer of a separate FEC stream implements RFC 3388 grouping and RFC ... | D | tested |
 | RFC5109-7.2-2 | `rfc5109.md` | FEC packet SSRC SHALL equal the SSRC of the media stream it protects | D | tested |
+| RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | D | tested |
 | RFC8835-3.5-3 | `rfc8835.md` | SCTP I-DATA (RFC 8260) | D | tested |
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | D | tested |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | E | n/a |
