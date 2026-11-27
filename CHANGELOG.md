@@ -109,6 +109,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidates, naming the cause and the fix (poll `poll_stream_command` first), and releases
   those listeners: a driver that polls later sees each `Listen` followed by its
   `StopListening`. An ICE restart gathers them afresh.
+- **The examples say when their candidates end** (`conf/examples-3-end-of-candidates`, after
+  `conf/ice-32-failed-needs-end-of-candidates`: W3C webrtc-pc 5.6.4 "failed" needs the end of
+  the candidates). Examples whose signalling carries candidates relay the end-of-candidates
+  and add their own when their gathering is done (`data-channels-flow-control`,
+  `data-channels-offer-answer`, `ice-tcp-active-passive`, `trickle-ice`, `trickle-ice-host`,
+  `trickle-ice-srflx`, `trickle-ice-relay`, `perfect-negotiation`, `data-channels-simple`; the
+  browser pages now forward the empty or `null` candidate, and `data-channels-offer-answer`
+  hands the peer's trickled candidate to `add_remote_candidate`, not `add_local_candidate`:
+  it connected before only because the offerer, which had the answerer's candidate from the
+  answer's SDP, checked it and the answerer learnt the offerer as a peer-reflexive candidate;
+  the offer it posted was created before its candidate and carried none).
+  Browser examples whose page sends only its description (`ice-restart`, `ice-tcp`,
+  `play-from-disk-renegotiation`, `play-from-disk-playlist-control`) give up after 30 s of
+  "disconnected" on their own timer. The copy-paste examples (`data-channels`, `reflect`,
+  `save-to-disk-*`, `play-from-disk-{vpx,h26x,fec}`, `simulcast`, `stats`, and the rest of the
+  base64 ones) set `SettingEngineBuilder::with_ice_failed_without_end_of_candidates(true)`
+  (Chromium's pasted description has no `a=end-of-candidates`) and add their own
+  end-of-candidates local candidate. Examples only; no engine change.
+- **ICE: a transport is "failed" only once no candidate is to come; until then "disconnected"**
+  (`conf/ice-32-failed-needs-end-of-candidates`; W3C webrtc-pc 5.6.4 `RTCIceTransportState`:
+  "failed" is a transport that "has finished gathering, received an indication that there are
+  no more remote candidates, finished checking all candidate pairs, and all pairs have either
+  failed connectivity checks or lost consent"; "disconnected" one that "has finished checking
+  all existing candidates pairs and not found a connection (or consent checks [RFC7675] once
+  successful, have now failed), but it is still gathering and/or waiting for additional remote
+  candidates"; "The failed and completed states require an indication that there are no
+  additional remote candidates"). The checking timeout (`disconnected_timeout +
+  failed_timeout`), a failed nomination (RFC 8445 7.2.5.3.4) and consent expiry (RFC 7675
+  5.1) failed the transport whether or not the end of the candidates had been indicated; they
+  now make it "disconnected" until it is, and "failed" the moment it is and the PAC timer has
+  expired (5.6.4 again: "and either zero local candidates were gathered or the PAC timer has
+  expired [RFC8863]"; so consent lost inside the first 39.5 s fails the transport as the timer
+  expires, the media path going at once as before). The indication is:
+  gathering finished (the application's end-of-candidates local candidate, as before) and the
+  peer's end-of-candidates (`add_remote_candidate` with an empty `candidate`, or
+  `a=end-of-candidates`) or a remote description without `a=ice-options:trickle`
+  (`canTrickleIceCandidates` false, which now also lets such a transport be "completed"). While
+  "disconnected" so, the agent keeps its candidates, nominates nothing more, checks again
+  ("checking") when a new pair is formed, and an ICE restart starts it over as before. A pair
+  whose consent expired is removed and the peer's requests on it go unanswered (RFC 7675 5.1:
+  "the same ICE credentials MUST NOT be used on the affected 5-tuple again"), and no other
+  valid pair takes its place without a nomination (RFC 8445 8.1.2). **What changes
+  for an application**: one that never relays the peer's end-of-candidates, or never adds its
+  own when gathering is done, sees "disconnected", never "failed", when the path is lost or
+  never found, and should restart ICE or close on its own timer; one that relays both (or
+  exchanges complete descriptions) sees "failed" as in 0.2.1. The examples that leave their
+  loop on "failed" (`examples/data-channels` and the others) add no end-of-candidates local
+  candidate, so they now stay "disconnected" when the browser goes away. The stream driver
+  (`rtci-stream-driver`) ends each generation's gathering itself and tears nothing down: the
+  application has to relay the end-of-candidates candidate the driver surfaces as an
+  `OnIceCandidateEvent` (as its tests now do) or keep a timer of its own. The transport
+  statistics drop the selected pair when consent is lost without the indications too
+  (`selectedCandidatePairId` gone, `selectedCandidatePairChanges` counted), as on "failed". New
+  `SettingEngineBuilder::with_ice_failed_without_end_of_candidates(bool)` (default `false`;
+  `true` in the `Chrome` behaviour profile, row `ice.failed-without-end-of-candidates`:
+  libwebrtc fails a transport without the indication) makes the PAC timer the
+  end-of-candidates fallback RFC 8863 section 5 allows ("ICE agents MAY use the PAC timer to
+  also serve as an end-of-candidates fallback"): those events fail the transport once the
+  timer has expired (39.5 s after the checks began, with the defaults), as before. Agent API
+  (additive): `Agent::set_remote_trickles`, `Agent::set_failed_without_end_of_candidates`,
+  `Agent::failed_without_end_of_candidates`. Audit rows WEBRTC-5.6.4-2 and WEBRTC-5.6.4-9
+  `partial` -> `tested` (open MUST 29 -> 27). Tests
+  `agent_checklist_test.rs::checks_that_all_failed_are_disconnected_until_no_candidate_is_to_come`,
+  `a_candidate_that_comes_after_the_checks_failed_is_checked`,
+  `consent_lost_before_the_end_of_candidates_is_disconnected_and_then_failed`,
+  `a_restart_of_an_agent_whose_checks_failed_checks_and_connects`,
+  `consent_lost_inside_the_pac_timer_is_failed_as_the_timer_expires`,
+  `a_failed_nomination_before_the_end_of_candidates_is_disconnected`,
+  `a_lite_agent_whose_peer_falls_silent_is_failed_only_after_the_end_of_candidates`,
+  `the_pac_timer_ends_the_candidates_when_set_to`; `tests/states_events_rtc2rtc.rs`
+  (`transport_state_events_come_before_the_connection_events_they_cause` now relays the end of
+  the candidates before "failed", `a_peer_that_cannot_trickle_is_the_indication_that_no_candidate_is_to_come`,
+  `a_cut_link_fails_without_the_end_of_candidates_when_set_to`). Tests that expected "failed"
+  after a lost path now signal the end of the candidates first (agent consent, nomination and
+  ported tests, `tests/lossy_link_rtc2rtc.rs`, `tests/stats_conformance_rtc2rtc.rs`,
+  `tests/webrtc_pc_transport_clauses_rtc2rtc.rs`, stream-driver `virtual_time.rs`); the
+  consent timing tests measure the loss of consent by the media path, and "failed" then or at
+  the PAC timer.
 
 ### Changed
 
@@ -299,6 +377,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change only for a stream whose direction stops it sending. Tests
   `tests/direction_change_drops_queued_media_rtc2rtc.rs::queued_media_of_a_stream_that_stops_sending_does_not_leave`
   (the default interceptors, the pacer among them), `rtci-interceptor/tests/streams_not_sending.rs`.
+- **ICE waits for the peer's checks before failing a checklist: the PAC timer of RFC 8863**
+  (`conf/ice-29-pac-timer`; RFC 8863 sections 4 and 5, updating RFC 8445 section 7.2.5.4 and
+  RFC 8838 section 8; reported from code reading by a consumer, deno_webrtc). A full agent
+  whose checklist was empty (the peer signalled no candidate, or none it could use) or whose
+  pairs had all failed at once failed the moment both sides had signalled end-of-candidates,
+  although the peer, which has our candidates, could still check us and form a peer-reflexive
+  pair (RFC 8445 section 7.3.1.3); the check then reached a failed agent. RFC 8863: "While the
+  timer is still running, the ICE agent MUST NOT update a checklist state from Running to
+  Failed, even if there are no pairs left in the checklist to check", and the session is not
+  failed either. The timer starts with the checks and lasts the transaction timeout (the
+  RECOMMENDED length: `Rc` requests and `Rm` RTOs, 39.5 s with the defaults; 8 s with one
+  request). **Behaviour change**: a session that never finds a pair fails at 39.5 s instead of
+  at once (nothing usable) or at 30 s (the checking timeout); a lite agent is unchanged. No API
+  change. Tests `agent_checklist_test.rs::an_empty_checklist_after_end_of_candidates_waits_for_the_peers_check_and_connects`,
+  `an_empty_checklist_that_no_check_fills_fails_when_the_pac_timer_expires`; the ice-27 tests
+  now expect the failures at the timer (`an_active_tcp_candidate_with_nothing_of_ours_to_dial_fails_the_empty_checklist_with_the_pac_timer`,
+  renamed from `..._at_once`).
+- **ICE consent is kept per 5-tuple, not per remote candidate** (`conf/ice-27-consent-per-5-tuple`;
+  RFC 7675 section 1, "Consent to send applies to a single 5-tuple", and section 5.1, "if a
+  valid STUN binding response has not been received from the remote peer's transport address
+  in 30 seconds, the endpoint MUST cease transmission on that 5-tuple"). The time of the last
+  consent response was kept on the remote candidate, so with two local candidates L1 and L2 and
+  one remote R, a response on (L2, R) (a check cancelled at the nomination and answered late,
+  or one the peer's requests trigger) renewed the consent of the selected (L1, R) although
+  nothing was answered on that 5-tuple, and a dead (L1, R) path was not detected. Each pair
+  now records its own last consent (`CandidatePair::last_consent`); the selected pair's expiry,
+  its Disconnected timer, the first consent check after a selection, the controlling agent's
+  nominating path and the path kept across an ICE restart read the pairs of the same 5-tuple
+  (same local base and remote candidate) only. `Candidate::last_consent` still reports the last
+  response from that remote candidate on any pair. Tests:
+  `rtci-ice/src/agent/agent_consent_delay_test.rs::test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consent`,
+  `test_the_response_that_validated_another_pair_is_the_selected_pairs_consent` (a controlled
+  agent selects a valid pair with a peer-reflexive local candidate; the one response is on the
+  checked pair, the same 5-tuple).
 
 ### Known limits
 

@@ -419,6 +419,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| s.ice.failed_nomination,
     },
     {
+        id: "ice.failed-without-end-of-candidates",
+        setting: "SettingEngineBuilder::with_ice_failed_without_end_of_candidates",
+        clause: "W3C webrtc-pc 5.6.4 RTCIceTransportState failed, RFC 8863 5 (MAY)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc p2p/base/p2p_transport_channel.cc::P2PTransportChannel::ComputeIceTransportState @ a222406d: kFailed when the channel had a connection and no connection is active any more (had_connection_ && !has_connection), whatever the gathering state and whether the remote candidates are complete; kDisconnected only for a channel that was writable and is not",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_failed_without_end_of_candidates(v),
+        read: |s: &SettingEngine| s.ice_failed_without_end_of_candidates,
+    },
+    {
         id: "ice.nomination-on-consent-checks",
         setting: "SettingEngineBuilder::with_ice_nomination_on_consent_checks",
         clause: "RFC 8445 7.1.2, RFC 7675 5.1",

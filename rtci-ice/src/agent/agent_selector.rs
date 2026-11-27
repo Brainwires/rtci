@@ -17,7 +17,7 @@
 //! other pair can still be nominated.
 
 use crate::agent::agent_config::*;
-use crate::agent::{Agent, BindingRequest, Event, TaggedEvent};
+use crate::agent::{Agent, BindingRequest, Event, HeldFailure, TaggedEvent};
 use crate::mdns::MulticastDnsMode;
 use bytes::BytesMut;
 use crc::{CRC_32_ISCSI, Crc};
@@ -107,7 +107,9 @@ impl Agent {
     /// nominated and `Completed` only when, in addition, both sides have said they have no
     /// more candidates.
     pub fn checklist_state(&self) -> ChecklistState {
-        if self.connection_state == ConnectionState::Failed {
+        if self.connection_state == ConnectionState::Failed
+            || self.failure_held == Some(HeldFailure::NominationFailed)
+        {
             ChecklistState::Failed
         } else if self.selected_pair.is_some() {
             ChecklistState::Completed
@@ -126,6 +128,23 @@ impl Agent {
         a.base_addr() == b.base_addr()
             && a.network_type() == b.network_type()
             && a.tcp_type() == b.tcp_type()
+    }
+
+    /// Whether two pairs send on the same 5-tuple: the same remote candidate, from local
+    /// candidates with the same base (RFC 7675 Section 1).
+    pub(crate) fn same_five_tuple(&self, a: usize, b: usize) -> bool {
+        let (a, b) = (&self.candidate_pairs[a], &self.candidate_pairs[b]);
+        a.remote_index == b.remote_index && self.same_base(a.local_index, b.local_index)
+    }
+
+    /// The last consent on a pair's 5-tuple (RFC 7675 Section 1): the latest success response
+    /// to a Binding request sent on it or on another pair of the same 5-tuple (a valid pair
+    /// whose local candidate is the mapped address shares its checked pair's base).
+    pub(crate) fn pair_consent(&self, pair_index: usize) -> Option<Instant> {
+        (0..self.candidate_pairs.len())
+            .filter(|&other| self.same_five_tuple(pair_index, other))
+            .filter_map(|other| self.candidate_pairs[other].last_consent)
+            .max()
     }
 
     pub(crate) fn pair_foundation(&self, local_index: usize, remote_index: usize) -> u32 {
@@ -242,6 +261,13 @@ impl Agent {
             }
         };
         self.announce_pair(index, true);
+        // W3C webrtc-pc 5.6.4: a transport that is "disconnected" with its checks failed
+        // while candidates may still come checks again when one comes ("disconnected", new
+        // local candidates: "checking").
+        if self.failure_held.is_some() {
+            self.update_connection_state(Some(self.clock), ConnectionState::Checking);
+            self.request_connectivity_check();
+        }
     }
 
     /// Queues `CandidatePairAdded` (`added`) or `CandidatePairRemoved` for the pair at
@@ -1039,7 +1065,9 @@ impl Agent {
         );
         self.fail_pair(pair_index);
         self.nomination_started = None;
-        self.update_connection_state(Some(now), ConnectionState::Failed);
+        // The checklist is Failed; the transport is "failed" only once no candidate is to
+        // come (W3C webrtc-pc 5.6.4), "disconnected" until then.
+        self.fail_or_hold(now, HeldFailure::NominationFailed);
     }
 
     /// Takes the open transaction `id`, if there is one. A consent request's transaction
@@ -1138,13 +1166,17 @@ impl Agent {
         }
 
         // Consent (RFC 7675 Section 5.1): a matching, authenticated success response from the
-        // address the request went to.
+        // address the request went to. It is consent on the 5-tuple the request was sent on
+        // (Section 1): the pair's, and that of any other pair with the same local base and
+        // remote candidate (`pair_consent`), not the remote candidate's other pairs.
         if let Some(remote) = self.remote_candidates.get_mut(request.remote_index) {
             remote.last_consent = Some(now);
         }
-        if self.selected_pair.is_some_and(|selected| {
-            self.candidate_pairs[selected].remote_index == request.remote_index
-        }) {
+        self.candidate_pairs[checked].last_consent = Some(now);
+        if self
+            .selected_pair
+            .is_some_and(|selected| self.same_five_tuple(selected, checked))
+        {
             self.consent_unanswered_since = None;
             // Consent is back: the state is looked at now, not at the next consent check.
             if self.connection_state == ConnectionState::Disconnected {
@@ -1684,9 +1716,7 @@ impl Agent {
         let Some(selected) = self.selected_pair else {
             return;
         };
-        let last_consent = self.remote_candidates[self.candidate_pairs[selected].remote_index]
-            .last_consent()
-            .unwrap_or(self.start_time);
+        let last_consent = self.pair_consent(selected).unwrap_or(self.start_time);
         let best = self
             .candidate_pairs
             .iter()
@@ -1929,6 +1959,11 @@ impl Agent {
         if !self.is_controlling || self.selected_pair.is_some() || self.nominated_pair.is_some() {
             return;
         }
+        // Checks that have failed (`Agent::fail_or_hold`, the agent `Disconnected` until no
+        // candidate is to come) nominate nothing more until a new pair comes.
+        if self.failure_held.is_some() {
+            return;
+        }
         let Some(pair_index) = self.get_best_valid_candidate_pair() else {
             return;
         };
@@ -2105,7 +2140,8 @@ impl Agent {
     pub(crate) fn update_checklist_failure(&mut self, now: Instant) {
         if self.connection_state != ConnectionState::Checking
             || self.selected_pair.is_some()
-            || !self.remote_end_of_candidates
+            || self.pac_running(now)
+            || !self.no_more_remote_candidates()
             || !self.local_gathering_complete
             || !self.mdns_queries.is_empty()
             || !self.early_requests.is_empty()
@@ -2125,6 +2161,26 @@ impl Agent {
             );
             self.update_connection_state(Some(now), ConnectionState::Failed);
         }
+    }
+
+    /// Whether the PAC timer (RFC 8863 Section 4, "Patiently Awaiting Connectivity") of a full
+    /// agent is running at `now`. It starts when ICE processing begins (`start`: the peer's
+    /// credentials are in, candidates or not), and "while the timer is still running, the ICE
+    /// agent MUST NOT update a checklist state from Running to Failed, even if there are no
+    /// pairs left in the checklist to check": a check from the peer can still make a
+    /// peer-reflexive pair (RFC 8445 Section 7.3.1.3) when the agent has no pair (the peer
+    /// signalled no candidate, or none the agent can use; RFC 8863 Sections 3.1, 3.2) or only
+    /// failed ones (Section 3.3), and Section 5 keeps it so after end-of-candidates. Its
+    /// length is the RECOMMENDED one, "equal to the agent's connectivity check transaction
+    /// timeout, including all retransmissions": `Rc` requests from the 500 ms RTO and `Rm`
+    /// RTOs after the last, 39.5 s with the defaults.
+    pub(crate) fn pac_running(&self, now: Instant) -> bool {
+        if self.lite {
+            return false;
+        }
+        let rc = u32::from(self.max_binding_requests.clamp(1, 16));
+        let pac = MIN_RTO * ((1u32 << (rc - 1)) - 1 + STUN_RM);
+        now < self.start_time + pac
     }
 
     /// A lite agent's keepalive (RFC 8445 Section 11): it sends no Binding requests, so when

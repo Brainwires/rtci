@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5046 | 26 | 6 | 5 | 11 | 1 | 0 | 662 | 5757 |
+| MUST | 5049 | 26 | 6 | 5 | 8 | 1 | 0 | 662 | 5757 |
 | SHOULD | 918 | 3 | 3 | 1 | 40 | 23 | 0 | 324 | 1312 |
 | MAY | 502 | 0 | 1 | 11 | 21 | 70 | 0 | 177 | 782 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6538 | 29 | 10 | 18 | 75 | 95 | 0 | 1164 | 7929 |
+| all | 6541 | 29 | 10 | 18 | 72 | 95 | 0 | 1164 | 7929 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5095 | 5078 | 99.7 | 5046 | 99.0 |
+| MUST | 5095 | 5081 | 99.7 | 5049 | 99.1 |
 | SHOULD | 988 | 924 | 93.5 | 918 | 92.9 |
 | MAY | 605 | 503 | 83.1 | 502 | 83.0 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
@@ -182,7 +182,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc7587.md` | MAY | 2 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 3 |
 | `rfc7627.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 16 |
 | `rfc7627.md` | SHOULD | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
-| `rfc7675.md` | MUST | 13 | 0 | 0 | 0 | 1 | 0 | 0 | 1 | 15 |
+| `rfc7675.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 15 |
 | `rfc7675.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `rfc7675.md` | MAY | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
 | `rfc7714.md` | MUST | 34 | 0 | 0 | 0 | 1 | 0 | 0 | 4 | 39 |
@@ -345,7 +345,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `w3c-webrtc-extensions.md` | MUST | 59 | 0 | 0 | 0 | 0 | 0 | 0 | 14 | 73 |
 | `w3c-webrtc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `w3c-webrtc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `w3c-webrtc-pc.md` | MUST | 860 | 0 | 0 | 4 | 3 | 0 | 0 | 62 | 929 |
+| `w3c-webrtc-pc.md` | MUST | 862 | 0 | 0 | 4 | 1 | 0 | 0 | 62 | 929 |
 | `w3c-webrtc-pc.md` | SHOULD | 4 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 10 |
 | `w3c-webrtc-pc.md` | MAY | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 11 | 18 |
 | `w3c-webrtc-priority.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 14 |

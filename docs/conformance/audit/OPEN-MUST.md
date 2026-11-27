@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 662; rows that
   apply: 5095.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5078 of 5095 (99.7 %).
-- Tested as the default (`tested`): 5046 of 5095 (99.0 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 17: 5 untested, 11 partial, 1 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5081 of 5095 (99.7 %).
+- Tested as the default (`tested`): 5049 of 5095 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 14: 5 untested, 8 partial, 1 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 5 | 0 |
-| C | partly implemented | 9 | 1 |
+| C | partly implemented | 6 | 1 |
 | D | not implemented | 1 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 49 | 26 |
+| all | | 46 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 15 rows, 9 of size S, 5 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 12 rows, 8 of size S, 3 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -38,7 +38,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 1 | 1 | 0 | 1 | 0 | 3 | 2 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
-| ice | 2 | 3 | 0 | 0 | 0 | 5 | 3 | 2 | 0 |
+| ice | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
 | jsep | 2 | 3 | 0 | 0 | 0 | 5 | 3 | 2 | 0 |
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
@@ -82,9 +82,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
 | WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
 | RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
-| RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
-| WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |
-| WEBRTC-5.6.4-9 | `w3c-webrtc-pc.md` | failed and completed need the end-of-remote-candidates indication | partial | C | As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep) | M | ice |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep) | S | jsep |
 | RFC9429-5.2.2-15 | `rfc9429.md` | a=rid lines of present transceivers stay the same | partial | C | W3C webrtc-pc 4.4.1.6 removes the encodings of rids an answer rejected, so the next offer drops their a=rid lines (JSEP: MUST stay the same); the W3C form is the default. Closes as conflict with a setting that keeps offering the rejected rids, and its mutation-checked test (jsep5 follow-up 3) | M | jsep |
 | RFC9429-5.2.2-16 | `rfc9429.md` | a=simulcast stays the same | partial | C | As 5.2.2-15 for the a=simulcast line (narrowed to the kept rids after an answer rejected one); closes as conflict with the same setting (jsep5 follow-up 3) | M | jsep |
@@ -102,7 +99,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-54 rows: 14 of class B, 18 of class C, 8 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+55 rows: 14 of class B, 19 of class C, 8 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -125,6 +122,7 @@ Sorted by class, then owner, size and ID.
 | RFC6679-7.1-1 | `rfc6679.md` | An SDP-using ECN implementation implements the attribute (6.1), nack ... | C | tested |
 | RFC6679-7.1-3 | `rfc6679.md` | a=rtcp-xr:ecn-sum is also used | C | tested |
 | RFC6679-7.1-4 | `rfc6679.md` | nack ecn is used when the initiation or congestion control needs ... | C | tested |
+| RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | C | tested |
 | RFC7742-6.2-10 | `rfc7742.md` | Parameter sets are signalled in-band; sprop-parameter-sets MUST NOT ... | C | tested |
 | RFC7742-6.2-6 | `rfc7742.md` | profile-level-id is included in the SDP generated | C | tested |
 | RFC7742-6.2-7 | `rfc7742.md` | profile-level-id is interpreted when received | C | tested |

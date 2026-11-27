@@ -542,6 +542,9 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_sctp_handshake_timers_back_off_rto`]. `true` (the
     /// default) is RFC 9260 5.1's.
     pub(crate) sctp_handshake_timers_back_off_rto: bool,
+    /// [`SettingEngineBuilder::with_ice_failed_without_end_of_candidates`]. `false` (the
+    /// default) is W3C webrtc-pc 5.6.4's "failed".
+    pub(crate) ice_failed_without_end_of_candidates: bool,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
@@ -719,6 +722,7 @@ impl SettingEngine {
             sctp_rto: Default::default(),
             sctp_max_retransmissions: Default::default(),
             sctp_handshake_timers_back_off_rto: true,
+            ice_failed_without_end_of_candidates: false,
             sctp_message_size_limit_without_interleaving: Default::default(),
             data_channel_max_buffer_size: Default::default(),
             data_channel_send_before_ack: Default::default(),
@@ -1903,6 +1907,43 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_ice_failed_nomination(mut self, failed_nomination: FailedNomination) -> Self {
         self.0.ice.failed_nomination = failed_nomination;
+        self
+    }
+
+    /// Whether an ICE transport whose checks have failed, or whose consent has expired, is
+    /// "failed" without the indications W3C webrtc-pc 5.6.4 makes "failed" wait for, once the
+    /// PAC timer (RFC 8863) has expired. `false` by default.
+    ///
+    /// The default is W3C webrtc-pc 5.6.4: "failed" is a transport that "has finished
+    /// gathering, received an indication that there are no more remote candidates, finished
+    /// checking all candidate pairs, and all pairs have either failed connectivity checks or
+    /// lost consent"; the indication is an end-of-candidates candidate
+    /// (`add_remote_candidate` with an empty `candidate`), `a=end-of-candidates` in the remote
+    /// description, or a remote description without `a=ice-options:trickle`, and gathering
+    /// is finished when the application has added its end-of-candidates local candidate.
+    /// Without them the transport is "disconnected" ("it is still gathering and/or waiting
+    /// for additional remote candidates") and becomes "failed" as soon as they are in, or
+    /// "checking" when a new candidate comes; `restart_ice` starts it over. An application
+    /// that never relays the peer's end-of-candidates sees "disconnected", never "failed".
+    ///
+    /// `true` is libwebrtc's behaviour (the `Chrome` behaviour profile, row
+    /// `ice.failed-without-end-of-candidates`) and the end-of-candidates fallback RFC 8863
+    /// section 5 allows ("ICE agents MAY use the PAC timer to also serve as an
+    /// end-of-candidates fallback"): once the PAC timer has expired (39.5 s after the checks
+    /// began, with the defaults) the transport fails by the checking timeout
+    /// (`with_ice_timeouts`), a failed nomination or consent expiry without them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_failed_without_end_of_candidates(true)
+    ///     .build();
+    /// ```
+    pub fn with_ice_failed_without_end_of_candidates(mut self, enabled: bool) -> Self {
+        self.0.ice_failed_without_end_of_candidates = enabled;
         self
     }
 

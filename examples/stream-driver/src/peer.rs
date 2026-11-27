@@ -73,7 +73,9 @@
 //! loop {
 //!     driver.step(Duration::from_millis(20)).await?;
 //!     while let Some(event) = driver.poll_event() {
-//!         // signal OnIceCandidateEvent candidates to the peer, answer negotiation-needed, ...
+//!         // signal OnIceCandidateEvent candidates to the peer (the end-of-candidates one
+//!         // too: without it the peer's transport is "disconnected", never "failed", when
+//!         // the path is lost), answer negotiation-needed, ...
 //!     }
 //!     while let Some(read) = driver.pc_mut().poll_read() { /* media, data channels */ }
 //! }
@@ -556,8 +558,13 @@ impl PeerDriver {
 
     /// The next event of the connection. The driver has already done what is its to do
     /// (gathering on `OnLocalCandidatesNeeded` and when a transport begins gathering, closing
-    /// the previous sockets on a new selected pair); the application signals the candidates
-    /// of `OnIceCandidateEvent` to the peer and handles the rest.
+    /// the previous sockets on a new selected pair, ending each generation's gathering with
+    /// its end-of-candidates); the application signals the candidates of
+    /// `OnIceCandidateEvent` to the peer, the end-of-candidates candidate included (W3C
+    /// webrtc-pc 5.6.4: the peer's transport is "failed" only once it has it, "disconnected"
+    /// until then), and handles the rest. The driver tears nothing down on "failed" or
+    /// "disconnected": an application that does not relay the end-of-candidates candidate, or
+    /// whose peer never sends its own, needs a timer of its own to restart or close.
     pub fn poll_event(&mut self) -> Option<RTCPeerConnectionEvent> {
         self.events.pop_front()
     }

@@ -1298,6 +1298,9 @@ fn test_after_consent_is_lost_the_same_credentials_are_not_used_again() {
         ..config(true)
     };
     let mut a = started_agent(now, cfg, &[REMOTE_A]);
+    // No candidate is to come: losing consent fails the agent (W3C webrtc-pc 5.6.4).
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let out = run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
     let username = |m: &Message| String::from_utf8(m.get(ATTR_USERNAME).unwrap()).unwrap();
     let before = username(&requests(&out)[0].0);
