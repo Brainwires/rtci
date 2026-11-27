@@ -142,6 +142,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("expected 1 but got 14"). The default is unchanged (pinned answers unchanged). Engine
   behaviour change NO by default; API addition only. Tests:
   `tests/jsep_answer_offered_formats_only.rs` (both values, the profiles, the WPT scenario).
+- **`RTCRtpSender::rewritten_payload_type_rtp_packets()`** and
+  **`RTCRtpSender::rewritten_from_another_codec_rtp_packets()`**, with their connection sums
+  `RTCPeerConnection::rewritten_payload_type_rtp_packets()` and
+  `RTCPeerConnection::rewritten_from_another_codec_rtp_packets()`
+  (`conf/sender-1-rewritten-payload-type-counter`). `write_rtp` rewrites a payload type that is
+  not negotiated for the sender to the one negotiated for its encoding's codec, and only the
+  number: the payload is not touched (the engine has no encoder). The first counter counts every
+  packet sent with a rewritten payload type, the legitimate case included (the application kept
+  its own offer's number for a codec the answer numbered otherwise, RFC 3264 section 5.1); the
+  second the ones whose written number names a different format of the sender's kind, among the
+  registered and negotiated formats (VP8 written with its offered number after the answer
+  negotiated H.264 only): their bytes went out labelled as a codec they are not in (RFC 3264
+  section 7, the offerer "MUST send using a media format listed in the answer"). An application
+  whose encoder follows the sender's negotiated codec keeps the second at 0, and its tests can
+  assert it. Codecs are compared by MIME type; a number that names no format counts in the first
+  only; packets refused or dropped are not counted. Not W3C members: webrtc-stats has none. The
+  `write_rtp` and `get_parameters` rustdoc and the README say what the application must do after
+  applying an answer: re-read the sender's negotiated codec and encode that one. Test
+  `tests/rewritten_payload_type_counter_rtc2rtc.rs`. Engine behaviour change no (the rewrite is
+  unchanged); API addition only.
 
 ### Fixed
 
@@ -237,6 +257,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, or one no description used. Engine behaviour change YES (renegotiated answers and
   offers may number added formats otherwise); API unchanged; first answers and initial offers
   unchanged (pinned answers and offers unchanged). Tests `tests/jsep_payload_type_meaning.rs`.
+- **The offerer sends with the answer's most preferred format it can send, also one its codec
+  preferences left out of the offer** (`conf/jsep-91-offerer-sends-answers-preferred-format`;
+  RFC 9429 section 5.11, in steps that "MUST be performed": "choose the media format to send as
+  the most preferred media format from the remote description that is also locally supported";
+  RFC 3264 section 7: the offerer "SHOULD use the first media format listed in the answer";
+  W3C webrtc-pc "set a session description": [[SendCodecs]] are "the codecs that description
+  negotiates for sending and which the user agent is currently capable of sending"). Present
+  since 0.1.0: with codec preferences set, the formats of a remote answer were matched against
+  those preferences only, so the sender never used a format the answer led with or added beyond
+  the offer. Consumer-reported WPT failure: `webrtc/protocol/additional-codecs.html`, "Listing an
+  additional codec in the answer causes it to be sent" (VP8 offered, the answer leads with H.264
+  on 63; the engine sent VP8 whenever a dynamic number was free for the answer to add VP8 on: with the default codecs none is, which hid it; failing-first run 45990202513 with a minimal codec set). The receive side and later offers keep the preferences. Engine
+  behaviour change YES: after an answer, `RTCRtpSender::get_parameters().codecs` lists every
+  answered format this endpoint can send, and a codec-less encoding is sent with the answer's
+  first. Tests `tests/offerer_sends_answers_preferred_format.rs`,
+  `tests/additional_codec_sent_rtc2rtc.rs` (on the wire);
+  `tests/jsep_answer_unoffered_formats.rs` updated (an answer-added format is now among the
+  offerer's send codecs, the answer's first is the one sent); the unit test
+  `test_rtp_sender_replace_track_invalid_codec_change` now applies an answer in the browsers'
+  form (offered formats only), since a format an `rtci` answer adds is negotiated for sending.
 
 ### Known limits
 
@@ -282,6 +322,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `pipefail` (SIGPIPE refused master's tip); and a patch release's generated page is
   corrected by hand, since git-cliff files `!`-marked behaviour-change commits under "Breaking
   changes".
+- Tests for two simulcast MUST rows the sixth audit sweep found untested
+  (`conf/jsep-93-must-rows-batch8`), each checked by a runtime-gated mutation
+  (`mut/must8b-gated`): RFC8851-6.3-5, an offered `a=rid` line whose `pt=` formats the answer
+  all discards is dropped from the answer and its `a=simulcast` ("the answerer MUST discard the
+  entire 'a=rid' line"), on the receiving and the sending side
+  (`a_rid_line_whose_formats_the_answer_discards_is_dropped`); RFC8853-5.2-1, an `a=simulcast`
+  received at the session level is ignored ("MUST ignore it if received at the session level"):
+  the offer is taken and no simulcast is negotiated (`a_session_level_simulcast_line_is_ignored`).
+  Both `untested` -> `tested`. No engine change. Open MUST rows 30 -> 28.
 
 ### Testing
 

@@ -1848,6 +1848,36 @@ impl RTCPeerConnection {
             .unnegotiated_payload_type_rtp_packets
     }
 
+    /// How many RTP packets the connection's senders sent with a payload type
+    /// [`write_rtp`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::write_rtp) rewrote
+    /// (written with one that is not negotiated for the sender, sent with the payload type of
+    /// the encoding's negotiated codec): the sum of each sender's
+    /// [`rewritten_payload_type_rtp_packets`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::rewritten_payload_type_rtp_packets).
+    /// The rewrite changes only the number, never the payload. Not a W3C attribute: a fork
+    /// addition.
+    pub fn rewritten_payload_type_rtp_packets(&self) -> u64 {
+        self.rtp_transceivers
+            .iter()
+            .filter_map(|transceiver| transceiver.sender().as_ref())
+            .map(|sender| sender.rewritten_payload_type_rtp_packets())
+            .sum()
+    }
+
+    /// Of [`rewritten_payload_type_rtp_packets`](Self::rewritten_payload_type_rtp_packets),
+    /// the packets whose written payload type names a format other than the codec they were
+    /// sent as, so that their bytes went out labelled as a codec they are not in: the sum of
+    /// each sender's
+    /// [`rewritten_from_another_codec_rtp_packets`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::rewritten_from_another_codec_rtp_packets).
+    /// An application whose encoder follows the negotiated codec keeps it at 0. Not a W3C
+    /// attribute: a fork addition.
+    pub fn rewritten_from_another_codec_rtp_packets(&self) -> u64 {
+        self.rtp_transceivers
+            .iter()
+            .filter_map(|transceiver| transceiver.sender().as_ref())
+            .map(|sender| sender.rewritten_from_another_codec_rtp_packets())
+            .sum()
+    }
+
     /// How many RTP and RTCP packets written to the connection were not sent, over all its
     /// transports: written while a transport had no ICE path to send them on (before
     /// connectivity, or after it was lost), or RTP whose SRTP index was already used for a

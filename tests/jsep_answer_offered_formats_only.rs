@@ -403,11 +403,11 @@ fn with_the_setting_the_h265_level_id_scenario_answers_one_h265_format() -> Test
 }
 
 /// The same scenario with an answerer in the setting's form (`peer(false)`, the default before
-/// 0.3.0): the answer lists H.265 and then the other
-/// registered video formats (one of them H.265 at most: the offered one). The offerer's send
-/// codecs are the answer's formats it can send, H.265 (the answer's first) leading at level-id
-/// 30 (jsep-91: RFC 9429 section 5.11, W3C [[SendCodecs]] "the codecs that description
-/// negotiates for sending and which the user agent is currently capable of sending").
+/// 0.3.0): the answer lists H.265 and then the other registered video formats (one of them
+/// H.265 at most: the offered one). The offerer's send codecs are the answer's formats it can
+/// send, the answer's first leading (RFC 9429 section 5.11, RFC 3264 section 7: conf/jsep-91):
+/// H.265 at level-id 30 first, one codec per media format of the answer's m= line (its repair
+/// formats, RTX / RED / FEC, are not send codecs).
 #[test]
 fn with_added_formats_the_h265_level_id_scenario_lists_the_answers_formats_h265_first() -> TestResult
 {
@@ -424,13 +424,16 @@ fn with_added_formats_the_h265_level_id_scenario_lists_the_answers_formats_h265_
         1,
         "{answer}"
     );
-    let non_repair = answered
+    let media_formats = answered
         .iter()
         .filter(|pt| {
-            !["rtx", "red", "ulpfec", "flexfec", "flexfec-03"]
-                .contains(&encoding_name(section, pt).as_str())
+            !matches!(
+                encoding_name(section, pt).as_str(),
+                "rtx" | "red" | "ulpfec" | "flexfec-03"
+            )
         })
         .count();
+    assert_eq!(codecs.len(), media_formats, "{answer}\n{codecs:?}");
     assert!(
         codecs[0]
             .rtp_codec
@@ -439,6 +442,5 @@ fn with_added_formats_the_h265_level_id_scenario_lists_the_answers_formats_h265_
         "{codecs:?}"
     );
     assert_eq!(level_id(&codecs[0]).as_deref(), Some("30"), "{codecs:?}");
-    assert_eq!(codecs.len(), non_repair, "{codecs:?}\n{answer}");
     Ok(())
 }
