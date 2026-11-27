@@ -396,6 +396,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every other release of an engine allocation (a removed transport, a restart's retired link).
   A 437 to an Allocate has the link allocate from another UDP base of the transport, up to
   three (RFC 8656 section 7.4), and raises `OnTurnRequestRejected`. turn-6.
+- **A remote `.local` name that does not resolve is no longer logged as an error**
+  (`conf/mdns-1-unresolved-remote-name-is-not-an-error`; draft-ietf-mmusic-mdns-ice-candidates
+  section 3.2.1, step 5: "Otherwise, ignore the candidate"). Chrome and Safari send their host
+  candidates under `<uuid>.local` names, and on many networks they do not resolve, so
+  `rtci_ice` logged "mDNS Query N timed out for <uuid>.local" at ERROR on every such session.
+  The query's end is now logged at debug, once per query (its retries log nothing), as are the
+  remote `.local` candidate ignored under `MulticastDnsMode::Disabled` (was WARN) and a name
+  that resolves to more than one address (`rtci-mdns`, section 3.2.2; was WARN). Behaviour is
+  unchanged: the default mode stays `MulticastDnsMode::QueryOnly`, which resolves remote names
+  (section 3.2.1, step 3: "Otherwise, resolve the candidate using mDNS"); an application that
+  wants no mDNS traffic sets `SettingEngineBuilder::with_multicast_dns_mode(MulticastDnsMode::Disabled)`
+  (documented on the setting, on the mode and in the README's "Feeding ICE Candidates"). Test:
+  `test_an_unresolved_remote_mdns_name_is_dropped_quietly_and_the_agent_goes_on`.
 
 ### Documentation
 
