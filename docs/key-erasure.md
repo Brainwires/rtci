@@ -309,6 +309,15 @@ already overwrites before and after building its key objects) and the two HKDF-E
 same frames). The overwrite depth is the SRTP one (32 KiB optimised, 128 KiB unoptimised); no
 DTLS form of any class lay deeper than 38.2 KB below the floor afterwards.
 
+**Cost.** The six wraps run once per derivation, never per record; the record path is
+code-identical to zeroize-4. Measured twice against zeroize-4 (`30ea0f57`) on the same runner per
+job with `scripts/bench-compare.sh rtci-dtls:record_protection` (ring): the first run (46014777435,
+3 rounds) had every benchmark within the gate and one, `DTLS/Decrypt/AES-128-GCM/ring`, at
+x1.127; the repeat (46018059811, 5 rounds, three heads with the same record-path code) gave that
+benchmark x0.97 for this head, x1.01 for a head whose engine is zeroize-4's and x1.01 for the
+14-wrap head: not a property of the change. `DTLS/Handshake/DTLS-1.2/ring` x1.004 and x1.011.
+No ledger row and no allowlist entry.
+
 **After** (head `98e3cbd7`; runs 46015289354, 46015302538, 46015308455): no secret of key
 derivation in any form, after any step, in any scenario, with either provider, in either build,
 with rustc 1.89, 1.99.1 and 1.100 on x86-64 Linux and 1.100 on AArch64 macOS; nothing at all

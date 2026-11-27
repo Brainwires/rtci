@@ -78,7 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AES suite (AES-CCM from rustc 1.99.1 on: Known limits). Each of the six is held by the test:
   taken away alone, the test fails. Eight more wraps that were tried (the DTLS 1.2 suite
   set-ups, the DTLS 1.3 record-key set-up, both HKDF-Extract steps) changed nothing measured and
-  were left out. The record path is unchanged. No wire format, API or default changes.
+  were left out. The record path is unchanged. No wire format, API or default changes. Cost:
+  DTLS 1.2 handshake x1.004 to x1.011 against zeroize-4; record protection unchanged (one
+  benchmark at x1.127 in a first run, x0.97 to x1.01 in a five-round repeat on three heads with
+  the same record-path code: docs/key-erasure.md).
 
 ### Changed
 
