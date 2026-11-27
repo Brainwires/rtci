@@ -23,7 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remove coverage. Each probe uses the sockets of the code under test: the driver's tests join
   and send on the address's interface (`IP_MULTICAST_IF`), the interop tests use a
   `MulticastSocket::new()` as their rtc peer does (the system's route for the group, which
-  `cargo.yml` points at loopback on GitHub's macOS image). The shared mDNS budget of two drivers (draft
+  `cargo.yml` points at loopback on GitHub's macOS image). On Windows the interop tests take
+  their address from the default route, not from the system's answer for the group: a join
+  on the loopback pseudo-interface (the driver's loopback test) stays listed after its process
+  exits and from then on makes Windows answer 127.0.0.1 for the group to every process, which
+  made every interop test bind loopback and time out when the driver's tests had run first
+  (agent-test run 46045692164); the driver's loopback real-socket test does not run on Windows
+  for the same reason (a long-lived runner would carry the join into the next job). The shared mDNS budget of two drivers (draft
   section 7.1) moves to virtual time
   (`mdns_virtual_time.rs::two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time`),
   where it does not depend on multicast at all; the real-socket file keeps the two smoke tests
