@@ -142,6 +142,41 @@ fn ice_server_urls_are_validated_as_the_spec_says() -> Result<()> {
     Ok(())
 }
 
+/// W3C "validate an ICE server URL" lists the conditions under which it throws (a URL that
+/// fails to parse, a scheme other than the four, no opaque path or one with "/" or "@", a
+/// fragment, a query on stun / stuns, a scheme not implemented, a host-and-port part that
+/// fails to parse or has a path, username or password, a turn / turns query other than
+/// transport=udp / tcp, a turn / turns server without valid username and credential). A URL
+/// none of them refuses is accepted, in set_configuration and in the constructor: among them
+/// a `stuns:` URL whose host is an IP address, which RFC 8489 section 8.1 has the STUN client
+/// reject when it would use it ("A 'stuns' URI containing an IP address MUST be rejected"),
+/// not the configuration; and `turns:` with an IP address, which RFC 5928 section 3 step 1
+/// takes ("If <host> is an IP address, then it indicates the specific IP address to be
+/// used", for <secure> true as well).
+#[test]
+fn a_url_no_check_refuses_is_accepted() -> Result<()> {
+    for url in [
+        "stun:192.0.2.1",
+        "stun:[2001:db8::1]:3478",
+        "stuns:stun.example.org",
+        "stuns:192.0.2.1:5349",
+        "stuns:192.0.2.1",
+        "stuns:[2001:db8::1]:5349",
+        "turn:192.0.2.1?transport=udp",
+        "turns:192.0.2.1:5349",
+        "turns:[2001:db8::1]?transport=tcp",
+    ] {
+        let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+        pc.set_configuration(with_servers(vec![server(url)]))
+            .unwrap_or_else(|e| panic!("set_configuration refused {url}: {e:?}"));
+        RTCPeerConnectionBuilder::new()
+            .with_configuration(with_servers(vec![server(url)]))
+            .build(Instant::now())
+            .unwrap_or_else(|e| panic!("the constructor refused {url}: {e:?}"));
+    }
+    Ok(())
+}
+
 /// W3C 4.2.1 / 4.4.1.5: ICE servers past the supported maximum (at least 32) are ignored, and
 /// an empty list clears the servers.
 #[test]

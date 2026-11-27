@@ -1509,6 +1509,68 @@ mod tests {
         panic!("no Binding request reached the STUN server");
     }
 
+    /// RFC 8489 section 8.1: "A 'stuns' URI containing an IP address MUST be rejected". The
+    /// configuration takes it (W3C "validate an ICE server URL" does not refuse it); gathering
+    /// does not use it: no connection is opened to it, the server is reported once with an
+    /// `icecandidateerror` of code 701 (W3C 4.8.3: the server cannot be reached; no local
+    /// address was used, so none is given), and gathering goes on and completes.
+    #[test]
+    fn a_stuns_server_whose_host_is_an_ip_address_is_not_used_and_is_reported() {
+        let now = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_ice_servers(vec![RTCIceServer {
+                        urls: vec!["stuns:192.0.2.1:5349".to_owned()],
+                        ..Default::default()
+                    }])
+                    .build(),
+            )
+            .build(now)
+            .expect("the configuration takes a stuns: URL with an IP address");
+        pc.create_data_channel("d", None).unwrap();
+        let offer = pc.create_offer(None).unwrap();
+        pc.set_local_description(now, offer).unwrap();
+        pc.add_local_candidate(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let server: SocketAddr = "192.0.2.1:5349".parse().unwrap();
+        let mut errors = vec![];
+        for step in 0..10u32 {
+            while let Some(t) = pc.poll_write() {
+                assert_ne!(t.transport.peer_addr, server, "nothing is sent to it");
+            }
+            while let Some(command) = pc.poll_stream_command() {
+                if let StreamCommand::Connect { remote, .. } = command {
+                    assert_ne!(remote, server, "no connection is opened to it");
+                }
+            }
+            while let Some(event) = pc.poll_event() {
+                if let RTCPeerConnectionEvent::OnIceCandidateErrorEvent(e) = event {
+                    errors.push(e);
+                }
+            }
+            pc.handle_timeout(now + TA * step).unwrap();
+        }
+        assert_eq!(errors.len(), 1, "once per server URL: {errors:?}");
+        assert_eq!(errors[0].url, "stuns:192.0.2.1:5349");
+        assert_eq!(
+            errors[0].error_code,
+            crate::peer_connection::event::ICE_SERVER_UNREACHABLE
+        );
+        assert_eq!((errors[0].address.as_str(), errors[0].port), ("", 0));
+
+        pc.add_local_candidate(RTCIceCandidateInit::default())
+            .unwrap();
+        while pc.poll_event().is_some() {}
+        assert_eq!(
+            pc.ice_gathering_state(),
+            crate::peer_connection::state::RTCIceGatheringState::Complete
+        );
+    }
+
     /// RFC 8489 section 14.14: "This attribute SHOULD be used by clients and servers. ... in
     /// all Binding requests". By default the gatherer's request carries the ICE agent's
     /// SOFTWARE, as the connectivity checks do.
