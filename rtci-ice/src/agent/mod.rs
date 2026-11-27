@@ -3467,17 +3467,22 @@ impl Agent {
         true
     }
 
-    /// Consent expired on the selected pair `pair_index` (RFC 7675 Section 5.1) while more
-    /// candidates may still come (local gathering not complete, or no end-of-candidates from
-    /// the peer). W3C webrtc-pc 5.6.4, "connected": "If consent checks [RFC7675] fail on the
+    /// Consent expired on the selected pair `pair_index` (RFC 7675 Section 5.1) while the agent
+    /// may not report `Failed` yet ([`Agent::may_report_failed`]): more candidates may still
+    /// come (local gathering not complete, or no end-of-candidates from the peer), or the PAC
+    /// timer runs. W3C webrtc-pc 5.6.4, "connected": "If consent checks [RFC7675] fail on the
     /// connection in use, and there are no other successful candidate pairs available, then
     /// the state transitions to "checking" (if there are candidate pairs remaining to be
     /// checked) or "disconnected" (if there are no candidate pairs to check, but the peer is
-    /// still gathering and/or waiting for additional remote candidates)". The pair is no longer
-    /// used: its consent transactions are discarded and it is removed, so that nothing is sent
-    /// or answered on it again (RFC 7675 Section 5.1); no other valid pair takes over without
-    /// a nomination. The agent keeps its candidates and the other pairs, and fails once the
-    /// indications are in ([`Agent::fail_or_hold`]).
+    /// still gathering and/or waiting for additional remote candidates)"; "completed": "If
+    /// consent checks [RFC7675] subsequently fail on all successful candidate pairs, the state
+    /// transitions to "failed"", which also waits for the PAC timer (`Disconnected` until
+    /// then). The pairs the nomination took out of the checklist (RFC 8445 Section 8.1.2,
+    /// Failed since) are not "remaining to be checked". The pair is no longer used: its consent transactions are discarded and it
+    /// is removed, so that nothing is sent or answered on it again (RFC 7675 Section 5.1); no
+    /// other valid pair takes over without a nomination. The agent keeps its candidates and
+    /// the other pairs, and fails once the indications are in and the PAC timer has expired
+    /// ([`Agent::fail_or_hold`]).
     fn lose_consent_waiting_for_candidates(&mut self, now: Instant, pair_index: usize) {
         let (local_index, remote_index) = (
             self.candidate_pairs[pair_index].local_index,
@@ -3500,6 +3505,11 @@ impl Agent {
         self.set_selected_pair(Some(now), None);
         self.remove_pair_at(now, pair_index);
         self.candidate_pairs[pair_index].consent_lost = true;
+        // The pairs the nomination took out of the checklist are Failed (RFC 8445 Section
+        // 8.1.2, `conclude`): not left to check, and none of them could be nominated in this
+        // ICE session (Section 8.1.1: "the agent MUST NOT nominate another pair for same
+        // component of the data stream within the ICE session. Doing so requires an ICE
+        // restart").
         let to_check = !self.triggered_queue.is_empty()
             || self.candidate_pairs.iter().any(|p| {
                 matches!(

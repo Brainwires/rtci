@@ -269,6 +269,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ICE: consent lost after completion fails the transport as the PAC timer expires, not 30 s
+  later** (`conf/ice-35-driver-consent-failure-time`, after
+  `conf/ice-32-failed-needs-end-of-candidates`; RFC 8445 section 8.1.2: once a pair is
+  nominated "the ICE agent MUST remove all candidate pairs for the same component from the
+  checklist"; 8.1.1: "the agent MUST NOT nominate another pair for same component of the data
+  stream within the ICE session. Doing so requires an ICE restart"; W3C webrtc-pc 5.6.4
+  "completed": "If consent checks [RFC7675] subsequently fail on all successful candidate
+  pairs, the state transitions to failed"). The nomination left the pairs it had not checked
+  (a TCP pair, say) Frozen or Waiting in the list; when consent on the selected pair expired
+  inside the PAC timer, ice-32's "checking if there are candidate pairs remaining to be
+  checked" counted them, so the agent went back to "checking", checked them, and failed only
+  by a second checking timeout: 60 s after the path went dark instead of at the PAC timer's
+  expiry (39.5 s after the checks began), on both sides of the stream driver's
+  `virtual_time.rs::consent_expiry_after_30_seconds_elapses_on_virtual_time_and_the_driver_reports_the_failure`
+  (trace: agent-test run 46063540403). The pairs still to be checked when a pair is nominated
+  are now taken out of the checklist as section 8.1.2 says: their state is Failed, as for a
+  pair the application removes, so that nothing that reads pair states can take them for
+  pairs still to come. No ordinary check is started on them for the rest of the ICE session,
+  they are not left to check when consent is lost (the agent is "disconnected" and then
+  "failed" as the PAC timer expires), they are not checks in progress for the checking timeout,
+  and they count as failed for the checklist's failure. That last part matters to a pair formed
+  after consent was lost before the peer's end-of-candidates: its failed check now ends in
+  "disconnected" by the checking timeout (30 s after the new checks), and in "failed" at the
+  end-of-candidates; a first form of this fix (a flag only the check scheduler and the consent
+  path read) left the agent "checking" there for good. They stay listed (their statistics say
+  `failed`: a behaviour change for `getStats`, which showed them `waiting` or `frozen`), a
+  request from the peer on one is still answered and triggers a check (section 8.1.2, third
+  bullet; 7.3.1.4 for a Failed pair), pairs formed later are checked as before, and an ICE
+  restart replaces them all. Tests `agent_checklist_test.rs::consent_lost_after_completion_does_not_check_the_pairs_the_nomination_retired`
+  and `agent_checklist_test.rs::a_pair_formed_after_consent_loss_fails_and_the_retired_pairs_do_not_hold_the_failure`
+  (both roles); `test_controlling_agent_nominates_once_and_the_checklist_completes` now
+  expects the pairs left unchecked Failed (nothing sent to them after the nomination, as
+  before). Audit: RFC8445-8.1.2-1 (note).
 - **A lite agent with no pair is not failed by its empty checklist**
   (`conf/ice-34-lite-agents-and-failed-after-end-of-candidates`; RFC 8445 section 6.2: "Lite
   implementations skip most of the steps in Section 6 except for verifying the peer's ICE

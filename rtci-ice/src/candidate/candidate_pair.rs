@@ -113,7 +113,6 @@ pub struct CandidatePair {
     /// not answered either ("After consent is lost, the same ICE credentials MUST NOT be used
     /// on the affected 5-tuple again", RFC 7675 Section 5.1).
     pub(crate) consent_lost: bool,
-
     // STUN transaction stats
     /// Total number of STUN connectivity check requests sent (not including retransmissions).
     pub(crate) requests_sent: u64,

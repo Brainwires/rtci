@@ -2086,11 +2086,20 @@ impl Agent {
         })
     }
 
-    /// Section 8.1.2, once a pair is nominated: the other pairs leave the triggered-check
-    /// queue and their In-Progress transactions are cancelled; no ordinary check is started
-    /// from now on (the checklist is Completed). The pairs stay in the list, for statistics
-    /// and because the peer may still nominate another one: a request on one of them is
-    /// answered and triggers a check as before.
+    /// Section 8.1.2, once a pair is nominated: "the ICE agent MUST remove all candidate pairs
+    /// for the same component from the checklist and from the triggered-check queue. If the
+    /// state of a pair is In-Progress, the agent cancels the In-Progress transaction". The
+    /// other pairs leave the triggered-check queue, their In-Progress transactions are
+    /// cancelled, and every pair still to be checked (Frozen, Waiting, or In-Progress until
+    /// now) is Failed: that is how the agent represents a pair that is out of the checklist
+    /// (as `remove_pair_at` does), so that no reader of pair states (Ta's next check, the
+    /// pairs left to check when consent is lost, the checks in progress the checking timeout
+    /// waits for, the checklist's failure) can take it for one still to come, also once the
+    /// selected pair is gone (lost consent; Section 8.1.1: no other pair may be nominated in
+    /// this ICE session). The pairs stay in the list (their statistics say `failed`), and
+    /// because the peer may still nominate another one a request on one of them is answered
+    /// and triggers a check as for any Failed pair (Section 7.3.1.4). Pairs formed later are
+    /// checked as any other; an ICE restart replaces them all.
     pub(crate) fn conclude(&mut self) {
         let Some(selected) = self.selected_pair else {
             return;
@@ -2108,6 +2117,15 @@ impl Agent {
             {
                 p.state = CandidatePairState::Waiting;
                 cancel.push((p.local_index, p.remote_index));
+            }
+            if index != selected
+                && !p.nomination_pending
+                && matches!(
+                    p.state,
+                    CandidatePairState::Frozen | CandidatePairState::Waiting
+                )
+            {
+                p.state = CandidatePairState::Failed;
             }
         }
         for (local_index, remote_index) in cancel {
