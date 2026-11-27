@@ -152,6 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applying an answer: re-read the sender's negotiated codec and encode that one. Test
   `tests/rewritten_payload_type_counter_rtc2rtc.rs`. Engine behaviour change no (the rewrite is
   unchanged); API addition only.
+- `rtci-interceptor`: `StreamsNotSending` (the local streams whose negotiated direction does
+  not send, written into the chain by the peer connection at each answer) and
+  `PacerInterceptor::not_sending_dropped` (`conf/pacer-3-held-streams-purged`).
 
 ### Fixed
 
@@ -247,6 +250,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offerer's send codecs, the answer's first is the one sent); the unit test
   `test_rtp_sender_replace_track_invalid_codec_change` now applies an answer in the browsers'
   form (offered formats only), since a format an `rtci` answer adds is negotiated for sending.
+- **Media the pacer held for a stream that stops sending no longer leaves after the direction
+  takes effect** (`conf/pacer-3-held-streams-purged`; RFC 8866 sections 6.7.1 and 6.7.4: "No
+  media is sent over an inactive media stream"; RFC 3264 section 5.1; W3C webrtc-pc 4.4.1.6;
+  reported from code reading by a consumer, deno_webrtc, behind the WPT flake "unmuted when
+  setting direction to sendrecv after inactive"). The sender refused what the application
+  wrote once the answer made the stream `recvonly` or `inactive`, but the pacer had no notion
+  of it: the packets it had queued (and retransmissions, FEC and probe padding of the stream's
+  RTX) left over the next second, and the NACK responder still answered NACKs for the stream
+  and padded probes on its RTX. At each answer the peer connection now names those streams
+  (media, RTX and FEC SSRCs) to the chain: the pacer drops what it holds of them at that
+  instant (no key-frame request, no `PacerDiscard`) and every later packet of them; the NACK
+  responder forgets what it sent of them (nothing from before is sent again once they send
+  again), answers no NACK for them and pads no probe on them. RTCP goes on. Engine behaviour
+  change only for a stream whose direction stops it sending. Tests
+  `tests/direction_change_drops_queued_media_rtc2rtc.rs::queued_media_of_a_stream_that_stops_sending_does_not_leave`
+  (the default interceptors, the pacer among them), `rtci-interceptor/tests/streams_not_sending.rs`.
 
 ### Known limits
 

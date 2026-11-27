@@ -397,7 +397,7 @@ pub use pacing::sender::{
     DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
     DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerDiscard,
     PacerFlush, PacerInterceptor, PacerPause, QueueOverflow as PacerQueueOverflow,
-    RetransmissionsLeft,
+    RetransmissionsLeft, StreamsNotSending,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;

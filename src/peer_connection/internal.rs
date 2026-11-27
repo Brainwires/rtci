@@ -2705,6 +2705,29 @@ impl RTCPeerConnection {
                 );
             }
         }
+        // The streams of the senders whose negotiated direction does not send, with their
+        // RTX and FEC streams: what the pacer holds of them goes now, and nothing of them is
+        // sent again (RFC 8866 sections 6.7.1 and 6.7.4: "No media is sent over an inactive
+        // media stream"; RFC 3264 section 5.1; W3C webrtc-pc 4.4.1.6: the answer sets
+        // `[[CurrentDirection]]`). RTCP goes on. Every answer says it again: a stream that
+        // sends again is no longer named.
+        let mut not_sending = Vec::new();
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let direction = transceiver.current_direction();
+            if direction == RTCRtpTransceiverDirection::Unspecified || direction.has_send() {
+                continue;
+            }
+            let Some(sender) = transceiver.sender() else {
+                continue;
+            };
+            for encoding in sender.send_encodings() {
+                let coding = &encoding.rtp_coding_parameters;
+                not_sending.extend(coding.ssrc);
+                not_sending.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                not_sending.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+            }
+        }
+        controls.push(interceptor::StreamsNotSending { ssrcs: not_sending }.into_packet(now));
         for control in controls {
             self.interceptor.handle_write(control)?;
         }
