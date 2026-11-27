@@ -91,7 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RFC 9429 5.8), where 0.2 took both. Upgrade: a peer that writes such rids needs
   `SettingEngineBuilder::with_published_rid_id_grammar(true)` (in no profile: libwebrtc takes
   only 1 to 16 alphanumerics and Firefox only alphanumerics). Rids set through the API were
-  already checked to 1 to 255 alphanumerics.
+  checked to 1 to 255 alphanumerics already; addTransceiver now refuses the others with the
+  `TypeError` W3C webrtc-pc 5.1 asks for (it was `ErrRTPSenderRidInvalid` for `-`, `_` and length).
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
   They are used by the ring provider's HMAC-SHA1 only; the nested lock file of the
   test-environment's layers peer follows.
