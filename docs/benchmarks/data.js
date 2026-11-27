@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795701460430,
+  "lastUpdate": 1795759483532,
   "repoUrl": "https://github.com/Brainwires/rtci",
   "entries": {
     "WebRTC-RS Criterion Benchmarks": [
@@ -23939,6 +23939,636 @@ window.BENCHMARK_DATA = {
             "name": "Interceptor/Ulpfec/encode-10x1200",
             "value": 2470,
             "range": "± 22",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "joshguyette@yahoo.com",
+            "name": "Josh Guyette",
+            "username": "nightness"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1301a849da32346bcbb283ca8625998f2b72699b",
+          "message": "Merge pull request #76 from Brainwires/conf/train-35\n\nTrain 35",
+          "timestamp": "2026-11-26T23:43:32-06:00",
+          "tree_id": "08922666a5e2b232df4839f7f016e8bd6797235d",
+          "url": "https://github.com/Brainwires/rtci/commit/1301a849da32346bcbb283ca8625998f2b72699b"
+        },
+        "date": 1795759482511,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Benchmark MarshalTo",
+            "value": 20,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Marshal",
+            "value": 36,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Unmarshal",
+            "value": 131,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SenderReport MarshalTo",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SenderReport Marshal",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SenderReport Unmarshal",
+            "value": 87,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ReceiverReport MarshalTo",
+            "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ReceiverReport Marshal",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ReceiverReport Unmarshal",
+            "value": 87,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "PictureLossIndication MarshalTo",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "PictureLossIndication Marshal",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "PictureLossIndication Unmarshal",
+            "value": 63,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "TransportLayerNack MarshalTo",
+            "value": 4,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "TransportLayerNack Marshal",
+            "value": 21,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "TransportLayerNack Unmarshal",
+            "value": 77,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Goodbye MarshalTo",
+            "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Goodbye Marshal",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Goodbye Unmarshal",
+            "value": 81,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SourceDescription MarshalTo",
+            "value": 52,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SourceDescription Marshal",
+            "value": 79,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SourceDescription Unmarshal",
+            "value": 140,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compound Unmarshal",
+            "value": 171,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compound Marshal",
+            "value": 42,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMappedAddress_AddTo",
+            "value": 41,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkAlternateServer_AddTo",
+            "value": 42,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_GetNotFound",
+            "value": 3,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_Get",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkErrorCode_AddTo",
+            "value": 65,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkErrorCodeAttribute_AddTo",
+            "value": 50,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkErrorCodeAttribute_GetFrom",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkFingerprint_AddTo",
+            "value": 46,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkFingerprint_Check",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkBuildOverhead/Build",
+            "value": 196,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkBuildOverhead/Raw",
+            "value": 133,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageIntegrity_AddTo",
+            "value": 235,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageIntegrity_Check",
+            "value": 230,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_Write",
+            "value": 35,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageType_Value",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_WriteTo",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_ReadFrom",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_ReadBytes",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkIsMessage",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_NewTransactionID",
+            "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageFull",
+            "value": 153,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageFullHardcore",
+            "value": 66,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_WriteHeader",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_CloneTo",
+            "value": 46,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_AddTo",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkDecode",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUsername_AddTo",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUsername_GetFrom",
+            "value": 17,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkNonce_AddTo",
+            "value": 32,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkNonce_AddTo_BadLength",
+            "value": 4,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkNonce_GetFrom",
+            "value": 19,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUnknownAttributes/AddTo",
+            "value": 32,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUnknownAttributes/GetFrom",
+            "value": 14,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkXOR",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkXORMappedAddress_AddTo",
+            "value": 40,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkXORMappedAddress_GetFrom",
+            "value": 22,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Marshal",
+            "value": 1436,
+            "range": "± 48",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Unmarshal",
+            "value": 3944,
+            "range": "± 81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Encrypt/RTP",
+            "value": 1332,
+            "range": "± 35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Decrypt/RTP",
+            "value": 1121,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Encrypt/RTCP",
+            "value": 223,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Decrypt/RTCP",
+            "value": 267,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Encrypt/RTP/AEAD-AES-128-GCM/ring",
+            "value": 560,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Decrypt/RTP/AEAD-AES-128-GCM/ring",
+            "value": 341,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Setup/AES-128-CM-HMAC-SHA1-80/ring",
+            "value": 1335,
+            "range": "± 77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Setup/AEAD-AES-128-GCM/ring",
+            "value": 1259,
+            "range": "± 25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkIsChannelData",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelData_Encode",
+            "value": 4,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelData_Decode",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelNumber/AddTo",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelNumber/GetFrom",
+            "value": 14,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkData/AddTo",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkData/AddToRaw",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkLifetime/AddTo",
+            "value": 30,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkLifetime/GetFrom",
+            "value": 14,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Media/Buffer/Interleaved to Deinterleaved",
+            "value": 219694,
+            "range": "± 2588",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Media/Buffer/Deinterleaved to Interleaved",
+            "value": 219203,
+            "range": "± 667",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Setup/AES-128-GCM/ring",
+            "value": 1506,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Encrypt/AES-128-GCM/ring",
+            "value": 276,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Decrypt/AES-128-GCM/ring",
+            "value": 268,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Setup/AES-256-CBC/ring",
+            "value": 1989,
+            "range": "± 47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Encrypt/AES-256-CBC/ring",
+            "value": 3171,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Decrypt/AES-256-CBC/ring",
+            "value": 2661,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Setup/AES-128-CCM/ring",
+            "value": 1101,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Encrypt/AES-128-CCM/ring",
+            "value": 1557,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Decrypt/AES-128-CCM/ring",
+            "value": 1622,
+            "range": "± 33",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Setup/AES-128-CCM-8/ring",
+            "value": 1110,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Encrypt/AES-128-CCM-8/ring",
+            "value": 1541,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Decrypt/AES-128-CCM-8/ring",
+            "value": 1603,
+            "range": "± 27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Setup/CHACHA20-POLY1305/ring",
+            "value": 1231,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Encrypt/CHACHA20-POLY1305/ring",
+            "value": 742,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Decrypt/CHACHA20-POLY1305/ring",
+            "value": 768,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "DTLS/Handshake/DTLS-1.2/ring",
+            "value": 333336,
+            "range": "± 2065",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Interceptor/Pacer/write+poll",
+            "value": 86,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Interceptor/NackResponder/buffer",
+            "value": 118,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Interceptor/NackResponder/buffer+answer",
+            "value": 22092,
+            "range": "± 1861",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Interceptor/Gcc/feedback-10",
+            "value": 2168,
+            "range": "± 74",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Interceptor/Ulpfec/encode-10x1200",
+            "value": 2053,
+            "range": "± 16",
             "unit": "ns/iter"
           }
         ]
