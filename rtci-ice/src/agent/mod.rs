@@ -3436,8 +3436,8 @@ impl Agent {
     /// checked) or "disconnected" (if there are no candidate pairs to check, but the peer is
     /// still gathering and/or waiting for additional remote candidates)". The pair is no longer
     /// used: its consent transactions are discarded and it is removed, so that nothing is sent
-    /// or answered on it again (RFC 7675 Section 5.1); another valid pair takes over if there
-    /// is one. The agent keeps its candidates and the other pairs, and fails once the
+    /// or answered on it again (RFC 7675 Section 5.1); no other valid pair takes over without
+    /// a nomination. The agent keeps its candidates and the other pairs, and fails once the
     /// indications are in ([`Agent::fail_or_hold`]).
     fn lose_consent_waiting_for_candidates(&mut self, now: Instant, pair_index: usize) {
         let (local_index, remote_index) = (
@@ -3454,14 +3454,13 @@ impl Agent {
         });
         // "After consent is lost, the same ICE credentials MUST NOT be used on the affected
         // 5-tuple again" (RFC 7675 Section 5.1): the pair is removed, so that no check is
-        // sent on it, and marked, so that no request on it is answered; another valid pair,
-        // if there is one, is selected.
+        // sent on it, and marked, so that no request on it is answered. No other pair takes
+        // over: the pair in use changes only by a nomination (RFC 8445 Sections 8.1.1 and
+        // 8.1.2) or an ICE restart, so the selection is cleared first and `remove_pair_at`
+        // (whose fallback is for a pair the application removes) selects nothing.
+        self.set_selected_pair(Some(now), None);
         self.remove_pair_at(now, pair_index);
         self.candidate_pairs[pair_index].consent_lost = true;
-        if self.selected_pair.is_some() {
-            return;
-        }
-        self.set_selected_pair(Some(now), None);
         let to_check = !self.triggered_queue.is_empty()
             || self.candidate_pairs.iter().any(|p| {
                 matches!(
