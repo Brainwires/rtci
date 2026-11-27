@@ -74,13 +74,15 @@ What remains with ring:
   carried from dead frames into heap padding were found and the scrub removes them (its
   removal is caught, m13 of the first round); DTLS has no stack measurement of the kind SRTP
   has (next section), so for a copy that stays on the stack DTLS is "scrubbed, not measured".
-  `scrub_stack` is one bulk zero fill of a 32 KiB buffer in a never-inlined frame, made
+  `scrub_stack` is one bulk zero fill of a buffer in a never-inlined frame (32 KiB in an
+  optimised build, 128 KiB in an unoptimised one: `debug_assertions`), made
   observable to the optimiser (`black_box` and a compiler fence) so it is not dropped as a
   dead store; it reaches the stack below its caller only, never registers or the frames above.
   Tested (zeroize3, ubuntu): its body emptied, the DTLS erasure tests fail in debug and release
   builds (runs 45659948616, 45659954724); the fill left unobservable, they fail in a release
   build (45659972471) and pass in a debug build (45659963417: at opt-level 0 nothing is
-  removed, so the two cannot be told apart there). Cost: about 0.5 to 0.7 µs per call.
+  removed, so the two cannot be told apart there). Cost: about 0.5 to 0.7 µs per call in an
+  optimised build.
 
 ## SRTP keys on the stack: what is guaranteed, and how it is known
 
@@ -124,9 +126,21 @@ keys are mostly hidden under the SRTCP ones in this table.
 **What is done about it**
 
 - Building a context, deriving session keys again and adding a master key run under
-  `crypto::on_erased_stack`: the work runs in a frame of its own and the 32 KiB of stack below
-  it are overwritten afterwards (`scrub_stack`). The built-in providers use about 3 KiB there
-  in an optimised build.
+  `crypto::on_erased_stack`: the work runs in a frame of its own and the stack below it is
+  overwritten afterwards (`scrub_stack`), 32 KiB of it in an optimised build and 128 KiB in an
+  unoptimised one. The built-in providers use about 3 KiB there in an optimised build and 42 to
+  47 KiB in an unoptimised one, where every temporary has a stack slot of its own: the deepest
+  part is the AES key schedules of the key derivation (`common::block_encrypt` holds a cipher
+  object of each AES key length in its frame, and `aes` builds the decryption schedule from the
+  encryption one in frames below it). With one 32 KiB depth for every build, rustc 1.99.1's
+  unoptimised build (the test environment's compiler) left the master key and its AES round
+  keys 37.7 to 42.2 KB below the measurement's starting point, beyond the overwrite, in all 20
+  measurements of the ring provider (run 45970063627); with rustc 1.100 nothing was left beyond it.
+  The unoptimised depth is the deepest use measured (47 KiB) times 2.7. A measured depth (fill
+  the stack below with a marker first, overwrite down to the lowest byte the work changed) was
+  not taken: it writes the region, reads it back and writes it again instead of writing it once, and in an optimised build, where the
+  work uses a tenth of the 32 KiB, it would only add cost to the set-up (row `zeroize-3` of
+  docs/performance.md); the optimised depth and cost are unchanged.
 - AES-CM: the expanded schedule lives in the boxed cipher object and a packet runs the counter
   mode over a reference to it; nothing is expanded per packet. `aes`'s cipher types are unions
   of a hardware and a larger portable schedule and the bytes of the variant not in use are
@@ -146,13 +160,17 @@ keys are mostly hidden under the SRTCP ones in this table.
 
 | Claim | Where it is asserted |
 |---|---|
-| ring provider (the default), optimised build, every profile, both ways of keying: no key the session derives is found in any form in the dead stack frames of the thread that built the contexts, protected and unprotected packets, re-keyed or tore down | `with_ring_key_handling_leaves_no_key_in_dead_stack_frames`, CI job `key_residue`: x86-64 Linux and AArch64 macOS |
+| ring provider (the default), optimised build, every profile, both ways of keying: no key the session derives is found in any form in the dead stack frames of the thread that built the contexts, protected and unprotected packets, re-keyed or tore down | `with_ring_key_handling_leaves_no_key_in_dead_stack_frames`, CI job `key_residue`: x86-64 Linux with the workspace's `rust-version` (the oldest supported compiler) and with stable, AArch64 macOS with stable |
 | the same thread, the same build: nothing is left anywhere else in the process after the teardown, and no master-key schedule is in the heap while the contexts live | the same test, Linux (whole-process search) |
-| either provider, any build: building and tearing down leave nothing in dead stack frames | the same test and `with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames`, in the ordinary test jobs (Linux, macOS) |
+| either provider, unoptimised and optimised builds: building and tearing down leave nothing in dead stack frames | the same test and `with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames`: CI job `key_residue` (both builds, the same compilers and platforms), the ordinary test jobs (Linux, macOS, stable, unoptimised) and the test environment (rustc 1.99.1, unoptimised) |
 | HMAC-SHA1 computed in the keyed object is correct and the object is reusable | `rtci-crypto/tests/hmac_sha1_vectors.rs` (RFC 2202 cases 1 to 7), and the SRTP, DTLS and STUN vectors of their crates |
 
 Each part of the fix is held by the first test (mutations): without the overwrite in
-`on_erased_stack`, building leaves 874 key forms (run 45886867130); with `hmac` and `sha1`
+`on_erased_stack`, building leaves 874 key forms (run 45886867130); with the overwrite 32 KiB
+deep in an unoptimised build too, building leaves the master key and its round keys with rustc
+1.99.1 (run 45970063627, where it was found; the mutation `mut/zeroize-4-scrub-32k-in-debug`
+reproduces it, run 45983076469: 242 key forms after building, the same inventory digest as the
+test environment's failure); with `hmac` and `sha1`
 built without `zeroize`, 480 HMAC-SHA1 states are left in freed heap after the teardown
 (45886871614); with the AES-CM cipher object built over stack that was not overwritten first,
 round keys of the master key are in the heap while the contexts live (45886877182: the unused
@@ -172,8 +190,20 @@ bytes of `aes`'s union, carried from the stack). Cost: docs/performance.md, row 
   source does, and how much of that survives depends on the compiler (an intermediate state of
   this work left 24 key forms with rustc 1.100 and 96 with rustc 1.99.1 from the same sources).
   The packet path is therefore asserted in optimised builds only; in unoptimised ones the test
-  prints what it finds, which with rustc 1.100 and the final code is nothing, on x86-64 Linux
-  and AArch64 macOS (runs 45886842087, 45886848334).
+  prints what it finds, the round keys of the AES-CTR key a packet uses, over the ten profiles
+  and both ways of keying (runs 45983045311, Linux, and 45983054507, macOS):
+
+  | rustc | x86-64 Linux, unoptimised | x86-64 Linux, optimised | AArch64 macOS |
+  |---|---|---|---|
+  | 1.89 (`rust-version`) | 72 (header-extension key) | 0 | not run |
+  | 1.99.1 | 84 (SRTP encryption key with AES-CM, header-extension key) | 0 | not run |
+  | 1.100 | 0 | 0 | 0 in both builds |
+
+  Building and tearing down are asserted in unoptimised builds too (above): 0 after either with
+  all three compilers; the AWS-LC provider leaves 150 forms in its packet path unoptimised with
+  rustc 1.89 and 1.99.1, 78 with 1.100 and in every optimised build (the stated limit above).
+  The test's "stack used" includes the overwrite itself (about 142 KiB unoptimised, 37 KiB
+  optimised).
 - **CPU registers, and whatever stores them on a stack.** A provider's AES leaves round keys in
   vector registers when it returns. A signal delivered next puts them into the signal frame; on
   Apple systems the lazy set-up of a thread-local saves the vector registers on the caller's
@@ -185,9 +215,11 @@ bytes of `aes`'s union, carried from the stack). Cost: docs/performance.md, row 
   own (`pthread_attr_setstack`) and has run on x86-64 Linux and AArch64 macOS only. On
   processors without the AES and SHA instructions the portable routines of `aes`, `sha1` and
   ring run instead, which nothing here has measured.
-- **Deeper than 32 KiB.** `on_erased_stack` overwrites 32 KiB below its frame. A provider
-  supplied by the application that uses more stack than that to build a key object leaves what
-  lies deeper.
+- **Deeper than the overwrite.** `on_erased_stack` overwrites 32 KiB below its frame in an
+  optimised build and 128 KiB in an unoptimised one (the depth follows `debug_assertions`: a
+  build profile with opt-level 0 and `debug-assertions = false` gets 32 KiB, which rustc 1.99.1
+  was measured to exceed). A provider supplied by the application that uses more stack than
+  that to build a key object leaves what lies deeper.
 - **DTLS.** Scrubbed (above), not measured in this way.
 
 For an application: nothing is asked of it for SRTP with the default provider. With the AWS-LC

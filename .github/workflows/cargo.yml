@@ -267,30 +267,55 @@ jobs:
           cargo test --package rtci --features performance-defaults --test behaviour_profiles --verbose
 
   # RFC 7714 section 13.1, "All keys MUST be properly erased when no longer needed": the
-  # residue measurement (rtci-srtp/tests/key_residue.rs) in an OPTIMISED build, where it asserts
-  # that the ring provider's packet path leaves no key form in a dead stack frame (the ordinary
-  # test jobs run it unoptimised, where only building and tearing down are asserted:
-  # docs/key-erasure.md). x86-64 Linux, with the whole process searched, and AArch64 macOS.
+  # residue measurement (rtci-srtp/tests/key_residue.rs) in an UNOPTIMISED and an OPTIMISED
+  # build, with the workspace's rust-version (the oldest supported compiler) and with stable.
+  # In every build it asserts that building and tearing down leave no key form in a dead stack
+  # frame; in the optimised one it also asserts that the ring provider's packet path leaves
+  # none (docs/key-erasure.md). How deep an unoptimised build's frames go depends on the
+  # compiler (rustc 1.99.1 went past the 32 KiB that used to be overwritten), so the oldest
+  # one is measured too. x86-64 Linux, with the whole process searched, and AArch64 macOS.
   key_residue:
     timeout-minutes: 30
-    name: SRTP key residue, optimised build (${{ matrix.os }})
+    name: SRTP key residue (${{ matrix.os }}, ${{ matrix.toolchain }}, ${{ matrix.profile }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ 'ubuntu-latest', 'macos-latest' ]
+        os: [ 'ubuntu-latest' ]
+        toolchain: [ 'rust-version', 'stable' ]
+        profile: [ 'unoptimised', 'optimised' ]
+        include:
+          - { os: 'macos-latest', toolchain: 'stable', profile: 'unoptimised' }
+          - { os: 'macos-latest', toolchain: 'stable', profile: 'optimised' }
     runs-on: ${{ matrix.os }}
     env:
       CARGO_INCREMENTAL: 0
+      # With the rust-version toolchain, as in the `msrv` job: dependencies resolve to versions
+      # that support it. With stable, as in every other job.
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: ${{ matrix.toolchain == 'rust-version' && 'fallback' || 'allow' }}
+      RELEASE: ${{ matrix.profile == 'optimised' && '--release' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The toolchain to measure with
+        id: toolchain
+        shell: bash
+        run: |
+          if [ "${{ matrix.toolchain }}" = rust-version ]; then
+            echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=stable" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: stable
+          toolchain: ${{ steps.toolchain.outputs.version }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ steps.toolchain.outputs.version }}-${{ matrix.profile }}
       - name: No SRTP key is left in a dead stack frame
-        run: cargo test --release --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
-      - name: HMAC-SHA1 computed in the keyed object, in an optimised build (RFC 2202, object reuse)
-        run: cargo test --release --package rtci-crypto --features crypto-aws-lc-rs --test hmac_sha1_vectors --verbose
+        run: |
+          rustc --version
+          cargo test $RELEASE --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
+      - name: HMAC-SHA1 computed in the keyed object (RFC 2202, object reuse)
+        run: cargo test $RELEASE --package rtci-crypto --features crypto-aws-lc-rs --test hmac_sha1_vectors --verbose
 
   crypto_backend_baseline:
     timeout-minutes: 45
