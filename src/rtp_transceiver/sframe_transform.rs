@@ -18,6 +18,49 @@
 //! of several spatial layers, [`RTCRtpSFrameEncryptor::transform_access_unit`] splits it and
 //! encrypts each layer on its own, and [`join_layer_frames`] puts a receiver's decrypted
 //! layers back together for the decoder.
+//!
+//! # Scalable video: how an application hands layer frames
+//!
+//! RFC 9605 section 4.2: a per-frame ciphertext spans several packets, its header in the first
+//! and its authentication tag in the last. A forwarder that drops the packets of one layer
+//! from a ciphertext holding two leaves a truncated ciphertext that no longer authenticates,
+//! so the duty of section 6.1.3 is the sender's: one ciphertext per layer, each sent as its
+//! own SFrame RTP frame with the Dependency Descriptor of that layer frame (its own frame
+//! number and template: `spatial_id`, `temporal_id`).
+//!
+//! What a layer is, per codec:
+//!
+//! - VP8, H.264: temporal layers only (the engine has no H.264 SVC). Each encoded frame is one
+//!   picture of one temporal layer: call [`RTCRtpSFrameEncryptor::transform`] once per frame.
+//!   `set_scalability` refuses a mode of several spatial layers for them.
+//! - VP9: a temporal layer is a picture; the spatial layers of a picture are the frames of
+//!   its superframe (VP9 bitstream specification Annex B), lowest first. The bitstream names
+//!   no spatial id: a frame's position is its layer.
+//! - AV1: a temporal unit has one `temporal_id`; its spatial layers are its OBUs grouped by
+//!   the extension header's `spatial_id`.
+//!
+//! A sender of VP9 or AV1 spatial layers declares the stream once
+//! (`set_scalability("video/VP9", Some(mode))`) and then either
+//!
+//! 1. hands the frame of one layer at a time, as an encoder that emits per-layer frames (and
+//!    a browser's encoded transform) does: [`RTCRtpSFrameEncryptor::transform_layer_frame`]
+//!    with the Dependency Descriptor template the frame is written with (for AV1 the OBUs'
+//!    ids are checked against it), or `transform`; or
+//! 2. hands the encoder's access unit (the superframe, the temporal unit):
+//!    [`RTCRtpSFrameEncryptor::transform_access_unit`] splits it and returns one
+//!    [`RTCSFrameLayer`] per spatial layer, lowest first, each with distinct SFrame counters;
+//!    the application sends each as its own frame under that layer's descriptor.
+//!
+//! With the mode declared, `transform` refuses an access unit of several spatial layers
+//! (TypeError): it returns one ciphertext and so could only be labelled with one layer's
+//! descriptor. Without a declared mode nothing is parsed and every frame is encrypted as it
+//! is; the engine does not own the encryptor, so the check is only as good as the declaration.
+//! Per-packet SFrame needs no split (the VP9 and AV1 payload formats never put two layers in
+//! one packet).
+//!
+//! A receiver decrypts each forwarded layer frame on its own, groups the plaintexts of one RTP
+//! timestamp by the frame metadata's `spatial_index` (the Dependency Descriptor's), lowest
+//! first, and passes them to [`join_layer_frames`] for the access unit its decoder takes.
 
 use crate::sframe::{CipherSuite, ErrorKind, SFrameContext};
 use bytes::{Bytes, BytesMut};
@@ -161,9 +204,14 @@ impl RTCRtpSFrameEncryptor {
     /// the declared codec.
     pub fn transform(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
         let key_id = self.key_id.ok_or(Error::InvalidStateError)?;
-        let layers = self.layers(frame)?;
-        if layers.len() > 1 {
-            return Err(several_layers(layers.len()));
+        // Without a declared mode of several spatial layers (or per packet) a frame is one
+        // layer as it is: nothing to parse, and the ciphertext is the one before RFC 9605
+        // section 6.1.3 was checked.
+        if self.layering.is_some() && self.sframe_type == RTCSFrameType::PerFrame {
+            let layers = self.layers(frame)?.len();
+            if layers > 1 {
+                return Err(several_layers(layers));
+            }
         }
         self.context
             .encrypt(key_id, b"", frame)
@@ -457,6 +505,14 @@ mod tests {
                 vec![0, 1],
                 "{mime}"
             );
+            // Two ciphertexts, two SFrame headers: the sender's key id, a counter each.
+            let headers: Vec<crate::sframe::Header> = encrypted
+                .iter()
+                .map(|l| crate::sframe::Header::decode(&l.ciphertext).map(|(header, _)| header))
+                .collect::<std::result::Result<_, _>>()
+                .map_err(sframe_error)?;
+            assert!(headers.iter().all(|h| h.kid == 1), "{mime}: {headers:?}");
+            assert_eq!(headers[1].ctr, headers[0].ctr + 1, "{mime}: {headers:?}");
             let plaintexts: Vec<Bytes> = encrypted
                 .iter()
                 .map(|l| decryptor.transform(&l.ciphertext).map(Bytes::from))
@@ -544,6 +600,109 @@ mod tests {
                 encryptor.transform_layer_frame(&frame, &layer),
                 Err(Error::TypeError(_))
             ));
+        }
+        Ok(())
+    }
+
+    /// Streams without spatial layers are untouched by RFC 9605 section 6.1.3's check: with no
+    /// declared mode, a mode of one spatial layer (VP8, H.264 and VP9 temporal layers), or
+    /// per-packet SFrame, `transform` and `transform_access_unit` give byte for byte what the
+    /// SFrame context gives for the frame as it is (the encryptor's code before the check).
+    #[test]
+    fn without_spatial_layers_the_ciphertext_is_the_frame_encrypted_as_it_is() -> Result<()> {
+        let suite = CipherSuite::Aes128GcmSha256_128;
+        let key = [7u8; 16];
+        let superframe = rtp::codec::vp9::join_superframe(&[
+            Bytes::from(vec![0x82u8; 40]),
+            Bytes::from(vec![0x83u8; 90]),
+        ])?;
+        let temporal_unit = [
+            av1_obu(2, None, &[]),
+            av1_obu(6, Some((0, 0)), &[0xa0; 30]),
+            av1_obu(6, Some((0, 1)), &[0xa1; 60]),
+        ]
+        .concat();
+        let frames: [&[u8]; 4] = [
+            b"an encoded frame",
+            &superframe,
+            &temporal_unit,
+            &[0x12; 300],
+        ];
+        let cases: [(RTCSFrameType, &str, Option<Option<ScalabilityMode>>); 7] = [
+            (RTCSFrameType::PerFrame, "video/VP9", None),
+            (RTCSFrameType::PerFrame, "video/AV1", Some(None)),
+            (RTCSFrameType::PerFrame, "video/VP9", mode("L1T3").map(Some)),
+            (RTCSFrameType::PerFrame, "video/VP8", mode("L1T3").map(Some)),
+            (
+                RTCSFrameType::PerFrame,
+                "video/H264",
+                mode("L1T2").map(Some),
+            ),
+            (
+                RTCSFrameType::PerPacket,
+                "video/AV1",
+                mode("L3T3").map(Some),
+            ),
+            (
+                RTCSFrameType::PerPacket,
+                "video/VP9",
+                mode("S2T1").map(Some),
+            ),
+        ];
+        for (sframe_type, mime, declared) in cases {
+            let mut encryptor = RTCRtpSFrameEncryptor::new(suite, sframe_type)?;
+            encryptor.set_encryption_key(&key, 9)?;
+            if let Some(declared) = declared {
+                encryptor.set_scalability(mime, declared)?;
+            }
+            let mut reference =
+                SFrameContext::with_default_provider(suite).map_err(sframe_error)?;
+            reference.add_send_key(9, &key).map_err(sframe_error)?;
+            for frame in frames {
+                let expected = reference.encrypt(9, b"", frame).map_err(sframe_error)?;
+                assert_eq!(
+                    encryptor.transform(frame)?,
+                    expected,
+                    "{sframe_type:?} {mime} {declared:?}"
+                );
+                let expected = reference.encrypt(9, b"", frame).map_err(sframe_error)?;
+                assert_eq!(
+                    encryptor.transform_access_unit(frame)?,
+                    vec![RTCSFrameLayer {
+                        spatial_id: 0,
+                        ciphertext: expected
+                    }],
+                    "{sframe_type:?} {mime} {declared:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The codecs that carry spatial layers (webrtc-svc section 5) are VP9 and AV1: a mode of
+    /// several spatial layers is refused for VP8 and for H.264 (the engine has no H.264 SVC),
+    /// whose temporal modes are accepted (each frame is one temporal layer already).
+    #[test]
+    fn spatial_modes_are_declared_for_vp9_and_av1_only() -> Result<()> {
+        let suite = CipherSuite::Aes128GcmSha256_128;
+        let mut encryptor = RTCRtpSFrameEncryptor::new(suite, RTCSFrameType::PerFrame)?;
+        for (mime, name, accepted) in [
+            ("video/VP8", "L1T3", true),
+            ("video/VP8", "L2T1", false),
+            ("video/VP8", "S2T1", false),
+            ("video/H264", "L1T3", true),
+            ("video/H264", "L3T3", false),
+            ("video/H264", "S2T3", false),
+            ("video/VP9", "L3T3", true),
+            ("video/VP9", "S3T3", true),
+            ("video/AV1", "L2T2", true),
+            ("video/av1", "S2T3", true),
+        ] {
+            assert_eq!(
+                encryptor.set_scalability(mime, mode(name)).is_ok(),
+                accepted,
+                "{mime} {name}"
+            );
         }
         Ok(())
     }
