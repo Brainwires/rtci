@@ -629,7 +629,7 @@ fn records_of_two_associations_never_share_a_datagram() -> Result<()> {
     }
     let mut received = vec![vec![], vec![]];
     let mut completed = vec![false, false];
-    let mut sent = exchange(
+    let handshakes = exchange(
         &mut server,
         &mut clients,
         &addresses,
@@ -637,7 +637,49 @@ fn records_of_two_associations_never_share_a_datagram() -> Result<()> {
         &mut received,
         &mut completed,
     );
+    // The id each client asked for, as the server took it from the client's ClientHello (a
+    // client sets its own only once it has the ServerHello). Read before the close, which
+    // ends the associations.
+    let ids: Vec<Vec<u8>> = addresses
+        .iter()
+        .map(|address| {
+            server
+                .connection_mut(address)
+                .expect("the server's association")
+                .connection_ids()
+                .expect("a DTLS 1.3 association")
+                .1
+                .to_vec()
+        })
+        .collect();
+    assert_eq!(ids[0].len(), 4);
+    assert_ne!(ids[0], ids[1], "the clients asked for different ids");
+    let mut protected = [0usize; 2];
+    let mut check = |sent: &Sent| {
+        for (index, datagram) in sent {
+            let (record_ids, plaintext) = record_connection_ids(datagram);
+            assert!(
+                record_ids.iter().all(|id| *id == ids[*index]),
+                "a datagram to client {index} holds records of {record_ids:?} (its id: {:?}, \
+                 the other's: {:?}) and {plaintext} plaintext records",
+                ids[*index],
+                ids[1 - *index]
+            );
+            protected[*index] += record_ids.len();
+        }
+    };
+    check(&handshakes);
     assert_eq!(completed, vec![true, true], "both handshakes complete");
+    for (index, client) in clients.iter_mut().enumerate() {
+        let conn = client
+            .connection_mut(&server_addr())
+            .expect("the client's association");
+        assert_eq!(
+            conn.connection_ids().expect("a DTLS 1.3 association").0,
+            &ids[index][..],
+            "client {index} asked for the id the server sends"
+        );
+    }
 
     let mut written = vec![vec![], vec![]];
     for n in 0..8 {
@@ -648,41 +690,15 @@ fn records_of_two_associations_never_share_a_datagram() -> Result<()> {
         }
     }
     server.close(now)?;
-    sent.extend(exchange(
+    let data = exchange(
         &mut server,
         &mut clients,
         &addresses,
         now,
         &mut received,
         &mut completed,
-    ));
-
-    let ids: Vec<Vec<u8>> = clients
-        .iter_mut()
-        .map(|client| {
-            let conn = client
-                .connection_mut(&server_addr())
-                .expect("the client's association");
-            conn.connection_ids()
-                .expect("a DTLS 1.3 association")
-                .0
-                .to_vec()
-        })
-        .collect();
-    assert_eq!(ids[0].len(), 4);
-    assert_ne!(ids[0], ids[1], "the clients asked for different ids");
-    let mut protected = [0usize; 2];
-    for (index, datagram) in &sent {
-        let (record_ids, plaintext) = record_connection_ids(datagram);
-        assert!(
-            record_ids.iter().all(|id| *id == ids[*index]),
-            "a datagram to client {index} holds records of {record_ids:?} (its id: {:?}, the \
-             other's: {:?}) and {plaintext} plaintext records",
-            ids[*index],
-            ids[1 - *index]
-        );
-        protected[*index] += record_ids.len();
-    }
+    );
+    check(&data);
     assert!(
         protected.iter().all(|count| *count > 8),
         "each association's records were looked at: {protected:?}"
