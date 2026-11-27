@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The offerer sends with the answer's most preferred format it can send, also one its codec
+  preferences left out of the offer** (`conf/jsep-91-offerer-sends-answers-preferred-format`;
+  RFC 9429 section 5.11, in steps that "MUST be performed": "choose the media format to send as
+  the most preferred media format from the remote description that is also locally supported";
+  RFC 3264 section 7: the offerer "SHOULD use the first media format listed in the answer";
+  W3C webrtc-pc "set a session description": [[SendCodecs]] are "the codecs that description
+  negotiates for sending and which the user agent is currently capable of sending"). Present
+  since 0.1.0: with codec preferences set, the formats of a remote answer were matched against
+  those preferences only, so the sender never used a format the answer led with or added beyond
+  the offer. Consumer-reported WPT failure: `webrtc/protocol/additional-codecs.html`, "Listing an
+  additional codec in the answer causes it to be sent" (VP8 offered, the answer leads with H.264
+  on 63; the engine sent VP8 whenever a dynamic number was free for the answer to add VP8 on: with the default codecs none is, which hid it; failing-first run 45990202513 with a minimal codec set). The receive side and later offers keep the preferences. Engine
+  behaviour change YES: after an answer, `RTCRtpSender::get_parameters().codecs` lists every
+  answered format this endpoint can send, and a codec-less encoding is sent with the answer's
+  first. Tests `tests/offerer_sends_answers_preferred_format.rs`,
+  `tests/additional_codec_sent_rtc2rtc.rs` (on the wire);
+  `tests/jsep_answer_unoffered_formats.rs` updated (an answer-added format is now among the
+  offerer's send codecs, the answer's first is the one sent); the unit test
+  `test_rtp_sender_replace_track_invalid_codec_change` now applies an answer in the browsers'
+  form (offered formats only), since a format an `rtci` answer adds is negotiated for sending.
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;

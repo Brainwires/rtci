@@ -1,8 +1,10 @@
 //! The offerer's sender names the answer's most preferred format it can send, also when its
 //! own codec preferences left that format out of the offer (signalling only; the wire is
-//! `tests/additional_codec_sent_rtc2rtc.rs`). These pass on master (agent-test run
-//! 45983496952): an answer that leads with such a format makes the preferences match nothing,
-//! and the send codecs fall back to every format the engine has.
+//! `tests/additional_codec_sent_rtc2rtc.rs`). With the default codecs these passed on master
+//! too (agent-test run 45983496952): no dynamic number is free for the answer to add VP8 on, so
+//! the preferences matched nothing and the send codecs fell back to every format the engine
+//! has; with free numbers the answer adds VP8 and master sent it (run 45990202513, the
+//! minimal-engine test of `additional_codec_sent_rtc2rtc.rs`).
 //!
 //! RFC 9429 section 5.11 ("For each "m=" section, the following steps MUST be performed"):
 //! "choose the media format to send as the most preferred media format from the remote

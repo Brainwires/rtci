@@ -473,8 +473,10 @@ fn a_packet_written_with_the_offers_vp8_number_does_not_leave_with_it() -> Resul
     Ok(())
 }
 
-/// The same scenario with a media engine of VP8 and one H.264 format at both ends: dynamic
-/// numbers are free, so the answer can add VP8 on one of them after H.264 on 63. RFC 9429
+/// Regression test of jsep-91 (failing first on master, agent-test run 45990202513: the answer
+/// was `63 99`, H.264 and VP8, and the sender's codecs were `[(99, "video/VP8")]`). The same
+/// scenario with a media engine of VP8 and one H.264 format at both ends: dynamic numbers are
+/// free, so the answer adds VP8 on one of them after H.264 on 63. RFC 9429
 /// section 5.11 still has the offerer send "the most preferred media format from the remote
 /// description that is also locally supported": H.264 on 63. (Diagnostic: prints the answer's
 /// video section and pc1's send codecs.)
@@ -510,6 +512,19 @@ fn with_free_payload_types_the_offerer_still_sends_the_answers_first_format() ->
         (63, "video/h264"),
         "RFC 9429 5.11: the answer's first format it can send; send codecs {pc1_send_codecs:?}\n{}",
         video.join("\n")
+    );
+    for seq in 1..=5u16 {
+        world.send(sender, seq, pt)?;
+    }
+    let received: Vec<u8> = world.peers[1]
+        .read_rtp
+        .iter()
+        .map(|h| h.payload_type)
+        .collect();
+    println!("MINIMAL ENGINE, PC2 RECEIVED PAYLOAD TYPES: {received:?}");
+    assert!(
+        received.len() >= 4 && received.iter().all(|p| *p == 63),
+        "pc2 receives H.264 on 63: {received:?}"
     );
     Ok(())
 }

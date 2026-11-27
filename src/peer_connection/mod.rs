@@ -3134,6 +3134,7 @@ impl RTCPeerConnection {
                             transceiver.set_codec_preferences_from_remote_description(
                                 media,
                                 &self.media_engine,
+                                false,
                             )?;
 
                             if transceiver.mid().is_none() {
@@ -3159,6 +3160,7 @@ impl RTCPeerConnection {
                             transceiver.set_codec_preferences_from_remote_description(
                                 media,
                                 &self.media_engine,
+                                false,
                             )?;
 
                             if transceiver.mid().is_none() {
@@ -3239,6 +3241,7 @@ impl RTCPeerConnection {
                         transceiver.set_codec_preferences_from_remote_description(
                             media,
                             &self.media_engine,
+                            true,
                         )?;
                     }
                 }
