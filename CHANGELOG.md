@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **SRTP keys are no longer left in dead stack frames by the default provider**
+  (`conf/zeroize-3-stack-residue-measurement`; RFC 7714 section 13.1: "All keys MUST be properly
+  erased when no longer needed"; docs/key-erasure.md; audit row RFC7714-13.1-3). 0.2.0 erased
+  every heap copy of a key and said of stack copies "not guaranteed". Measured on 0.2.0 with a
+  test that reads the stack itself (below): after building an SRTP context the thread's dead
+  stack frames held the master key with both of its AES schedules, session round keys, the
+  AES-GCM GHASH key and the SRTCP HMAC-SHA1 states; after protecting or unprotecting packets,
+  both AES schedules of the SRTCP and header-extension encryption keys and the HMAC-SHA1 states
+  (ring provider: 2137 key forms over the ten profiles with and without a key derivation rate,
+  rustc 1.100, x86-64 Linux; 1995 on AArch64 macOS). Nothing was ever left in the heap or
+  anywhere else in the process: the 0.2.0 statement about heap copies stands. Now:
+  - **Building a context, deriving session keys again (a non-zero key derivation rate) and
+    adding a master key** run under `crypto::on_erased_stack` (new, `rtci-crypto`), which runs
+    the work in a frame of its own and overwrites the 32 KiB of stack below it afterwards
+    (`scrub_stack`). Nothing is left by these steps, with either provider, in unoptimised and
+    optimised builds.
+  - **AES-CM** (the payload cipher of the AES-CM profiles, and the RFC 6904 header-extension
+    keystream of every profile): the cipher object keeps its expanded key schedule and a
+    packet runs the counter mode over a reference to it. It kept the key and expanded both
+    schedules on the stack for every packet. The object is overwritten whole when dropped
+    (`aes`'s cipher types are unions whose unused bytes it never writes) and is built over
+    freshly overwritten stack.
+  - **HMAC-SHA1 of the ring provider** (SRTP and SRTCP authentication with the AES-CM and NULL
+    profiles; also the DTLS CBC record MAC and STUN message integrity): computed in the keyed
+    object, in place, with `hmac` 0.13 and `sha1` 0.11 and their `zeroize` features (were 0.12
+    and 0.10, which have none). It was computed on a copy of the keyed object in a stack frame
+    for every packet, which left the SHA-1 states after `key XOR ipad` and `key XOR opad` (the
+    key in another form) there: 42 key forms over the profiles in an optimised build on x86-64
+    Linux, 36 on AArch64 macOS, with the other two changes in place.
+  - Result, ring provider, every profile, with `Context::new` and with an MKI and a key
+    derivation rate: 0 key forms in dead stack frames after building, protecting and
+    unprotecting RTP and RTCP, re-keying and tearing down, in an optimised build on x86-64
+    Linux and AArch64 macOS (asserted in CI), and nothing anywhere else in the process (Linux).
+    In an unoptimised build the same was measured with rustc 1.100 on both (runs 45886842087,
+    45886848334); it is printed there, not asserted (see Known limits).
+  No wire format, API signature or default changes. Cost, against 0.2.0 in one job: SRTP
+  context set-up 1.26 → 2.99 µs with the AES-CM profiles and 1.26 → 2.09 µs with AES-GCM (the
+  stack overwrites, once per context); per packet nothing slower, SRTCP 12 to 15 % faster (no
+  key expansion per packet).
+  Performance: zeroize-3
+
+### Changed
+
+- `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
+  They are used by the ring provider's HMAC-SHA1 only; the nested lock file of the
+  test-environment's layers peer follows.
+- New: `crypto::on_erased_stack(work)`.
+
 ### Added
 
 - **The default interceptor set can be given a start, a floor and a ceiling for its
@@ -39,6 +89,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is `None` until a batch or a receiver report's loss was folded in, `round_trip_time` until
   one implied a round-trip time.
 
+### Known limits
+
+- **What RFC 7714 section 13.1 is not shown to hold for** (docs/key-erasure.md; the audit row
+  stays `partial`):
+  - **The AWS-LC provider's packet path** (`crypto-aws-lc-rs`, not the default): AWS-LC
+    computes each HMAC on a copy of the keyed context in a stack frame of its own and its
+    AES-GCM leaves a GHASH table entry in one, so every protected or unprotected packet leaves
+    the SRTP / SRTCP HMAC-SHA1 states (AES-CM and NULL profiles) or a form of the GCM key in
+    dead stack frames: 78 key forms over the profiles, in unoptimised and optimised builds.
+    The engine does not overwrite the stack after every packet. Building and tearing down
+    leave nothing with it. The limit as a test:
+    `known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames` (ignored).
+  - **Unoptimised builds**: the compiler stores every intermediate value of the AES and SHA-1
+    routines in a stack slot, round keys and hash states included, whatever the source does.
+    Measured, not asserted: with rustc 1.100 and the final code the ring provider leaves
+    nothing in a debug build either; an intermediate state of this work left 24 forms with
+    rustc 1.100 and 96 with rustc 1.99.1 from the same sources.
+  - **CPU registers, and what saves them**: a provider's AES leaves round keys in vector
+    registers when it returns, and anything that later stores the registers on a stack puts
+    them there: a signal frame, or the lazy set-up of a thread-local on Apple systems (seen
+    once: an AES-GCM round key of the ring provider, when a thread-local was first used right
+    after a packet). The engine's own packet path uses no thread-local; an application's code
+    and signal handlers are its own.
+  - **Windows, and architectures other than x86-64 and AArch64**: the same code runs, and the
+    heap searches run on Windows, but the stack measurement needs a thread on a stack of the
+    test's own (`pthread_attr_setstack`), so nothing is measured there.
+  - **Deeper than 32 KiB**: `on_erased_stack` overwrites 32 KiB. The built-in providers use
+    about 3 KiB to build a context in an optimised build; a provider supplied by the
+    application that goes deeper leaves what lies below.
+
 ### Documentation
 
 - **Releasing: what the 0.2.1 publish ran into** (`docs/releasing.md`): `cargo generate-lockfile`
@@ -47,6 +127,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `pipefail` (SIGPIPE refused master's tip); and a patch release's generated page is
   corrected by hand, since git-cliff files `!`-marked behaviour-change commits under "Breaking
   changes".
+
+### Testing
+
+- **A measurement of key residue in stack frames that does not depend on the C library**
+  (`rtci-srtp/tests/key_residue.rs`, `owned_stack/`, `process_scan/`;
+  `scripts/key-residue-report.sh`; CI job `key_residue`). Each step of a session (building the
+  contexts, packets, re-keying, tearing down) runs on a worker thread whose stack the test
+  maps itself, fills with a known byte and reads while the worker waits, so what a step left
+  is read byte for byte; every key the session derives is looked for in every form an
+  implementation holds or computes on the way (AES round keys of both schedules, GHASH key and
+  table entry, HMAC padded keys and states, header-extension keys, each key derivation epoch,
+  the master key and salt). On Linux the whole process is searched too, with nothing left out
+  but the search's own buffer and unreadable pages counted. A control leaves a key on a stack,
+  in the heap, in a freed block and in static data and must find each, and must not find an
+  erased one. The answer is the same in the test-environment image (glibc 2.39) and on
+  GitHub's runners (glibc 2.43): identical inventories, digest for digest, with one compiler.
+  - `with_ring_key_handling_leaves_no_key_in_dead_stack_frames`: every step, asserted in an
+    optimised build (the CI job `key_residue`, Linux and macOS); building and tearing down
+    asserted in every build.
+  - `with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames`.
+  - `rtci-crypto/tests/hmac_sha1_vectors.rs`: RFC 2202 test cases 1 to 7 with every provider,
+    one keyed object used again and again and with the message split at every position.
+- **Why the search it replaces gave two answers** (`rtci-srtp/tests/key_erasure_process_memory.rs`,
+  removed; its `known_limit_*` tests with it). It searched the stack of an ordinary thread
+  after the thread had ended, through `/proc/self/maps`. Shown by
+  `investigate_how_the_c_library_treats_thread_stacks` (ignored; prints what it finds): glibc
+  gives an ended thread's stack back to the kernel except for a few pages (4 of 256 marks left,
+  506 of 512 pages zero, glibc 2.39 and 2.43 alike), which is why only part of the residue was
+  ever seen; and with glibc 2.43 a thread's guard is no mapping of its own, so the worker's
+  stack and the searching thread's are one mapping, which the search left out whole because it
+  held the searcher's own stack, and whose pieces holding a guard page it could not read and
+  dropped. Hence residue in 20 of 20 runs in the test-environment image (glibc 2.39) and in 0
+  of 40 on GitHub's runners (Ubuntu 26.04, glibc 2.43; 0.2.0's notes called both "noble").
+  The one unexplained finding of that search, a master key in "another mapping", was the
+  search's own data: it kept each key inverted, and two of its tests used master keys that
+  were each other's complement.
+- 0.2.0's documentation cited "RFC 3711 section 9.3" for key erasure. RFC 3711 has no such
+  clause (section 9.3 is "Confidentiality of the RTP Payload"; section 3.2.1 has the master
+  key "kept secret"). The clause is RFC 7714 section 13.1, which has two items: a secret
+  master salt, and all keys. Corrected in docs/key-erasure.md and the sources' comments.
 
 ## [0.2.1] - 2026-11-27
 
