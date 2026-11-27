@@ -289,8 +289,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CARGO_INCREMENTAL: 0
-      # As in the `msrv` job: dependencies resolve to versions that support the toolchain.
-      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+      # With the rust-version toolchain, as in the `msrv` job: dependencies resolve to versions
+      # that support it. With stable, as in every other job.
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: ${{ matrix.toolchain == 'rust-version' && 'fallback' || 'allow' }}
       RELEASE: ${{ matrix.profile == 'optimised' && '--release' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
