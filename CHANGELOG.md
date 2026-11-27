@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-27
+
+A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
+SemVer Check passes on every compared crate): train 35 of the clause-by-clause conformance work.
+
+- **Regression fix**: data channels never opened under `max-bundle` when the offer also had
+  media (0.1.0 and 0.2.0): the bundle-only data section was taken for a rejected one, so no SCTP
+  association started.
+- **MUST violations fixed** (each present in 0.2.0): formats this endpoint's own answer added are
+  received (RFC 3264 6.1); a header extension the receiving section no longer signals is ignored
+  (RFC 8834 10); a later offer keeps the `a=rid` line (RFC 9429 5.2.2); `a=msid` is compared
+  ignoring its appdata (RFC 9429 5.8.2); an SCTP ABORT with a format error is discarded and port
+  0 is refused (RFC 9260 3.3.7, 3.1); DTLS 1.3 `legacy_version`, version selection and
+  `user_canceled` (RFC 8446 4.2.1, 6.1); an unsigned STUN 400 is discarded (RFC 8489 9.2.5).
+  No audit MUST row is violated; 30 are open. 0.2.0 counted 7 before six audit sweeps re-read
+  the `tested` rows against the RFC text and the test bodies.
+- **Behaviour changes** (below): after `close()`, `poll_timeout()` stays `Some` until the TURN
+  allocations are released; SCTP handshake timers back off the RTO; a DTLS server refuses a
+  `supported_versions` list with nothing it supports, and `user_canceled` ends the connection;
+  an unsigned STUN 400 is given up at the transaction timeout; SCTP `connect` refuses port 0; an
+  ICE restart keeps the old TURN allocation while it carries media; the DTLS client's first
+  flight leaves at once; no made-up SNI; start-up probing for audio-first calls and for media
+  that starts mid-call.
+- **Known limits**: as in 0.2.0, copies of DTLS and SRTP key material can remain in dead stack
+  frames and reach freed heap blocks through padding, depending on the platform's struct
+  layout; with the default profile no browser accepts an rtci-written `max-bundle` initial offer
+  with more than one m= section (the `Chrome` profile writes the form browsers take).
+
 ### Behaviour changes
 
 - **A peer connection's DTLS ClientHello carries no server_name extension, and nothing is
