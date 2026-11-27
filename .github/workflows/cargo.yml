@@ -159,6 +159,18 @@ jobs:
           # and GitHub-hosted Windows run the real-multicast mDNS tests today: there they must
           # not skip. A self-hosted Windows VM whose network does not loop multicast skips them.
           RTCI_EXPECT_HOST_MULTICAST: ${{ format('linux{0}{1}', runner.os == 'macOS' && ',macos' || '', (runner.os == 'Windows' && runner.environment == 'github-hosted') && ',windows' || '') }}
+      # `MulticastSocket::with_interface` must send by its interface on a Windows host whose
+      # route for the mDNS group was left on loopback. The script puts the host in that state,
+      # fails if it could not, and deletes the entry again from an EXIT trap; it needs an
+      # administrator shell. GitHub's runners only (elevated, thrown away after the job): never
+      # our own Windows machines, whose state would outlive the job.
+      - name: mDNS with the group's route on loopback (GitHub-hosted Windows)
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
+        shell: bash
+        run: >-
+          bash scripts/windows-poisoned-mdns-route.sh
+          'RTCI_EXPECT_HOST_MULTICAST=linux,windows cargo test -p rtci --test mdns_query_and_gather_interop --no-fail-fast'
+          'cargo test -p rtci-stream-driver --test mdns --no-fail-fast'
       # The driver's mDNS on virtual time (`runtime-mock` is not a default feature): two
       # publishing drivers must connect, which catches a return of 0.1.0's socket matching on
       # every platform, not only where real multicast runs.

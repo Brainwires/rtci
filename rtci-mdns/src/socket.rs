@@ -129,6 +129,13 @@ impl MulticastSocket {
     /// If not set, the socket joins the multicast group on all interfaces
     /// (`INADDR_ANY`).
     ///
+    /// With an interface the socket also sends by it (`IP_MULTICAST_IF`, RFC 6762 section 14).
+    /// Without one it sends by the system's route for 224.0.0.251. On Windows that route comes
+    /// from the destination cache, and a process that sent to the group from 127.0.0.1 leaves
+    /// it on loopback after it exits: a socket built without an interface then sends from
+    /// 127.0.0.1 on that host, and peers on the network neither hear it nor resolve its names.
+    /// An application on Windows should pass the interface of the address it publishes.
+    ///
     /// # Arguments
     ///
     /// * `interface` - The IPv4 address of the network interface to use.

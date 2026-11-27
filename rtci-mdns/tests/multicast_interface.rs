@@ -20,7 +20,7 @@ fn default_route_v4() -> Ipv4Addr {
 }
 
 #[test]
-#[ignore = "real multicast on the host's mDNS group; run by scripts/windows-poisoned-mdns-route.sh"]
+#[ignore = "real multicast on the host's mDNS group; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows)"]
 fn a_socket_given_an_interface_sends_from_it_whatever_the_group_route() {
     let interface = default_route_v4();
     let sender: std::net::UdpSocket = MulticastSocket::new()

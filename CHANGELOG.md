@@ -17,9 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket, on that host, left by loopback with source 127.0.0.1, and a peer that resolves a
   `.local` name to the answer's source (or refuses an address record from another address)
   got loopback or nothing (agent-test run 46049306566). It now sets `IP_MULTICAST_IF` to the
-  interface it joined on. `MulticastSocket::new()` without an interface is unchanged (the
-  system's route). Test `rtci-mdns/tests/multicast_interface.rs`, run on a Windows host put in
-  that state by `scripts/windows-poisoned-mdns-route.sh`.
+  interface it joined on. **Limit:** `MulticastSocket::new()` without an interface is
+  unchanged and still sends by the system's route, so on such a Windows host it still sends
+  from 127.0.0.1 and fails silently; the `with_interface` documentation says so and tells a
+  Windows application to pass the interface of the address it publishes. Test
+  `rtci-mdns/tests/multicast_interface.rs`, run on a Windows host put in that state by
+  `scripts/windows-poisoned-mdns-route.sh` (which also runs the interop and driver mDNS tests
+  there and deletes the entry again from an EXIT trap): a new step of `cargo.yml`'s platform
+  job, on GitHub-hosted Windows only, since it changes host state and needs an administrator
+  shell. Without the fix the test fails on such a host (agent-test run 46051047569: the
+  datagram never reached a receiver joined on the network interface); with it, "sent by
+  10.1.0.100, received from 10.1.0.100" and the four interop tests pass (run 46051053795).
 
 ### Tests
 
@@ -50,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the group's destination-cache entry on loopback (source 127.0.0.1) after the process,
   and every process then gets 127.0.0.1 for 224.0.0.251, until the entry is deleted
   (`netsh interface ipv4 delete destinationcache interface=<loopback index>
-  address=224.0.0.251`, as administrator: measured on Windows 11; the stale entry also on
-  GitHub's Windows image; IPv6 ff02::fb not measured). The driver changes no host routing
+  address=224.0.0.251`, as administrator: the entry and the delete measured on Windows 11
+  and on GitHub's Windows image; IPv6 ff02::fb not measured). The driver changes no host routing
   state itself; it logs one warning per process when it joins the IPv4 mDNS group on loopback
   on Windows (new dependency: `log`). No behaviour change otherwise. The shared mDNS budget of two drivers (draft
   section 7.1) moves to virtual time
