@@ -627,6 +627,118 @@ fn add_track_with_streams_associates_exactly_those_streams() -> TestResult {
     Ok(())
 }
 
+const ABS_SEND_TIME_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+const TRANSPORT_CC_URI: &str =
+    "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+
+/// A peer with the default codecs and the video header extensions `uris` only.
+fn peer_with_extensions(uris: &[&str]) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    for uri in uris {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: (*uri).to_owned(),
+            },
+            RtpCodecKind::Video,
+            None,
+        )?;
+    }
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?)
+}
+
+/// The `a=extmap` lines of the first video section, as (uri, id).
+fn extmaps(sdp: &str) -> Vec<(String, String)> {
+    let sections = media_sections(sdp);
+    let video = sections
+        .iter()
+        .find(|s| s[0].starts_with("m=video"))
+        .expect("a video section");
+    video
+        .iter()
+        .filter_map(|l| l.strip_prefix("a=extmap:"))
+        .filter_map(|v| {
+            let (id, rest) = v.split_once(' ')?;
+            let uri = rest.split_whitespace().next()?;
+            Some((uri.to_owned(), id.split('/').next()?.to_owned()))
+        })
+        .collect()
+}
+
+/// W3C webrtc-pc 5.2 / 5.3: `getCapabilities(kind).headerExtensions` is "the list of
+/// implemented header extensions for sending" ("for receiving"), "the most optimistic view of
+/// the header extensions the user agent supports", whatever was negotiated: an answer that
+/// accepts MID alone leaves abs-send-time and transport-cc in both lists. The later offer keeps
+/// each extension's id (RFC 8285 section 6: the mapping stays for the session) and lists no
+/// extension the first offer did not.
+#[test]
+fn get_capabilities_lists_the_registered_header_extensions_after_a_negotiation() -> TestResult {
+    let all = [MID_URI, ABS_SEND_TIME_URI, TRANSPORT_CC_URI];
+    let mut offerer = peer_with_extensions(&all)?;
+    let mut answerer = peer_with_extensions(&[MID_URI])?;
+    let id = offerer
+        .add_transceiver_from_kind(RtpCodecKind::Video, Some(RTCRtpTransceiverInit::default()))?;
+    let uris = |pc: &mut RTCPeerConnection| -> (Vec<String>, Vec<String>) {
+        let mut send: Vec<String> = pc
+            .rtp_sender(id.into())
+            .expect("sender")
+            .get_capabilities(RtpCodecKind::Video)
+            .expect("video")
+            .header_extensions
+            .into_iter()
+            .map(|h| h.uri)
+            .collect();
+        let mut recv: Vec<String> = pc
+            .rtp_receiver(id.into())
+            .expect("receiver")
+            .get_capabilities(RtpCodecKind::Video)
+            .expect("video")
+            .header_extensions
+            .into_iter()
+            .map(|h| h.uri)
+            .collect();
+        send.sort();
+        recv.sort();
+        (send, recv)
+    };
+    let before = uris(&mut offerer);
+    let mut expected: Vec<String> = all.iter().map(|u| (*u).to_owned()).collect();
+    expected.sort();
+    assert_eq!(
+        before,
+        (expected.clone(), expected.clone()),
+        "before the negotiation"
+    );
+
+    let (first_offer, answer) = exchange(&mut offerer, &mut answerer)?;
+    let answered: Vec<String> = extmaps(&answer).into_iter().map(|(u, _)| u).collect();
+    assert_eq!(
+        answered,
+        vec![MID_URI.to_owned()],
+        "the answer accepts MID alone: {answer}"
+    );
+    assert_eq!(
+        uris(&mut offerer),
+        (expected.clone(), expected),
+        "getCapabilities after the negotiation"
+    );
+
+    // RFC 8285 section 6: a later offer keeps the ids, and adds nothing new.
+    let later = offerer.create_offer(None)?.sdp;
+    let first = extmaps(&first_offer);
+    for (uri, id) in extmaps(&later) {
+        let earlier = first.iter().find(|(u, _)| *u == uri);
+        assert_eq!(
+            earlier.map(|(_, i)| i.as_str()),
+            Some(id.as_str()),
+            "{uri} keeps its id in the later offer:\n{first_offer}\n---\n{later}"
+        );
+    }
+    Ok(())
+}
+
 /// W3C webrtc-pc 5.2 / 5.3: `getCapabilities` is "the list of implemented send codecs" ("receive
 /// codecs"), "the most optimistic view of the codecs the user agent supports", whatever was
 /// negotiated: after an exchange that negotiated VP8 alone (an answer with the offered formats
