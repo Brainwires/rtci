@@ -97,12 +97,42 @@ impl RTCPeerConnection {
         // Codecs a remote description gave the sender carry its payload types (RFC 9429
         // section 5.10) and stay; the transceiver's preferences carry this endpoint's.
         let send_codecs_from_remote = transceiver.send_codecs_from_remote();
+        let created_by_remote = transceiver.created_by_remote_description();
         let streams = crate::rtp_transceiver::rtp_sender::internal::track_streams(&track);
         if let Some(sender) = transceiver.sender_mut() {
-            if !sender.has_send_encodings() || !sender.is_negotiated() {
+            let plain_track = matches!(
+                send_encodings.as_slice(),
+                [lone] if lone.rtp_coding_parameters.rid.is_empty()
+            );
+            if sender.has_proposed_send_encodings() && plain_track {
+                // W3C `addTrack`, reusing the sender: only `[[SenderTrack]]` is set, so the
+                // encodings a remote offer to receive simulcast proposed stay. As when the
+                // track came before the offer (`propose_send_encodings`), the first takes the
+                // track's SSRCs and every one its codec.
+                let track_encoding = &send_encodings[0];
+                let mut kept = sender.send_encodings().to_vec();
+                for (index, encoding) in kept.iter_mut().enumerate() {
+                    if index == 0 {
+                        let coding = &mut encoding.rtp_coding_parameters;
+                        let from = &track_encoding.rtp_coding_parameters;
+                        coding.ssrc = from.ssrc;
+                        coding.rtx = from.rtx.clone();
+                        coding.fec = from.fec.clone();
+                    }
+                    encoding.codec = track_encoding.codec.clone();
+                }
+                sender.set_send_encodings(kept);
+                // A rollback: the sender of a transceiver the offer created has a null
+                // `[[LastStableRidlessSendEncodings]]` (W3C "create an RTCRtpSender"), so the
+                // proposed encodings stay; one that had no encodings yet gets the track's.
+                sender.keep_proposed_send_encodings_for_track(
+                    (!created_by_remote).then(|| send_encodings.clone()),
+                );
+            } else if !sender.has_send_encodings() || !sender.is_negotiated() {
+                // A track that carries encodings of its own (the engine's way to give a
+                // sender its simulcast layers) is sent with them, over any a remote offer
+                // proposed; a rollback of that offer keeps them.
                 sender.set_send_encodings(send_encodings);
-                // The track's encodings replace any a remote offer proposed: a rollback of
-                // that offer keeps them rather than restore the sender's earlier ones.
                 sender.forget_ridless_send_encodings();
             }
             sender.attach_track(track, streams);
@@ -151,9 +181,13 @@ impl RTCPeerConnection {
         };
 
         // The new track's own encodings (its SSRCs) are taken only while no description
-        // carries the sender's: afterwards they stay as negotiated.
+        // carries the sender's: afterwards they stay as negotiated. Encodings a remote offer
+        // proposed stay too (W3C `replaceTrack` sets only `[[SenderTrack]]`).
         let adopts_encodings = transceiver.sender().as_ref().is_some_and(|sender| {
-            !sender.has_send_encodings() || (!sender.has_track() && !sender.is_negotiated())
+            !sender.has_send_encodings()
+                || (!sender.has_track()
+                    && !sender.is_negotiated()
+                    && !sender.has_proposed_send_encodings())
         });
         let (track, send_encodings) = if adopts_encodings && !track.codings().is_empty() {
             let send_encodings = self.send_encodings_from_track(&track);
@@ -168,8 +202,25 @@ impl RTCPeerConnection {
         } else {
             (track, None)
         };
+        // A rollback of the offer that proposed the sender's encodings gives one that had none
+        // before it the W3C default encoding; one of a transceiver the offer created keeps
+        // them (its `[[LastStableRidlessSendEncodings]]` is null).
+        let restore = if self.rtp_transceivers[id]
+            .sender()
+            .as_ref()
+            .is_some_and(|sender| sender.has_proposed_send_encodings())
+            && !self.rtp_transceivers[id].created_by_remote_description()
+        {
+            let kind = self.rtp_transceivers[id].kind();
+            Some(self.new_send_encodings(kind, vec![])?.0)
+        } else {
+            None
+        };
         self.ensure_send_encodings(id)?;
         if let Some(sender) = self.rtp_transceivers[id].sender_mut() {
+            if sender.has_proposed_send_encodings() {
+                sender.keep_proposed_send_encodings_for_track(restore);
+            }
             match send_encodings {
                 Some(send_encodings) => sender.set_send_encodings(send_encodings),
                 // The sender's encodings stay; what the new track says it carries (the codec

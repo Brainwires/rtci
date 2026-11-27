@@ -508,6 +508,30 @@ impl RTCRtpSenderInternal {
         true
     }
 
+    /// Whether the sender holds encodings a remote offer proposed, which a rollback replaces
+    /// (`[[LastStableRidlessSendEncodings]]` is set).
+    pub(crate) fn has_proposed_send_encodings(&self) -> bool {
+        self.last_stable_ridless_send_encodings.is_some()
+    }
+
+    /// A track given to a sender that holds proposed encodings, which it keeps (W3C
+    /// `addTrack` and `replaceTrack` change only `[[SenderTrack]]`). When the sender had no
+    /// encodings before the offer (the engine's form of the W3C default encoding), what a
+    /// rollback restores is `restore`: the track's own encodings, or `None` (the W3C slot
+    /// stays null, so the proposed encodings stay).
+    pub(crate) fn keep_proposed_send_encodings_for_track(
+        &mut self,
+        restore: Option<Vec<RTCRtpEncodingParameters>>,
+    ) {
+        if self
+            .last_stable_ridless_send_encodings
+            .as_ref()
+            .is_some_and(|encodings| encodings.is_empty())
+        {
+            self.last_stable_ridless_send_encodings = restore;
+        }
+    }
+
     /// The negotiation completed: the proposed envelope is the sender's.
     pub(crate) fn forget_ridless_send_encodings(&mut self) {
         self.last_stable_ridless_send_encodings = None;

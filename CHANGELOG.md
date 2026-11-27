@@ -18,13 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=simulcast` (WPT `webrtc/protocol/simulcast-answer.html`, "createAnswer() with multiple
   send encodings should create simulcast answer"). Such a sender now takes one encoding per
   offered rid, as a sender with one rid-less encoding already did, and the answer writes
-  `a=rid:<rid> send` for each and `a=simulcast:send foo;bar;baz` (RFC 8853 section 5.3.2). A
-  track added before the offer is rolled back keeps its own encodings over the rollback. Tests
+  `a=rid:<rid> send` for each and `a=simulcast:send foo;bar;baz` (RFC 8853 section 5.3.2). Tests
   `jsep_simulcast.rs::a_transceiver_a_simulcast_offer_creates_sends_the_offered_streams`,
   `an_offered_pause_mark_leaves_the_proposed_encoding_active`,
-  `encodings_made_inactive_leave_the_next_offer_alone`,
-  `a_track_added_after_a_simulcast_offer_survives_its_rollback`; audit row WEBRTC-4.4.1.4-55
+  `encodings_made_inactive_leave_the_next_offer_alone`; audit row WEBRTC-4.4.1.4-55
   (stays `tested`, the violation recorded in its note).
+- **A track added or replaced in after a remote offer to receive simulcast keeps the offered
+  streams** (`conf/jsep-89-track-added-keeps-proposed-encodings`; W3C webrtc-pc `addTrack`,
+  reusing a sender: "Set sender.[[SenderTrack]] to track", nothing else of the sender;
+  `replaceTrack` likewise sets only [[SenderTrack]]). `add_track` or `replace_track` on the
+  sender of a transceiver that such an offer created or promoted, before the answer, replaced
+  the proposed encodings with the track's one, so the answer sent one stream without `a=rid` or
+  `a=simulcast`. The proposed encodings now stay; the first takes the track's SSRCs and every
+  one its codec, as when the track was added before the offer. A track that carries rid
+  encodings of its own (the engine's way to give simulcast layers) is still sent with them.
+  Behaviour change on rollback: the sender of a transceiver the offer created keeps the
+  proposed encodings when that offer is rolled back after `add_track` (W3C "create an
+  RTCRtpSender": [[LastStableRidlessSendEncodings]] "initialized to null"; the rollback restores
+  it only when it is not null). WPT `webrtc/simulcast/negotiation-encodings.https.html`
+  ("sRD(simulcast offer), addTrack, then rollback brings us back to having a single encoding")
+  expects one rid-less encoding there, which the text does not say. Tests
+  `jsep_simulcast.rs::a_track_added_after_a_simulcast_offer_keeps_the_proposed_encodings`,
+  `a_track_replaced_in_after_a_simulcast_offer_keeps_the_proposed_encodings`,
+  `a_rollback_keeps_the_proposed_encodings_of_a_transceiver_the_offer_created`; audit rows
+  WEBRTC-5.1-8, WEBRTC-5.2-34 (violations recorded, stay `tested`), WEBRTC-4.4.1.4-75.
 
 ## [0.2.1] - 2026-11-27
 
