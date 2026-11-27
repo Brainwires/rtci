@@ -731,6 +731,20 @@ fn add_video(
 }
 ```
 
+The engine does not encode: the application writes RTP with `RTCRtpSender::write_rtp`. What it
+sends is the codec negotiated for the sender, the first media codec of
+`RTCRtpSender::get_parameters().rtp_parameters.codecs`, with that codec's payload type (the
+remote description's number, RFC 3264 section 5.1). A remote description changes it, so after
+applying an answer (or, when answering, an offer) the application reads it again and encodes
+that codec, rather than keeping the encoder it chose from `setCodecPreferences` or its own
+offer. A packet written with a payload type that is not negotiated is sent with the negotiated
+one: `write_rtp` rewrites the number, never the payload, so bytes of another codec would go out
+labelled as the negotiated one. Each rewrite is counted:
+`RTCRtpSender::rewritten_payload_type_rtp_packets()` (every rewrite, the same codec renumbered
+included) and `RTCRtpSender::rewritten_from_another_codec_rtp_packets()` (the written number
+names a different format), summed on the connection by the `RTCPeerConnection` methods of the
+same names. An application's tests can assert the second stays 0.
+
 ### Statistics
 
 ```rust,no_run

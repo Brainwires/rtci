@@ -135,6 +135,13 @@ pub(crate) struct RTCRtpSenderInternal {
     /// codec the current SSRC is sent with when the application switched to one other than
     /// the negotiated choice.
     clock_rates: std::collections::HashMap<SSRC, ClockRateStreams>,
+    /// The packets `write_rtp` accepted with a payload type it rewrote to the one negotiated
+    /// for their encoding's codec (`RTCRtpSender::rewritten_payload_type_rtp_packets`).
+    rewritten_payload_type_rtp_packets: u64,
+    /// Of those, the ones whose written payload type names, in the media engine, a format
+    /// other than the codec they were sent as
+    /// (`RTCRtpSender::rewritten_from_another_codec_rtp_packets`).
+    rewritten_from_another_codec_rtp_packets: u64,
 }
 
 /// What a sender keeps of one encoding's clock rates (RFC 7160 section 4.1: an SSRC per
@@ -642,6 +649,25 @@ impl RTCRtpSenderInternal {
     /// and are available for sending.
     pub(crate) fn get_send_codecs(&self) -> &[RTCRtpCodecParameters] {
         &self.send_codecs
+    }
+
+    /// Counts a packet `write_rtp` sent with a rewritten payload type; `another_codec` when
+    /// the written number named a format other than the codec it was sent as.
+    pub(crate) fn count_rewritten_payload_type(&mut self, another_codec: bool) {
+        self.rewritten_payload_type_rtp_packets += 1;
+        if another_codec {
+            self.rewritten_from_another_codec_rtp_packets += 1;
+        }
+    }
+
+    /// See `RTCRtpSender::rewritten_payload_type_rtp_packets`.
+    pub(crate) fn rewritten_payload_type_rtp_packets(&self) -> u64 {
+        self.rewritten_payload_type_rtp_packets
+    }
+
+    /// See `RTCRtpSender::rewritten_from_another_codec_rtp_packets`.
+    pub(crate) fn rewritten_from_another_codec_rtp_packets(&self) -> u64 {
+        self.rewritten_from_another_codec_rtp_packets
     }
 
     /// The RTP capabilities of the engine for sending `kind` (W3C webrtc 5.2
