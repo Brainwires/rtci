@@ -2680,7 +2680,11 @@ impl RTCPeerConnection {
                 .as_ref()
                 .and_then(|offer| offer.parsed.as_ref())
             {
-                check_answer_against_offer(offer, parsed)?;
+                check_answer_against_offer(
+                    offer,
+                    parsed,
+                    self.setting_engine.unoffered_feedback_refused,
+                )?;
             }
             let transceiver_by_mid =
                 RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);

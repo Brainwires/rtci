@@ -198,6 +198,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clause (section 9.3 is "Confidentiality of the RTP Payload"; section 3.2.1 has the master
   key "kept secret"). The clause is RFC 7714 section 13.1, which has two items: a secret
   master salt, and all keys. Corrected in docs/key-erasure.md and the sources' comments.
+### Documentation
+
+- **This default does not follow RFC 6184 section 7.2** (`conf/h264-1-pdon-departure-documented`;
+  owner decision 2026-11-26, audit row RFC6184-7.2.2-1, which stays `partial`). Section 7.2.2
+  initialises PDON to 0, so a NAL unit whose DON is 0 is at DON distance 65535 - 0 + 0 + 1 =
+  65536, the largest possible, and a stream numbered from DON 0 would have its first NAL unit
+  delivered last. The H.264 de-interleaving buffer instead takes PDON, until a NAL unit has been
+  passed on, as the DON just before the earliest one it holds. No erratum to RFC 6184 touches
+  section 7.2 as of 2026-11-26. Stated in the rustdoc of `H264DeinterleavingBuffer`,
+  `RTCRtpCodec::h264_depacketizer` and the new setting, in the README, and in a new
+  `docs/conformance.md` list, "Standing departures from a MUST", which also lists the RTP
+  circuit breaker's packet size (RFC 8083 section 3, audit row RFC8083-3-3, verdict unchanged).
+- **This default does not follow RFC 9429 section 5.11** (`conf/audit-1-must-departures-reconciled`):
+  an answer whose section has `a=rtcp-fb` its offer lacked is applied (the feedback never
+  enabled), where the RFC says it "MUST result in an error". Audit row RFC9429-5.11-6 `tested` ->
+  `partial` (it rounded up: no error was ever raised); listed under "Standing departures from a
+  MUST". Open MUST rows 7 -> 8.
+- Audit sweep of `tested` MUST rows whose test does not exercise the clause
+  (`conf/audit-2-tested-must-sweep`): seven rows `tested` -> `untested`, the behaviour
+  implemented but no test showing it: RFC5506-4.1-1 and 4.2.3-1 (regular reports compound under
+  reduced-size RTCP), RFC5576-6.1-4 (one cname per ssrc-id), RFC5761-5.1.1-6 (RTCP on the RTP port
+  before the answer), RFC8859-4.3-2 (RTCP mux on every m= line of a 5-tuple), RFC8830-2-3 (one
+  msid-appdata per media description), RFC8834-10-5 (an unsignalled header extension ignored).
+  Test references corrected where a better test exists (RFC5888-9.2-3, RFC8834-4.1-5 / 4.8-4,
+  seven RFC9335 rows named in prose) and two stale notes (RFC7798-4.4.3-1, RFC8261-6.1-4). Open
+  MUST rows 8 -> 15. No engine change.
+- Second audit sweep (`conf/audit-3-tested-must-sweep-2`): the rows the first sweep let stand on a
+  test name, the "by construction" rows, and a sample of receive-side `tested` MUST rows of RFC
+  3264, 9429, 9143, 8445, 8839, 6347, 9147, 3711, 3550, 4585, 4588, 5764, 7714, 8888, 8831, 8832,
+  each test body read against the RFC sentence (about 108 rows). Five rows `tested` ->
+  `untested`: RFC9429-5.2.2-15 / 5.2.2-16 (a=rid and a=simulcast of a subsequent offer stay the
+  same: the cited test checks the receiver's SSRC binding) and RFC9429-5.5-1 / 5.5-2 / 5.5-3
+  (setLocalDescription's type checked against the signaling state: no test refuses a local
+  description in a wrong state). Citations corrected, verdict kept, for 19 rows, five of which
+  cited tests that no longer exist (TWCC-3.1-6, RFC2198-5-4, RFC8866-5.13-5, RFC8888-3.1-17,
+  RFC9628-6.1.1-4) and one whose test was hollow for the clause (RFC7587-7-4). No violation
+  found. Open MUST rows 15 -> 20. No engine change.
+- Third audit sweep (`conf/audit-4-tested-must-sweep-3`): the receive-side `tested` MUST rows the
+  second sweep left (RFC 9260 SCTP, RFC 9429, 9143, 8445, 8839, 6347, 9147, 3550, 8831) and the
+  last "same" rows, each test body read against the RFC sentence (about 140 rows). Six rows
+  `tested` -> `untested`: RFC9260-3.2-8 (a Chunk Length below 4), RFC9260-3.3.2.1.5-2 (the Host
+  Name type inside Supported Address Types), RFC9260-3.3.7-5 (a malformed ABORT discarded),
+  RFC9429-5.3.1-7 (a section whose formats setCodecPreferences excludes is rejected),
+  RFC9143-9.3.1.2-3 (no rtcp-mux-only in a rejected section; the paraphrase said rtcp-mux); two
+  `tested` -> `partial`: RFC9260-3.1-1 / 3.1-2 (port 0 MUST NOT be sent: the test is
+  receive-only and `with_sctp_port(0)` / `with_remote_sctp_port(0)` are accepted). Citations
+  corrected for about 15 rows, two of them dead or misnamed (GCC-5.5-15 named a test renamed in
+  November; four rows cited `me.rs::` for `media_engine.rs`). `scripts/check-test-inventory.py
+  --check` (CI) now fails on a backticked name in the Test cell of a MUST or SHOULD audit row
+  that is no `fn`, module, fuzz target or field in the tree, with its unit tests
+  (`scripts/test_check_test_inventory.py`). No violation found. Open MUST rows 20 -> 27. No
+  engine change.
+- Fourth audit sweep (`conf/audit-5-tested-must-sweep-4`): receive-side `tested` MUST rows of
+  files no sweep had read (W3C webrtc-pc, RFC 8446, 8489, webrtc-extensions, RFC 7728, 3611,
+  5246, webrtc-stats, RFC 6762, 8260: 251 rows), each test body read against the specification's
+  sentence. Two rows `tested` -> `violated`: RFC8446-4.2.1-12 (a DTLS 1.3 client refused a
+  ServerHello whose legacy_version was not {254, 253}, which RFC 8446 4.2.1 says it MUST ignore,
+  and a test asserted the refusal; fixed on `conf/dtls-29-server-hello-legacy-version-ignored`)
+  and RFC8489-9.2.5-14 (an unsigned 400 answering the anonymous first TURN request is taken, not
+  discarded; the cited test has no 400). Three `tested` -> `partial`: WEBRTC-4.5.1-1
+  (`Error::dom_exception_name` gives no name for the setConfiguration, ICE server, certificate
+  and addIceCandidate errors), WEBRTC-5.6.4-2 / 5.6.4-9 (ICE "failed" is reached by the checking
+  timeout without the end-of-candidates indication W3C requires). Twenty-five `tested` ->
+  `untested`, a half of the clause or the refused case without a test (webrtc-pc 7, RFC 8446 10,
+  RFC 7728 4, RFC 3611 3 reserved-field rows, RFC 5246 1). Citations corrected for about 15
+  rows, five stale notes fixed. Open MUST rows 27 -> 57. No engine change on this branch.
+- Fifth audit sweep (`conf/audit-6-tested-must-sweep-5`): the remaining receive-side `tested`
+  MUST rows (about 145 in some 50 files, RFC 6679 to W3C mediacapture, and 15 rows left in files
+  already swept), and a first sample of the rows that are not receive-side (every tenth `tested`
+  MUST row of RFC 3264, 9429, 9143, 8445, 8839, 6347, 9147, 5764, 3711, 7714, 3550, 4585, 4588,
+  8888, 8831 and 8832: 88 rows; RFC 9260's 22 not yet sampled). Seven receive-side rows
+  `tested` -> `untested`: RFC8851-6.3-5 (an offered `pt=` list emptied by the answer), RFC8834-4.1-24
+  (an unsignalled RTP header extension, the clause RFC8834-10-5 holds and `conf/must7-3` fixes),
+  RFC5746-3.6-5 (a DTLS 1.2 server handed an unknown ClientHello extension), RFC4733-2.3.4-1
+  (volume of events without one; class E, proposed n/a), RFC6525-5.2.7-1 (a response whose
+  number has no running timer), RFC5576-9-1 (a receiver that ignores a=ssrc), RFC8853-5.2-1
+  (session-level a=simulcast). In the sample three of 88 (RFC9147-4-9 records of two
+  associations in one datagram, 5-1 the legacy_session_id echo half, 5.5-1 non-overlapping
+  fragments). Citations corrected for about 12 rows, one paraphrase that read as the opposite of
+  its MUST NOT (RFC8839-4.3.1-5), ten stale notes replaced. No violation found. Open MUST rows
+  57 -> 67. No engine change.
+- Sixth audit sweep (`conf/audit-7-tested-must-sweep-6`): every `tested` MUST row of RFC 9147,
+  8446, 6347 and 5246 not read before (353 rows), RFC 9260's 22 sample rows, and a second-stage
+  sample (one in five of the rows left) of RFC 3264, 5764, 4588, 8888, 8831, 8832 and 7714 (26
+  rows). 21 `tested` -> `untested` and 2 `tested` -> `partial`. DTLS 1.3: the plaintext sequence
+  limit, the replay window against a far-ahead forgery, the 240 s answer to a repeated last
+  flight, epochs near 2^48 on receipt, and four alerts whose description no test asserts (the
+  alert is protected): RFC9147-9-8, RFC8446-4.6.2-6, 4.6.3-4, 4.1.2-3 (no ClientHello case at
+  all). RFC 8446: 4.1.3-3 (ServerHello.random), 4.2.2-3, 4.2.7-1, 4.2.10-15 (early data resent as
+  application data), 4.6.1-7, 4.6.1-9 / 4.6.1-10 (both sides cap the ticket lifetime, so the one
+  test shows neither cap), 5-5 / 5.4-5 (conn-level unexpected_message never reached). RFC 5246
+  7.3-5 and 8422-5.1-1, RFC9260-3.3.1-8 (PPID of every fragment), RFC3264-8.1-1. Partial (class
+  C): RFC6347-4.2.1-8 (the HelloVerifyRequest says DTLS 1.0 by default while the ServerHello says
+  1.2: RFC 6347 4.2.1's MUST against its own SHOULD, for the coordinator) and RFC6347-4.2.4-5 (a
+  repeated last flight is answered at most seven times, not for 2 MSL). RFC4733-2.3.4-1 set to
+  `n/a` (the application chooses the event and its volume). Three citations added. Open MUST rows
+  67 -> 89. No engine change.
+- RFC8830-3-7 is level MAY, not MUST: section 3 says the recipient "can signal" that the track
+  has ended; the binding wording is section 3.2.5's procedure step (row RFC8830-3.2.5-1, still
+  `conflict`, W3C webrtc-pc 4.4.1.5 governs the default). `docs/behaviour-profiles.md` called the
+  clause "a can" and left the setting out of every profile; it is now governed.
+- The DTLS rows audit sweep 6 downgraded, closed with tests (`conf/dtls-31-sweep6-must-rows`),
+  each proved by a mutation of the engine: RFC 9147 sections 4 (no plaintext record past
+  sequence 2^48-1), 4.5.1 (a forgery far ahead does not move the replay window), 8 (a receiver
+  takes a KeyUpdate past epoch 2^48-1) and 9 (unexpected_message for connection id messages out
+  of place); RFC 8446 sections 4.1.2, 4.6.2, 4.6.3 (the protected alert of a ClientHello, a
+  CertificateRequest and a KeyUpdate out of place, through `on_post_handshake_message` and on
+  the wire), 4.1.3 (the ServerHello random is the server's own; legacy_version {254, 253} in the
+  ServerHello and HelloRetryRequest the server writes, no longer covered by the client's check
+  since `conf/dtls-29`), 4.2.2 (no cookie in a later connection's first ClientHello), 4.2.7
+  (supported_groups in EncryptedExtensions changes nothing), 4.2.10 (rejected 0-RTT data is not
+  resent), 4.6.1 (the resumption ClientHello's server name is reported; the server's and the
+  client's seven-day ticket caps each shown alone), 5 and 5.4 (unexpected_message for an
+  authenticated record of unknown type or all padding); RFC 5246 section 7.3 (a session id holds
+  nothing of its handshake). RFC5246-8422-5.1-1 is level SHOULD, not MUST (RFC 8422 section 5.1:
+  a client proposing ECC suites "SHOULD include these extensions"), now tested; the
+  paragraph's MUST NOT, no ECC extensions from a client that proposes no ECC suite, is a new row,
+  RFC5246-8422-5.1-3, tested (a DTLS 1.2 PSK client sends neither). "Standing
+  departures from a MUST" lists RFC 6347 section 4.2.1, whose MUST (the HelloVerifyRequest
+  version equals the ServerHello's) contradicts the SHOULD before it (DTLS 1.0 regardless): the
+  default keeps the SHOULD, as OpenSSL does, and `StrictRfc` does not change it; and RFC 8446
+  section 4.2.3, which `ConfigBuilder::with_insecure_hashes(true)` lets an application break by
+  listing an MD5 scheme (an opt-in). Tests only, no engine change.
+
+### Features
+
+- `MediaEngine::set_h264_literal_pdon(bool)` (default `false`; behaviour profile row
+  `h264.literal-pdon`, which `StrictRfc` sets to `true`), read by the new
+  `MediaEngine::h264_depacketizer(&codec)` and `RTCRtpReceiver::h264_depacketizer(&codec)`: with
+  `true` the H.264 depacketizer's de-interleaving buffer starts PDON at 0 as RFC 6184 section
+  7.2.2 is written (`H264DeinterleavingBuffer::with_literal_pdon`). Before, no profile reached
+  that form. `RTCRtpCodec::h264_depacketizer` is unchanged. Test
+  `tests/h264_deinterleaving_profile.rs`.
+- `SettingEngineBuilder::with_unoffered_feedback_refused(bool)` (default `false`; profile row
+  `jsep.unoffered-feedback-refused`, `StrictRfc` `true`): `set_remote_description` refuses an
+  answer with `a=rtcp-fb` its offer lacked (RFC 9429 section 5.11) with
+  `ErrAnswerDoesNotMatchOffer`, leaving the offer pending. Tests
+  `tests/jsep_answer_feedback_profile.rs`, `answer_check.rs::feedback_the_offer_did_not_have_refuses_the_answer_when_asked`.
+- `StrictRfc` now turns `SettingEngineBuilder::with_msid_removal_ends_track` on (profile row
+  `track.msid-removal-ends-track`; RFC 8830 section 3.2.5), as it already did for the other RFC
+  8830 track settings; the default and `Chrome` keep it off. Test
+  `tests/jsep_msid.rs::the_strict_rfc_profile_ends_a_track_whose_section_drops_its_msid`.
+### Fixed
+
+- **A completed DTLS 1.2 association answers the peer's repeated last flight for 240 s, not
+  seven times** (`conf/dtls-32-final-flight-answered-for-2-msl`; RFC 6347 section 4.2.4: "for at
+  least twice the default MSL defined for [TCP], when in the FINISHED state, the node that
+  transmits the last flight [...] MUST respond to a retransmit of the peer's last flight with a
+  retransmit of the last flight"). An authenticated repeat of the peer's Finished was answered
+  at most `DEFAULT_MAXIMUM_RETRANSMIT_NUMBER` (7) times and then never, however soon it came,
+  so a peer whose eighth retransmission came within the four minutes could be left without the
+  flight it needed. Each repeat is now answered, once, for 240 s after the handshake, and none
+  after (the same 240 s DTLS 1.3 keeps its handshake keys for, RFC 9147 section 5.8.1, whose
+  server answers each repeat with an ACK, now shown by a test). The bound against
+  amplification stays one answer per datagram carrying an authenticated repeat, which the
+  replay window admits once; plaintext handshake records draw none. Audit rows
+  RFC6347-4.2.4-5 `partial` -> `tested`, RFC9147-5.8.1-2 `untested` -> `tested`. Test
+  `endpoint.rs::authenticated_finished_repeats_are_answered_for_twice_the_msl` (it replaces
+  `authenticated_finished_repeats_still_obey_the_retry_budget`, which asserted the cut-off) and
+  `reliability_test.rs::the_clients_last_flight_is_acknowledged_for_twice_the_msl`. Behaviour
+  change, not breaking.
+
+- **A DTLS 1.3 client ignores the ServerHello's legacy_version**
+  (`conf/dtls-29-server-hello-legacy-version-ignored`; RFC 8446 section 4.2.1: with
+  "supported_versions" present, "clients MUST ignore the ServerHello.legacy_version value and
+  MUST use only the "supported_versions" extension to determine the selected version"). A
+  ServerHello or HelloRetryRequest selecting DTLS 1.3 whose legacy_version was not {254, 253}
+  was refused with illegal_parameter; it is now taken by its supported_versions (RFC 9147 section
+  5.4's {254, 253} binds the server, which this one still sends). Found by the audit sweep
+  (audit row RFC8446-4.2.1-12, which was `tested` while its test asserted the refusal). New test
+  `rfc8446_conformance_test.rs::a_server_hello_or_retry_request_with_another_legacy_version_is_taken`;
+  the legacy_version case of the wrong-fixed-fields test is removed. Not breaking.
+
+- **DTLS server: a ClientHello whose supported_versions lists no version this server may select
+  is refused** (`conf/dtls-30-tls13-must-rows`; RFC 8446 section 4.2.1, "Servers MUST only select
+  a version of TLS present in that extension", and must not negotiate by legacy_version when the
+  extension is there). 0.2.0 served a ClientHello whose supported_versions held unknown versions
+  only (or DTLS 1.3 only, to a server without DTLS 1.3) with DTLS 1.2, chosen by its
+  legacy_version; it now answers protocol_version. A ClientHello without supported_versions, or
+  one listing DTLS 1.2, is served with DTLS 1.2 as before. Behaviour change, not breaking. Test
+  `rfc8446_conformance_test.rs::unknown_versions_are_ignored_and_only_a_listed_version_is_selected`.
+- **DTLS 1.3: data after a user_canceled alert is ignored** (`conf/dtls-30-tls13-must-rows`; RFC
+  8446 section 6.1: user_canceled is a closure alert, and "Any data received after a closure
+  alert has been received MUST be ignored", RFC 9147 section 5.10). 0.2.0 took no notice of a
+  received user_canceled and went on reading. It now ends the association's reading as a
+  close_notify does (answered with this side's close_notify, reported as `PeerClosed`). Test
+  `rfc8446_conformance_test.rs::data_after_a_user_canceled_is_ignored`.
+- Tests and audit rows for the other RFC 8446 MUST rows audit sweep 4 left `untested`, the
+  behaviour already right: unknown ClientHello extensions, suites, groups and schemes ignored
+  (4.1.2-16, 9.3-5), the HelloRetryRequest's version retained (4.1.4-12), the early_data
+  illegal_parameter alert (4.2.11-14), unknown NewSessionTicket extensions (4.6.1-14, 9.3-6),
+  unknown alert types (6-5), and RFC5246-7.4.1.3-3 (a DTLS 1.2 ServerHello suite the client did
+  not offer).
 
 ## [0.2.0] - 2026-11-26
 

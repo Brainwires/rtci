@@ -453,6 +453,9 @@ pub struct SettingEngine {
     pub(crate) dtls_new_association_on_previous_addresses: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
+    /// [`SettingEngineBuilder::with_unoffered_feedback_refused`]: RFC 9429 section 5.11, an
+    /// answer with `a=rtcp-fb` the offer did not have is an error.
+    pub(crate) unoffered_feedback_refused: bool,
     /// RFC 8830 section 3: a new msid-appdata in a section is a new track: the receiver's
     /// track ends and a new one takes its place.
     pub(crate) msid_appdata_change_renews_track: bool,
@@ -675,6 +678,7 @@ impl SettingEngine {
             disable_sdp_tls_id: Default::default(),
             dtls_new_association_without_ice_restart: Default::default(),
             msid_removal_ends_track: Default::default(),
+            unoffered_feedback_refused: Default::default(),
             stopping_transceiver_rejected_in_answer: Default::default(),
             dtls_use_srtp_only_with_media: Default::default(),
             accept_lowercase_fingerprints: Default::default(),
@@ -2225,8 +2229,9 @@ impl SettingEngineBuilder {
     ///
     /// RFC 8830 section 3: "When a session description is updated to no longer list any
     /// 'msid' attribute on a specific media description, the recipient can signal to its
-    /// application that the corresponding MediaStreamTrack has ended." In this API the W3C
-    /// webrtc-pc object model governs the track's state (RFC 9429 defers to it), and its
+    /// application that the corresponding MediaStreamTrack has ended." Section 3.2.5 states
+    /// the procedure: "If no such attribute is found, stop the MediaStreamTrack. This will set
+    /// its state to 'ended'." In this API the W3C webrtc-pc object model governs the track's state (RFC 9429 defers to it), and its
     /// "process remote tracks" keeps the track, moved to the session's default stream; it is
     /// muted when the section stops sending. That is the default (`false`). With `true` the
     /// receiver's track ends ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)).
@@ -2243,6 +2248,25 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_msid_removal_ends_track(mut self, ends: bool) -> Self {
         self.0.msid_removal_ends_track = ends;
+        self
+    }
+
+    /// Refuses a remote answer whose media section has an `a=rtcp-fb` line its offer did not
+    /// have. The default is `false`; the `StrictRfc` behaviour profile sets it.
+    ///
+    /// RFC 9429 section 5.11: "If the 'm=' section references RTCP feedback mechanisms that
+    /// were not present in the corresponding 'm=' section in the offer, this indicates a
+    /// negotiation problem and MUST result in an error" (RFC 4585 section 4.2: "The answerer
+    /// MUST NOT add feedback parameters"). With `true`, `set_remote_description` returns
+    /// [`Error::ErrAnswerDoesNotMatchOffer`](shared::error::Error::ErrAnswerDoesNotMatchOffer)
+    /// for such an answer and leaves the offer pending.
+    ///
+    /// **This default does not follow RFC 9429 section 5.11** (owner decision; `docs/conformance.md`,
+    /// "Standing departures from a MUST"): the answer is applied, the extra feedback is logged
+    /// and never enabled, since what is negotiated is the intersection with this endpoint's own
+    /// feedback for the format. libwebrtc does the same: it raises no error and intersects.
+    pub fn with_unoffered_feedback_refused(mut self, refused: bool) -> Self {
+        self.0.unoffered_feedback_refused = refused;
         self
     }
 
