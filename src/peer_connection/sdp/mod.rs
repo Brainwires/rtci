@@ -5245,8 +5245,10 @@ fn answer_payload_types(
                 .iter()
                 .filter(|(pt, earlier)| {
                     !offered.contains_key(pt)
-                        && codec_parameters_fuzzy_search(earlier, std::slice::from_ref(&codec)).1
-                            == CodecMatch::Exact
+                        && crate::peer_connection::configuration::media_engine::is_same_codec(
+                            earlier,
+                            &codec.rtp_codec,
+                        )
                 })
                 .map(|(pt, _)| *pt)
                 .min()

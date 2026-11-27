@@ -19,9 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered number whenever the current offer did not use it, also when an earlier description
   of the session had given that number another format (offer 1 with H.264 on 98, offer 2
   without it: the answer to offer 2 listed VP9 on 98; the same for a format never accepted).
-  The engine now remembers every dynamic number each applied description gave a format
-  (connection-wide) and gives none of them to another format: such a format takes a number it
-  had before, or one no description used. Engine behaviour change YES (renegotiated answers and
+  The offer side broke the rule for a format the engine never accepted (an offer that gave 98
+  to an unknown format, then the engine's own offer listed VP9 on 98). The engine now remembers
+  every dynamic number each applied description (local or remote, bundle-only sections
+  included, rejected ones not) gave a codec, connection-wide, and gives none of them to another
+  codec (same encoding name, clock rate and channels, and for H.264 / H.265 / VP9 / AV1 the
+  same configuration; other parameters may change): such a format takes a number it had
+  before, or one no description used. Engine behaviour change YES (renegotiated answers and
   offers may number added formats otherwise); API unchanged; first answers and initial offers
   unchanged (pinned answers and offers unchanged). Tests `tests/jsep_payload_type_meaning.rs`.
 

@@ -2963,6 +2963,13 @@ impl RTCPeerConnection {
         }
         if let Some(media_engine) = negotiated_media_engine {
             self.media_engine = media_engine;
+            // The negotiated copy was made before `commit_description` recorded this
+            // description's payload types (RFC 3264 section 8.3.2): record them in it too.
+            if remote_description.sdp_type != RTCSdpType::Rollback
+                && let Some(parsed) = remote_description.parsed.as_ref()
+            {
+                self.media_engine.record_payload_types(parsed);
+            }
         }
         self.pipeline_context
             .interceptor_handler_context

@@ -89,6 +89,28 @@ pub(crate) fn has_symmetric_configuration(codec: &RTCRtpCodec) -> bool {
         .any(|mime_type| codec.mime_type.eq_ignore_ascii_case(mime_type))
 }
 
+/// Whether two formats are the same codec for RFC 3264 section 8.3.2 ("the mapping from a
+/// particular dynamic payload type number to a particular codec ... MUST NOT change"): the
+/// same encoding name, clock rate and channel count (RFC 8866 section 6.6, `a=rtpmap`), and
+/// for a format whose parameters are its configuration (H.264, H.265, VP9, AV1:
+/// [`has_symmetric_configuration`]) the same configuration. Other parameters may change
+/// (RFC 3264 section 6.1: they "MAY be different"), and an RTX format may repair another
+/// primary.
+pub(crate) fn is_same_codec(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {
+    first.mime_type.eq_ignore_ascii_case(&second.mime_type)
+        && first.clock_rate == second.clock_rate
+        && (first.channels == second.channels || first.channels == 0 || second.channels == 0)
+        && (!has_symmetric_configuration(first)
+            || codec_parameters_fuzzy_search(
+                first,
+                &[RTCRtpCodecParameters {
+                    rtp_codec: second.clone(),
+                    payload_type: 0,
+                }],
+            )
+            .1 == CodecMatch::Exact)
+}
+
 /// The fmtp line of an H.264 answer: this endpoint's parameters (`local`), with the offer's
 /// profile and the level RFC 6184 section 8.2.2 allows: this endpoint's own when both sides
 /// say `level-asymmetry-allowed=1`, else the lower of the two.
@@ -1793,11 +1815,12 @@ impl MediaEngine {
     /// RTX format's `apt` follows its primary. Negotiated payload types are never renumbered
     /// (section 5.2.2: they "MUST stay the same" for the session's lifetime).
     /// Records the payload type numbers of an applied description (RFC 3264 section 8.3.2): each
-    /// dynamic number (96 to 127, 35 to 63) of an accepted m= section that no earlier
+    /// dynamic number (96 to 127, 35 to 63) of an m= section that is not rejected (port zero
+    /// without `a=bundle-only`, RFC 3264 section 6, RFC 9143 section 6) and that no earlier
     /// description of the session gave a format keeps the format this one gives it.
     pub(crate) fn record_payload_types(&mut self, description: &SessionDescription) {
         for media in &description.media_descriptions {
-            if media.media_name.port.value == 0 {
+            if media.media_name.port.value == 0 && !media.has_attribute("bundle-only") {
                 continue;
             }
             let Ok(codecs) = crate::peer_connection::sdp::codecs_from_media_description(media)
@@ -1825,10 +1848,7 @@ impl MediaEngine {
     ) -> bool {
         self.payload_type_history
             .get(&payload_type)
-            .is_some_and(|earlier| {
-                codec_parameters_fuzzy_search(earlier, std::slice::from_ref(codec)).1
-                    != CodecMatch::Exact
-            })
+            .is_some_and(|earlier| !is_same_codec(earlier, &codec.rtp_codec))
     }
 
     pub(crate) fn offer_codecs_for_section(
