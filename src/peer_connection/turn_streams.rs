@@ -1230,6 +1230,16 @@ impl RTCPeerConnection {
                         debug!("TURN allocation on {} refused: {err:?}", link.url);
                         refused.push((index, err));
                     }
+                    // Before the allocation the only request out is the Allocate: one that
+                    // timed out (a silent server, or one whose only answer was an unsigned
+                    // 400, RFC 8489 section 9.2.5) is that server's failure, as a refusal is.
+                    turn::client::Event::TransactionTimeout(_) if link.relay.is_none() => {
+                        debug!("TURN allocation on {} timed out", link.url);
+                        refused.push((
+                            index,
+                            turn::client::RequestError::Failed(shared::error::Error::ErrTimeout),
+                        ));
+                    }
                     turn::client::Event::AllocationLost(_, err) => {
                         debug!("TURN allocation on {} lost: {err:?}", link.url);
                         link.state = LinkState::Failed;

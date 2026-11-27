@@ -643,6 +643,62 @@ fn test_a_connection_bind_unanswered_for_thirty_seconds_has_failed() -> Result<(
     client.close()
 }
 
+/// RFC 8489 §9.2.5: a 400 without an integrity attribute is discarded "as if it were never
+/// received", on a data connection too: the ConnectionBind is still answered by the response
+/// that follows, and one answered by nothing else times out (RFC 6062 §5.3's 30 seconds), not
+/// as the 400 and not as an integrity violation.
+#[test]
+fn test_an_unsigned_400_to_a_connection_bind_is_never_received() -> Result<()> {
+    let now = Instant::now();
+    let server = TestServer::new()?;
+    let mut client = tcp_allocation(&server, now)?;
+    let unsigned_400 = |bind: &Message| {
+        server.reply(
+            bind,
+            CLASS_ERROR_RESPONSE,
+            vec![Box::new(ErrorCodeAttribute {
+                code: CODE_BAD_REQUEST,
+                reason: b"Bad Request".to_vec(),
+            })],
+            None,
+        )
+    };
+
+    // The signed success after it binds the connection.
+    let mut connection =
+        client
+            .relay(relayed_addr())?
+            .data_connection(now, ConnectionId(6), data_local())?;
+    let (bind, _) = next_bind(&mut connection);
+    connection.handle_read(chunk(now, &unsigned_400(&bind)?))?;
+    assert_eq!(connection.poll_event(), None, "the 400 was acted on");
+    assert!(!connection.is_bound());
+    let success = server.reply(&bind, CLASS_SUCCESS_RESPONSE, vec![], Some(&server.key))?;
+    connection.handle_read(chunk(now, &success))?;
+    assert_eq!(connection.poll_event(), Some(DataConnectionEvent::Bound));
+
+    // Nothing after it: the bind times out.
+    let mut connection =
+        client
+            .relay(relayed_addr())?
+            .data_connection(now, ConnectionId(7), data_local())?;
+    let (bind, _) = next_bind(&mut connection);
+    connection.handle_read(chunk(now, &unsigned_400(&bind)?))?;
+    assert_eq!(connection.poll_event(), None, "the 400 was acted on");
+    let deadline = connection
+        .poll_timeout()
+        .expect("the bind is still waited for");
+    assert_eq!(deadline, now + CONNECTION_BIND_TIMEOUT);
+    connection.handle_timeout(deadline)?;
+    assert_eq!(
+        connection.poll_event(),
+        Some(DataConnectionEvent::BindError(RequestError::Failed(
+            Error::ErrTimeout
+        )))
+    );
+    client.close()
+}
+
 fn connection_attempt(
     now: Instant,
     from: SocketAddr,
