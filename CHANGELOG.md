@@ -9,20 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
-- **Three SCTP and data channel MUST rows are tested** (`conf/sctp-27-must-rows-batch8`; tests
-  and audit only, no engine change; each checked by a mutation, `mut/must8a-gated`). RFC 6525
-  5.2.7 H1: a Re-configuration Response whose number has no running timer changes nothing (the
+- **Two SCTP MUST rows are tested** (`conf/sctp-27-must-rows-batch8`; tests and audit only,
+  no engine change; each checked by a mutation, `mut/must8a-gated`). RFC 6525 5.2.7 H1: a
+  Re-configuration Response whose number has no running timer changes nothing (the
   outstanding request stays outstanding and timed, the stream keeps its sequence numbers,
   nothing is reported:
   `rtci-sctp stream_reset_test.rs::a_response_for_no_outstanding_request_changes_nothing`).
   W3C webrtc-pc 6.1.2: a received SHUTDOWN makes the RTCSctpTransport closed
-  (`handler/sctp.rs::a_received_shutdown_closes_the_sctp_transport`); 6.2.8: a message on a
-  channel that is not open reaches no application message
-  (`tests/data_channel_receive_not_open_rtc2rtc.rs::a_message_on_a_closing_channel_is_discarded`).
-  The two webrtc-pc tests are those of conf/w3c-1, whose mutations missed the code that holds
-  the behaviour (the `ended` arm of `SctpTransport::state`; the pipeline close sets the channel
-  closed at once); the new mutations break it. RFC6525-5.2.7-1, WEBRTC-6.1.2-3 and
-  WEBRTC-6.2.8-1 `tested` (were `untested`, open-must class B).
+  (`handler/sctp.rs::a_received_shutdown_closes_the_sctp_transport`, the test of conf/w3c-1,
+  whose mutation missed the `ended` arm of `SctpTransport::state` that holds the behaviour).
+  RFC6525-5.2.7-1 and WEBRTC-6.1.2-3 `tested` (were `untested`, open-must class B). The
+  conf/w3c-1 test for W3C 6.2.8 (`data_channel_receive_not_open_rtc2rtc.rs`) is carried along,
+  but WEBRTC-6.2.8-1 stays `untested`: the test passes with both of the handler's discard
+  checks lifted, so its message never reaches them.
 
 ## [0.2.1] - 2026-11-27
 
