@@ -1484,6 +1484,381 @@ fn an_empty_checklist_that_no_check_fills_fails_when_the_pac_timer_expires() {
     assert_eq!(a.state(), ConnectionState::Failed);
 }
 
+// --- W3C webrtc-pc 5.6.4: "failed" needs the end of the candidates ---
+
+/// The connection states `a` reported since the last call, each with its time since `start`.
+fn timed_states(a: &mut Agent, start: Instant) -> Vec<(Duration, ConnectionState)> {
+    std::iter::from_fn(|| a.poll_event())
+        .filter_map(|e| match e.event {
+            Event::ConnectionStateChange(s) => Some((e.now.duration_since(start), s)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `at` is in `[from, from + LOOK]`: the agent's next look at its state after `from`.
+fn by_next_look(at: Duration, from: Duration) -> bool {
+    at >= from && at <= from + LOOK + MS
+}
+
+/// W3C webrtc-pc 5.6.4, `RTCIceTransportState`: "failed": the transport "has finished
+/// gathering, received an indication that there are no more remote candidates, finished
+/// checking all candidate pairs, and all pairs have either failed connectivity checks or lost
+/// consent"; "disconnected": "Alternatively, the RTCIceTransport has finished checking all
+/// existing candidates pairs and not found a connection [...], but it is still gathering
+/// and/or waiting for additional remote candidates"; and "The failed and completed states
+/// require an indication that there are no additional remote candidates. This can be
+/// indicated by calling addIceCandidate with a candidate value whose candidate property is set
+/// to an empty string or by canTrickleIceCandidates being set to false." The one pair fails at
+/// once (error responses); past the checking timeout and the PAC timer the agent is
+/// `Disconnected`, never `Failed`, for as long as one indication is missing (local gathering,
+/// or the peer's), and `Failed` the moment the last one comes: the peer's end-of-candidates,
+/// local gathering, or a description that cannot trickle. Before ice-32 the checking timeout
+/// failed it at 39.5 s whatever was signalled.
+#[test]
+fn checks_that_all_failed_are_disconnected_until_no_candidate_is_to_come() {
+    let refuse = |_: &Sent| Answer::Error(CODE_BAD_REQUEST);
+    let last = Duration::from_secs(70);
+    for case in [
+        "remote end-of-candidates",
+        "local gathering",
+        "remote cannot trickle",
+    ] {
+        let start = Instant::now();
+        let mut a = started_agent(start, config(true), &[REMOTE_A]);
+        match case {
+            "remote end-of-candidates" | "remote cannot trickle" => {
+                a.set_local_gathering_complete()
+            }
+            _ => a.set_remote_end_of_candidates(),
+        }
+        run_with(&mut a, start, Duration::ZERO, last, refuse);
+        assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Failed);
+        let seen = timed_states(&mut a, start);
+        assert_eq!(
+            seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+            vec![ConnectionState::Checking, ConnectionState::Disconnected],
+            "{case}: {seen:?}"
+        );
+        assert!(by_next_look(seen[1].0, PAC), "{case}: {seen:?}");
+        assert_eq!(
+            a.checklist_state(),
+            ChecklistState::Running,
+            "{case}: RFC 8838 Section 8, Running while candidates may come"
+        );
+        assert!(a.poll_timeout().is_some(), "{case}: the agent goes on");
+
+        match case {
+            "remote end-of-candidates" => a.set_remote_end_of_candidates(),
+            "local gathering" => a.set_local_gathering_complete(),
+            _ => a.set_remote_trickles(false),
+        }
+        run_with(&mut a, start, last, last + Duration::from_secs(1), refuse);
+        let seen = timed_states(&mut a, start);
+        assert_eq!(seen.len(), 1, "{case}: {seen:?}");
+        assert_eq!(seen[0].1, ConnectionState::Failed, "{case}");
+        assert!(by_next_look(seen[0].0, last), "{case}: {seen:?}");
+        assert_eq!(a.checklist_state(), ChecklistState::Failed);
+        assert!(a.poll_timeout().is_none());
+    }
+}
+
+/// W3C webrtc-pc 5.6.4: a transport that is "disconnected" with its checks failed checks again
+/// when a candidate comes ("(disconnected, new local candidates): checking"), here a remote
+/// one that answers: `Checking`, then `Connected`; a new local candidate whose pair fails too:
+/// `Checking`, and `Disconnected` again by the checking timeout counted from then.
+#[test]
+fn a_candidate_that_comes_after_the_checks_failed_is_checked() {
+    let at = Duration::from_secs(45);
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    let answer = |s: &Sent| {
+        if s.to == addr(REMOTE_B) {
+            Answer::Success(addr(LOCAL))
+        } else {
+            Answer::Error(CODE_BAD_REQUEST)
+        }
+    };
+    run_with(&mut a, start, Duration::ZERO, at, answer);
+    assert_eq!(a.state(), ConnectionState::Disconnected);
+    let _ = timed_states(&mut a, start);
+    a.add_remote_candidate(host(addr(REMOTE_B))).unwrap();
+    run_with(&mut a, start, at, at + Duration::from_secs(2), answer);
+    let seen = timed_states(&mut a, start);
+    assert_eq!(
+        seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+        vec![ConnectionState::Checking, ConnectionState::Connected],
+        "{seen:?}"
+    );
+    assert_eq!(
+        a.get_selected_candidate_pair().unwrap().1.addr(),
+        addr(REMOTE_B)
+    );
+
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    let refuse = |_: &Sent| Answer::Error(CODE_BAD_REQUEST);
+    run_with(&mut a, start, Duration::ZERO, at, refuse);
+    assert_eq!(a.state(), ConnectionState::Disconnected);
+    let _ = timed_states(&mut a, start);
+    a.add_local_candidate(host(addr("192.168.0.5:1001")))
+        .unwrap();
+    run_with(&mut a, start, at, at + Duration::from_secs(40), refuse);
+    let seen = timed_states(&mut a, start);
+    assert_eq!(
+        seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+        vec![ConnectionState::Checking, ConnectionState::Disconnected],
+        "{seen:?}"
+    );
+    assert!(
+        by_next_look(seen[1].0, at + Duration::from_secs(30)),
+        "the checking timeout counts from the new checks: {seen:?}"
+    );
+}
+
+/// W3C webrtc-pc 5.6.4, "connected": "If consent checks [RFC7675] fail on the connection in
+/// use, and there are no other successful candidate pairs available, then the state
+/// transitions to [...] "disconnected" (if there are no candidate pairs to check, but the
+/// peer is still gathering and/or waiting for additional remote candidates)"; "failed" once
+/// no candidate is to come. RFC 7675 Section 5.1 holds either way: nothing is sent on the
+/// pair once consent has expired, and "the same ICE credentials MUST NOT be used on the
+/// affected 5-tuple again": not for a check, not for the answer to the peer's request.
+#[test]
+fn consent_lost_before_the_end_of_candidates_is_disconnected_and_then_failed() {
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    answered(&mut a, start, Duration::ZERO, Duration::from_secs(1));
+    assert_eq!(a.state(), ConnectionState::Connected);
+    let _ = timed_states(&mut a, start);
+    let out = silent(
+        &mut a,
+        start,
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+    );
+    let seen = timed_states(&mut a, start);
+    assert!(
+        !seen.iter().any(|(_, s)| *s == ConnectionState::Failed),
+        "failed without the end of the candidates: {seen:?}"
+    );
+    assert_eq!(a.state(), ConnectionState::Disconnected, "{seen:?}");
+    assert!(a.media_path().is_none(), "nothing is sent without consent");
+    assert!(a.get_selected_candidate_pair().is_none());
+    // Consent expired 30 s after the last response (under 1 s in): nothing to the peer after.
+    assert!(
+        !requests_of(&out)
+            .iter()
+            .any(|s| s.at > Duration::from_secs(32)),
+        "a request on the 5-tuple whose consent was lost"
+    );
+    // The peer's request on that 5-tuple is not answered.
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
+    );
+    let _ = deliver(&mut a, start + Duration::from_secs(60), &request, REMOTE_A);
+    assert!(
+        a.poll_write().is_none(),
+        "an answer on the 5-tuple whose consent was lost"
+    );
+
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    silent(
+        &mut a,
+        start,
+        Duration::from_secs(60),
+        Duration::from_secs(61),
+    );
+    let seen = timed_states(&mut a, start);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].1, ConnectionState::Failed);
+    assert!(by_next_look(seen[0].0, Duration::from_secs(60)), "{seen:?}");
+}
+
+/// W3C webrtc-pc 5.6.4: "If begun in the transient "disconnected" state, it causes a
+/// transition to "checking"": an ICE restart of an agent whose checks failed before the end
+/// of the candidates checks the new generation and connects over it.
+#[test]
+fn a_restart_of_an_agent_whose_checks_failed_checks_and_connects() {
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    let refuse = |_: &Sent| Answer::Error(CODE_BAD_REQUEST);
+    let at = Duration::from_secs(45);
+    run_with(&mut a, start, Duration::ZERO, at, refuse);
+    assert_eq!(a.state(), ConnectionState::Disconnected);
+    let _ = timed_states(&mut a, start);
+
+    a.restart(start + at, String::new(), String::new(), false)
+        .unwrap();
+    assert_eq!(a.state(), ConnectionState::Checking);
+    a.add_local_candidate(host(addr(LOCAL))).unwrap();
+    a.add_remote_candidate(host(addr(REMOTE_B))).unwrap();
+    a.start_connectivity_checks(
+        start + at,
+        true,
+        REMOTE_UFRAG.to_owned(),
+        REMOTE_PWD.to_owned(),
+    )
+    .unwrap();
+    answered(&mut a, start, at, at + Duration::from_secs(2));
+    let seen = timed_states(&mut a, start);
+    assert_eq!(
+        seen.first().map(|(_, s)| *s),
+        Some(ConnectionState::Checking),
+        "{seen:?}"
+    );
+    assert_eq!(a.state(), ConnectionState::Connected, "{seen:?}");
+    assert!(!seen.iter().any(|(_, s)| *s == ConnectionState::Failed));
+}
+
+/// RFC 8445 Section 7.2.5.3.4 (`FailedNomination::FailChecklist`, the default): a nomination
+/// answered with an error fails its pair and the checklist; before the end of the candidates
+/// the agent is `Disconnected` with its checklist Failed and nominates nothing more (W3C
+/// webrtc-pc 5.6.4), and `Failed` once both sides are done.
+#[test]
+fn a_failed_nomination_before_the_end_of_candidates_is_disconnected() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400)]);
+    let out = run_with(&mut a, start, Duration::ZERO, Duration::from_secs(5), |s| {
+        if s.message.contains(ATTR_USE_CANDIDATE) {
+            Answer::Error(CODE_BAD_REQUEST)
+        } else {
+            Answer::Success(addr(LOCAL))
+        }
+    });
+    let seen = timed_states(&mut a, start);
+    assert_eq!(nominations(&out).len(), 1, "no other pair is nominated");
+    assert_eq!(
+        seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+        vec![ConnectionState::Checking, ConnectionState::Disconnected],
+        "{seen:?}"
+    );
+    assert_eq!(a.checklist_state(), ChecklistState::Failed);
+    assert!(a.get_selected_candidate_pair().is_none());
+
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    let out = run_with(
+        &mut a,
+        start,
+        Duration::from_secs(5),
+        Duration::from_secs(6),
+        |_| Answer::Success(addr(LOCAL)),
+    );
+    assert!(nominations(&out).is_empty());
+    let seen = timed_states(&mut a, start);
+    assert_eq!(
+        seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+        vec![ConnectionState::Failed],
+        "{seen:?}"
+    );
+}
+
+/// A lite agent (no checks of its own, RFC 8445 Section 2.5) whose full peer falls silent:
+/// `Disconnected` 5 s after the peer's last request, and, past `disconnected_timeout +
+/// failed_timeout`, still `Disconnected` until no candidate is to come (W3C webrtc-pc 5.6.4),
+/// then `Failed`. With `set_failed_without_end_of_candidates` (it has no PAC timer, RFC 8863
+/// Section 4 being for full agents) it fails at 30 s, as before ice-32.
+#[test]
+fn a_lite_agent_whose_peer_falls_silent_is_failed_only_after_the_end_of_candidates() {
+    for fallback in [false, true] {
+        let start = Instant::now();
+        let cfg = AgentConfig {
+            lite: true,
+            candidate_types: vec![CandidateType::Host],
+            ..config(false)
+        };
+        let mut a = started_agent(start, cfg, &[REMOTE_A]);
+        a.set_failed_without_end_of_candidates(fallback);
+        let nominating = peer_request(
+            &a,
+            vec![
+                Box::new(AttrControlling(1)),
+                Box::new(PriorityAttr(1000)),
+                Box::new(UseCandidateAttr::new()),
+            ],
+        );
+        deliver(&mut a, start, &nominating, REMOTE_A).unwrap();
+        assert!(a.get_selected_candidate_pair().is_some());
+        silent(&mut a, start, Duration::ZERO, Duration::from_secs(60));
+        let seen = timed_states(&mut a, start);
+        let at = |state| seen.iter().find(|(_, s)| *s == state).map(|(at, _)| *at);
+        let disconnected = at(ConnectionState::Disconnected).expect("disconnected");
+        assert!(
+            by_next_look(disconnected, Duration::from_secs(5)),
+            "{fallback}: {seen:?}"
+        );
+        if fallback {
+            let failed = at(ConnectionState::Failed).expect("failed");
+            assert!(
+                by_next_look(failed, Duration::from_secs(30)),
+                "{fallback}: {seen:?}"
+            );
+            continue;
+        }
+        assert_eq!(at(ConnectionState::Failed), None, "{seen:?}");
+        assert_eq!(a.state(), ConnectionState::Disconnected);
+        a.set_local_gathering_complete();
+        a.set_remote_end_of_candidates();
+        silent(
+            &mut a,
+            start,
+            Duration::from_secs(60),
+            Duration::from_secs(61),
+        );
+        let seen = timed_states(&mut a, start);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].1, ConnectionState::Failed);
+        assert!(by_next_look(seen[0].0, Duration::from_secs(60)), "{seen:?}");
+    }
+}
+
+/// `Agent::set_failed_without_end_of_candidates`, libwebrtc's form and the end-of-candidates
+/// fallback RFC 8863 Section 5 allows ("ICE agents MAY use the PAC timer to also serve as an
+/// end-of-candidates fallback"): with nothing signalled, the checks that failed fail the
+/// agent as the PAC timer expires (39.5 s), and consent lost fails it too, at the latest as
+/// the timer expires.
+#[test]
+fn the_pac_timer_ends_the_candidates_when_set_to() {
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    a.set_failed_without_end_of_candidates(true);
+    assert!(a.failed_without_end_of_candidates());
+    run_with(
+        &mut a,
+        start,
+        Duration::ZERO,
+        Duration::from_secs(45),
+        |_| Answer::Error(CODE_BAD_REQUEST),
+    );
+    let seen = timed_states(&mut a, start);
+    assert_eq!(
+        seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+        vec![ConnectionState::Checking, ConnectionState::Failed],
+        "{seen:?}"
+    );
+    assert!(by_next_look(seen[1].0, PAC), "{seen:?}");
+
+    let start = Instant::now();
+    let mut a = started_agent(start, config(true), &[REMOTE_A]);
+    a.set_failed_without_end_of_candidates(true);
+    answered(&mut a, start, Duration::ZERO, Duration::from_secs(1));
+    silent(
+        &mut a,
+        start,
+        Duration::from_secs(1),
+        Duration::from_secs(45),
+    );
+    let seen = timed_states(&mut a, start);
+    let failed = seen
+        .iter()
+        .find(|(_, s)| *s == ConnectionState::Failed)
+        .map(|(at, _)| *at)
+        .expect("failed");
+    assert!(by_next_look(failed, PAC), "{seen:?}");
+}
+
 // --- A pair still to come from the peer's check (RFC 8445 7.3.1.3, RFC 8838 8) ---
 
 /// The local passive TCP candidate of the scenarios below.
@@ -1935,6 +2310,10 @@ fn controlled_nomination(
         ..config(false)
     };
     let mut a = agent_with(start, cfg, &[(1, 500), (2, 400)]);
+    // Both sides are done with their candidates: the failed checklist fails the agent (W3C
+    // webrtc-pc 5.6.4).
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let nominate = peer_request(
         &a,
         vec![
@@ -1997,8 +2376,9 @@ fn test_a_controlled_nomination_whose_triggered_check_gets_an_error_fails_the_ch
 /// A controlling agent with one remote candidate and the checking timer on (the defaults):
 /// plain checks are answered, nominations only when `answer_nominations` says so, and the
 /// peer, which has accepted the nomination on its side, sends a consent request every
-/// `peer_every` (none when `None`). Returns what the agent sent and the states it reported,
-/// with the time (since `start`) of each, until `until`.
+/// `peer_every` (none when `None`). Both sides are done with their candidates (W3C webrtc-pc
+/// 5.6.4: a failure is "failed" only then). Returns what the agent sent and the states it
+/// reported, with the time (since `start`) of each, until `until`.
 fn nominating_over_loss(
     start: Instant,
     cfg: AgentConfig,
@@ -2010,6 +2390,8 @@ fn nominating_over_loss(
     a.add_remote_candidate(remote(1, 500, "f1")).unwrap();
     a.start_connectivity_checks(start, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
         .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let mut out = vec![];
     let mut seen = vec![];
     let step = peer_every.unwrap_or(Duration::from_secs(1));
@@ -2093,7 +2475,8 @@ fn test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from() {
         second_at >= first_at + Duration::from_millis(39_400),
         "the second nomination follows the end of the first transaction: {nominations:?}"
     );
-    assert_eq!(a.state(), ConnectionState::Connected);
+    // (Completed: both sides are done with their candidates.)
+    assert_eq!(a.state(), ConnectionState::Completed);
     assert!(a.get_selected_candidate_pair().is_some());
     assert!(
         seen.iter()
@@ -2213,6 +2596,8 @@ fn test_a_nomination_to_a_silent_peer_fails_at_the_end_of_its_transaction() {
 fn test_a_nomination_answered_with_an_error_fails_the_checklist() {
     let start = Instant::now();
     let mut a = agent_with(start, config(true), &[(1, 500), (2, 400)]);
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let out = run_with(&mut a, start, Duration::ZERO, Duration::from_secs(5), |s| {
         if s.message.contains(ATTR_USE_CANDIDATE) {
             Answer::Error(CODE_BAD_REQUEST)
@@ -2253,6 +2638,8 @@ fn test_a_nomination_answered_with_an_error_moves_on_when_set_to_retry() {
 fn test_a_nomination_answered_from_another_address_fails_the_checklist() {
     let start = Instant::now();
     let mut a = agent_with(start, config(true), &[(1, 500), (2, 400)]);
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let mut nomination = None;
     run_with(&mut a, start, Duration::ZERO, Duration::from_secs(5), |s| {
         if s.message.contains(ATTR_USE_CANDIDATE) {

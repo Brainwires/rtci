@@ -62,6 +62,10 @@ fn consent_expiry_after_30_seconds_elapses_on_virtual_time_and_the_driver_report
 -> Result<()> {
     let runtime = MockRuntime::new();
     let (mut a, mut b) = peers(&runtime)?;
+    // The application relays the end of the candidates: lost consent is "failed" then (W3C
+    // webrtc-pc 5.6.4), "disconnected" without it.
+    a.relay_end_of_candidates = true;
+    b.relay_end_of_candidates = true;
     runtime.run(connect_and_exchange(&mut a, &mut b, STEP, 10_000))?;
     let dark = runtime.now();
     runtime.net().set_links(

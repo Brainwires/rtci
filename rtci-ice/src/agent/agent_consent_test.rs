@@ -106,6 +106,10 @@ fn sent_requests(a: &mut Agent) -> Vec<TransactionId> {
 fn test_peer_requests_alone_do_not_keep_consent() {
     let base = Instant::now();
     let mut a = connected_agent(base);
+    // No candidate is to come on either side: consent that expires fails the agent (W3C
+    // webrtc-pc 5.6.4; without the indications it would be disconnected).
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let remote: SocketAddr = REMOTE.parse().unwrap();
     for secs in 1..60 {
         let now = base + Duration::from_secs(secs);

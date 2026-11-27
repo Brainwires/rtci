@@ -328,8 +328,11 @@ impl RTCPeerConnection {
         let sctp_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Sctp);
 
         // Create the ICE transport
-        let ice_transport =
+        let mut ice_transport =
             IceTransport::new(now, agent_config, crypto_provider.clone(), ice_transport_id)?;
+        ice_transport.agent.set_failed_without_end_of_candidates(
+            setting_engine.ice_failed_without_end_of_candidates,
+        );
 
         // Create the DTLS transport
         // The configuration keeps its certificates: `get_configuration` reports them and

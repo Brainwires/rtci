@@ -432,6 +432,26 @@ pub struct TaggedEvent {
     pub event: Event,
 }
 
+/// What ended the checks of an agent that reports `Disconnected` instead of `Failed` because
+/// the indication that there are no more candidates is missing (W3C webrtc-pc 5.6.4: "failed"
+/// needs the transport to have "finished gathering, received an indication that there are no
+/// more remote candidates"; until then, "disconnected": it "has finished checking all
+/// existing candidates pairs and not found a connection (or consent checks [RFC7675] once
+/// successful, have now failed), but it is still gathering and/or waiting for additional
+/// remote candidates"). See [`Agent::set_failed_without_end_of_candidates`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldFailure {
+    /// The checking timeout (`disconnected_timeout + failed_timeout`) passed with nothing left
+    /// that could produce a selected pair.
+    CheckingTimeout,
+    /// Consent expired on the selected pair (RFC 7675 Section 5.1) and no pair is left to
+    /// check.
+    ConsentExpired,
+    /// The nomination failed (RFC 8445 Section 7.2.5.3.4, `FailedNomination::FailChecklist`):
+    /// the checklist is Failed.
+    NominationFailed,
+}
+
 /// The addresses and transport data is sent on and accepted from. See [`Agent::media_path`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaPath {
@@ -509,6 +529,17 @@ pub struct Agent {
     pub(crate) remote_end_of_candidates: bool,
     /// Local gathering is complete for this generation (RFC 8838 Section 13).
     pub(crate) local_gathering_complete: bool,
+    /// The peer's descriptions say it can trickle candidates (`a=ice-options:trickle`). When
+    /// they do not, its description held every candidate it has (W3C webrtc-pc 5.6.4: the
+    /// indication that there are no more remote candidates can be given "by
+    /// canTrickleIceCandidates being set to false"). See [`Agent::set_remote_trickles`].
+    pub(crate) remote_trickles: bool,
+    /// See [`Agent::set_failed_without_end_of_candidates`]. Off by default.
+    pub(crate) failed_without_end_of_candidates: bool,
+    /// The checks have failed, but without the indications [`Agent::may_report_failed`]
+    /// needs the agent reports `Disconnected`, not `Failed`: what ended them. Cleared by any
+    /// other state (a new pair makes the agent check again).
+    pub(crate) failure_held: Option<HeldFailure>,
     /// The peer's signalled candidates of this generation that are not paired but whose
     /// checks can still create a pair (each kind once).
     pub(crate) unpaired_remotes: Vec<UnpairedRemote>,
@@ -886,6 +917,9 @@ impl Agent {
                 .max(1),
             remote_end_of_candidates: false,
             local_gathering_complete: false,
+            remote_trickles: true,
+            failed_without_end_of_candidates: false,
+            failure_held: None,
             unpaired_remotes: vec![],
             early_requests: vec![],
 
@@ -2034,7 +2068,9 @@ impl Agent {
     /// timeout, once local gathering is complete too and the PAC timer has expired (RFC 8863:
     /// 39.5 s after checking began, with the defaults), unless a check from the peer may still
     /// form a pair (a `tcptype active` candidate of the peer that dials ours, a `.local` name
-    /// not resolved): then its timeout ends it. An ICE restart starts a new generation.
+    /// not resolved): then its timeout ends it. With local gathering complete it is also the
+    /// indication W3C webrtc-pc 5.6.4 makes "failed" and "completed" wait for (see
+    /// [`Agent::set_failed_without_end_of_candidates`]). An ICE restart starts a new generation.
     pub fn set_remote_end_of_candidates(&mut self) {
         self.remote_end_of_candidates = true;
         self.request_connectivity_check();
@@ -2045,6 +2081,81 @@ impl Agent {
     pub fn set_local_gathering_complete(&mut self) {
         self.local_gathering_complete = true;
         self.request_connectivity_check();
+    }
+
+    /// Whether the peer's description says it can trickle candidates (`a=ice-options:trickle`,
+    /// RFC 9429 Sections 4.1.17 and 5.10), `true` until told otherwise. A peer that cannot
+    /// trickle gave all its candidates in its description: W3C webrtc-pc 5.6.4 counts
+    /// `canTrickleIceCandidates` false as the indication that there are no more remote
+    /// candidates, which "failed" and "completed" need. (Candidates signalled later are still
+    /// taken: only an end-of-candidates indication makes the agent ignore them, RFC 8838
+    /// Section 14.)
+    pub fn set_remote_trickles(&mut self, trickles: bool) {
+        self.remote_trickles = trickles;
+        self.request_connectivity_check();
+    }
+
+    /// Whether the agent reports `Failed` without the indications W3C webrtc-pc 5.6.4 makes
+    /// "failed" wait for, once the PAC timer (RFC 8863) has expired. Off by default.
+    ///
+    /// By default (off) the transport is "failed" only when it "has finished gathering,
+    /// received an indication that there are no more remote candidates, finished checking all
+    /// candidate pairs, and all pairs have either failed connectivity checks or lost consent":
+    /// local gathering complete ([`Agent::set_local_gathering_complete`]) and the peer's
+    /// end-of-candidates ([`Agent::set_remote_end_of_candidates`]) or a peer that cannot
+    /// trickle ([`Agent::set_remote_trickles`]). Before that, checks that have all failed (the
+    /// checking timeout, a failed nomination) or consent that expired make the agent
+    /// `Disconnected` ("it is still gathering and/or waiting for additional remote
+    /// candidates"); it fails as soon as the indications are in, checks again (`Checking`)
+    /// when a new pair is formed, and an ICE restart starts it over. A peer that never sends
+    /// its end-of-candidates leaves it `Disconnected` until the application restarts or closes.
+    ///
+    /// On, the PAC timer serves as the end-of-candidates fallback RFC 8863 Section 5 allows
+    /// ("ICE agents MAY use the PAC timer to also serve as an end-of-candidates fallback"):
+    /// once it has expired (39.5 s after the checks began, with the defaults; at once for a
+    /// lite agent, which has none) those events fail the agent without the indications, as
+    /// libwebrtc's transports do.
+    pub fn set_failed_without_end_of_candidates(&mut self, enabled: bool) {
+        self.failed_without_end_of_candidates = enabled;
+        self.request_connectivity_check();
+    }
+
+    /// See [`Agent::set_failed_without_end_of_candidates`].
+    pub fn failed_without_end_of_candidates(&self) -> bool {
+        self.failed_without_end_of_candidates
+    }
+
+    /// The peer has no more candidates for this generation: its end-of-candidates indication,
+    /// or a description that says it cannot trickle (W3C webrtc-pc 5.6.4).
+    pub(crate) fn no_more_remote_candidates(&self) -> bool {
+        self.remote_end_of_candidates || !self.remote_trickles
+    }
+
+    /// Whether checks that have failed may make the agent `Failed` at `now` (W3C webrtc-pc
+    /// 5.6.4 "failed"): local gathering is complete and the peer has no more candidates, or
+    /// [`Agent::set_failed_without_end_of_candidates`] and the PAC timer has expired.
+    pub(crate) fn may_report_failed(&self, now: Instant) -> bool {
+        (self.local_gathering_complete && self.no_more_remote_candidates())
+            || (self.failed_without_end_of_candidates && !self.pac_running(now))
+    }
+
+    /// The checks have failed (`why`): `Failed` when [`Agent::may_report_failed`], else
+    /// `Disconnected` until it does (W3C webrtc-pc 5.6.4).
+    pub(crate) fn fail_or_hold(&mut self, now: Instant, why: HeldFailure) {
+        if self.may_report_failed(now) {
+            self.update_connection_state(Some(now), ConnectionState::Failed);
+            return;
+        }
+        if self.failure_held.is_none() {
+            info!(
+                "[{}]: {why:?}, but the indication that there are no more candidates is missing (local gathering complete: {}, remote end-of-candidates: {}): disconnected, not failed",
+                self.get_name(),
+                self.local_gathering_complete,
+                self.no_more_remote_candidates()
+            );
+        }
+        self.update_connection_state(Some(now), ConnectionState::Disconnected);
+        self.failure_held.get_or_insert(why);
     }
 
     /// Whether this IP address is one the peer's signalling led to: the address of a candidate
@@ -2965,6 +3076,15 @@ impl Agent {
             self.last_connection_state = self.connection_state;
             return;
         }
+        // Checks that failed while the indications were missing: failed once they are in (W3C
+        // webrtc-pc 5.6.4).
+        if let Some(why) = self.failure_held
+            && self.may_report_failed(now)
+        {
+            self.fail_or_hold(now, why);
+            self.last_connection_state = self.connection_state;
+            return;
+        }
         if self.connection_state == ConnectionState::Checking {
             // We have just entered checking for the first time so update our checking timer
             if self.last_connection_state != self.connection_state {
@@ -2980,7 +3100,10 @@ impl Agent {
             // Sections 6.1.4.2 and 8.1.2: the checklist fails when every pair has failed). A
             // pair that is still being checked fails by its own transaction (Section 14.3), a
             // nomination by `expire_unanswered_nomination`. Nor while the PAC timer runs (RFC
-            // 8863 Section 4: no Failed checklist, no Failed session, before it expires).
+            // 8863 Section 4: no Failed checklist, no Failed session, before it expires). And
+            // `Failed` only with the indications that no candidate is to come (W3C webrtc-pc
+            // 5.6.4); without them `Disconnected`, and the checks go on (a triggered check, a
+            // new pair).
             if self.failed_timeout != ZERO_DURATION
                 && now
                     .checked_duration_since(self.checking_duration)
@@ -2989,9 +3112,11 @@ impl Agent {
                 && !self.checks_in_progress(now)
                 && !self.pac_running(now)
             {
-                self.update_connection_state(Some(now), ConnectionState::Failed);
-                self.last_connection_state = self.connection_state;
-                return;
+                self.fail_or_hold(now, HeldFailure::CheckingTimeout);
+                if self.connection_state == ConnectionState::Failed {
+                    self.last_connection_state = self.connection_state;
+                    return;
+                }
             }
         }
 
@@ -3065,6 +3190,9 @@ impl Agent {
         now: Option<Instant>,
         new_state: ConnectionState,
     ) {
+        if new_state != ConnectionState::Disconnected {
+            self.failure_held = None;
+        }
         if self.connection_state != new_state {
             // Connection has gone to failed, release all gathered candidates
             if new_state == ConnectionState::Failed {
@@ -3162,9 +3290,10 @@ impl Agent {
     /// The state of a connected agent whose consent is fresh: `Completed` once both sides
     /// have said they have no more candidates (W3C `RTCIceTransportState`: "finished
     /// gathering, received an indication that there are no more remote candidates, finished
-    /// checking all candidate pairs and found a connection"), `Connected` until then.
+    /// checking all candidate pairs and found a connection"; a peer that cannot trickle has
+    /// none to come either), `Connected` until then.
     fn healthy_state(&self) -> ConnectionState {
-        if self.remote_end_of_candidates && self.local_gathering_complete {
+        if self.no_more_remote_candidates() && self.local_gathering_complete {
             ConnectionState::Completed
         } else {
             ConnectionState::Connected
@@ -3234,10 +3363,15 @@ impl Agent {
                 total_time_to_failure += self.disconnected_timeout;
             }
 
-            if total_time_to_failure != ZERO_DURATION && disconnected_time > total_time_to_failure {
+            // Failed only with the indications that no candidate is to come (W3C webrtc-pc
+            // 5.6.4); until then the silence is a loss of connectivity: Disconnected.
+            let failed =
+                total_time_to_failure != ZERO_DURATION && disconnected_time > total_time_to_failure;
+            if failed && self.may_report_failed(now) {
                 self.update_connection_state(Some(now), ConnectionState::Failed);
-            } else if self.disconnected_timeout != ZERO_DURATION
-                && disconnected_time > self.disconnected_timeout
+            } else if failed
+                || (self.disconnected_timeout != ZERO_DURATION
+                    && disconnected_time > self.disconnected_timeout)
             {
                 self.update_connection_state(Some(now), ConnectionState::Disconnected);
             } else {
@@ -3266,7 +3400,11 @@ impl Agent {
         };
 
         if since_consent >= self.consent_expiry() {
-            self.update_connection_state(Some(now), ConnectionState::Failed);
+            if self.may_report_failed(now) {
+                self.update_connection_state(Some(now), ConnectionState::Failed);
+            } else {
+                self.lose_consent_waiting_for_candidates(now, pair_index);
+            }
         } else if self.disconnected_timeout != ZERO_DURATION
             && unanswered >= self.disconnected_timeout
         {
@@ -3280,6 +3418,57 @@ impl Agent {
         }
 
         true
+    }
+
+    /// Consent expired on the selected pair `pair_index` (RFC 7675 Section 5.1) while more
+    /// candidates may still come (local gathering not complete, or no end-of-candidates from
+    /// the peer). W3C webrtc-pc 5.6.4, "connected": "If consent checks [RFC7675] fail on the
+    /// connection in use, and there are no other successful candidate pairs available, then
+    /// the state transitions to "checking" (if there are candidate pairs remaining to be
+    /// checked) or "disconnected" (if there are no candidate pairs to check, but the peer is
+    /// still gathering and/or waiting for additional remote candidates)". The pair is no longer
+    /// used: its consent transactions are discarded and it is removed, so that nothing is sent
+    /// or answered on it again (RFC 7675 Section 5.1); another valid pair takes over if there
+    /// is one. The agent keeps its candidates and the other pairs, and fails once the
+    /// indications are in ([`Agent::fail_or_hold`]).
+    fn lose_consent_waiting_for_candidates(&mut self, now: Instant, pair_index: usize) {
+        let (local_index, remote_index) = (
+            self.candidate_pairs[pair_index].local_index,
+            self.candidate_pairs[pair_index].remote_index,
+        );
+        warn!(
+            "[{}]: consent expired on the selected pair {}: no longer sending on it",
+            self.get_name(),
+            self.candidate_pairs[pair_index]
+        );
+        self.pending_binding_requests.retain(|r| {
+            !(r.consent && r.local_index == local_index && r.remote_index == remote_index)
+        });
+        // "After consent is lost, the same ICE credentials MUST NOT be used on the affected
+        // 5-tuple again" (RFC 7675 Section 5.1): the pair is removed, so that no check is
+        // sent on it, and marked, so that no request on it is answered; another valid pair,
+        // if there is one, is selected.
+        self.remove_pair_at(now, pair_index);
+        self.candidate_pairs[pair_index].consent_lost = true;
+        if self.selected_pair.is_some() {
+            return;
+        }
+        self.set_selected_pair(Some(now), None);
+        let to_check = !self.triggered_queue.is_empty()
+            || self.candidate_pairs.iter().any(|p| {
+                matches!(
+                    p.state,
+                    CandidatePairState::Frozen
+                        | CandidatePairState::Waiting
+                        | CandidatePairState::InProgress
+                )
+            });
+        if to_check {
+            self.update_connection_state(Some(now), ConnectionState::Checking);
+            self.checking_duration = now;
+        } else {
+            self.fail_or_hold(now, HeldFailure::ConsentExpired);
+        }
     }
 
     /// Sends a STUN Binding request on the selected pair when the consent interval has run
@@ -4297,8 +4486,9 @@ impl Agent {
         if let Some(pair_index) = self.find_pair(local_index, remote_index) {
             self.candidate_pairs[pair_index].on_request_received();
             // An authenticated request is answered whatever the pair's state (unless the
-            // destination policy refused the pair).
-            if respond {
+            // destination policy refused the pair, or consent was lost on it: RFC 7675
+            // Section 5.1, the credentials are not used on that 5-tuple again).
+            if respond && !self.candidate_pairs[pair_index].consent_lost {
                 self.send_binding_success(now, m, local_index, remote_addr);
             }
             self.handle_binding_request(now, m, local_index, remote_index);

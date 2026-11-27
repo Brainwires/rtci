@@ -17,7 +17,7 @@
 //! other pair can still be nominated.
 
 use crate::agent::agent_config::*;
-use crate::agent::{Agent, BindingRequest, Event, TaggedEvent};
+use crate::agent::{Agent, BindingRequest, Event, HeldFailure, TaggedEvent};
 use crate::mdns::MulticastDnsMode;
 use bytes::BytesMut;
 use crc::{CRC_32_ISCSI, Crc};
@@ -107,7 +107,9 @@ impl Agent {
     /// nominated and `Completed` only when, in addition, both sides have said they have no
     /// more candidates.
     pub fn checklist_state(&self) -> ChecklistState {
-        if self.connection_state == ConnectionState::Failed {
+        if self.connection_state == ConnectionState::Failed
+            || self.failure_held == Some(HeldFailure::NominationFailed)
+        {
             ChecklistState::Failed
         } else if self.selected_pair.is_some() {
             ChecklistState::Completed
@@ -259,6 +261,13 @@ impl Agent {
             }
         };
         self.announce_pair(index, true);
+        // W3C webrtc-pc 5.6.4: a transport that is "disconnected" with its checks failed
+        // while candidates may still come checks again when one comes ("disconnected", new
+        // local candidates: "checking").
+        if self.failure_held.is_some() {
+            self.update_connection_state(Some(self.clock), ConnectionState::Checking);
+            self.request_connectivity_check();
+        }
     }
 
     /// Queues `CandidatePairAdded` (`added`) or `CandidatePairRemoved` for the pair at
@@ -1056,7 +1065,9 @@ impl Agent {
         );
         self.fail_pair(pair_index);
         self.nomination_started = None;
-        self.update_connection_state(Some(now), ConnectionState::Failed);
+        // The checklist is Failed; the transport is "failed" only once no candidate is to
+        // come (W3C webrtc-pc 5.6.4), "disconnected" until then.
+        self.fail_or_hold(now, HeldFailure::NominationFailed);
     }
 
     /// Takes the open transaction `id`, if there is one. A consent request's transaction
@@ -1948,6 +1959,11 @@ impl Agent {
         if !self.is_controlling || self.selected_pair.is_some() || self.nominated_pair.is_some() {
             return;
         }
+        // Checks that have failed (`Agent::fail_or_hold`, the agent `Disconnected` until no
+        // candidate is to come) nominate nothing more until a new pair comes.
+        if self.failure_held.is_some() {
+            return;
+        }
         let Some(pair_index) = self.get_best_valid_candidate_pair() else {
             return;
         };
@@ -2125,7 +2141,7 @@ impl Agent {
         if self.connection_state != ConnectionState::Checking
             || self.selected_pair.is_some()
             || self.pac_running(now)
-            || !self.remote_end_of_candidates
+            || !self.no_more_remote_candidates()
             || !self.local_gathering_complete
             || !self.mdns_queries.is_empty()
             || !self.early_requests.is_empty()

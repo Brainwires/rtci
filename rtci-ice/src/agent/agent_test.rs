@@ -2187,6 +2187,9 @@ fn test_unauthenticated_traffic_does_not_refresh_consent() -> Result<()> {
     )?;
     a.add_pair(0, 0);
     a.set_selected_pair(Some(t(1)), Some(0));
+    // No candidate is to come: consent that expires fails the agent (W3C webrtc-pc 5.6.4).
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
 
     let transport = TransportContext {
         local_addr,

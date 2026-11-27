@@ -152,6 +152,9 @@ fn test_consent_expires_after_thirty_seconds_whatever_the_timeouts() {
             failed_timeout: Some(failed),
             ..config(true)
         });
+        // No candidate is to come: consent that expires fails the agent (W3C webrtc-pc 5.6.4).
+        a.set_local_gathering_complete();
+        a.set_remote_end_of_candidates();
         let last_consent = a.remote_candidates[0].last_consent().unwrap();
         // The peer goes away.
         let trace = run_traced(&mut a, now, now + Duration::from_secs(120), |_, _| false);
@@ -182,6 +185,8 @@ fn test_shorter_timeouts_fail_a_silent_pair_sooner() {
         failed_timeout: Some(Duration::from_secs(7)),
         ..config(true)
     });
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
     let last_consent = a.remote_candidates[0].last_consent().unwrap();
     let trace = run_traced(&mut a, now, now + Duration::from_secs(60), |_, _| false);
     let (failed_at, _) = trace

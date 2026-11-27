@@ -111,8 +111,6 @@ WEBRTC-4.4.2-46	B	S	jsep	A test that setLocalDescription(pranswer) with SDP othe
 WEBRTC-4.5.1-1	C	S	jsep	Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep)
 WEBRTC-4.8.3-2	B	S	ice	A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep)
 WEBRTC-5.5-3	B	S	dtls-srtp	A test that a second fatal alert or a datagram after a DTLS failure fires no second error or statechange (audit-5 sweep)
-WEBRTC-5.6.4-2	C	M	ice	W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep)
-WEBRTC-5.6.4-9	C	M	ice	As WEBRTC-5.6.4-2: failed only after the end-of-candidates indication; completed is tested (audit-5 sweep)
 WEBRTC-6.1.2-3	B	S	sctp	A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep)
 WEBRTC-6.2.8-1	B	S	sctp	A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep)
 RFC8851-6.3-5	B	S	jsep	A test whose offer lists a `pt=` none of the answerer's formats keep: the answer drops that a=rid line (audit-6 sweep)

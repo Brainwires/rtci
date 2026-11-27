@@ -2404,6 +2404,12 @@ impl RTCPeerConnection {
                     .agent
                     .set_remote_end_of_candidates();
             }
+            // W3C webrtc-pc 5.6.4: a peer that cannot trickle (no `a=ice-options:trickle`,
+            // `canTrickleIceCandidates` false) has given every candidate it has, the
+            // indication "failed" and "completed" need.
+            self.ice_transport_mut()
+                .agent
+                .set_remote_trickles(has_ice_trickle_option(parsed_remote_description));
 
             if !transports_started {
                 log::trace!(

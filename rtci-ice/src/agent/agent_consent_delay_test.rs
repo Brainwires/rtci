@@ -166,6 +166,14 @@ fn connected(config: AgentConfig) -> (Agent, SlowPeer, Instant) {
     (a, peer, start + S)
 }
 
+/// Tells `a` that no candidate is to come on either side, so that consent that expires fails
+/// it (W3C webrtc-pc 5.6.4: "failed" needs the end of the candidates; without it the agent is
+/// disconnected).
+fn no_more_candidates(a: &mut Agent) {
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+}
+
 fn fixed(wait: Duration) -> AgentConfig {
     AgentConfig {
         consent_response_wait: ConsentResponseWait::Fixed(wait),
@@ -332,6 +340,7 @@ fn test_a_consent_request_waits_sixteen_times_the_rto_for_its_response() {
 #[test]
 fn test_a_response_after_its_wait_renews_nothing_unless_the_wait_is_fixed() {
     let (mut a, mut peer, now) = connected(config(true));
+    no_more_candidates(&mut a);
     let last = selected_consent(&a);
     let trace = peer.run(&mut a, now, now + 120 * S, |_, _, _| Some(9 * S));
     assert_eq!(trace.renewed, vec![], "an answer 9 s after its request");
@@ -422,6 +431,7 @@ fn test_unanswered_consent_transactions_are_bounded_and_end_with_the_consent() {
         (fixed(60 * S), None, 4..=8),
     ] {
         let (mut a, mut peer, mut now) = connected(cfg);
+        no_more_candidates(&mut a);
         if let Some(round_trip) = warm_up {
             peer.run(&mut a, now, now + 60 * S, |_, _, _| Some(round_trip));
             now += 60 * S;
@@ -587,6 +597,7 @@ fn test_a_late_response_on_another_pair_does_not_renew_the_selected_pairs_consen
     }
     a.start_connectivity_checks(start, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
         .unwrap();
+    no_more_candidates(&mut a);
     let mut peer = SlowPeer::default();
     let trace = peer.run(&mut a, start, start + 120 * S, |at, _, to| {
         if to == addr(REMOTE_B) {
@@ -642,6 +653,7 @@ fn test_a_late_response_on_another_pair_to_the_same_remote_does_not_renew_consen
     a.add_remote_candidate(host(addr(REMOTE_A))).unwrap();
     a.start_connectivity_checks(start, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
         .unwrap();
+    no_more_candidates(&mut a);
 
     let to_agent = |a: &mut Agent, now: Instant, m: &Message, local: &str| {
         a.handle_read(TaggedBytesMut {
@@ -771,6 +783,7 @@ fn test_the_response_that_validated_another_pair_is_the_selected_pairs_consent()
     const MAPPED: &str = "203.0.113.7:4000";
     let start = Instant::now();
     let mut a = started_agent(start, config(false), &[REMOTE_A]);
+    no_more_candidates(&mut a);
 
     let nominate_at = start + 10 * S;
     let mut nominated = false;

@@ -108,6 +108,11 @@ pub struct CandidatePair {
     /// check is sent or answered on it, and it is not listed. It keeps its slot: pairs are
     /// referenced by index.
     pub(crate) removed: bool,
+    /// Consent expired on this pair while it was selected and the agent went on (it was not
+    /// failed: candidates may still come): it is removed, and the peer's requests on it are
+    /// not answered either ("After consent is lost, the same ICE credentials MUST NOT be used
+    /// on the affected 5-tuple again", RFC 7675 Section 5.1).
+    pub(crate) consent_lost: bool,
 
     // STUN transaction stats
     /// Total number of STUN connectivity check requests sent (not including retransmissions).
@@ -199,6 +204,7 @@ impl CandidatePair {
             remote_nomination: 0,
             nomination_pending: false,
             removed: false,
+            consent_lost: false,
             // STUN transaction stats
             requests_sent: 0,
             requests_received: 0,

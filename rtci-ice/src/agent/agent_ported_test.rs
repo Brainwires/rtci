@@ -885,6 +885,9 @@ fn test_connection_state_failed_delete_all_candidates() -> Result<()> {
     let (mut a, mut b) = agent_pair(base, short_timeouts_config(), short_timeouts_config())?;
     start_both(&mut a, &mut b, base)?;
     let connected_at = connect(&mut a, &mut b, base)?;
+    // No candidate is to come (W3C webrtc-pc 5.6.4: "failed" needs it).
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
 
     // The network goes away: nothing `a` sends is answered.
     for i in 1..=100u32 {
@@ -923,6 +926,11 @@ fn test_connection_state_connecting_to_failed() -> Result<()> {
         "InvalidFrag".to_owned(),
         "InvalidPwd".to_owned(),
     )?;
+    // Neither side has a candidate to come (W3C webrtc-pc 5.6.4: "failed" needs it).
+    for agent in [&mut a, &mut b] {
+        agent.set_local_gathering_complete();
+        agent.set_remote_end_of_candidates();
+    }
 
     // The checks get no valid answer: each is a transaction that ends after 39.5 seconds
     // (RFC 8489 Section 6.2.1), and only then, every pair failed, the agent fails (RFC 8445
@@ -1126,6 +1134,9 @@ fn test_lite_lifecycle() -> Result<()> {
         states(&mut b).contains(&ConnectionState::Connected),
         "the lite agent reported Connected"
     );
+    // No candidate is to come (W3C webrtc-pc 5.6.4: "failed" needs it).
+    b.set_local_gathering_complete();
+    b.set_remote_end_of_candidates();
 
     a.close()?;
 
@@ -1237,6 +1248,11 @@ fn test_a_restart_from_disconnected_or_failed_is_checking() -> Result<()> {
         let (mut a, mut b) = agent_pair(base, cfg(), cfg())?;
         start_both(&mut a, &mut b, base)?;
         let connected_at = connect(&mut a, &mut b, base)?;
+        if target == ConnectionState::Failed {
+            // W3C webrtc-pc 5.6.4: "failed" needs the end of the candidates.
+            a.set_local_gathering_complete();
+            a.set_remote_end_of_candidates();
+        }
         let (_, at) = run_alone(&mut a, connected_at, |a| a.state() == target)?;
         assert_eq!(a.state(), target);
         a.restart(at, String::new(), String::new(), true)?;

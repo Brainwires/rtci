@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **ICE: a transport is "failed" only once no candidate is to come; until then "disconnected"**
+  (`conf/ice-32-failed-needs-end-of-candidates`; W3C webrtc-pc 5.6.4 `RTCIceTransportState`:
+  "failed" is a transport that "has finished gathering, received an indication that there are
+  no more remote candidates, finished checking all candidate pairs, and all pairs have either
+  failed connectivity checks or lost consent"; "disconnected" one that "has finished checking
+  all existing candidates pairs and not found a connection (or consent checks [RFC7675] once
+  successful, have now failed), but it is still gathering and/or waiting for additional remote
+  candidates"; "The failed and completed states require an indication that there are no
+  additional remote candidates"). The checking timeout (`disconnected_timeout +
+  failed_timeout`), a failed nomination (RFC 8445 7.2.5.3.4) and consent expiry (RFC 7675
+  5.1) failed the transport whether or not the end of the candidates had been indicated; they
+  now make it "disconnected" until it is, and "failed" the moment it is. The indication is:
+  gathering finished (the application's end-of-candidates local candidate, as before) and the
+  peer's end-of-candidates (`add_remote_candidate` with an empty `candidate`, or
+  `a=end-of-candidates`) or a remote description without `a=ice-options:trickle`
+  (`canTrickleIceCandidates` false, which now also lets such a transport be "completed"). While
+  "disconnected" so, the agent keeps its candidates, nominates nothing more, checks again
+  ("checking") when a new pair is formed, and an ICE restart starts it over as before. A pair
+  whose consent expired is removed and the peer's requests on it go unanswered (RFC 7675 5.1:
+  "the same ICE credentials MUST NOT be used on the affected 5-tuple again"). **What changes
+  for an application**: one that never relays the peer's end-of-candidates, or never adds its
+  own when gathering is done, sees "disconnected", never "failed", when the path is lost or
+  never found, and should restart ICE or close on its own timer; one that relays both (or
+  exchanges complete descriptions) sees "failed" as in 0.2.1. New
+  `SettingEngineBuilder::with_ice_failed_without_end_of_candidates(bool)` (default `false`;
+  `true` in the `Chrome` behaviour profile, row `ice.failed-without-end-of-candidates`:
+  libwebrtc fails a transport without the indication) makes the PAC timer the
+  end-of-candidates fallback RFC 8863 section 5 allows ("ICE agents MAY use the PAC timer to
+  also serve as an end-of-candidates fallback"): those events fail the transport once the
+  timer has expired (39.5 s after the checks began, with the defaults), as before. Agent API
+  (additive): `Agent::set_remote_trickles`, `Agent::set_failed_without_end_of_candidates`,
+  `Agent::failed_without_end_of_candidates`. Audit rows WEBRTC-5.6.4-2 and WEBRTC-5.6.4-9
+  `partial` -> `tested` (open MUST 29 -> 27). Tests
+  `agent_checklist_test.rs::checks_that_all_failed_are_disconnected_until_no_candidate_is_to_come`,
+  `a_candidate_that_comes_after_the_checks_failed_is_checked`,
+  `consent_lost_before_the_end_of_candidates_is_disconnected_and_then_failed`,
+  `a_restart_of_an_agent_whose_checks_failed_checks_and_connects`,
+  `a_failed_nomination_before_the_end_of_candidates_is_disconnected`,
+  `a_lite_agent_whose_peer_falls_silent_is_failed_only_after_the_end_of_candidates`,
+  `the_pac_timer_ends_the_candidates_when_set_to`; `tests/states_events_rtc2rtc.rs`
+  (`transport_state_events_come_before_the_connection_events_they_cause` now relays the end of
+  the candidates before "failed", `a_peer_that_cannot_trickle_is_the_indication_that_no_candidate_is_to_come`,
+  `a_cut_link_fails_without_the_end_of_candidates_when_set_to`). Tests that expected "failed"
+  after a lost path now signal the end of the candidates first (agent consent, nomination and
+  ported tests, `tests/lossy_link_rtc2rtc.rs`, stream-driver `virtual_time.rs`).
+
 ### Fixed
 
 - **ICE waits for the peer's checks before failing a checklist: the PAC timer of RFC 8863**
