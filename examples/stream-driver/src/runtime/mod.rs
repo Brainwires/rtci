@@ -667,7 +667,12 @@ pub fn std_multicast(config: &MulticastConfig) -> io::Result<std::net::UdpSocket
             };
             socket.bind(&SocketAddr::new(local.into(), config.port).into())?;
             join_each(&interfaces, |interface| match interface {
-                Some(IpAddr::V4(interface)) => socket.join_multicast_v4(&group, &interface),
+                Some(IpAddr::V4(interface)) => {
+                    if cfg!(windows) && interface.is_loopback() {
+                        warn_loopback_join_on_windows(group);
+                    }
+                    socket.join_multicast_v4(&group, &interface)
+                }
                 _ => socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED),
             })?;
         }
@@ -690,6 +695,20 @@ pub fn std_multicast(config: &MulticastConfig) -> io::Result<std::net::UdpSocket
         }
     }
     Ok(socket.into())
+}
+
+/// Windows keeps a membership joined on the loopback interface after the process has exited,
+/// and then answers 127.0.0.1 for the group to every process that asks which address reaches
+/// it (measured on GitHub-hosted Windows: listed 90 s later, not cleared by an explicit leave;
+/// `peer` module documentation). Said once per process.
+fn warn_loopback_join_on_windows(group: Ipv4Addr) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        log::warn!(
+            "joining {group} on the loopback interface: on Windows this membership outlives the \
+             process, and the system then routes {group} by loopback for other processes"
+        );
+    });
 }
 
 /// Joins once per interface (`None`: the default one, when there is no interface): an error

@@ -40,6 +40,17 @@
 //! on the IPv6 group (and on the IPv4 group of the same interface where the driver has an IPv4
 //! address there), and a query once on each interface.
 //!
+//! On Windows, joining the IPv4 mDNS group on the loopback interface (a driver given 127.0.0.1)
+//! leaves a membership on the "Loopback Pseudo-Interface" after the process has exited
+//! (`netsh interface ipv4 show joins`: references 0; still listed 90 s later on a GitHub-hosted
+//! runner, which is all that was measured; what clears it is not known: an explicit
+//! `IP_DROP_MEMBERSHIP` before the socket closes does not, nor does a later join and leave), and
+//! from then on the system answers 127.0.0.1 to any process that asks which address reaches
+//! 224.0.0.251. Software on the machine that picks its mDNS address that way then uses loopback.
+//! The driver logs a warning when it makes such a join. Loopback candidates are for local use only
+//! (RFC 8445 section 5.1.1.1: "Addresses from a loopback interface MUST NOT be included in the
+//! candidate addresses").
+//!
 //! Where mDNS cannot be sent (a socket that cannot be bound, or a system that refuses every
 //! send to the group: no multicast route, or a Mac application without the Local Network
 //! permission) the driver tells the application with
@@ -145,7 +156,9 @@ pub struct PeerDriverConfig {
 }
 
 impl PeerDriverConfig {
-    /// Host candidates on `addresses`, any free port.
+    /// Host candidates on `addresses`, any free port. With a loopback address and mDNS on
+    /// Windows, see the module documentation: the loopback join of the mDNS group outlives the
+    /// process.
     pub fn on(addresses: Vec<IpAddr>) -> Self {
         Self {
             addresses,

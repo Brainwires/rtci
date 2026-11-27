@@ -29,7 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits and from then on makes Windows answer 127.0.0.1 for the group to every process, which
   made every interop test bind loopback and time out when the driver's tests had run first
   (agent-test run 46045692164); the driver's loopback real-socket test does not run on Windows
-  for the same reason (a long-lived runner would carry the join into the next job). The shared mDNS budget of two drivers (draft
+  for the same reason (a long-lived runner would carry the join into the next job).
+  **Stream driver:** that Windows behaviour is documented (`peer` module, `PeerDriverConfig::on`,
+  `AddressFilter::include_loopback`: a driver with mDNS on a loopback address on Windows leaves
+  the loopback membership behind it; an explicit leave does not prevent it, what clears it is
+  unknown), and the driver logs one warning per process when it joins the IPv4 mDNS group on
+  loopback on Windows (new dependency: `log`). No behaviour change otherwise. The shared mDNS budget of two drivers (draft
   section 7.1) moves to virtual time
   (`mdns_virtual_time.rs::two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time`),
   where it does not depend on multicast at all; the real-socket file keeps the two smoke tests
