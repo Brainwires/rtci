@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+
+- **Two RTP MUST rows are tested** (`conf/rtp-10-must-rows-batch8`; tests and audit only, no
+  engine change; each checked by a mutation, `mut/must8a-gated`). RFC 5576 section 9: a sender
+  is prepared for receivers that ignore its source descriptions: with two video sections of the
+  same payload types, one encoding with RTX and two simulcast layers with RTX, every SSRC
+  described, a receiver handed the offer without any `a=ssrc` / `a=ssrc-group` line still binds
+  every stream to its section and layer and repairs each over its RTX stream, by the MID, RID
+  and RRID the sender writes
+  (`tests/source_descriptions_ignored_rtc2rtc.rs::streams_and_their_repairs_are_bound_when_the_source_descriptions_are_ignored`).
+  RFC 8834 section 4.1, ignore unknown RTP header extensions: the same clause as section 10,
+  fixed in 0.2.1, now cited with its tests. RFC5576-9-1 and RFC8834-4.1-24 `tested` (were
+  `untested`, open-must class B).
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
