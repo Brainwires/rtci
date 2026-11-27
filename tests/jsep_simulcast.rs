@@ -981,7 +981,14 @@ a=simulcast:recv foo;bar;baz
 fn wpt_answerer(
     offer: &str,
 ) -> Result<(RTCPeerConnection, RTCRtpSenderId), Box<dyn std::error::Error>> {
-    let mut pc = default_peer()?;
+    wpt_answerer_on(default_peer()?, offer)
+}
+
+/// [`wpt_answerer`] on the peer `pc`.
+fn wpt_answerer_on(
+    mut pc: RTCPeerConnection,
+    offer: &str,
+) -> Result<(RTCPeerConnection, RTCRtpSenderId), Box<dyn std::error::Error>> {
     pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(crlf(offer))?)?;
     let ids: Vec<_> = pc.get_transceivers().collect();
     assert_eq!(ids.len(), 1, "the offer creates one transceiver");
@@ -1065,10 +1072,22 @@ fn an_offered_pause_mark_leaves_the_proposed_encoding_active() -> TestResult {
 /// WPT `webrtc/protocol/simulcast-answer.html`, "Disabling encodings locally does not change
 /// the SDP": after the answer, encodings made inactive by `set_parameters` are still offered
 /// as they were (RFC 9429 section 5.2.2: the `a=simulcast` line "MUST stay the same"; without
-/// RFC 7728 no stream is marked paused, RFC 8853 section 5.3.2).
+/// RFC 7728 no stream is marked paused, RFC 8853 section 5.3.2). The peer states
+/// `with_rid_pause_marks(false)`, the RFC default: the `Chrome` profile (row
+/// `sdp.rid-pause-marks`) writes `~` for an inactive encoding, as libwebrtc does.
 #[test]
 fn encodings_made_inactive_leave_the_next_offer_alone() -> TestResult {
-    let (mut pc, sender) = wpt_answerer(WPT_SIMULCAST_RECV_OFFER)?;
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let peer = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_rid_pause_marks(false)
+                .build(),
+        )
+        .build(Instant::now())?;
+    let (mut pc, sender) = wpt_answerer_on(peer, WPT_SIMULCAST_RECV_OFFER)?;
     let answer = pc.create_answer(None)?;
     pc.set_local_description(Instant::now(), answer)?;
     let mut s = pc.rtp_sender(sender).expect("sender");
@@ -1087,30 +1106,133 @@ fn encodings_made_inactive_leave_the_next_offer_alone() -> TestResult {
     Ok(())
 }
 
-/// `add_track` after a remote offer to receive simulcast reuses the transceiver the offer
-/// created (W3C `addTrack`) and gives its sender the track's encodings; a rollback of the offer
-/// keeps the transceiver (the application touched it, RFC 9429 section 5.7) and those
-/// encodings, not the empty set the sender had before the offer proposed its own.
+/// W3C `addTrack` reusing a sender ("If sender is not null, run the following steps to use
+/// that sender: Set sender.[[SenderTrack]] to track ..."): nothing else of the sender changes,
+/// so a track added after a remote offer to receive simulcast, before the answer, is sent with
+/// the encodings the offer proposed (`[[SendEncodings]]` is proposedSendEncodings since that
+/// offer, "Create an RTCRtpSender ... using proposedSendEncodings"), and the answer sends them.
+/// WPT `webrtc/simulcast/negotiation-encodings.https.html`, "sRD(simulcast offer), addTrack,
+/// then rollback brings us back to having a single encoding", first half.
 #[test]
-fn a_track_added_after_a_simulcast_offer_survives_its_rollback() -> TestResult {
+fn a_track_added_after_a_simulcast_offer_keeps_the_proposed_encodings() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0089))?;
+    assert_eq!(
+        pc.get_transceivers().count(),
+        1,
+        "addTrack reuses the transceiver"
+    );
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    // The first takes the track's SSRC, as when the track comes before the offer.
+    let first_ssrc = pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc;
+    assert_eq!(first_ssrc, Some(0x0516_0089));
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send foo;bar;baz"],
+        "{}",
+        answer.sdp
+    );
+    Ok(())
+}
+
+/// The same for W3C `replaceTrack`, which sets only `[[SenderTrack]]` too.
+#[test]
+fn a_track_replaced_in_after_a_simulcast_offer_keeps_the_proposed_encodings() -> TestResult {
+    let (mut pc, sender) = wpt_answerer(WPT_SIMULCAST_RECV_OFFER)?;
+    pc.rtp_sender(sender)
+        .expect("sender")
+        .replace_track(Some(jsep_common::video_track("replaced", 0x0516_0189)))?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:send foo;bar;baz"],
+        "{}",
+        answer.sdp
+    );
+    Ok(())
+}
+
+/// A rollback of that offer keeps the transceiver (the application touched it, RFC 9429
+/// section 5.7) and, by the W3C text, its encodings: the sender of a transceiver a remote
+/// offer created starts with `[[LastStableRidlessSendEncodings]]` "initialized to null"
+/// ("create an RTCRtpSender"), the slot is only set when the connection reaches stable, and the
+/// rollback restores it only "If [[LastStableRidlessSendEncodings]] is not null". WPT
+/// `negotiation-encodings.https.html` ("sRD(simulcast offer), addTrack, then rollback brings
+/// us back to having a single encoding") expects one rid-less encoding instead, which the text
+/// does not say.
+#[test]
+fn a_rollback_keeps_the_proposed_encodings_of_a_transceiver_the_offer_created() -> TestResult {
     let mut pc = default_peer()?;
     let now = Instant::now();
     pc.set_remote_description(
         now,
         RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
     )?;
-    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0086))?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0289))?;
     pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
     assert_eq!(pc.get_transceivers().count(), 1);
-    let ssrcs: Vec<_> = pc
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    Ok(())
+}
+
+/// `with_rollback_resets_offer_created_senders(true)`, the WPT form
+/// (`negotiation-encodings.https.html`, "sRD(simulcast offer), addTrack, then rollback brings
+/// us back to having a single encoding", w3c/webrtc-pc#2764): the rollback returns that sender
+/// to one encoding without a rid, the track's.
+#[test]
+fn a_rollback_can_return_an_offer_created_sender_to_one_encoding() -> TestResult {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_rollback_resets_offer_created_senders(true)
+                .build(),
+        )
+        .build(Instant::now())?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0389))?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.get_transceivers().count(), 1);
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("", None)]));
+    let ssrc = pc
         .rtp_sender(sender)
         .expect("sender")
         .get_parameters()
-        .encodings
-        .iter()
-        .map(|e| e.rtp_coding_parameters.ssrc)
-        .collect();
-    assert_eq!(ssrcs, [Some(0x0516_0086)]);
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc;
+    assert_eq!(ssrc, Some(0x0516_0389));
     Ok(())
 }
 
