@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key expansion per packet).
   Performance: zeroize-3
 
+### Behaviour changes
+
+- **A remote SSRC that times out no longer mutes its track** (`conf/jsep-97-rtp-timeout-does-not-mute`;
+  W3C webrtc-pc Candidate Correction 57, w3c/webrtc-pc PR #3082, 2025-10-23: "RTCP timeout is
+  not a reason to mute a remote track"). Section 9.3 of the Recommendation muted the track when
+  an SSRC was removed "either due to reception of a BYE or via timeout"; the correction keeps
+  the BYE only. The engine muted on the RTP timeout (RFC 3550 section 6.3.5, the RTCP
+  session's `SourceTimedOut`) as well; now the source is forgotten and the track left as it
+  is. A BYE still mutes it, and `with_source_departure_ends_track(true)` still ends a track
+  whose SSRCs have all left by BYE or timeout. Upgrade: the previous form is
+  `SettingEngineBuilder::with_rtp_timeout_mutes_track(true)` (new; in no behaviour profile).
+  Audit rows RFC8830-3-8, WEBRTC-9.3-2.
+
 ### Changed
 
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
