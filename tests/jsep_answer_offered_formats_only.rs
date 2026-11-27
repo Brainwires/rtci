@@ -225,6 +225,12 @@ a=fmtp:111 minptime=10;useinbandfec=1
 
 /// Codec preferences that name a format the offer lacks: with the setting the answer still
 /// lists only what was offered (libwebrtc negotiates the preferences against the offer).
+///
+/// The engine already answers so without the setting: on the mutation branch (the setting
+/// read but not applied, agent-test run 45969404986) this test passed, so through the public
+/// API preferences set after the offer never bring an unoffered format into the answer, and
+/// the setting's filter over the preferred formats (`offered_formats_only`) is defensive. The
+/// test pins the outcome, not the filter.
 #[test]
 fn with_the_setting_codec_preferences_add_no_format_the_offer_lacks() -> TestResult {
     let offer = crlf(&format!(
