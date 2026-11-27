@@ -1113,3 +1113,87 @@ fn a_track_added_after_a_simulcast_offer_survives_its_rollback() -> TestResult {
     assert_eq!(ssrcs, [Some(0x0516_0086)]);
     Ok(())
 }
+
+/// WPT `webrtc/simulcast/rid-manipulation.html`, "Remote reanswer altering rids does not throw
+/// an exception": a sender added with `sendEncodings` 0, 1, 2 (`addTransceiver`, no track) is
+/// answered `a=simulcast:recv 1;2`, then re-offers and is answered `a=simulcast:recv 0;2`, each
+/// answer carrying `a=rid:0 recv`, `a=rid:1 recv` and `a=rid:2 recv` (the WPT's `midToRid`
+/// writes all three). The second answer names rid 0, which the sender's envelope no longer has
+/// and its re-offer did not offer. RFC 8851 section 6.4 step 1: "If no matching line can be
+/// located in the offer, the "a=rid" line is ignored"; RFC 8853 section 5.3.3 only has the
+/// offerer not send removed rid-ids. The answer is applied, not refused: rid 0 is ignored and
+/// the envelope narrows to 2 (W3C webrtc-pc "set the RTCSessionDescription": "remove the
+/// dictionaries that correspond to the missing layers").
+#[test]
+fn a_reanswer_naming_a_rid_outside_the_offer_ignores_it() -> TestResult {
+    use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    let mut pc1 = default_peer()?;
+    let encodings = ["0", "1", "2"]
+        .iter()
+        .map(|rid| RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                rid: (*rid).to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .collect();
+    let id = pc1.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendrecv,
+            streams: vec![],
+            send_encodings: encodings,
+        }),
+    )?;
+    let sender = pc1
+        .rtp_transceiver(id)
+        .expect("the transceiver")
+        .sender()
+        .expect("its sender");
+    let mut pc2 = default_peer()?;
+    let now = Instant::now();
+
+    // One round of the WPT's `negotiateSfuAnswer(asimulcast)`.
+    let mut sfu_answer =
+        |pc1: &mut RTCPeerConnection,
+         simulcast: &str|
+         -> Result<(String, RTCSessionDescription), Box<dyn std::error::Error>> {
+            let offer = pc1.create_offer(None)?;
+            pc1.set_local_description(now, offer.clone())?;
+            pc2.set_remote_description(now, offer.clone())?;
+            let answer = pc2.create_answer(None)?;
+            pc2.set_local_description(now, answer.clone())?;
+            let mut sdp: String = answer
+                .sdp
+                .lines()
+                .filter(|l| !l.starts_with("a=rid:") && !l.starts_with("a=simulcast:"))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            sdp.push_str(&format!(
+                "a=rid:0 recv\na=rid:1 recv\na=rid:2 recv\n{simulcast}\n"
+            ));
+            Ok((offer.sdp, RTCSessionDescription::answer(crlf(&sdp))?))
+        };
+
+    let (offer, answer) = sfu_answer(&mut pc1, "a=simulcast:recv 1;2")?;
+    assert_eq!(
+        lines_with(&offer, "a=simulcast:"),
+        vec!["a=simulcast:send 0;1;2"]
+    );
+    pc1.set_remote_description(now, answer)?;
+    assert_eq!(
+        sent_layers(&mut pc1, sender),
+        layers(&[("1", None), ("2", None)])
+    );
+
+    let (offer, answer) = sfu_answer(&mut pc1, "a=simulcast:recv 0;2")?;
+    assert_eq!(
+        lines_with(&offer, "a=simulcast:"),
+        vec!["a=simulcast:send 1;2"],
+        "{offer}"
+    );
+    pc1.set_remote_description(now, answer)?;
+    assert_eq!(sent_layers(&mut pc1, sender), layers(&[("2", None)]));
+    Ok(())
+}
