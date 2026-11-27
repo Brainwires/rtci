@@ -85,13 +85,17 @@ impl Peer {
             media_engine.register_default_codecs()?;
         }
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
-        let pc = RTCPeerConnectionBuilder::new()
-            .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_setting_engine(
+        // `adds_formats` false: no setting call at all, so the default is what is tested.
+        let mut builder = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build());
+        if adds_formats {
+            builder = builder.with_setting_engine(
                 rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
-                    .with_answer_offered_formats_only(!adds_formats)
+                    .with_answer_offered_formats_only(false)
                     .build(),
-            )
+            );
+        }
+        let pc = builder
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
