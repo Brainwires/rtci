@@ -57,6 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key expansion per packet).
   Performance: zeroize-3
 
+### Behaviour changes
+
+- **A later remote offer that asks a simulcast sender for rids outside its envelope is
+  answered, not refused** (`conf/jsep-96-remote-offer-rid-changes-are-answered`; W3C
+  webrtc-pc Candidate Correction 37, w3c/webrtc-pc PR #2794, 2022-12-08: "Don't fail
+  sRD(offer) over rid mismatch, just answer with unicast"). The engine refused such an offer
+  with InvalidAccessError, from the step of the Recommendation that the correction emptied
+  ("This specification does not allow remotely initiated RID renegotiation"). Now it is
+  applied: the sender's encodings stay, the answer lists only the offered rids the sender has
+  (none, and no `a=simulcast`, when every rid is new), and applying the answer removes the
+  encodings it does not list, the first staying when it lists none. Upgrade: an application
+  that relied on the refusal sets `SettingEngineBuilder::with_remote_rid_renegotiation_refused(true)`
+  (new; in no behaviour profile). Audit rows WEBRTC-4.4.1.4-10, WEBRTC-5.4.1-3.
+
 ### Changed
 
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
