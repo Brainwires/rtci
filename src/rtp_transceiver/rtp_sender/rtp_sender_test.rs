@@ -12,6 +12,7 @@ use crate::peer_connection::configuration::media_engine::{
 };
 use crate::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use crate::peer_connection::sdp::RTCSessionDescription;
 use crate::peer_connection::transport::RTCDtlsRole;
 use crate::peer_connection::util_test::{
     Pair, RecordingInterceptor, default_media_engine, new_pair, new_pair_with, new_peer,
@@ -290,11 +291,57 @@ fn test_rtp_sender_replace_track_invalid_track_kind_change() -> Result<()> {
     receiver.close()
 }
 
+/// The answer in the browsers' form: its video section keeps only the formats the offer has
+/// (an `rtci` answer lists its other formats after them, RFC 9429 section 5.3.1, and a format
+/// the answer lists is negotiated for the offerer's sending: W3C [[SendCodecs]]).
+fn answer_with_offered_formats_only(answer: &str, offer: &str) -> String {
+    let formats = |sdp: &str| -> Vec<String> {
+        sdp.lines()
+            .find(|l| l.starts_with("m=video"))
+            .map(|m| m.split_whitespace().skip(3).map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let offered = formats(offer);
+    let mut out = vec![];
+    let mut in_video = false;
+    for line in answer.split("\r\n") {
+        if line.starts_with("m=") {
+            in_video = line.starts_with("m=video");
+            if in_video {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                let kept: Vec<&str> = fields[3..]
+                    .iter()
+                    .copied()
+                    .filter(|pt| offered.iter().any(|o| o == pt))
+                    .collect();
+                out.push(format!("{} {}", fields[..3].join(" "), kept.join(" ")));
+                continue;
+            }
+        }
+        if in_video {
+            let pt = ["a=rtpmap:", "a=fmtp:", "a=rtcp-fb:"]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .and_then(|rest| rest.split_whitespace().next());
+            if let Some(pt) = pt
+                && pt != "*"
+                && !offered.iter().any(|o| o == pt)
+            {
+                continue;
+            }
+        }
+        out.push(line.to_owned());
+    }
+    out.join("\r\n")
+}
+
 /// Replaced: the old test expected `replace_track` to refuse a track whose codec (VP9) was not
-/// negotiated (`ErrUnsupportedCodec`). W3C `replaceTrack` checks only the kind, and so does the
-/// sans-IO sender; what keeps an unnegotiated codec off the wire is the sender's negotiated
-/// parameters. This checks that: after the replacement the sender still offers only the
-/// preferred codec, and media written with VP9's payload type leaves as VP8.
+/// negotiated (`ErrUnsupportedCodec`). W3C `replaceTrack` checks only the kind (and "the
+/// sender's already-negotiated envelope"), and so does the sans-IO sender; what keeps an
+/// unnegotiated codec off the wire is the sender's negotiated parameters. This checks that:
+/// after the replacement the sender still offers only the preferred codec, and media written
+/// with VP9's payload type leaves as VP8. The answer has the offered formats only (jsep-91: a
+/// format an `rtci` answer adds is negotiated for sending, W3C [[SendCodecs]], so VP9 would be).
 #[test]
 fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     let (mut sender, mut receiver) = new_pair()?;
@@ -310,7 +357,15 @@ fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
             payload_type: 96,
         }])?;
 
-    signal_pair(&mut sender, &mut receiver)?;
+    let offer = sender.create_offer(None)?;
+    sender.set_local_description(Instant::now(), offer.clone())?;
+    receiver.set_remote_description(Instant::now(), offer.clone())?;
+    let answer = receiver.create_answer(None)?;
+    receiver.set_local_description(Instant::now(), answer.clone())?;
+    sender.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::answer(answer_with_offered_formats_only(&answer.sdp, &offer.sdp))?,
+    )?;
     let mut pair = Pair::new(sender, receiver);
     pair.connect()?;
 
