@@ -2762,14 +2762,20 @@ impl RTCPeerConnection {
                         "{err} (RFC 9429 section 5.8.2, RFC 6236 section 3.1)"
                     )));
                 }
-                if let Some(err) = sdp::simulcast::malformed_simulcast_line(media) {
+                if let Some(err) = sdp::simulcast::malformed_simulcast_line(
+                    media,
+                    self.setting_engine.rid_id_grammar(),
+                ) {
                     return Err(Error::SdpInvalidValue(format!(
                         "{err} (RFC 9429 section 5.8, RFC 8853 section 5.2)"
                     )));
                 }
                 // RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line
                 // MUST exist as 'a=rid' lines."
-                if let Some(rid) = sdp::simulcast::simulcast_rid_without_line(media) {
+                if let Some(rid) = sdp::simulcast::simulcast_rid_without_line(
+                    media,
+                    self.setting_engine.rid_id_grammar(),
+                ) {
                     return Err(Error::SdpInvalidValue(format!(
                         "a=simulcast names rid {rid} without an a=rid line (RFC 9429 section 5.8.3)"
                     )));
@@ -2807,13 +2813,16 @@ impl RTCPeerConnection {
             if !envelope {
                 continue;
             }
-            if let Some(rid) = sdp::get_rids(media).into_iter().find(|rid| {
-                rid.direction == sdp::SimulcastDirection::Recv
-                    && rid.simulcast
-                    && !encodings
-                        .iter()
-                        .any(|e| e.rtp_coding_parameters.rid == rid.id)
-            }) {
+            if let Some(rid) = sdp::get_rids(media, self.setting_engine.rid_id_grammar())
+                .into_iter()
+                .find(|rid| {
+                    rid.direction == sdp::SimulcastDirection::Recv
+                        && rid.simulcast
+                        && !encodings
+                            .iter()
+                            .any(|e| e.rtp_coding_parameters.rid == rid.id)
+                })
+            {
                 log::warn!(
                     "remote description renegotiates RIDs: rid {} is outside the simulcast \
                      envelope (W3C webrtc-pc 4.4.1.6, 5.4.1)",
@@ -2884,6 +2893,7 @@ impl RTCPeerConnection {
         crate::peer_connection::sdp::check_attribute_lines(
             parsed,
             self.setting_engine.strict_sdp_attribute_grammar,
+            self.setting_engine.rid_id_grammar(),
         )?;
         Ok(())
     }

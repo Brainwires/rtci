@@ -696,6 +696,53 @@ fn a_simulcast_line_naming_a_rid_outside_the_grammar_refuses_the_description() -
     Ok(())
 }
 
+/// `SettingEngineBuilder::with_published_rid_id_grammar(true)` reads received rid-ids as RFC
+/// 8851 section 10 was published (`1*(alpha-numeric / "-" / "_")`, any length): the lines the
+/// corrected grammar discards are received, and an `a=simulcast` line naming them is applied.
+#[test]
+fn with_the_published_grammar_dashes_underscores_and_long_rids_are_taken() -> TestResult {
+    let published = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::default()
+                    .with_published_rid_id_grammar(true)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    let long = "a".repeat(256);
+    let mut answerer = published()?;
+    let rids = received_rids_with(
+        &mut answerer,
+        &format!("a=rid:a-b send\r\na=rid:a_b send\r\na=rid:{long} send\r\n"),
+    )?;
+    assert_eq!(
+        rids,
+        vec![
+            "f".to_owned(),
+            "h".to_owned(),
+            "a-b".to_owned(),
+            "a_b".to_owned(),
+            long.clone()
+        ]
+    );
+
+    for id in ["a-b".to_owned(), "a_b".to_owned(), long] {
+        let mut pc = published()?;
+        pc.set_remote_description(
+            Instant::now(),
+            remote_offer(
+                "sendonly",
+                &format!("a=rid:f send\na=rid:{id} send\na=simulcast:send f;{id}\n"),
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
 /// RFC 8851 section 6.1: "any payload type listed in 'pt=' MUST be one of the formats of the
 /// m= line": an encoding's `payload_types` keeps in the offer only the ones the section has,
 /// and the offerer's answer to an offer `~` it does not support is not applied as a pause

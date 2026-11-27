@@ -79,6 +79,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour change (0.3.0): received rid-ids follow RFC 8851 as corrected by erratum 7132**
+  (`conf/rid-1-rid-id-grammar-follows-erratum-7132`; audit row RFC8851-10-1). Erratum 7132
+  (Verified 2022-10-13) corrects section 10 to `rid-id = 1*255(alpha-numeric)`, "consistent
+  with the rules for the RtpStreamId/RepairedRtpStreamId SDES from RFC 8852 section 3"; the
+  published grammar also took `-` and `_`, of any length. `rtci-sdp`: `Rid::parse`,
+  `Simulcast::parse`, `Rid::new` and `depend=` use the corrected grammar; new `RidIdGrammar`
+  (`Corrected`, the default, and `Published`) with `Rid::parse_with` / `Simulcast::parse_with`.
+  Engine: a received `a=rid` line whose rid-id has `-` or `_` or more than 255 characters is
+  discarded (RFC 8851 6.2.2 step 1), and a description whose `a=simulcast` names one is refused
+  (RFC 9429 5.8), where 0.2 took both. Upgrade: a peer that writes such rids needs
+  `SettingEngineBuilder::with_published_rid_id_grammar(true)` (in no profile: libwebrtc takes
+  only 1 to 16 alphanumerics and Firefox only alphanumerics). Rids set through the API were
+  already checked to 1 to 255 alphanumerics.
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
   They are used by the ring provider's HMAC-SHA1 only; the nested lock file of the
   test-environment's layers peer follows.

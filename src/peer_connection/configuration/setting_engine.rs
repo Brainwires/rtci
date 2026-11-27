@@ -569,6 +569,8 @@ pub struct SettingEngine {
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// [`SettingEngineBuilder::with_published_rid_id_grammar`].
+    pub(crate) published_rid_id_grammar: bool,
     /// [`SettingEngineBuilder::with_rollback_content_ignored`].
     pub(crate) rollback_content_ignored: bool,
     /// [`SettingEngineBuilder::with_rollback_resets_offer_created_senders`].
@@ -729,6 +731,7 @@ impl SettingEngine {
             srtp_rekeying_both_at_warning: Default::default(),
             ignore_rid_pause_for_recv: Default::default(),
             rid_pause_marks: Default::default(),
+            published_rid_id_grammar: Default::default(),
             rollback_content_ignored: Default::default(),
             rollback_resets_offer_created_senders: Default::default(),
             strict_sdp_attribute_grammar: Default::default(),
@@ -820,6 +823,16 @@ impl SettingEngine {
     /// the server.
     pub fn turn_allocation_refresh_interval_cap(&self) -> Option<Duration> {
         self.turn_allocation_refresh_interval_cap
+    }
+
+    /// The `rid-id` grammar received lines are read with
+    /// ([`SettingEngineBuilder::with_published_rid_id_grammar`]).
+    pub(crate) fn rid_id_grammar(&self) -> sdp::attribute::RidIdGrammar {
+        if self.published_rid_id_grammar {
+            sdp::attribute::RidIdGrammar::Published
+        } else {
+            sdp::attribute::RidIdGrammar::Corrected
+        }
     }
 
     /// The SOFTWARE of the ICE agent's STUN messages, in the form of
@@ -3458,6 +3471,23 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Reads the rid-ids of received `a=rid` and `a=simulcast` lines with the grammar of RFC
+    /// 8851 section 10 as published, `rid-id = 1*(alpha-numeric / "-" / "_")` of any length,
+    /// instead of the corrected one. The default is `false`.
+    ///
+    /// Erratum 7132 (Verified 2022-10-13) corrects the grammar to `rid-id =
+    /// 1*255(alpha-numeric)`, "consistent with the rules for the RtpStreamId/RepairedRtpStreamId
+    /// SDES from RFC 8852 section 3", the identifier a rid is sent as. By default a received
+    /// `a=rid` line whose rid-id has `-` or `_` or more than 255 characters is discarded (RFC
+    /// 8851 section 6.2.2 step 1: "In the case of a syntax error, the 'a=rid' line is
+    /// discarded"), and a description whose `a=simulcast` line names one is refused (RFC 9429
+    /// section 5.8). `true` takes them, for a peer that still writes the published form. Rids
+    /// this endpoint writes are always in the corrected form (W3C webrtc-pc addTransceiver).
+    pub fn with_published_rid_id_grammar(mut self, published: bool) -> Self {
+        self.0.published_rid_id_grammar = published;
         self
     }
 
