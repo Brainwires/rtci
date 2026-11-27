@@ -61,6 +61,21 @@ fn mdns_egress_ip() -> Option<IpAddr> {
         .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
+/// The address the system answers for the mDNS group: a UDP socket connected to
+/// 224.0.0.251:5353 and its local address. On Windows a process that joined the group on
+/// loopback and sent to it there leaves this answer at 127.0.0.1 for every process after it has
+/// exited (hosted Windows, agent-test run 46049295359; the `netsh` joins table entry alone does
+/// not move it): the Windows post-condition of the loopback test.
+fn group_answer() -> Option<IpAddr> {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect((rtci::mdns::MDNS_MULTICAST_IPV4, rtci::mdns::MDNS_PORT))?;
+            socket.local_addr()
+        })
+        .ok()
+        .map(|addr| addr.ip())
+}
+
 /// The address the test runs on ([`mdns_egress_ip`]), or `None` when this host has no
 /// interface that carries multicast to the mDNS group (some GitHub-hosted Windows images have
 /// none) or does not deliver it back to this process on it ([`multicast_or_skip`]); the test is
@@ -345,6 +360,7 @@ async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> R
         return Ok(());
     }
     let limit = MdnsRateLimit::default();
+    let answer_before = group_answer();
     let mut a = Side::new(ip, Some(limit.clone()))?;
     let mut b = Side::new(ip, Some(limit))?;
     let up = connect(&mut a, &mut b, Duration::from_secs(30)).await?;
@@ -360,5 +376,16 @@ async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> R
         b.driver.mdns_datagrams_sent(),
         b.driver.mdns_datagrams_received()
     );
+    // Windows post-condition, should the test run there again: once the drivers (and their
+    // mDNS sockets) are gone, the host's answer for the group is not left at loopback (see
+    // `group_answer`), unless it was loopback before.
+    drop((a, b));
+    if cfg!(windows) && answer_before.is_some_and(|ip| !ip.is_loopback()) {
+        let after = group_answer();
+        assert!(
+            after.is_some_and(|ip| !ip.is_loopback()),
+            "the loopback test left the group's answer at {after:?} (was {answer_before:?})"
+        );
+    }
     Ok(())
 }
