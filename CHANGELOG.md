@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A payload type number keeps the format it was first given for the whole session**
+  (`conf/jsep-90-answer-added-format-keeps-payload-type-meaning`; RFC 3264 section 8.3.2: "the
+  mapping from a particular dynamic payload type number to a particular codec within that media
+  stream MUST NOT change for the duration of a session"; RFC 9143 section 9.1.1; W3C webrtc-pc
+  `setCodecPreferences`: a removed codec's "payload type is not to be reused in future offers or
+  answers"). MUST violation present in 0.2.0 and 0.2.1: a format this endpoint's answer added
+  beyond the offer (RFC 9429 5.3.1), and a format its later offer numbered afresh, took its
+  registered number whenever the current offer did not use it, also when an earlier description
+  of the session had given that number another format (offer 1 with H.264 on 98, offer 2
+  without it: the answer to offer 2 listed VP9 on 98; the same for a format never accepted).
+  The engine now remembers every dynamic number each applied description gave a format
+  (connection-wide) and gives none of them to another format: such a format takes a number it
+  had before, or one no description used. Engine behaviour change YES (renegotiated answers and
+  offers may number added formats otherwise); API unchanged; first answers and initial offers
+  unchanged (pinned answers and offers unchanged). Tests `tests/jsep_payload_type_meaning.rs`.
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;

@@ -534,6 +534,15 @@ pub struct MediaEngine {
     pub(crate) negotiated_video_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) negotiated_audio_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) negotiated_application_codecs: Vec<RTCRtpCodecParameters>,
+    /// Every dynamic payload type number a description of the session (local or remote, offer
+    /// or answer) has given a format, with the first format it named: RFC 3264 section 8.3.2,
+    /// "the mapping from a particular dynamic payload type number to a particular codec within
+    /// that media stream MUST NOT change for the duration of a session". Kept for the whole
+    /// connection, not per m= section: in a BUNDLE group one number has one configuration
+    /// (RFC 9143 section 9.1.1), so this only ever avoids a number. A format this endpoint
+    /// adds to an answer or numbers in an offer never takes a number this maps to another
+    /// format ([`Self::payload_type_means_another_format`]).
+    pub(crate) payload_type_history: std::collections::HashMap<PayloadType, RTCRtpCodec>,
     /// The payload types of the negotiated lists that number an SFrame section's formats
     /// (`a=sframe`, draft-ietf-avtcore-rtp-sframe-03 section 6): the SFrame sections of a
     /// connection number their formats apart from the plain ones ("payload types for media
@@ -607,6 +616,7 @@ impl MediaEngine {
             negotiated_video_codecs: Default::default(),
             negotiated_audio_codecs: Default::default(),
             negotiated_application_codecs: Default::default(),
+            payload_type_history: Default::default(),
             sframe_payload_types: Default::default(),
             header_extensions: Default::default(),
             negotiated_header_extensions: Default::default(),
@@ -1782,6 +1792,45 @@ impl MediaEngine {
     /// dynamic one (96 to 127, then 35 to 63; never 64 to 95, RFC 5761 section 4); an added
     /// RTX format's `apt` follows its primary. Negotiated payload types are never renumbered
     /// (section 5.2.2: they "MUST stay the same" for the session's lifetime).
+    /// Records the payload type numbers of an applied description (RFC 3264 section 8.3.2): each
+    /// dynamic number (96 to 127, 35 to 63) of an accepted m= section that no earlier
+    /// description of the session gave a format keeps the format this one gives it.
+    pub(crate) fn record_payload_types(&mut self, description: &SessionDescription) {
+        for media in &description.media_descriptions {
+            if media.media_name.port.value == 0 {
+                continue;
+            }
+            let Ok(codecs) = crate::peer_connection::sdp::codecs_from_media_description(media)
+            else {
+                continue;
+            };
+            for codec in codecs {
+                if (96..=127).contains(&codec.payload_type)
+                    || (35..=63).contains(&codec.payload_type)
+                {
+                    self.payload_type_history
+                        .entry(codec.payload_type)
+                        .or_insert(codec.rtp_codec);
+                }
+            }
+        }
+    }
+
+    /// Whether an earlier description of the session gave `payload_type` a format other than
+    /// `codec` (RFC 3264 section 8.3.2), so that `codec` must not take that number.
+    pub(crate) fn payload_type_means_another_format(
+        &self,
+        payload_type: PayloadType,
+        codec: &RTCRtpCodecParameters,
+    ) -> bool {
+        self.payload_type_history
+            .get(&payload_type)
+            .is_some_and(|earlier| {
+                codec_parameters_fuzzy_search(earlier, std::slice::from_ref(codec)).1
+                    != CodecMatch::Exact
+            })
+    }
+
     pub(crate) fn offer_codecs_for_section(
         &self,
         kind: RtpCodecKind,
@@ -1810,13 +1859,18 @@ impl MediaEngine {
             .chain(&self.video_codecs)
             .map(|codec| codec.payload_type)
             .collect();
+        // RFC 3264 section 8.3.2: a number an earlier description of the session gave a format
+        // keeps meaning it; a new number is one no description used.
         let mut free = (96..=127u8)
             .chain(35..=63u8)
-            .filter(|pt| !reserved.contains(pt));
-        let mut number = |registered_pt: PayloadType,
+            .filter(|pt| !reserved.contains(pt) && !self.payload_type_history.contains_key(pt));
+        let mut number = |codec: &RTCRtpCodecParameters,
                           taken: &mut std::collections::HashSet<PayloadType>|
          -> Option<PayloadType> {
-            let pt = if taken.contains(&registered_pt) {
+            let registered_pt = codec.payload_type;
+            let pt = if taken.contains(&registered_pt)
+                || self.payload_type_means_another_format(registered_pt, codec)
+            {
                 free.by_ref().find(|pt| !taken.contains(pt))?
             } else {
                 registered_pt
@@ -1837,7 +1891,7 @@ impl MediaEngine {
                     primaries.insert(codec.payload_type, negotiated.payload_type);
                 }
                 _ => {
-                    let Some(pt) = number(codec.payload_type, &mut taken) else {
+                    let Some(pt) = number(codec, &mut taken) else {
                         continue;
                     };
                     primaries.insert(codec.payload_type, pt);
@@ -1860,7 +1914,7 @@ impl MediaEngine {
             if repaired {
                 continue;
             }
-            let Some(pt) = number(codec.payload_type, &mut taken) else {
+            let Some(pt) = number(codec, &mut taken) else {
                 continue;
             };
             let mut rtx = (*codec).clone();
