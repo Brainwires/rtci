@@ -1813,11 +1813,14 @@ pub(crate) fn rtp_capabilities(
     }
     Some(RTCRtpCapabilities {
         codecs,
+        // W3C webrtc-pc 5.2 / 5.3: "the list of implemented header extensions for sending"
+        // ("for receiving"), "the most optimistic view": the registered extensions of the kind
+        // that the direction allows, once per URI (a dictionary has the URI only), never the
+        // set a negotiation narrowed them to.
         header_extensions: media_engine
-            .get_rtp_parameters_by_kind(kind, direction)
-            .header_extensions
+            .registered_header_extension_uris(kind, direction)
             .into_iter()
-            .map(|h| RTCRtpHeaderExtensionCapability { uri: h.uri })
+            .map(|uri| RTCRtpHeaderExtensionCapability { uri })
             .collect(),
     })
 }

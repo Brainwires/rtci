@@ -165,6 +165,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`get_capabilities(kind).header_extensions` lists the registered header extensions after a
+  negotiation too** (`conf/w3c-3-capabilities-list-registered-header-extensions`; W3C webrtc-pc
+  5.2 / 5.3: "the list of implemented header extensions for sending" / "for receiving", "the
+  most optimistic view"). From 0.1.0 a negotiation narrowed the list to the extensions the
+  answer accepted (an answer with MID alone left MID alone). Now the registered extensions of
+  the kind that the direction allows, once per URI, in registration order (before: by id).
+  Descriptions are not affected: later offers keep each extension's id (RFC 8285 section 6).
+  Test `tests/rtp_object_model.rs::get_capabilities_lists_the_registered_header_extensions_after_a_negotiation`.
 - **`RTCRtpSender::get_capabilities` / `RTCRtpReceiver::get_capabilities` list the implemented
   formats after a negotiation too** (`conf/jsep-95-answers-list-offered-formats-by-default`; W3C
   webrtc-pc 5.2 / 5.3: "the list of implemented send codecs", "the most optimistic view of the
@@ -175,7 +183,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/early_media_rtc2rtc.rs::a_format_a_later_offer_adds_is_received_as_that_format_before_the_answer`
   found no VP9). Test
   `tests/rtp_object_model.rs::get_capabilities_is_the_same_after_a_negotiation_that_narrowed_the_formats`.
-  Header extensions are still the negotiated ones after a negotiation (follow-up).
 - **The offerer sends with the answer's most preferred format it can send, also one its codec
   preferences left out of the offer** (`conf/jsep-91-offerer-sends-answers-preferred-format`;
   RFC 9429 section 5.11, in steps that "MUST be performed": "choose the media format to send as
