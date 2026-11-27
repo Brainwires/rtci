@@ -160,7 +160,7 @@ keys are mostly hidden under the SRTCP ones in this table.
 
 | Claim | Where it is asserted |
 |---|---|
-| ring provider (the default), optimised build, every profile, both ways of keying: no key the session derives is found in any form in the dead stack frames of the thread that built the contexts, protected and unprotected packets, re-keyed or tore down | `with_ring_key_handling_leaves_no_key_in_dead_stack_frames`, CI job `key_residue`: x86-64 Linux with the workspace's `rust-version` (the oldest supported compiler) and with stable, AArch64 macOS with stable |
+| ring provider (the default), unoptimised and optimised builds, every profile, both ways of keying: no key the session derives is found in any form in the dead stack frames of the thread that built the contexts, protected and unprotected packets, re-keyed or tore down | `with_ring_key_handling_leaves_no_key_in_dead_stack_frames`, CI job `key_residue`: x86-64 Linux with the workspace's `rust-version` (the oldest supported compiler) and with stable, AArch64 macOS with stable |
 | the same thread, the same build: nothing is left anywhere else in the process after the teardown, and no master-key schedule is in the heap while the contexts live | the same test, Linux (whole-process search) |
 | either provider, unoptimised and optimised builds: building and tearing down leave nothing in dead stack frames | the same test and `with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames`: CI job `key_residue` (both builds, the same compilers and platforms), the ordinary test jobs (Linux, macOS, stable, unoptimised) and the test environment (rustc 1.99.1, unoptimised) |
 | HMAC-SHA1 computed in the keyed object is correct and the object is reusable | `rtci-crypto/tests/hmac_sha1_vectors.rs` (RFC 2202 cases 1 to 7), and the SRTP, DTLS and STUN vectors of their crates |
@@ -181,28 +181,24 @@ bytes of `aes`'s union, carried from the stack). Cost: docs/performance.md, row 
 - **The AWS-LC provider's packet path.** AWS-LC computes each HMAC on a copy of the keyed
   context in a stack frame of its own, and its AES-GCM leaves a GHASH table entry in one: every
   protected or unprotected packet leaves the SRTP / SRTCP HMAC-SHA1 states (AES-CM and NULL
-  profiles) or a form of the GCM key in dead stack frames, 78 key forms over the profiles in
-  unoptimised and optimised builds alike. The engine does not overwrite the stack after every
+  profiles) or a form of the GCM key in dead stack frames, 78 key forms over the profiles in an
+  optimised build and 24 in an unoptimised one (where the overwrite after each AES-CTR
+  operation, below, also clears most of the HMAC states; 150 without it with rustc 1.89 and
+  1.99.1, runs 46030856312, 46030861874). The engine does not overwrite the stack after every
   packet. `known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames` (ignored)
   is the limit as a test.
-- **Unoptimised builds.** At opt-level 0 the compiler stores every intermediate value of the
-  AES and SHA-1 routines in a stack slot, round keys and hash states included, whatever the
-  source does, and how much of that survives depends on the compiler (an intermediate state of
-  this work left 24 key forms with rustc 1.100 and 96 with rustc 1.99.1 from the same sources).
-  The packet path is therefore asserted in optimised builds only; in unoptimised ones the test
-  prints what it finds, the round keys of the AES-CTR key a packet uses, over the ten profiles
-  and both ways of keying (runs 45983045311, Linux, and 45983054507, macOS):
-
-  | rustc | x86-64 Linux, unoptimised | x86-64 Linux, optimised | AArch64 macOS |
-  |---|---|---|---|
-  | 1.89 (`rust-version`) | 72 (header-extension key) | 0 | not run |
-  | 1.99.1 | 84 (SRTP encryption key with AES-CM, header-extension key) | 0 | not run |
-  | 1.100 | 0 | 0 | 0 in both builds |
-
-  Building and tearing down are asserted in unoptimised builds too (above): 0 after either with
-  all three compilers; the AWS-LC provider leaves 150 forms in its packet path unoptimised with
-  rustc 1.89 and 1.99.1, 78 with 1.100 and in every optimised build (the stated limit above).
-  The test's "stack used" includes the overwrite itself (about 142 KiB unoptimised, 37 KiB
+- **Unoptimised builds: what rtci-crypto's profile decides.** At opt-level 0 the AES-NI
+  intrinsics of `aes` are calls whose vector arguments go through stack copies, so every block
+  of the AES-CTR keystream leaves round keys and AES states in stack temporaries: before
+  dtls-34, 72 and 84 to 108 round-key forms of the per-packet AES-CTR key with rustc 1.89 and
+  1.99.1 on x86-64 Linux, 18 on AArch64 macOS, none with rustc 1.100 on Linux (runs 45983045311,
+  46030856312, 46030861874). Since dtls-34 rtci-crypto overwrites 48 KiB of stack after each
+  record operation of RustCrypto's AES in a build with `debug_assertions`
+  (`scrub_record_stack`; the next section), and the ring provider's packet path leaves 0 forms
+  there with every compiler measured, asserted in every build. The gap: `debug_assertions` is
+  rtci-crypto's own profile setting; a custom profile that turns it off for rtci-crypto (or
+  optimises rtci-crypto) while `aes` stays at opt-level 0 gets no overwrite and the residue
+  above. The test's "stack used" includes the overwrites (about 142 KiB unoptimised, 37 KiB
   optimised).
 - **CPU registers, and whatever stores them on a stack.** A provider's AES leaves round keys in
   vector registers when it returns. A signal delivered next puts them into the signal frame; on
@@ -242,8 +238,8 @@ over that frame and moved into the heap carries it in bytes no field owns (paddi
 payload of a `None`, the unused arm of a union), and that heap block is later freed with the
 key in it, which no `Zeroize` can prevent. The heap quarantine test (`tests/dtls_secret_erasure.rs`)
 saw it twice on Windows before this work: the exporter output carried by an `Option<Instant>`,
-and an AES-CCM write key in a freed 692-byte buffer. Fixing a carrier moves the leak to the
-next one; the source is the dead frames.
+and an AES-CCM write key in a freed 692-byte block (the worked example below). Fixing a carrier
+moves the leak to the next one; the source is the dead frames.
 
 **The measurement** (`rtci-dtls/tests/key_residue.rs`, unix; the `owned_stack` module of the
 SRTP measurement). Each step of an association runs on a worker thread whose stack the test
@@ -336,11 +332,15 @@ path and IVs (forms, unoptimised / optimised):
 | Claim | Where it is asserted |
 |---|---|
 | either provider, every build: no secret of key derivation in a dead stack frame after any step; no key of any class after the steps that protect no record | `with_ring_dtls_key_handling_leaves_no_key_in_dead_stack_frames`, `with_aws_lc_dtls_key_handling_leaves_no_key_in_dead_stack_frames`: CI job `key_residue` (x86-64 Linux with `rust-version` and stable, AArch64 macOS with stable, unoptimised and optimised); the ordinary test jobs and the test environment unoptimised |
-| ring, optimised build: no record key of an AES suite (AES-GCM, AES-CBC cipher and MAC keys, AES-CCM) after any step | the ring test; AES-CCM from rustc 1.99.1 on (below) |
-| AWS-LC, optimised build: no AES-CBC cipher key and no AES-CCM key (the record path rtci-crypto composes from RustCrypto's AES) | the AWS-LC test; AES-CCM from rustc 1.99.1 on |
+| ring, every build: no record key of an AES suite (AES-GCM, AES-CBC cipher and MAC keys, AES-CCM) after any step | the ring test; AES-CCM in an optimised build from rustc 1.99.1 on (below) |
+| AWS-LC, every build: no AES-CBC cipher key and no AES-CCM key (the record path rtci-crypto composes from RustCrypto's AES) | the AWS-LC test; AES-CCM in an optimised build from rustc 1.99.1 on |
 
 Each wrap is held by these tests: with any one of the six taken away alone, both tests fail in
-both builds (run 46014737611, `mut/zeroize-5-gated-wraps-2`).
+both builds (run 46014737611, `mut/zeroize-5-gated-wraps-2`). The record-work overwrite of an
+unoptimised build (below) is held by them too: with it switched off (`RTCI_MUT=M1`, a gate read
+once per process, the frames otherwise the same) both tests fail unoptimised with rustc 1.89,
+1.99.1 and AArch64 macOS 1.100: 452, 446 and 119 AES-CCM / AES-CBC forms come back (runs
+46030856312, 46030861874; with rustc 1.100 on x86-64 Linux there were none to begin with).
 
 **What is not guaranteed**
 
@@ -355,31 +355,79 @@ both builds (run 46014737611, `mut/zeroize-5-gated-wraps-2`).
   `known_limit_with_aws_lc_the_dtls_record_path_leaves_keys_in_dead_stack_frames` (ignored) is
   the limit as a test.
 - **AES-CCM with rustc older than 1.99.1, optimised.** AES-CCM is RustCrypto's AES in
-  rtci-crypto with either provider. With rustc 1.89 it left one or two round keys of a DTLS 1.3
-  AES-CCM record key in the delivery that opens the server's flight, 16.4 to 16.7 KB below the
-  floor (round key 4 with the 14-wrap build, run 46012389383; round keys 5 and 9 with the final
-  one, run 46015302538; repeats within a run identical): by reading the record path, since the
-  record keys' set-up runs on an overwritten stack. None with 1.99.1 or 1.100. Not fixed: it
-  would need an overwrite after every record. `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1` turns the
-  assertion into a printed count; `scripts/key-residue-report.sh` and the `key_residue` CI job
-  set it for any compiler older than 1.99.1 (the versions between 1.89 and 1.99.1 are
-  unmeasured and treated as the limit).
-- **Unoptimised builds' record path.** At opt-level 0 RustCrypto's AES of the AES-CCM and AES-CBC
-  record path keeps keys and round keys in stack slots: 97 to 100 AES-CCM and 45 to 47 AES-CBC
-  forms with rustc 1.89 and 1.99.1, 24 and 9 on AArch64 macOS, none with 1.100 on Linux; at most
-  31.3 KB deep (ring) and 38.2 KB (AWS-LC, its HMAC-SHA1). Printed, not asserted.
+  rtci-crypto with either provider. With rustc 1.89 its record path left one to three round keys
+  of a DTLS 1.3 AES-CCM record key in the delivery that opens the server's flight, 16.4 to 16.7
+  KB below the floor (one, round key 4, with the 14-wrap build, run 46012389383; two with
+  zeroize-5's final one, 46015302538; three with dtls-34, 46030485783: the number follows the
+  layout; repeats within a run identical). None with 1.99.1 or 1.100. Not fixed in an
+  optimised build: it would need an overwrite after every record there.
+  `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1` turns that assertion into a printed count;
+  `scripts/key-residue-report.sh` and the `key_residue` CI job set it for any compiler older
+  than 1.99.1 (the versions between 1.89 and 1.99.1 are unmeasured and treated as the limit).
+- **Unoptimised builds: what rtci-crypto's profile decides.** At opt-level 0 the AES-NI
+  intrinsics of `aes` are calls whose vector arguments go through stack copies: every block of
+  the AES-CCM and AES-CBC record path left round keys and AES states in stack temporaries (97
+  to 100 AES-CCM and 44 to 47 AES-CBC forms with rustc 1.89 and 1.99.1, 26 and 7 on AArch64
+  macOS, none with 1.100 on Linux). Since dtls-34 rtci-crypto runs each record operation of
+  RustCrypto's AES (AES-CCM, AES-CBC, AES-CTR) in a frame of its own and overwrites 48 KiB of
+  stack below it afterwards, with `debug_assertions` only (`scrub_record_stack`); an optimised
+  build compiles none of it. Depth: the deepest AES-CCM / AES-CBC form measured lay 31,288 bytes
+  below the measurement's floor (rustc 1.89, the AES-CCM records step, run 46015302538), and the
+  record call lies below that floor, so it lay less than that below the call; 48 KiB is that
+  times 1.5. The forms 36.8 to 38.2 KB deep are AWS-LC's HMAC-SHA1 states of the AES-CBC MAC key,
+  not RustCrypto's AES. The gap: `debug_assertions` is rtci-crypto's own profile setting; a
+  custom profile that turns it off for rtci-crypto (or optimises rtci-crypto) while `aes` and
+  `ccm` stay at opt-level 0 gets no overwrite and the residue above.
 - **IVs** (above): 7 to 26 forms per provider and build.
 - **Run-to-run variation.** Within a run the repeats agree digest for digest, except one form
   more or less in a few legs (AWS-LC optimised on Linux, 50 / 51; ring unoptimised on Linux,
   50 / 51; ring optimised on macOS, 33 / 35): all of them record-path or IV forms.
 - **CPU registers, signal frames, Windows, other architectures**: as for SRTP above. On Windows
-  the evidence is the heap side: the quarantine tests of `tests/dtls_secret_erasure.rs` and
-  `tests/dtls_srtp_keying_material_erasure.rs` pass, three rounds each, on Windows and macOS
-  (runs 46014745677, 46014758592).
+  the evidence is the heap side, the quarantine tests of `tests/dtls_secret_erasure.rs` and
+  `tests/dtls_srtp_keying_material_erasure.rs`, and it is a detector, not a proof (the worked
+  example below): whether a key in a dead frame reaches a freed block depends on where later
+  values happen to lie.
 - **What the measurement cannot see**: forms the test does not compute (AWS-LC's internal
   representations other than the ones above, SHA-384 / SHA-512 HMAC states: no measured suite
   uses them), and a provider wrapper is in the measured stack (it adds a frame to each provider
   call and handles keys only by reference and only inverted).
+
+### A worked example: an AES-CCM key reaching the heap on Windows
+
+The heap quarantine test failed on Windows only, with the DTLS 1.2 AES-128-CCM suite only, in
+2 or 3 rounds of 3 (runs 46018046209, 46025525728; dtls-32 on its own showed the same,
+45927483372): "block 1 of the PRF key expansion = an AEAD key (16 bytes)", the raw client write
+key, "in a freed block of 692 bytes". What it took to find out what that was:
+
+- **The block** (an allocation-site trace of every 692-byte block, run 46024198829): a hashbrown
+  table of `(HandshakeType, HandshakeMessage)`, 4 buckets of 168 bytes and 20 control bytes,
+  allocated by `HashMap::insert` in `HandshakeCache::full_pull_map`, called by `flight4::parse`.
+  The one live bucket holds a `ClientKeyExchange` (its 65-byte public key at entry offsets 24 to
+  63); the key lies at entry offset 72, past every field that variant writes. `full_pull_map`
+  builds each message on the stack (`Handshake::unmarshal`) and moves it into the map whole:
+  the bytes the smaller variant never writes are whatever the stack held there.
+- **Around the key** (the same dump): round key 0 (the key), 16 other bytes, round key 1, 16
+  other bytes, part of round key 2: round keys paired with AES states, the shape of per-block
+  work, not of the key schedule's set-up. Wrapping the AES-CCM suite's set-up in
+  `on_erased_stack` did not remove it (2 of 3 rounds still failed).
+- **Where the bytes came from** (run 46026969169, three rounds each, an unoptimised control
+  failing in 2 of 3 in the same job): absent in an optimised build, absent with the `aes` and
+  `ccm` crates alone optimised, absent with the portable AES (`--cfg aes_force_soft`), and absent
+  with the stack overwritten after each AES-CCM call (46026978042). So it is the unoptimised
+  AES-NI code of `aes`, which passes its vector arguments through stack copies, during the
+  CCM decryption of the client's Finished (with the client write key), which the server does
+  between two parses of the client's flight: the second parse builds its messages over those
+  frames. Not CPU registers: those would survive an optimised build.
+- **Why Windows, why it came and went.** The carrier is wherever a later value's unwritten bytes
+  fall, which moves with every layout change: zeroize-5 with dtls-31 alone was clean
+  (46024205258), dtls-32's changes (a new `DTLSConn` field, the handshaker's code) made it appear, and with the record-work
+  overwrite switched off but its wrapper in place the Windows test passes six rounds of six too
+  (46030868260, where the gate reads its variable once and writes no frames of its own): the
+  wrapper's own frame moved the carrier off the key. That is why the Windows heap test is no
+  proof that the overwrite works, and is not cited as one: it cannot tell the overwrite from a
+  layout change. The proof is the stack measurement, which reads the frames themselves: with
+  the overwrite off the AES-CCM / AES-CBC forms are back in the dead frames (452 with rustc
+  1.89), with it on there are none (46030856312, 46030861874).
 
 ## What the tests look at
 

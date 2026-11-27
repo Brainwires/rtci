@@ -83,6 +83,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   benchmark at x1.127 in a first run, x0.97 to x1.01 in a five-round repeat on three heads with
   the same record-path code: docs/key-erasure.md).
 
+- **The record path of RustCrypto's AES no longer leaves round keys on the stack in an
+  unoptimised build** (`conf/dtls-34-final-flight-on-erased-stack`; RFC 7714 section 13.1, RFC
+  5246 section 8.1; docs/key-erasure.md, worked example). At opt-level 0 the AES-NI intrinsics
+  of `aes` pass their vector arguments through stack copies, so every block of AES-CCM, AES-CBC
+  and AES-CTR (DTLS AES-CCM and AES-CBC, SRTP AES-CM and the RFC 6904 keystream, with either
+  provider) left round keys and AES states in stack temporaries: 452 AES-CCM / AES-CBC forms in
+  the DTLS measurement with rustc 1.89, 446 with 1.99.1, 119 on AArch64 macOS, and 72 / 108 / 18
+  AES-CTR forms in the SRTP one. On Windows one of them, a DTLS 1.2 AES-CCM write key, reached a
+  freed heap block through the unwritten bytes of a handshake message moved into the handshake
+  cache's map. rtci-crypto now runs each such record operation in a frame of its own and
+  overwrites 48 KiB of stack below it afterwards, in builds with `debug_assertions` only: 0
+  forms then, asserted in every build by both residue tests. An optimised build compiles none of
+  it.
+
 ### Changed
 
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
@@ -134,17 +148,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `known_limit_with_aws_lc_the_dtls_record_path_leaves_keys_in_dead_stack_frames`, ignored).
     The engine does not overwrite the stack after every record.
   - **AES-CCM with rustc older than 1.99.1, optimised**: AES-CCM is RustCrypto's AES in
-    rtci-crypto with either provider; with rustc 1.89 its record path left one or two round keys
-    of a DTLS 1.3 AES-CCM key, 16.4 to 16.7 KB deep, none with 1.99.1 and 1.100. Asserted from
+    rtci-crypto with either provider; with rustc 1.89 its record path left one to three round
+    keys of a DTLS 1.3 AES-CCM key, 16.4 to 16.7 KB deep (the number follows the layout), none
+    with 1.99.1 and 1.100. Asserted from
     1.99.1 on; for older compilers `RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1` (set by
     `scripts/key-residue-report.sh` and the CI job) prints it instead.
-  - **Unoptimised builds' record path**: RustCrypto's AES of the AES-CCM and AES-CBC suites
-    keeps keys and round keys in stack slots (up to 145 forms with rustc 1.89 and 1.99.1).
+  - **Unoptimised builds whose profile turns `debug_assertions` off for rtci-crypto** while `aes`
+    stays at opt-level 0: the record-work overwrite (Security) is not compiled, and RustCrypto's
+    AES leaves round keys in stack temporaries (up to 145 DTLS forms with rustc 1.89 and 1.99.1).
   - **IVs**: a DTLS 1.3 record's nonce is its IV at sequence number 0, and the nonce is built
     from a copy of the whole IV; counted and printed, not asserted, as an AEAD does not need a
     secret nonce.
   - **Windows**: the stack measurement needs `pthread_attr_setstack`; the heap quarantine tests
-    are the evidence there (pass, three rounds, Windows and macOS).
+    run there, and they are a detector, not a proof: whether a key left in a dead frame reaches
+    a freed block depends on the layout (docs/key-erasure.md, the worked example).
 
 ### Testing
 
