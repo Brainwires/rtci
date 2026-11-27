@@ -22,9 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anywhere else in the process: the 0.2.0 statement about heap copies stands. Now:
   - **Building a context, deriving session keys again (a non-zero key derivation rate) and
     adding a master key** run under `crypto::on_erased_stack` (new, `rtci-crypto`), which runs
-    the work in a frame of its own and overwrites the 32 KiB of stack below it afterwards
-    (`scrub_stack`). Nothing is left by these steps, with either provider, in unoptimised and
-    optimised builds.
+    the work in a frame of its own and overwrites the stack below it afterwards (`scrub_stack`:
+    32 KiB in an optimised build, where building a context uses about 3 KiB; 128 KiB in an
+    unoptimised one, where it uses 42 to 47 KiB depending on the compiler). Nothing is left by
+    these steps, with either provider, in unoptimised and optimised builds, asserted with the
+    oldest supported compiler (the workspace's `rust-version`) and with stable
+    (`conf/zeroize-4-scrub-covers-the-key-setup-frames`: with 32 KiB in every build, rustc
+    1.99.1's unoptimised build left the master key and its AES round keys 37.7 to 42.1 KB
+    deep, below the overwrite's reach, in all 20 measurements of the test environment).
   - **AES-CM** (the payload cipher of the AES-CM profiles, and the RFC 6904 header-extension
     keystream of every profile): the cipher object keeps its expanded key schedule and a
     packet runs the counter mode over a reference to it. It kept the key and expanded both
@@ -42,8 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     derivation rate: 0 key forms in dead stack frames after building, protecting and
     unprotecting RTP and RTCP, re-keying and tearing down, in an optimised build on x86-64
     Linux and AArch64 macOS (asserted in CI), and nothing anywhere else in the process (Linux).
-    In an unoptimised build the same was measured with rustc 1.100 on both (runs 45886842087,
-    45886848334); it is printed there, not asserted (see Known limits).
+    In an unoptimised build building and tearing down are asserted the same way; the packet
+    path is measured and printed there, not asserted (see Known limits).
   No wire format, API signature or default changes. Cost, against 0.2.0 in one job: SRTP
   context set-up 1.26 → 2.99 µs with the AES-CM profiles and 1.26 → 2.09 µs with AES-GCM (the
   stack overwrites, once per context); per packet nothing slower, SRTCP 12 to 15 % faster (no
@@ -71,9 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames` (ignored).
   - **Unoptimised builds**: the compiler stores every intermediate value of the AES and SHA-1
     routines in a stack slot, round keys and hash states included, whatever the source does.
-    Measured, not asserted: with rustc 1.100 and the final code the ring provider leaves
-    nothing in a debug build either; an intermediate state of this work left 24 forms with
-    rustc 1.100 and 96 with rustc 1.99.1 from the same sources.
+    The packet path is measured, not asserted, in an unoptimised build: with rustc 1.100 the
+    ring provider leaves nothing there (runs 45886842087, 45886848334); with rustc 1.99.1 it
+    leaves the round keys of the AES-CTR key a packet uses (the SRTP encryption key with
+    AES-CM, the header-extension key with AES-GCM): 84 key forms over the profiles (test
+    environment, run 45970063627). Building and tearing down are asserted in every build.
   - **CPU registers, and what saves them**: a provider's AES leaves round keys in vector
     registers when it returns, and anything that later stores the registers on a stack puts
     them there: a signal frame, or the lazy set-up of a thread-local on Apple systems (seen
@@ -83,8 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Windows, and architectures other than x86-64 and AArch64**: the same code runs, and the
     heap searches run on Windows, but the stack measurement needs a thread on a stack of the
     test's own (`pthread_attr_setstack`), so nothing is measured there.
-  - **Deeper than 32 KiB**: `on_erased_stack` overwrites 32 KiB. The built-in providers use
-    about 3 KiB to build a context in an optimised build; a provider supplied by the
+  - **Deeper than the overwrite**: `on_erased_stack` overwrites 32 KiB (optimised build) or
+    128 KiB (unoptimised). The built-in providers use about 3 KiB to build a context in an
+    optimised build and up to 47 KiB in an unoptimised one; a build profile with opt-level 0
+    and `debug-assertions = false` gets the optimised depth; a provider supplied by the
     application that goes deeper leaves what lies below.
 
 ### Testing
@@ -103,8 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   erased one. The answer is the same in the test-environment image (glibc 2.39) and on
   GitHub's runners (glibc 2.43): identical inventories, digest for digest, with one compiler.
   - `with_ring_key_handling_leaves_no_key_in_dead_stack_frames`: every step, asserted in an
-    optimised build (the CI job `key_residue`, Linux and macOS); building and tearing down
-    asserted in every build.
+    optimised build; building and tearing down asserted in every build. The CI job
+    `key_residue` runs it unoptimised and optimised, on x86-64 Linux with the workspace's
+    `rust-version` and with stable, and on AArch64 macOS with stable; the ordinary test jobs
+    and the test environment (rustc 1.99.1) run it unoptimised.
   - `with_aws_lc_building_and_tearing_down_leave_no_key_in_dead_stack_frames`.
   - `rtci-crypto/tests/hmac_sha1_vectors.rs`: RFC 2202 test cases 1 to 7 with every provider,
     one keyed object used again and again and with the message split at every position.
