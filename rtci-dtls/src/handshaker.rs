@@ -151,7 +151,10 @@ impl DTLSConn {
                 && !self.is_handshake_completed()
             {
                 self.set_handshake_completed();
-                self.handshake_completed_at = Some(now);
+                let started = *self.handshake_started.get_or_insert(now);
+                self.handshake_completed_after_ns =
+                    u64::try_from(now.saturating_duration_since(started).as_nanos())
+                        .unwrap_or(u64::MAX - 1);
                 debug!(
                     "[handshake:{}] is completed",
                     srv_cli_str(self.state.is_client),
@@ -421,6 +424,16 @@ impl DTLSConn {
         Ok(HandshakeState::Finished)
     }
 
+    /// When the handshake completed, if it has.
+    pub(crate) fn handshake_completed_at(&self) -> Option<Instant> {
+        if self.handshake_completed_after_ns == u64::MAX {
+            return None;
+        }
+        self.handshake_started.map(|started| {
+            started + std::time::Duration::from_nanos(self.handshake_completed_after_ns)
+        })
+    }
+
     pub(crate) fn handshake_timeout(&mut self, now: Instant) -> Result<()> {
         self.state.clock = Some(now);
         let next_handshake_state = if self.current_handshake_state == HandshakeState::Waiting {
@@ -473,7 +486,7 @@ impl DTLSConn {
             // The RFC asks for "at least" 240 s and sets no end; ending there is what DTLS 1.3
             // does when it lets go of its handshake keys (RFC 9147 5.8.1).
             let elapsed = self
-                .handshake_completed_at
+                .handshake_completed_at()
                 .map(|at| now.saturating_duration_since(at));
             if elapsed.is_some_and(|elapsed| elapsed <= FINAL_FLIGHT_ANSWER_PERIOD) {
                 Some(HandshakeState::Sending)

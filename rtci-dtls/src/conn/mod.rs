@@ -136,8 +136,13 @@ pub struct DTLSConn {
     pub(crate) state: State, // Internal state
 
     handshake_completed: bool,
-    /// When the handshake completed: the start of [`FINAL_FLIGHT_ANSWER_PERIOD`].
-    pub(crate) handshake_completed_at: Option<Instant>,
+    /// When the handshake completed, the start of [`FINAL_FLIGHT_ANSWER_PERIOD`]: nanoseconds
+    /// after `handshake_started`, `u64::MAX` until then (`handshake_completed_at`). An integer
+    /// and not an `Option<Instant>`: a `None` of that type leaves eight bytes of the value
+    /// uninitialized, and moving the association copies whatever the stack held there into the
+    /// heap blocks it passes through, where `Zeroize` cannot reach them (the secret-erasure
+    /// test found an exported SRTP key that way, on Windows).
+    pub(crate) handshake_completed_after_ns: u64,
     connection_closed_by_user: bool,
     // closeLock              sync.Mutex
     closed: bool, //  *closer.Closer
@@ -309,7 +314,7 @@ impl DTLSConn {
             cache: HandshakeCache::new(),
             state,
             handshake_completed: false,
-            handshake_completed_at: None,
+            handshake_completed_after_ns: u64::MAX,
             connection_closed_by_user: false,
             closed: false,
             closed_by_peer: false,
