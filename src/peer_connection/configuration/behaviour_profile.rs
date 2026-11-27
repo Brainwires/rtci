@@ -651,8 +651,8 @@ governed_behaviours! {
     {
         id: "jsep.answer-offered-formats-only",
         setting: "SettingEngineBuilder::with_answer_offered_formats_only",
-        clause: "RFC 9429 5.3.1 (\"MUST be added after all existing formats\"; \"MAY include formats that are locally supported but not present in the offer\"), RFC 3264 6.1 (MAY)",
-        rfc: false => "false",
+        clause: "RFC 9429 5.3.1 (\"MUST be added after all existing formats\"; \"MAY include formats that are locally supported but not present in the offer\"), RFC 3264 6.1 (MAY); default departs from the MUST sentence (docs/conformance.md)",
+        rfc: true => "true",
         chrome: true => "true",
         strict_rfc: false => "false",
         chrome_source: "libwebrtc pc/codec_vendor.cc::NegotiateCodecs @ a222406d: an answer's codecs are the local codecs FindMatchingCodec finds in the offer, with the offer's payload types, sorted into the offer's order when the transceiver has no codec preferences (keep_offer_order); CodecVendor::GetNegotiatedCodecsForAnswer calls it with the local codecs filtered by the codec preferences, so no codec the offer lacks is answered",

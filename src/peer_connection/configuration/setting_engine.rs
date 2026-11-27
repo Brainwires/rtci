@@ -695,7 +695,7 @@ impl SettingEngine {
             max_bundle_ignored: Default::default(),
             rtcp_mux_only_in_subsequent_offers: false,
             bundle_only_sections_in_browser_form: false,
-            answer_offered_formats_only: false,
+            answer_offered_formats_only: true,
             unique_transport_credentials: Default::default(),
             separate_fec_sessions: false,
             explicit_rollback_only: Default::default(),
@@ -2574,32 +2574,36 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Whether an answer lists only formats the offer has. The default is `false`; the
-    /// `Chrome` behaviour profile sets `true`.
+    /// Whether an answer lists only formats the offer has. The default is `true` (0.3.0; it
+    /// was `false` up to 0.2.x), in the `Rfc`, `Chrome` and `Performance` behaviour profiles;
+    /// the `StrictRfc` profile sets `false`.
     ///
-    /// With `false` (the default), an answer to a section the transceiver has no codec
-    /// preferences for lists the offered formats this endpoint supports, in the offer's order,
-    /// and then every other media format this endpoint has registered for the kind (RFC 9429
-    /// section 5.3.1: "Any currently available media formats that are not present in the
-    /// current remote description MUST be added after all existing formats"; RFC 3264 section
-    /// 6.1: the answer "MAY indicate additional media formats, not listed in the corresponding
-    /// stream in the offer, that the answerer is willing to send or receive"). The added
-    /// formats carry no repair format and no feedback, and this endpoint receives on them
-    /// (RFC 3264 section 6.1: "The answerer MUST be prepared to receive media for recvonly or
-    /// sendrecv streams using any media formats listed for those streams in the answer").
+    /// With `true` (the default), an answer lists only the offered formats this endpoint
+    /// supports, matched by the engine's codec-matching rules, in the offer's order, each repair
+    /// format (RTX, RED, FEC) only with the primary format it repairs: the intersection, as
+    /// libwebrtc (Chrome), Firefox and WebKit answer. RFC 9429 section 5.3.1: "the media formats
+    /// in the answer MUST include at least one format that is present in the offer but MAY
+    /// include formats that are locally supported but not present in the offer". The
+    /// web-platform-tests assume it (`webrtc/protocol/h265-level-id.https.html` asserts that
+    /// the offerer's sender has exactly one codec).
     ///
-    /// With `true`, an answer lists only the offered formats this endpoint supports, matched
-    /// as without the setting, in the offer's order, each repair format (RTX, RED, FEC) only
-    /// with the primary format it repairs: the intersection, as libwebrtc (Chrome), Firefox
-    /// and WebKit answer. RFC 9429 section 5.3.1 allows it in the same list of rules: "the
-    /// media formats in the answer MUST include at least one format that is present in the
-    /// offer but MAY include formats that are locally supported but not present in the
-    /// offer". The web-platform-tests assume it (`webrtc/protocol/h265-level-id.https.html`,
-    /// "Offer to send H265, answer to receive level-id=30 results in level-id=30", asserts
-    /// that the offerer's sender has exactly one codec). An answer with codec preferences is
-    /// not affected: it lists the preferences that were offered whatever this setting says
-    /// (RFC 9429 section 5.3.1, "MUST exclude any codecs not present in the codec
-    /// preferences").
+    /// With `false`, an answer to a section the transceiver has no codec preferences for lists
+    /// those formats and then every other media format this endpoint has registered for the
+    /// kind, the literal reading of the bullet before (RFC 9429 section 5.3.1: "Any currently
+    /// available media formats that are not present in the current remote description MUST
+    /// be added after all existing formats"; RFC 3264 section 6.1: the answer "MAY indicate
+    /// additional media formats, not listed in the corresponding stream in the offer, that
+    /// the answerer is willing to send or receive"). The added formats carry no repair format
+    /// and no feedback, and this endpoint receives on them (RFC 3264 section 6.1: "The
+    /// answerer MUST be prepared to receive media for recvonly or sendrecv streams using any
+    /// media formats listed for those streams in the answer"). They are live: the offerer may
+    /// switch to one (WebKit did), and they are among the offerer's send codecs (W3C
+    /// [[SendCodecs]]). `docs/conformance.md` lists this default as a standing departure from
+    /// that MUST sentence, with the reasons.
+    ///
+    /// An answer with codec preferences is not affected: it lists the preferences that were
+    /// offered whatever this setting says (RFC 9429 section 5.3.1, "MUST exclude any codecs not
+    /// present in the codec preferences").
     pub fn with_answer_offered_formats_only(mut self, offered_only: bool) -> Self {
         self.0.answer_offered_formats_only = offered_only;
         self

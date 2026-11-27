@@ -9,18 +9,18 @@ Verdicts and classes are defined in `RULES.md`.
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5094.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5064 of 5094 (99.4 %).
-- Tested as the default (`tested`): 5032 of 5094 (98.8 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Tested as the default (`tested`): 5031 of 5094 (98.8 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 6.
 - Open (not tested in any form): 30: 17 untested, 11 partial, 2 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 27 | 20 |
 | B | implemented, lacking a test that fails without it | 17 | 0 |
 | C | partly implemented | 9 | 1 |
 | D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 62 | 26 |
+| all | | 63 | 27 |
 
 ## What 100 % takes
 
@@ -63,6 +63,7 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.2.2-10 | `rfc9429.md` | A section bundled into another carries no ICE credentials | setting | A | `setting`: bundle attributes in the tagged section only | S | jsep (running) |
 | RFC9429-5.2.2-27 | `rfc9429.md` | Bundled sections omit IDENTICAL and TRANSPORT parameters | setting | A | `setting`: bundle attributes in the tagged section only | S | jsep (running) |
 | RFC9429-5.3-1 | `rfc9429.md` | createAnswer output is compatible with the remote description and RFC ... | setting | A | `setting`: bundle attributes in the tagged section only (umbrella; 5.3.2-5, and 5.3.1-6 `conflict`) | S | jsep (running) |
+| RFC9429-5.3.1-16 | `rfc9429.md` | Available formats absent from the offer are added after the offered ... | setting | A | `setting`: since 0.3.0 the default answers with the offered formats only (jsep-95; the 5.3.1 MAY bullet, every browser); with_answer_offered_formats_only(false) / StrictRfc add the others; closes only if the default changes back or the RFC is corrected (draft erratum handoff/erratum-rfc9429-5.3.1.md) | S | jsep (running) |
 | RFC9429-5.3.2-5 | `rfc9429.md` | A bundled section carries no ICE credentials | setting | A | `setting`: bundle attributes in the tagged section only | S | jsep (running) |
 | RFC9429-5.8-1 | `rfc9429.md` | Any line that is not well formed rejects the description, even when ... | setting | A | `setting`: trailing white space in attribute values (webrtc-rs 0.17) | S | jsep (running) |
 | RFC7160-4.1-1 | `rfc7160.md` | A sender with RTCP on uses a different SSRC for each clock rate | setting | A | `setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC) | S | media (media-25) |

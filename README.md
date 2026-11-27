@@ -573,12 +573,13 @@ more than one m= section (nor, by the same rule, a `balanced` offer with two sec
 `SettingEngineBuilder::with_bundle_only_sections_in_browser_form(true)` alone, or `balanced`
 with one section of each type. Offers from browsers and answers are not affected.
 
-**Answers list formats the offer lacks by default.** Without codec preferences, an answer lists the offered formats
-this endpoint supports and then every other media format it has registered for the kind (RFC 9429 5.3.1, "MUST be
-added after all existing formats"; RFC 3264 6.1, MAY), and it receives on them. Browsers answer with the offered
-formats only, which the same RFC 9429 5.3.1 rule list allows ("MAY include formats that are locally supported but not
-present in the offer"), and web-platform-tests such as `webrtc/protocol/h265-level-id.https.html` assume it. The
-`Chrome` profile, or `SettingEngineBuilder::with_answer_offered_formats_only(true)` alone, answers in that form.
+**Answers list the offered formats only (since 0.3.0).** Without codec preferences, an answer lists the offered
+formats this endpoint supports, in the offer's order, as every browser answers (RFC 9429 5.3.1: the answer "MAY include
+formats that are locally supported but not present in the offer"). Up to 0.2.x it also listed every other media format
+registered for the kind after them, the literal reading of the bullet before ("MUST be added after all existing
+formats"), and received on them; `SettingEngineBuilder::with_answer_offered_formats_only(false)`, or the `StrictRfc`
+profile, still answers that way. The two bullets of RFC 9429 5.3.1 contradict each other; the choice and its reasons
+are a standing departure in [docs/conformance.md](docs/conformance.md).
 
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads

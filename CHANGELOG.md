@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Default behaviour change (0.3.0)
+
+- **An answer lists only the offered formats by default**
+  (`conf/jsep-95-answers-list-offered-formats-by-default`; owner decision 2026-11-27). Without
+  codec preferences an answer now lists the offered formats this endpoint supports, in the
+  offer's order, each repair format with its primary, and nothing else:
+  `SettingEngineBuilder::with_answer_offered_formats_only` defaults to `true` (the `Rfc`,
+  `Chrome` and `Performance` profiles; `StrictRfc` sets `false`). RFC 9429 section 5.3.1 says
+  both "Any currently available media formats that are not present in the current remote
+  description MUST be added after all existing formats" and "the media formats in the answer
+  MUST include at least one format that is present in the offer but MAY include formats that
+  are locally supported but not present in the offer"; the default now takes the second, as
+  every browser does (libwebrtc `pc/codec_vendor.cc` `NegotiateCodecs`), and is listed as a
+  standing departure from the first in docs/conformance.md (audit rows RFC9429-5.3.1-16 and
+  RFC3264-6.1-7: `setting`). Reasons: the added formats are live (WebKit switched its sender
+  to an added VP9, test-env run 45878070327), they become the offerer's send codecs (jsep-91),
+  they spend dynamic payload type numbers in the peer's session (RFC 3264 section 8.3.2), and
+  the web-platform-tests assume the offered form (`webrtc/protocol/h265-level-id.https.html`).
+  **Upgrading from 0.2.1:** answers shrink to the offered formats; an offerer that switched to
+  a format only the answer listed can no longer do so; `getParameters().codecs` of the remote
+  offerer lists fewer codecs. For the old form call
+  `SettingEngineBuilder::with_answer_offered_formats_only(false)` (or use the `StrictRfc`
+  profile). The pinned browser answers (`tests/fixtures/browser-sdp-answers/`) lose the added
+  formats. Tests that cover the added formats run with the setting:
+  `answer_added_formats_rtc2rtc.rs`, `jsep_answer_unoffered_formats.rs`,
+  `jsep_payload_type_meaning.rs` (answer side), `jsep_sframe_payload_types.rs`,
+  `additional_codec_sent_rtc2rtc.rs`, `offerer_sends_answers_preferred_format.rs`; the new
+  default is asserted by `jsep_answer_offered_formats_only.rs` and
+  `additional_codec_sent_rtc2rtc.rs::by_default_the_answer_is_h264_on_63_alone_and_it_is_sent`.
+
 ### Security
 
 - **SRTP keys are no longer left in dead stack frames by the default provider**
