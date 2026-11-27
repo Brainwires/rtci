@@ -1814,6 +1814,93 @@ fn consent_lost_inside_the_pac_timer_is_failed_as_the_timer_expires() {
     assert!(by_next_look(failed, PAC), "{seen:?}");
 }
 
+/// RFC 8445 Section 8.1.2: once a pair is nominated, "the ICE agent MUST remove all candidate
+/// pairs for the same component from the checklist", and Section 8.1.1: "the agent MUST NOT
+/// nominate another pair for same component of the data stream within the ICE session. Doing
+/// so requires an ICE restart". W3C webrtc-pc 5.6.4, "completed": "If consent checks
+/// [RFC7675] subsequently fail on all successful candidate pairs, the state transitions to
+/// "failed"", once the PAC timer has expired. So a completed agent whose nomination left a
+/// pair unchecked (here the peer never answers the second candidate) does not check that
+/// pair when consent on the selected pair expires inside the PAC timer: `Disconnected`, then
+/// `Failed` as the timer expires. It went back to `Checking`, checked the leftover pair and
+/// failed by a second checking timeout, 30 s later (`virtual_time.rs` in the stream driver:
+/// failed 60 s after the path went dark). Either role: the controlled agent concludes on the
+/// peer's nomination.
+#[test]
+fn consent_lost_after_completion_does_not_check_the_pairs_the_nomination_retired() {
+    for controlling in [true, false] {
+        let start = Instant::now();
+        let mut a = started_agent(start, config(controlling), &[REMOTE_A, REMOTE_B]);
+        a.set_local_gathering_complete();
+        a.set_remote_end_of_candidates();
+        if !controlling {
+            let nominate = peer_request(
+                &a,
+                vec![
+                    Box::new(AttrControlling(1)),
+                    Box::new(PriorityAttr(1000)),
+                    Box::new(UseCandidateAttr::new()),
+                ],
+            );
+            deliver(&mut a, start, &nominate, REMOTE_A).unwrap();
+        }
+        let only_a = |s: &Sent| {
+            if s.to == addr(REMOTE_A) {
+                Answer::Success(addr(LOCAL))
+            } else {
+                Answer::Silence
+            }
+        };
+        run_with(
+            &mut a,
+            start,
+            Duration::ZERO,
+            Duration::from_secs(1),
+            only_a,
+        );
+        let role = if controlling {
+            "controlling"
+        } else {
+            "controlled"
+        };
+        assert_eq!(a.state(), ConnectionState::Completed, "{role}");
+        assert_eq!(
+            a.get_selected_candidate_pair().unwrap().1.addr(),
+            addr(REMOTE_A),
+            "{role}"
+        );
+        let b = a.find_remote_candidate(addr(REMOTE_B)).unwrap();
+        let b = a.candidate_pairs[a.find_pair(0, b).unwrap()];
+        assert!(
+            matches!(
+                b.state,
+                CandidatePairState::Waiting | CandidatePairState::Frozen
+            ),
+            "{role}: the second pair was left unchecked by the nomination: {}",
+            b.state
+        );
+        let _ = timed_states(&mut a, start);
+        let out = silent(&mut a, start, Duration::from_secs(1), PAC + LOOK + MS);
+        let seen = timed_states(&mut a, start);
+        assert!(
+            !seen.iter().any(|(_, s)| *s == ConnectionState::Checking),
+            "{role}: checking again after consent was lost: {seen:?}"
+        );
+        assert!(
+            !requests_of(&out).iter().any(|s| s.to == addr(REMOTE_B)),
+            "{role}: a check on a pair the nomination retired"
+        );
+        let failed = seen
+            .iter()
+            .find(|(_, s)| *s == ConnectionState::Failed)
+            .map(|(at, _)| *at);
+        assert!(
+            failed.is_some_and(|at| by_next_look(at, PAC)),
+            "{role}: failed as the PAC timer expires: {seen:?}"
+        );
+    }
+}
+
 /// W3C webrtc-pc 5.6.4: "If begun in the transient "disconnected" state, it causes a
 /// transition to "checking"": an ICE restart of an agent whose checks failed before the end
 /// of the candidates checks the new generation and connects over it.

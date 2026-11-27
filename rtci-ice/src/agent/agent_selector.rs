@@ -508,7 +508,7 @@ impl Agent {
     fn next_waiting(&self) -> Option<usize> {
         let mut best: Option<usize> = None;
         for (index, p) in self.candidate_pairs.iter().enumerate() {
-            if p.state != CandidatePairState::Waiting || p.triggered {
+            if p.state != CandidatePairState::Waiting || p.triggered || p.retired {
                 continue;
             }
             if self.tcp_attempts_exhausted(p) {
@@ -553,7 +553,7 @@ impl Agent {
     fn pairs_to_unfreeze(&self) -> Vec<usize> {
         let mut out: Vec<usize> = vec![];
         for (index, p) in self.candidate_pairs.iter().enumerate() {
-            if p.state != CandidatePairState::Frozen {
+            if p.state != CandidatePairState::Frozen || p.retired {
                 continue;
             }
             let busy = self.candidate_pairs.iter().any(|q| {
@@ -2088,9 +2088,10 @@ impl Agent {
 
     /// Section 8.1.2, once a pair is nominated: the other pairs leave the triggered-check
     /// queue and their In-Progress transactions are cancelled; no ordinary check is started
-    /// from now on (the checklist is Completed). The pairs stay in the list, for statistics
-    /// and because the peer may still nominate another one: a request on one of them is
-    /// answered and triggers a check as before.
+    /// from now on (the checklist is Completed), also once the selected pair is gone (lost
+    /// consent): the pairs still to be checked are `retired`. The pairs stay in the list, for
+    /// statistics and because the peer may still nominate another one: a request on one of
+    /// them is answered and triggers a check as before.
     pub(crate) fn conclude(&mut self) {
         let Some(selected) = self.selected_pair else {
             return;
@@ -2108,6 +2109,15 @@ impl Agent {
             {
                 p.state = CandidatePairState::Waiting;
                 cancel.push((p.local_index, p.remote_index));
+            }
+            if index != selected
+                && !p.nomination_pending
+                && matches!(
+                    p.state,
+                    CandidatePairState::Frozen | CandidatePairState::Waiting
+                )
+            {
+                p.retired = true;
             }
         }
         for (local_index, remote_index) in cancel {
