@@ -134,9 +134,10 @@ fn with_the_setting_an_answer_lists_the_offered_formats_only_in_the_offers_order
 
 #[test]
 fn without_the_setting_an_answer_adds_the_other_formats_after_the_offered_ones() -> TestResult {
-    let offered_only = answer_to(&mut peer(true)?, video_offer())?;
+    // The offered formats this endpoint has, in the offer's order (independent of the
+    // setting's own code path).
+    let offered_only = ["100", "96", "97"].map(str::to_owned);
     let answer = answer_to(&mut peer(false)?, video_offer())?;
-    let offered_only = formats(&media_sections(&offered_only)[0]);
     let section = &media_sections(&answer)[0];
     let answered = formats(section);
     assert!(
@@ -239,13 +240,17 @@ a=fmtp:97 apt=96
     let mut pc = peer(true)?;
     pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
     let id = pc.get_transceivers().next().expect("a transceiver");
-    let sender = pc
-        .rtp_transceiver(id)
+    // The registered capabilities, read on a connection that negotiated nothing (the
+    // answerer's own list narrows to what its offer had).
+    let mut fresh = peer(true)?;
+    let fresh_id = fresh.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let fresh_sender = fresh
+        .rtp_transceiver(fresh_id)
         .expect("t")
         .sender()
         .expect("a sender");
-    let capabilities = pc
-        .rtp_sender(sender)
+    let capabilities = fresh
+        .rtp_sender(fresh_sender)
         .expect("sender")
         .get_capabilities(RtpCodecKind::Video)
         .expect("video")
