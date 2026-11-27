@@ -1176,3 +1176,43 @@ fn a_rollback_keeps_the_proposed_encodings_of_a_transceiver_the_offer_created() 
     );
     Ok(())
 }
+
+/// `with_rollback_resets_offer_created_senders(true)`, the WPT form
+/// (`negotiation-encodings.https.html`, "sRD(simulcast offer), addTrack, then rollback brings
+/// us back to having a single encoding", w3c/webrtc-pc#2764): the rollback returns that sender
+/// to one encoding without a rid, the track's.
+#[test]
+fn a_rollback_can_return_an_offer_created_sender_to_one_encoding() -> TestResult {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_rollback_resets_offer_created_senders(true)
+                .build(),
+        )
+        .build(Instant::now())?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(crlf(WPT_SIMULCAST_RECV_OFFER))?,
+    )?;
+    let sender = pc.add_track(jsep_common::video_track("late", 0x0516_0389))?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("foo", None), ("bar", None), ("baz", None)])
+    );
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.get_transceivers().count(), 1);
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("", None)]));
+    let ssrc = pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc;
+    assert_eq!(ssrc, Some(0x0516_0389));
+    Ok(())
+}

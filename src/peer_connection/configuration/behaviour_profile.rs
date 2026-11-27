@@ -1469,6 +1469,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "none (RFC 8832 has none); libwebrtc has none",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_rollback_resets_offer_created_senders",
+        class: NotGovernedClass::Same,
+        note: "off: a rollback keeps the proposed simulcast encodings of an offer-created sender a track was added to (W3C [[LastStableRidlessSendEncodings]] null), as Chrome 158 (wpt.fyi run 6329870674821120, webrtc/simulcast/negotiation-encodings.https.html?rest \"sRD(simulcast offer), addTrack, then rollback brings us back to having a single encoding\": FAIL, got [\"foo\", \"bar\"]); on is the WPT form, which Firefox 161 passes",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_ignore_rid_pause_for_recv",
         class: NotGovernedClass::Same,
         note: "applies with rid pause marks only",

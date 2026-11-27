@@ -89,6 +89,7 @@ impl RTCPeerConnection {
         let (track, send_encodings, codec_preferences) =
             self.normalize_sender_track(track, send_encodings)?;
 
+        let resets_offer_created = self.setting_engine.rollback_resets_offer_created_senders;
         let transceiver = &mut self.rtp_transceivers[id];
         if transceiver.get_codec_preferences().is_empty() && !codec_preferences.is_empty() {
             transceiver.set_codec_preferences(codec_preferences, &self.media_engine)?;
@@ -125,8 +126,10 @@ impl RTCPeerConnection {
                 // A rollback: the sender of a transceiver the offer created has a null
                 // `[[LastStableRidlessSendEncodings]]` (W3C "create an RTCRtpSender"), so the
                 // proposed encodings stay; one that had no encodings yet gets the track's.
+                // (`with_rollback_resets_offer_created_senders`: the track's then too, the WPT
+                // form.)
                 sender.keep_proposed_send_encodings_for_track(
-                    (!created_by_remote).then(|| send_encodings.clone()),
+                    (!created_by_remote || resets_offer_created).then(|| send_encodings.clone()),
                 );
             } else if !sender.has_send_encodings() || !sender.is_negotiated() {
                 // A track that carries encodings of its own (the engine's way to give a

@@ -569,6 +569,8 @@ pub struct SettingEngine {
     pub(crate) rid_pause_marks: bool,
     /// [`SettingEngineBuilder::with_rollback_content_ignored`].
     pub(crate) rollback_content_ignored: bool,
+    /// [`SettingEngineBuilder::with_rollback_resets_offer_created_senders`].
+    pub(crate) rollback_resets_offer_created_senders: bool,
     /// [`SettingEngineBuilder::with_strict_sdp_attribute_grammar`].
     pub(crate) strict_sdp_attribute_grammar: bool,
     /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
@@ -725,6 +727,7 @@ impl SettingEngine {
             ignore_rid_pause_for_recv: Default::default(),
             rid_pause_marks: Default::default(),
             rollback_content_ignored: Default::default(),
+            rollback_resets_offer_created_senders: Default::default(),
             strict_sdp_attribute_grammar: Default::default(),
             w3c_simulcast_answer: Default::default(),
             nominated_candidates_only: Default::default(),
@@ -3434,6 +3437,24 @@ impl SettingEngineBuilder {
     /// whatever the SDP holds.
     pub fn with_rollback_content_ignored(mut self, ignored: bool) -> Self {
         self.0.rollback_content_ignored = ignored;
+        self
+    }
+
+    /// Returns, on a rollback of a remote offer to receive simulcast, the sender of a
+    /// transceiver that offer created, kept because a track was added to it since
+    /// (`add_track`), to one encoding without a rid: the track's. The default is `false`.
+    ///
+    /// W3C webrtc-pc: the sender of a transceiver a remote offer creates starts with
+    /// `[[LastStableRidlessSendEncodings]]` "initialized to null" ("create an RTCRtpSender");
+    /// the slot is set only when an offer is applied in stable, before that transceiver
+    /// exists, and a rollback restores it only "If [[LastStableRidlessSendEncodings]] is not
+    /// null". So by default the sender keeps the encodings the offer proposed. WPT
+    /// `webrtc/simulcast/negotiation-encodings.https.html`, "sRD(simulcast offer), addTrack,
+    /// then rollback brings us back to having a single encoding" (written for
+    /// w3c/webrtc-pc#2764) expects one rid-less encoding: `true` takes that form, which
+    /// Firefox 161 has and Chrome 158 and Safari 27.2 do not (wpt.fyi).
+    pub fn with_rollback_resets_offer_created_senders(mut self, resets: bool) -> Self {
+        self.0.rollback_resets_offer_created_senders = resets;
         self
     }
 

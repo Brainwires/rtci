@@ -36,11 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposed encodings when that offer is rolled back after `add_track` (W3C "create an
   RTCRtpSender": [[LastStableRidlessSendEncodings]] "initialized to null"; the rollback restores
   it only when it is not null). WPT `webrtc/simulcast/negotiation-encodings.https.html`
-  ("sRD(simulcast offer), addTrack, then rollback brings us back to having a single encoding")
-  expects one rid-less encoding there, which the text does not say. Tests
+  ("sRD(simulcast offer), addTrack, then rollback brings us back to having a single encoding",
+  written for w3c/webrtc-pc#2764, fixed by PR #2797) expects one rid-less encoding there, which
+  the merged text does not give that sender; Chrome 158 and Safari 27.2 fail the subtest with
+  `["foo", "bar"]` (the text's form), Firefox 161 passes (wpt.fyi). 0.2.1 passed it only because
+  `add_track` dropped the proposed encodings. New setting
+  `SettingEngineBuilder::with_rollback_resets_offer_created_senders(true)` gives the WPT form
+  (the track's one encoding); off in every profile, as Chrome. Tests
   `jsep_simulcast.rs::a_track_added_after_a_simulcast_offer_keeps_the_proposed_encodings`,
   `a_track_replaced_in_after_a_simulcast_offer_keeps_the_proposed_encodings`,
-  `a_rollback_keeps_the_proposed_encodings_of_a_transceiver_the_offer_created`; audit rows
+  `a_rollback_keeps_the_proposed_encodings_of_a_transceiver_the_offer_created`,
+  `a_rollback_can_return_an_offer_created_sender_to_one_encoding`; audit rows
   WEBRTC-5.1-8, WEBRTC-5.2-34 (violations recorded, stay `tested`), WEBRTC-4.4.1.4-75.
 
 ## [0.2.1] - 2026-11-27
