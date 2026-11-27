@@ -46,10 +46,13 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
+use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtci::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
 use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
-use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::interceptor_registry::{
+    DefaultInterceptorOptions, register_default_interceptors_with_options,
+};
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
@@ -69,6 +72,7 @@ use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtci::sansio::Protocol;
 use rtci::shared::error::Error;
+use rtci::shared::time::SystemInstant;
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -122,6 +126,58 @@ impl Interceptor for TapInterceptor {
     fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 
+/// A small deterministic generator (SplitMix64).
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
+
+/// The built-in crypto provider with its random source replaced by a seeded [`Rng`]: what the
+/// engine draws through `RTCCryptoProvider::random()` (ICE, DTLS, SCTP and, through
+/// `DefaultInterceptorOptions::rtcp_random`, the RTCP report times: RFC 3550 6.3.1's
+/// randomisation of the interval over [0.5, 1.5] times its computed value) is the same in every
+/// run. Unseeded, the measured RTCP share differed from run to run, and once landed above the
+/// 5% bound it is measured against (train 36 round 10b, macOS job 140696205056: 0.0516).
+struct SeededProvider {
+    inner: Arc<dyn RTCCryptoProvider>,
+    rng: Mutex<Rng>,
+}
+
+impl RTCCryptoProvider for SeededProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn crypto(&self) -> &dyn RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn RTCRandom {
+        self
+    }
+}
+
+impl RTCRandom for SeededProvider {
+    fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        let mut rng = self.rng.lock().map_err(|_| CryptoError::RandomnessFailed)?;
+        for chunk in output.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next_u64().to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
+/// The seed of each peer's random source: fixed, so every run (and platform) measures the same
+/// trace.
+const SEEDS: [u64; 2] = [0x5eed_0001, 0x5eed_0002];
+
 struct Peer {
     pc: RTCPeerConnection,
     tap: Tap,
@@ -133,11 +189,26 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str, profile: BehaviourProfile) -> Result<Self> {
+    /// `seed`: the peer's random source; `start`: the instant the run starts at, which the
+    /// peer's clock and NTP times are anchored to, so that two runs of one seed in one process
+    /// (or on two machines) are the same run.
+    fn new(addr: &str, profile: BehaviourProfile, seed: u64, start: Instant) -> Result<Self> {
+        let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
+            inner: default_provider()?,
+            rng: Mutex::new(Rng(seed)),
+        });
         let mut media_engine = MediaEngine::for_profile(profile);
         media_engine.register_default_codecs()?;
         let tap = Tap::default();
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?.with(
+        let mut options = DefaultInterceptorOptions::for_profile(profile);
+        options.rtcp_random = Some(provider.clone());
+        options.wall_clock = Some(SystemInstant::at(start, Duration::from_secs(1_700_000_000)));
+        let (registry, _handles) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            &options,
+        )?;
+        let registry = registry.with(
             Slot::Custom(100),
             TapInterceptor {
                 tap: tap.clone(),
@@ -150,11 +221,12 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_behaviour_profile(profile)
+                    .with_crypto_provider(provider)
                     .build(),
             )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+            .build(start)?;
         Ok(Self {
             pc,
             tap,
@@ -418,12 +490,13 @@ struct Measured {
 }
 
 fn measure(sc: Scenario, profile: BehaviourProfile, drop_at: Option<u64>) -> Result<Measured> {
+    let start = Instant::now();
     let mut world = World {
         peers: [
-            Peer::new("10.0.0.1:5000", profile)?,
-            Peer::new("10.0.0.2:5000", profile)?,
+            Peer::new("10.0.0.1:5000", profile, SEEDS[0], start)?,
+            Peer::new("10.0.0.2:5000", profile, SEEDS[1], start)?,
         ],
-        now: Instant::now(),
+        now: start,
         delay: Duration::from_millis(20),
         in_flight: vec![],
         order: 0,
@@ -660,6 +733,8 @@ fn print_row(sc: &Scenario, profile: BehaviourProfile, m: &Measured) {
         m.share * 100.0,
         m.nack_ms.map_or("-".to_owned(), |ms| format!("{ms:.0}"))
     );
+    // The share in full: seeded, every run on every platform prints the same value.
+    println!("RTCP-SHARE {} {}: {:?}", sc.name, profile.name(), m.share);
 }
 
 fn scenarios() -> Vec<Scenario> {

@@ -489,6 +489,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **The RTCP-share tests are seeded** (`conf/rtcp-4-rtcp-share-test-is-seeded`;
+  `tests/rtcp_rate_trace_rtc2rtc.rs`). Both peers draw their random numbers from a seeded
+  provider (`DefaultInterceptorOptions::rtcp_random` and the setting engine's crypto provider:
+  RFC 3550 section 6.3.1's report-interval randomisation, the dither of early feedback, ICE,
+  DTLS, SCTP), with their clocks and NTP times anchored at the run's start. The measured share
+  was different in every run and landed once above the unchanged 5% bound of
+  `the_performance_profile_keeps_low_rate_rtcp_inside_five_percent` (train 36 round 10b, macOS:
+  0.0516); every share is now printed in full (`RTCP-SHARE ...`).
+
 - **The test environment relays the end of candidates**
   (`conf/ice-34-lite-agents-and-failed-after-end-of-candidates`; `tests/testenv/mod.rs`
   `negotiate` / `negotiate_with` now end each peer's gathering and hand each the other's
