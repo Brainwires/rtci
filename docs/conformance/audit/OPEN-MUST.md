@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 662; rows that
   apply: 5095.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5073 of 5095 (99.6 %).
-- Tested as the default (`tested`): 5041 of 5095 (98.9 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 22: 10 untested, 11 partial, 1 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5076 of 5095 (99.6 %).
+- Tested as the default (`tested`): 5044 of 5095 (99.0 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 19: 7 untested, 11 partial, 1 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
-| B | implemented, lacking a test that fails without it | 10 | 0 |
+| B | implemented, lacking a test that fails without it | 7 | 0 |
 | C | partly implemented | 9 | 1 |
 | D | not implemented | 1 | 0 |
 | E | cannot be met or observed inside this engine | 8 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 54 | 26 |
+| all | | 51 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 20 rows, 14 of size S, 5 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 17 rows, 11 of size S, 5 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -43,7 +43,6 @@ become `setting` only if such a cell is named, or close when the default changes
 | jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | rtp | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
-| sctp | 3 | 0 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 
 ## Rows
@@ -85,9 +84,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
 | RFC5576-9-1 | `rfc5576.md` | The sender is prepared for receivers that ignore its source ... | untested | B | An rtc2rtc test whose answerer is handed the offer with every a=ssrc / a=ssrc-group line removed: media and RTX still bound (MID, RID, RRID) (audit-6 sweep) | S | rtp |
 | RFC8834-4.1-24 | `rfc8834.md` | Ignore unknown RTP header extensions | untested | B | As RFC8834-10-5 (the same clause, section 4.1); conf/must7-3 fixes the receive reads; on merge take 10-5's class (audit-6 sweep) | S | rtp |
-| RFC6525-5.2.7-1 | `rfc6525.md` | H1: a response marks its request acknowledged; the timer stops when ... | untested | B | A test that a Re-configuration Response with a sequence number no request is outstanding for changes nothing (no stream reset, timer and outstanding requests unchanged) (audit-6 sweep) | S | sctp |
-| WEBRTC-6.1.2-3 | `w3c-webrtc-pc.md` | "closed" when a SHUTDOWN or ABORT chunk is received | untested | B | A test that a SHUTDOWN received from the peer makes RTCSctpTransport closed (the ABORT half: close_is_noticed_by_the_remote) (audit-5 sweep) | S | sctp |
-| WEBRTC-6.2.8-1 | `w3c-webrtc-pc.md` | Receive: discard the data if the channel is not "open" | untested | B | A test that user data received on a closing (or closed) channel reaches no application message (audit-5 sweep) | S | sctp |
 | RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
 | RFC7675-1-1 | `rfc7675.md` | Consent to send applies to a single 5-tuple: it is kept, renewed and ... | partial | C | Consent per candidate pair: the last consent response is kept per remote candidate, so a response on another pair to the same remote candidate renews the selected pair's consent. Keep it per pair; test: two local candidates, one remote, the selected pair silent while a late check on the other pair is answered (sketch in the row) | S | ice |
 | WEBRTC-5.6.4-2 | `w3c-webrtc-pc.md` | "failed": gathering done, no more remote candidates, all pairs failed ... | partial | C | W3C failed needs the end-of-candidates indication: without it a transport whose pairs failed or lost consent is disconnected; the checking timeout fails it now (coordinator: RFC/W3C form vs the timer bound RFC8838-8-1/8-3 keep) (audit-5 sweep) | M | ice |

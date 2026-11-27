@@ -416,6 +416,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now with a mutation that removes every layer of "if already failed, abort"). RFC5746-3.6-5,
   RFC9147-4-9, RFC9147-5-1, RFC9147-5.5-1 and WEBRTC-5.5-3 `tested` (were `untested`,
   open-must class B).
+- **Two SCTP MUST rows are tested** (`conf/sctp-27-must-rows-batch8`; tests and audit only,
+  no engine change; each checked by a mutation, `mut/must8a-gated`). RFC 6525 5.2.7 H1: a
+  Re-configuration Response whose number has no running timer changes nothing (the
+  outstanding request stays outstanding and timed, the stream keeps its sequence numbers,
+  nothing is reported:
+  `rtci-sctp stream_reset_test.rs::a_response_for_no_outstanding_request_changes_nothing`).
+  W3C webrtc-pc 6.1.2: a received SHUTDOWN makes the RTCSctpTransport closed
+  (`handler/sctp.rs::a_received_shutdown_closes_the_sctp_transport`, the test of conf/w3c-1,
+  whose mutation missed the `ended` arm of `SctpTransport::state` that holds the behaviour).
+  RFC6525-5.2.7-1 and WEBRTC-6.1.2-3 `tested` (were `untested`, open-must class B). The
+  conf/w3c-1 test for W3C 6.2.8 (`data_channel_receive_not_open_rtc2rtc.rs`) is carried along,
+  but WEBRTC-6.2.8-1 stays `untested`: the test passes with both of the handler's discard
+  checks lifted, so its message never reaches them.
+- **W3C webrtc-pc 6.2.8 is tested: a message read while a channel is closing reaches no
+  application message** (`conf/sctp-28-data-on-a-channel-that-is-not-open`, on conf/sctp-27;
+  `tests/data_channel_receive_while_closing_rtc2rtc.rs::a_message_read_after_close_is_called_is_discarded`;
+  test and audit only, no engine change; mutation checked). `close()` makes the channel
+  "closing" and queues the stream reset behind what was sent, so a datagram read before the
+  next flush carries user data for a closing channel on a stream that still reads; it is
+  discarded while its sibling's message is delivered. The only state that is not "open" in
+  which user data can reach the channel (see the test's notes). WEBRTC-6.2.8-1 `tested`.
 
 ## [0.2.1] - 2026-11-27
 
