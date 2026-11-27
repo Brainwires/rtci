@@ -134,7 +134,7 @@ keys are mostly hidden under the SRTCP ones in this table.
   object of each AES key length in its frame, and `aes` builds the decryption schedule from the
   encryption one in frames below it). With one 32 KiB depth for every build, rustc 1.99.1's
   unoptimised build (the test environment's compiler) left the master key and its AES round
-  keys 37.7 to 42.1 KB below the measurement's starting point, beyond the overwrite, in all 20
+  keys 37.7 to 42.2 KB below the measurement's starting point, beyond the overwrite, in all 20
   measurements of the ring provider (run 45970063627); with rustc 1.100 nothing was left beyond it.
   The unoptimised depth is the deepest use measured (47 KiB) times 2.7. A measured depth (fill
   the stack below with a marker first, overwrite down to the lowest byte the work changed) was
@@ -169,7 +169,8 @@ Each part of the fix is held by the first test (mutations): without the overwrit
 `on_erased_stack`, building leaves 874 key forms (run 45886867130); with the overwrite 32 KiB
 deep in an unoptimised build too, building leaves the master key and its round keys with rustc
 1.99.1 (run 45970063627, where it was found; the mutation `mut/zeroize-4-scrub-32k-in-debug`
-reproduces it: run pending); with `hmac` and `sha1`
+reproduces it, run 45983076469: 242 key forms after building, the same inventory digest as the
+test environment's failure); with `hmac` and `sha1`
 built without `zeroize`, 480 HMAC-SHA1 states are left in freed heap after the teardown
 (45886871614); with the AES-CM cipher object built over stack that was not overwritten first,
 round keys of the master key are in the heap while the contexts live (45886877182: the unused
@@ -189,11 +190,20 @@ bytes of `aes`'s union, carried from the stack). Cost: docs/performance.md, row 
   source does, and how much of that survives depends on the compiler (an intermediate state of
   this work left 24 key forms with rustc 1.100 and 96 with rustc 1.99.1 from the same sources).
   The packet path is therefore asserted in optimised builds only; in unoptimised ones the test
-  prints what it finds: with rustc 1.100 and the final code nothing, on x86-64 Linux and
-  AArch64 macOS (runs 45886842087, 45886848334); with rustc 1.99.1 (test environment, x86-64
-  Linux, run 45970063627) 84 key forms over the profiles, the round keys of the AES-CTR key a
-  packet uses (the SRTP encryption key with AES-CM, the header-extension key with AES-GCM).
-  Building and tearing down are asserted in unoptimised builds too (above).
+  prints what it finds, the round keys of the AES-CTR key a packet uses, over the ten profiles
+  and both ways of keying (runs 45983045311, Linux, and 45983054507, macOS):
+
+  | rustc | x86-64 Linux, unoptimised | x86-64 Linux, optimised | AArch64 macOS |
+  |---|---|---|---|
+  | 1.89 (`rust-version`) | 72 (header-extension key) | 0 | not run |
+  | 1.99.1 | 84 (SRTP encryption key with AES-CM, header-extension key) | 0 | not run |
+  | 1.100 | 0 | 0 | 0 in both builds |
+
+  Building and tearing down are asserted in unoptimised builds too (above): 0 after either with
+  all three compilers; the AWS-LC provider leaves 150 forms in its packet path unoptimised with
+  rustc 1.89 and 1.99.1, 78 with 1.100 and in every optimised build (the stated limit above).
+  The test's "stack used" includes the overwrite itself (about 142 KiB unoptimised, 37 KiB
+  optimised).
 - **CPU registers, and whatever stores them on a stack.** A provider's AES leaves round keys in
   vector registers when it returns. A signal delivered next puts them into the signal frame; on
   Apple systems the lazy set-up of a thread-local saves the vector registers on the caller's

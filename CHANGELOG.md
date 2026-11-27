@@ -28,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     these steps, with either provider, in unoptimised and optimised builds, asserted with the
     oldest supported compiler (the workspace's `rust-version`) and with stable
     (`conf/zeroize-4-scrub-covers-the-key-setup-frames`: with 32 KiB in every build, rustc
-    1.99.1's unoptimised build left the master key and its AES round keys 37.7 to 42.1 KB
-    deep, below the overwrite's reach, in all 20 measurements of the test environment).
+    1.99.1's unoptimised build left the master key and its AES round keys 37.7 to 42.2 KB
+    deep, below the overwrite's reach, in all 20 measurements of the test environment, run
+    45970063627; now 0 with rustc 1.89, 1.99.1 and 1.100 in both builds, runs 45983045311,
+    45983054507, and the test environment passes, 45983033708).
   - **AES-CM** (the payload cipher of the AES-CM profiles, and the RFC 6904 header-extension
     keystream of every profile): the cipher object keeps its expanded key schedule and a
     packet runs the counter mode over a reference to it. It kept the key and expanded both
@@ -76,11 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames` (ignored).
   - **Unoptimised builds**: the compiler stores every intermediate value of the AES and SHA-1
     routines in a stack slot, round keys and hash states included, whatever the source does.
-    The packet path is measured, not asserted, in an unoptimised build: with rustc 1.100 the
-    ring provider leaves nothing there (runs 45886842087, 45886848334); with rustc 1.99.1 it
-    leaves the round keys of the AES-CTR key a packet uses (the SRTP encryption key with
-    AES-CM, the header-extension key with AES-GCM): 84 key forms over the profiles (test
-    environment, run 45970063627). Building and tearing down are asserted in every build.
+    The packet path is measured, not asserted, in an unoptimised build, and what it leaves
+    depends on the compiler: the round keys of the AES-CTR key a packet uses, over the ten
+    profiles with and without a key derivation rate, x86-64 Linux: rustc 1.89 (the workspace's
+    `rust-version`) 72 key forms (the header-extension key), rustc 1.99.1 84 (the SRTP
+    encryption key with AES-CM too), rustc 1.100 none, nor on AArch64 macOS (runs 45983045311,
+    45983054507). In an optimised build it leaves none with any of the three compilers.
+    Building and tearing down are asserted in every build.
   - **CPU registers, and what saves them**: a provider's AES leaves round keys in vector
     registers when it returns, and anything that later stores the registers on a stack puts
     them there: a signal frame, or the lazy set-up of a thread-local on Apple systems (seen

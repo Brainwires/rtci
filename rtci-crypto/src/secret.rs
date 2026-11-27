@@ -83,10 +83,11 @@ impl From<Vec<u8>> for SecretVec {
 ///
 /// The depth has to cover the stack the work before it used. Building an SRTP context uses
 /// about 3 KiB in an optimised build and 42 to 47 KiB in an unoptimised one, where every
-/// temporary has a stack slot of its own (`rtci-srtp/tests/key_residue.rs` prints it): the
-/// AES key schedules built for the key derivation are the deepest part, below frames such as
+/// temporary has a stack slot of its own (`rtci-srtp/tests/key_residue.rs`, measured with a
+/// 32 KiB overwrite): the AES key schedules built for the key derivation are the deepest
+/// part, below frames such as
 /// `common::block_encrypt`'s, which holds a cipher object of every AES key length. With rustc
-/// 1.99.1 (x86-64 Linux) the master key and its round keys were left 37.7 to 42.1 KB below the
+/// 1.99.1 (x86-64 Linux) the master key and its round keys were left 37.7 to 42.2 KB below the
 /// point the measurement starts from, more than 32 KiB below the context's `on_erased_stack`
 /// frame (which lies less than 4.9 KB below that point), out of a 32 KiB overwrite's reach.
 /// 128 KiB is the deepest unoptimised use measured (47 KiB) times 2.7, for other compilers and
