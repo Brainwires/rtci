@@ -103,7 +103,12 @@ A fix needed after step 5 (the tag) is a new commit and a patch release (`0.1.1`
    empty `## [Unreleased]` above it. The version in `[workspace.package]` and in every
    `[workspace.dependencies]` requirement on a workspace crate is `X.Y.Z`.
 3. `SECURITY.md`'s supported-versions table names the new line if it is a new minor version.
-4. A crates.io API token with the `publish-new` and `publish-update` scopes, given to cargo
+4. The draft-work register (`docs/conformance/draft-work.md`) is re-checked: for each entry,
+   the W3C editor's draft and its `amendments.json`, the issues and PRs it names, the RFC errata
+   and the datatracker; dates updated, and a default whose draft work has moved is changed (or
+   the entry says why not) before the release commit (`docs/conformance/audit/RULES.md`,
+   "Contradictions").
+5. A crates.io API token with the `publish-new` and `publish-update` scopes, given to cargo
    with `cargo login` (it stays in `~/.cargo/credentials.toml`; never commit it or put it in
    the repository's secrets until publishing moves to CI).
 
