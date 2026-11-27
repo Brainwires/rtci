@@ -269,6 +269,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rtci_mdns::MulticastSocket::with_interface` sends by that interface**
+  (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`; RFC 6762 section 14). The socket
+  joined the group on the interface given but sent by the system's route for 224.0.0.251. On
+  Windows that route comes from the destination cache, and a process that sent to the group
+  from 127.0.0.1 leaves it on loopback after it has exited: every later datagram of such a
+  socket, on that host, left by loopback with source 127.0.0.1, and a peer that resolves a
+  `.local` name to the answer's source (or refuses an address record from another address)
+  got loopback or nothing (agent-test run 46049306566). It now sets `IP_MULTICAST_IF` to the
+  interface it joined on. **Limit:** `MulticastSocket::new()` without an interface is
+  unchanged and still sends by the system's route, so on such a Windows host it still sends
+  from 127.0.0.1 and fails silently; the `with_interface` documentation says so and tells a
+  Windows application to pass the interface of the address it publishes. Test
+  `rtci-mdns/tests/multicast_interface.rs`, run on a Windows host put in that state by
+  `scripts/windows-poisoned-mdns-route.sh` (which also runs the interop and driver mDNS tests
+  there and deletes the entry again from an EXIT trap): a new step of `cargo.yml`'s platform
+  job, on GitHub-hosted Windows only, since it changes host state and needs an administrator
+  shell. Without the fix the test fails on such a host (agent-test run 46051047569: the
+  datagram never reached a receiver joined on the network interface); with it, "sent by
+  10.1.0.100, received from 10.1.0.100" and the four interop tests pass (run 46051053795).
 - **ICE: consent lost after completion fails the transport as the PAC timer expires, not 30 s
   later** (`conf/ice-35-driver-consent-failure-time`, after
   `conf/ice-32-failed-needs-end-of-candidates`; RFC 8445 section 8.1.2: once a pair is
@@ -522,6 +541,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **The real-multicast mDNS tests probe the host first** (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`).
+  `examples/stream-driver/tests/mdns.rs` and the two QueryAndGather tests of
+  `tests/mdns_query_and_gather_interop.rs` resolve `.local` names over the host's mDNS group;
+  on a self-hosted Windows VM whose network did not loop multicast back (NAT address
+  10.0.2.15, master push run 45956791846: no mDNS datagram arrived on its interface nor on
+  loopback) all five failed, saying nothing about the engine. Each now first sends a probe to
+  224.0.0.251:5353 on its interface and waits up to two seconds for it on a socket of its own
+  joined there; if it does not come back the test is skipped with the reason printed, except on
+  the jobs that say multicast works there (`RTCI_EXPECT_HOST_MULTICAST`, which `cargo.yml` sets
+  to Linux everywhere, plus macOS and GitHub-hosted Windows in the platform job: the places
+  these tests run today), where a failing probe fails the test, so the skip cannot quietly
+  remove coverage. Each probe uses the sockets of the code under test: the driver's tests join
+  and send on the address's interface (`IP_MULTICAST_IF`), the interop tests use a
+  `MulticastSocket::new()` as their rtc peer does (the system's route for the group, which
+  `cargo.yml` points at loopback on GitHub's macOS image). On Windows the interop tests take
+  their address from the default route, not from the system's answer for the group: mDNS sent
+  on loopback (the driver's loopback test) leaves the group's destination-cache entry on
+  loopback after its process exits and from then on makes Windows answer 127.0.0.1 for the
+  group to every process, which made every interop test bind loopback and time out when the
+  driver's tests had run first (agent-test run 46045692164); the driver's loopback real-socket
+  test does not run on Windows for the same reason (a long-lived runner would carry the entry
+  into the next job).
+  **Stream driver:** that Windows behaviour is documented (`peer` module, `PeerDriverConfig::on`,
+  `AddressFilter::include_loopback`): a socket joined on loopback that sends to the group
+  leaves the group's destination-cache entry on loopback (source 127.0.0.1) after the process,
+  and every process then gets 127.0.0.1 for 224.0.0.251, until the entry is deleted
+  (`netsh interface ipv4 delete destinationcache interface=<loopback index>
+  address=224.0.0.251`, as administrator: the entry and the delete measured on Windows 11
+  and on GitHub's Windows image; IPv6 ff02::fb not measured). The driver changes no host routing
+  state itself; it logs one warning per process when it joins the IPv4 mDNS group on loopback
+  on Windows (new dependency: `log`). No behaviour change otherwise. The shared mDNS budget of two drivers (draft
+  section 7.1) moves to virtual time
+  (`mdns_virtual_time.rs::two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time`),
+  where it does not depend on multicast at all; the real-socket file keeps the two smoke tests
+  (egress interface, loopback). No engine change.
 - **The test environment relays the end of candidates**
   (`conf/ice-34-lite-agents-and-failed-after-end-of-candidates`; `tests/testenv/mod.rs`
   `negotiate` / `negotiate_with` now end each peer's gathering and hand each the other's

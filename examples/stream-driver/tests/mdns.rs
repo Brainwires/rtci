@@ -1,14 +1,26 @@
-//! `PeerDriver`'s mDNS over the host's real mDNS group: two driven connections publish their
-//! host addresses behind `.local` names (draft-ietf-mmusic-mdns-ice-candidates section 3.1)
-//! and resolve each other's through the driver's mDNS sockets, within one budget shared by both
-//! (section 7.1).
+//! `PeerDriver`'s mDNS over the host's real mDNS group: the smoke tests of the driver's real
+//! mDNS sockets. Two driven connections publish their host addresses behind `.local` names
+//! (draft-ietf-mmusic-mdns-ice-candidates section 3.1) and resolve each other's through the
+//! driver's mDNS sockets, on the host's egress interface and on loopback.
+//!
+//! What they prove beyond the virtual-time tests (`tests/mdns_virtual_time.rs`: the same
+//! exchange, the interface rules of RFC 6762 section 14 and the shared budget of section 7.1,
+//! on the mock network, on every platform) is that the driver's sockets work with the
+//! operating system's: bound, joined and sent on the right interface. They also need the
+//! host to deliver multicast between two sockets of this process on that interface, which is
+//! not the driver's to give: a CI virtual machine whose network does not loop multicast back
+//! (seen on a self-hosted Windows VM, NAT address 10.0.2.15: no mDNS datagram arrived, on its
+//! interface nor on loopback) made all of them fail. So each test first probes the host
+//! ([`host_loops_multicast`], with the driver's own socket options: joined on the address's
+//! interface, sent with `IP_MULTICAST_IF` set to it): when the host does not deliver, the test
+//! is skipped with the reason printed, except where the job says multicast works
+//! ([`host_multicast_expected`]: `cargo.yml` on Linux, macOS and GitHub-hosted Windows), where
+//! a failing probe fails the test (the skip cannot become universal).
 //!
 //! Linux and Windows. Multicast needs a route that carries it back to this host: GitHub's macOS
 //! image has none (an mDNS send fails with "No route to host"; `cargo.yml` reroutes it for the
 //! root crate's interop tests only), and on a desktop Mac a multicast socket raises the Local
-//! Network privacy prompt. The same connection on virtual time, on every platform, is
-//! `tests/mdns_virtual_time.rs`; the budget's own rules are unit tests of the crate
-//! (`mdns_io.rs`).
+//! Network privacy prompt. The budget's own rules are unit tests of the crate (`mdns_io.rs`).
 #![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use rtci::ice::mdns::MulticastDnsMode;
@@ -25,7 +37,7 @@ use rtci::rtp_transceiver::RTCRtpTransceiverInit;
 use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtci::sansio::Protocol;
 use rtci_stream_driver::peer::{PeerDriver, PeerDriverConfig};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -49,11 +61,27 @@ fn mdns_egress_ip() -> Option<IpAddr> {
         .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
+/// The address the system answers for the mDNS group: a UDP socket connected to
+/// 224.0.0.251:5353 and its local address. On Windows a process that joined the group on
+/// loopback and sent to it there leaves this answer at 127.0.0.1 for every process after it has
+/// exited (hosted Windows, agent-test run 46049295359; the `netsh` joins table entry alone does
+/// not move it): the Windows post-condition of the loopback test.
+fn group_answer() -> Option<IpAddr> {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect((rtci::mdns::MDNS_MULTICAST_IPV4, rtci::mdns::MDNS_PORT))?;
+            socket.local_addr()
+        })
+        .ok()
+        .map(|addr| addr.ip())
+}
+
 /// The address the test runs on ([`mdns_egress_ip`]), or `None` when this host has no
-/// interface that carries multicast to the mDNS group: some GitHub-hosted Windows images have
-/// none, and the test is then skipped with the reason printed (the same connection runs on
-/// virtual time on every platform, `tests/mdns_virtual_time.rs`). On Linux the hosted runners
-/// always have one, so its absence fails the test there rather than hiding a regression.
+/// interface that carries multicast to the mDNS group (some GitHub-hosted Windows images have
+/// none) or does not deliver it back to this process on it ([`multicast_or_skip`]); the test is
+/// then skipped with the reason printed (the same connection runs on virtual time on every
+/// platform, `tests/mdns_virtual_time.rs`). On Linux the hosted runners always have one that
+/// delivers, so its absence fails the test there rather than hiding a regression.
 fn mdns_egress_or_skip(test: &str) -> Option<IpAddr> {
     let ip = mdns_egress_ip();
     if ip.is_none() {
@@ -62,8 +90,98 @@ fn mdns_egress_or_skip(test: &str) -> Option<IpAddr> {
             "{test} needs an interface that carries multicast to the mDNS group"
         );
         println!("SKIPPED {test}: no interface on this host carries multicast to the mDNS group");
+        return None;
     }
-    ip
+    ip.filter(|ip| multicast_or_skip(test, *ip))
+}
+
+/// Whether the host delivers a datagram sent to the mDNS group (224.0.0.251:5353, the group and
+/// port the drivers use) from `ip`'s interface back to a socket of this process joined to the
+/// group on that interface, within two seconds. The probe is a DNS response with no records
+/// and a random ID (what other responders on the link ignore, and only this probe sends); it
+/// is sent up to ten times, 200 ms apart. Not a retry of the test: it asks the host one
+/// question, before the test, and the test runs once.
+fn host_loops_multicast(ip: IpAddr) -> bool {
+    let IpAddr::V4(interface) = ip else {
+        return false;
+    };
+    let probe = || -> std::io::Result<bool> {
+        let group = SocketAddr::from((rtci::mdns::MDNS_MULTICAST_IPV4, rtci::mdns::MDNS_PORT));
+        let receiver: std::net::UdpSocket = rtci::mdns::MulticastSocket::new()
+            .with_interface(interface)
+            .into_std()?;
+        receiver.set_nonblocking(false)?;
+        receiver.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let sender = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        sender.set_multicast_if_v4(&interface)?;
+        sender.set_multicast_loop_v4(true)?;
+        sender.bind(&SocketAddr::new(ip, 0).into())?;
+        let sender: std::net::UdpSocket = sender.into();
+        let nonce = std::process::id()
+            ^ std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or_default();
+        let [id0, id1, ..] = nonce.to_be_bytes();
+        let message = [id0, id1, 0x84, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut buf = [0u8; 1500];
+        for _ in 0..10 {
+            sender.send_to(&message, group)?;
+            let until = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < until {
+                match receiver.recv_from(&mut buf) {
+                    Ok((n, _)) if buf[..n] == message => return Ok(true),
+                    Ok(_) => continue,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(false)
+    };
+    probe().unwrap_or_else(|e| {
+        println!("multicast probe on {ip}: {e}");
+        false
+    })
+}
+
+/// Whether this job says the host delivers multicast to itself: `RTCI_EXPECT_HOST_MULTICAST`, a
+/// comma-separated list of operating system names (`std::env::consts::OS`: `linux`, `macos`,
+/// `windows`), which `cargo.yml` sets on the jobs where these tests run today (Linux, macOS
+/// with its multicast route over loopback, GitHub-hosted Windows). There a failing probe fails
+/// the test instead of skipping it, so the skip cannot quietly remove coverage; elsewhere
+/// (a self-hosted VM that does not loop multicast, an `agent-test` run without the variable) it
+/// skips with the reason printed.
+fn host_multicast_expected() -> bool {
+    std::env::var("RTCI_EXPECT_HOST_MULTICAST")
+        .is_ok_and(|v| v.split(',').any(|os| os.trim() == std::env::consts::OS))
+}
+
+/// [`host_loops_multicast`] on `ip`'s interface, or the test is skipped with the reason
+/// printed; where [`host_multicast_expected`], a host that does not deliver fails the test.
+fn multicast_or_skip(test: &str, ip: IpAddr) -> bool {
+    if host_loops_multicast(ip) {
+        return true;
+    }
+    if host_multicast_expected() {
+        panic!(
+            "{test}: this host does not deliver multicast to itself on {ip}, and the job says it \
+             does (RTCI_EXPECT_HOST_MULTICAST): the real-socket mDNS tests must run here"
+        );
+    }
+    println!("SKIPPED {test}: the host does not loop multicast on {ip} back to this process");
+    false
 }
 
 struct Side {
@@ -210,47 +328,6 @@ async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() ->
     Ok(())
 }
 
-/// draft-ietf-mmusic-mdns-ice-candidates section 7.1: one rate limit over all mDNS queries and
-/// responses. Two connections whose drivers share a small budget (1 at once, then 1 a second)
-/// send together no more than it allows over the whole exchange (probes, announcements,
-/// queries and answers of both), and still connect: what the budget refused waited, and
-/// leaves later at the budget's rate.
-#[tokio::test]
-async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Result<()> {
-    const BURST: u32 = 1;
-    const PER_SECOND: u32 = 1;
-    let _group = MDNS_GROUP_IN_USE.lock().await;
-    let Some(ip) =
-        mdns_egress_or_skip("two_driven_connections_send_their_mdns_within_one_shared_budget")
-    else {
-        return Ok(());
-    };
-    let limit = MdnsRateLimit::new(BURST, PER_SECOND);
-    let start = Instant::now();
-    let mut a = Side::new(ip, Some(limit.clone()))?;
-    let mut b = Side::new(ip, Some(limit))?;
-    let up = connect(&mut a, &mut b, Duration::from_secs(40)).await?;
-    // The drivers bind their mDNS sockets when gathering begins, so each may take the other's
-    // first announcement into its cache and connect after a single datagram: the exchange
-    // goes on for a while, and what the budget held leaves at its rate.
-    while start.elapsed() < Duration::from_secs(4) {
-        round(&mut a, &mut b).await?;
-    }
-    let elapsed = start.elapsed();
-    let sent = a.driver.mdns_datagrams_sent() + b.driver.mdns_datagrams_sent();
-    let allowed = u64::from(BURST) + (elapsed.as_secs_f64() * f64::from(PER_SECOND)).ceil() as u64;
-    assert!(
-        sent <= allowed,
-        "{sent} mDNS datagrams in {elapsed:?}: the shared budget allows {allowed}"
-    );
-    assert!(
-        sent > u64::from(BURST),
-        "the held mDNS left after the burst: {sent}"
-    );
-    assert!(up, "connected, the held mDNS sent as the budget allowed");
-    Ok(())
-}
-
 /// RFC 6762 section 14: the driver sends each mDNS message on the interface of the address it
 /// is about and joins the group there, not only on the system's default multicast interface.
 /// Two drivers whose only address is loopback publish names of 127.0.0.1, announce and answer
@@ -260,8 +337,30 @@ async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Re
 #[tokio::test]
 async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> Result<()> {
     let _group = MDNS_GROUP_IN_USE.lock().await;
-    let ip = IpAddr::from([127, 0, 0, 1]);
+    let ip = IpAddr::from(Ipv4Addr::LOCALHOST);
+    // On Windows mDNS sent on loopback leaves the group's destination-cache route on loopback
+    // after this process (`netsh interface ipv4 show destinationcache address=224.0.0.251`),
+    // and every process then gets 127.0.0.1 for the group (agent-test runs 46045692164,
+    // 46049295359; the fleet's Windows PC): on a runner that lives on (our self-hosted Windows
+    // VM) the next job's mDNS tests would bind loopback. Not run there;
+    // the same exchange on loopback's rules runs on virtual time
+    // (`mdns_virtual_time.rs::drivers_whose_link_is_not_the_default_multicast_interface_resolve_each_other`).
+    if cfg!(windows) {
+        println!(
+            "SKIPPED drivers_on_loopback_resolve_each_other_on_the_loopback_interface: on \
+             Windows mDNS on loopback leaves the group's destination-cache route on loopback \
+             for the whole host"
+        );
+        return Ok(());
+    }
+    if !multicast_or_skip(
+        "drivers_on_loopback_resolve_each_other_on_the_loopback_interface",
+        ip,
+    ) {
+        return Ok(());
+    }
     let limit = MdnsRateLimit::default();
+    let answer_before = group_answer();
     let mut a = Side::new(ip, Some(limit.clone()))?;
     let mut b = Side::new(ip, Some(limit))?;
     let up = connect(&mut a, &mut b, Duration::from_secs(30)).await?;
@@ -277,5 +376,16 @@ async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> R
         b.driver.mdns_datagrams_sent(),
         b.driver.mdns_datagrams_received()
     );
+    // Windows post-condition, should the test run there again: once the drivers (and their
+    // mDNS sockets) are gone, the host's answer for the group is not left at loopback (see
+    // `group_answer`), unless it was loopback before.
+    drop((a, b));
+    if cfg!(windows) && answer_before.is_some_and(|ip| !ip.is_loopback()) {
+        let after = group_answer();
+        assert!(
+            after.is_some_and(|ip| !ip.is_loopback()),
+            "the loopback test left the group's answer at {after:?} (was {answer_before:?})"
+        );
+    }
     Ok(())
 }

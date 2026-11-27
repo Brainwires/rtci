@@ -40,6 +40,24 @@
 //! on the IPv6 group (and on the IPv4 group of the same interface where the driver has an IPv4
 //! address there), and a query once on each interface.
 //!
+//! On Windows, a process that joins the IPv4 mDNS group on the loopback interface (a driver
+//! given 127.0.0.1) and sends to the group there leaves a stale route for the group behind
+//! it: the system's destination cache holds 224.0.0.251 with source 127.0.0.1 on the
+//! "Loopback Pseudo-Interface" after the process has exited (`netsh interface ipv4 show
+//! destinationcache address=224.0.0.251`), and from then on any process that asks which
+//! address reaches the group (a UDP socket connected to it) gets 127.0.0.1. Measured on
+//! Windows 11 and on GitHub's Windows image; the joins table entry for the group on the
+//! loopback interface that the join also leaves (`show joins`, references 0) is not what moves
+//! the answer. A later join, send and leave on the network interface does not clear the
+//! entry; deleting it does, at once: `netsh interface ipv4 delete destinationcache
+//! interface=<the loopback interface's index> address=224.0.0.251`, from an administrator
+//! prompt (measured on Windows 11 and on GitHub's Windows image). The same may hold for IPv6's
+//! ff02::fb; that was not measured. The driver changes no host routing state itself: an
+//! application or test host that runs drivers on loopback on Windows cleans the entry that way
+//! when it is done. The driver logs a warning when it makes such a join. Loopback candidates
+//! are for local use only (RFC 8445 section 5.1.1.1: "Addresses from a loopback interface MUST
+//! NOT be included in the candidate addresses").
+//!
 //! Where mDNS cannot be sent (a socket that cannot be bound, or a system that refuses every
 //! send to the group: no multicast route, or a Mac application without the Local Network
 //! permission) the driver tells the application with
@@ -147,7 +165,9 @@ pub struct PeerDriverConfig {
 }
 
 impl PeerDriverConfig {
-    /// Host candidates on `addresses`, any free port.
+    /// Host candidates on `addresses`, any free port. With a loopback address and mDNS on
+    /// Windows, see the module documentation: the mDNS sent on loopback leaves a stale
+    /// destination-cache route for the group after the process.
     pub fn on(addresses: Vec<IpAddr>) -> Self {
         Self {
             addresses,

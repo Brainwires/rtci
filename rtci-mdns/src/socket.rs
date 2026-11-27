@@ -129,6 +129,13 @@ impl MulticastSocket {
     /// If not set, the socket joins the multicast group on all interfaces
     /// (`INADDR_ANY`).
     ///
+    /// With an interface the socket also sends by it (`IP_MULTICAST_IF`, RFC 6762 section 14).
+    /// Without one it sends by the system's route for 224.0.0.251. On Windows that route comes
+    /// from the destination cache, and a process that sent to the group from 127.0.0.1 leaves
+    /// it on loopback after it exits: a socket built without an interface then sends from
+    /// 127.0.0.1 on that host, and peers on the network neither hear it nor resolve its names.
+    /// An application on Windows should pass the interface of the address it publishes.
+    ///
     /// # Arguments
     ///
     /// * `interface` - The IPv4 address of the network interface to use.
@@ -153,7 +160,9 @@ impl MulticastSocket {
     /// - `SO_REUSEADDR` enabled (allows multiple processes to bind)
     /// - `SO_REUSEPORT` enabled on Unix platforms (except Solaris/illumos)
     /// - Non-blocking mode enabled (for async compatibility)
-    /// - Joined to the mDNS multicast group (224.0.0.251)
+    /// - Joined to the mDNS multicast group (224.0.0.251), on [`with_interface`]'s interface when
+    ///   one is given, and sending by that interface (`IP_MULTICAST_IF`), whatever the system's
+    ///   route for the group says
     /// - IP TTL 255 on what it sends (RFC 6762 section 11)
     ///
     /// # Errors
@@ -221,6 +230,16 @@ impl MulticastSocket {
         // Join the mDNS multicast group
         let iface = self.interface.unwrap_or(Ipv4Addr::UNSPECIFIED);
         socket.join_multicast_v4(&MDNS_MULTICAST_IPV4, &iface)?;
+        // RFC 6762 section 14: what the socket sends leaves by the interface it joined on, not
+        // by the system's route for the group. On Windows that route comes from the destination
+        // cache, which a process that sent to the group from loopback leaves on loopback after
+        // it has exited (source 127.0.0.1, `netsh interface ipv4 show destinationcache`): every
+        // datagram of a socket without `IP_MULTICAST_IF` then leaves by loopback, with source
+        // 127.0.0.1, and a receiver that takes an address record only from the address it names
+        // refuses the answers.
+        if !iface.is_unspecified() {
+            socket.set_multicast_if_v4(&iface)?;
+        }
 
         Ok(socket.into())
     }
