@@ -1484,6 +1484,100 @@ fn an_empty_checklist_that_no_check_fills_fails_when_the_pac_timer_expires() {
     assert_eq!(a.state(), ConnectionState::Failed);
 }
 
+/// RFC 8445 Section 6.2: "Lite implementations skip most of the steps in Section 6 except for
+/// verifying the peer's ICE support and determining its role in the ICE processing": the
+/// checklist and its Failed state (Section 6.1.2.1) are a full agent's, and a lite agent sends
+/// no check (Section 2.5) that could fail a pair. A lite agent with no pair, its gathering
+/// complete and nothing more to come from the peer, is not failed at once:
+/// - with a full peer (end-of-candidates signalled) its pair comes from the peer's check (RFC
+///   8838 Appendix B: "the connectivity checks would be enough for the ICE-lite implementation
+///   to discover all potentially useful candidates as peer-reflexive"); its checking timeout
+///   (`disconnected_timeout + failed_timeout`, 30 s) still fails it when none comes;
+/// - with a lite peer whose description cannot trickle (a lite description has no
+///   `a=ice-options:trickle`), a candidate the peer still sends (the engine's TCP candidates,
+///   trickled once their listeners are bound) forms the pair, selected without checks (Section
+///   8.2). Before this the agent failed the empty checklist at its first look (train 36 round
+///   10, run 46038516696:
+///   `two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer`).
+#[test]
+fn a_lite_agent_with_no_pair_is_not_failed_when_no_candidate_is_to_come() {
+    let start = Instant::now();
+    let lite = |controlling| AgentConfig {
+        lite: true,
+        candidate_types: vec![CandidateType::Host],
+        ..config(controlling)
+    };
+
+    // A full peer.
+    let mut a = bare_agent(start, lite(false));
+    a.start_connectivity_checks(start, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_end_of_candidates();
+    silent(&mut a, start, Duration::ZERO, Duration::from_secs(29));
+    let seen = timed_states(&mut a, start);
+    assert!(
+        !seen.iter().any(|(_, s)| *s == ConnectionState::Failed),
+        "a full peer: {seen:?}"
+    );
+    assert_eq!(
+        a.state(),
+        ConnectionState::Checking,
+        "a full peer: {seen:?}"
+    );
+    silent(
+        &mut a,
+        start,
+        Duration::from_secs(29),
+        Duration::from_secs(32),
+    );
+    let seen = timed_states(&mut a, start);
+    let failed = seen
+        .iter()
+        .find(|(_, s)| *s == ConnectionState::Failed)
+        .map(|(at, _)| *at);
+    assert!(
+        failed.is_some_and(|at| at >= Duration::from_secs(30)),
+        "a full peer: the checking timeout fails it: {seen:?}"
+    );
+
+    // A lite peer that cannot trickle, whose candidate comes anyway.
+    let mut a = bare_agent(start, lite(true));
+    a.set_remote_lite(true);
+    a.start_connectivity_checks(start, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    a.set_local_gathering_complete();
+    a.set_remote_trickles(false);
+    silent(&mut a, start, Duration::ZERO, Duration::from_secs(3));
+    let seen = timed_states(&mut a, start);
+    assert!(
+        !seen.iter().any(|(_, s)| *s == ConnectionState::Failed),
+        "a lite peer: {seen:?}"
+    );
+    assert_eq!(
+        a.state(),
+        ConnectionState::Checking,
+        "a lite peer: {seen:?}"
+    );
+    a.add_remote_candidate(host(addr(REMOTE_A))).unwrap();
+    silent(
+        &mut a,
+        start,
+        Duration::from_secs(3),
+        Duration::from_secs(4),
+    );
+    assert!(
+        a.get_selected_candidate_pair().is_some(),
+        "a lite peer: the pair is selected without checks"
+    );
+    let seen = timed_states(&mut a, start);
+    assert!(
+        seen.iter().any(|(_, s)| *s == ConnectionState::Connected)
+            && !seen.iter().any(|(_, s)| *s == ConnectionState::Failed),
+        "a lite peer: {seen:?}"
+    );
+}
+
 // --- W3C webrtc-pc 5.6.4: "failed" needs the end of the candidates ---
 
 /// The connection states `a` reported since the last call, each with its time since `start`.
