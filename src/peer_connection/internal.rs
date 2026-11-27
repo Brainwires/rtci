@@ -1682,7 +1682,6 @@ impl RTCPeerConnection {
                 }
                 self.rollback_transceivers()?;
                 self.restore_last_stable_state();
-                self.sync_remote_trickle_with_current_description();
                 // The transports the offer added go with it.
                 self.restore_transport_layout();
             }
@@ -1774,22 +1773,6 @@ impl RTCPeerConnection {
         Ok(())
     }
 
-    /// After a rollback the remote description is the current one again: W3C
-    /// `canTrickleIceCandidates` is "determined based on whether a remote description
-    /// indicates support for trickle ICE" (null without one), and the ICE agent reads the same
-    /// for "failed" and "completed" (W3C 5.6.4; RFC 9429 section 5.7: media "processed
-    /// according to the previous local and remote descriptions"). A rolled-back remote
-    /// pranswer, applied to the transport at once, no longer counts.
-    fn sync_remote_trickle_with_current_description(&mut self) {
-        self.can_trickle_ice_candidates = self
-            .current_remote_description
-            .as_ref()
-            .and_then(|d| d.parsed.as_ref())
-            .map(crate::peer_connection::sdp::has_ice_trickle_option);
-        let trickles = self.can_trickle_ice_candidates != Some(false);
-        self.ice_transport_mut().agent.set_remote_trickles(trickles);
-    }
-
     /// Brings back what the last completed exchange negotiated, after a rollback (W3C
     /// webrtc-pc "set a session description", the rollback steps; RFC 9429 section 5.7: "the
     /// state of the session is restored to the state it was in before the offer"): the
@@ -1862,8 +1845,6 @@ impl RTCPeerConnection {
         self.removed_transceivers
             .truncate(snapshot.removed_transceivers);
         self.can_trickle_ice_candidates = snapshot.can_trickle_ice_candidates;
-        let trickles = self.can_trickle_ice_candidates != Some(false);
-        self.ice_transport_mut().agent.set_remote_trickles(trickles);
         self.trickled_remote_candidates = snapshot.trickled_remote_candidates;
         self.last_offer = snapshot.last_offer;
         self.last_answer = snapshot.last_answer;
