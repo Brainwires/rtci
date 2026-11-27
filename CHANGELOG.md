@@ -79,6 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour change (0.3.0): a `stuns:` ICE server URL whose host is an IP address is taken by the
+  configuration**
+  (`conf/w3c-4-stuns-url-with-ip-address-is-accepted-at-configuration`; audit rows
+  WEBRTC-4.4.1.5-24, RFC8489-8.1-1). The constructor and `set_configuration` threw `ErrHost`
+  for it, although W3C webrtc-pc "validate an ICE server URL" has no condition that refuses it.
+  RFC 8489 section 8.1 ("A 'stuns' URI containing an IP address MUST be rejected") is now met
+  where the URI would be used: the engine's server-reflexive gathering sends it nothing, reports
+  it once with an `icecandidateerror` of code 701 and no local address, and completes. The code
+  701 is our choice (W3C 4.8.3 names no code for a server the client rejects without asking it).
+  Not done: an `icecandidateerror` for a server the engine cannot reach. `turns:` with an IP
+  address is taken as before (RFC 5928 section 3 step 1). `rtci-ice` `Url::parse_url` keeps the
+  RFC 8489 rule; the peer connection reads its servers with `Url::parse_url_lenient`.
 - `rtci-crypto` depends on `hmac` 0.13 and `sha1` 0.11 (were 0.12 and 0.10), with `zeroize`.
   They are used by the ring provider's HMAC-SHA1 only; the nested lock file of the
   test-environment's layers peer follows.
@@ -157,17 +169,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PacerInterceptor::not_sending_dropped` (`conf/pacer-3-held-streams-purged`).
 
 ### Fixed
-
-- **A `stuns:` ICE server URL whose host is an IP address is taken by the configuration**
-  (`conf/w3c-4-stuns-url-with-ip-address-is-accepted-at-configuration`; audit rows
-  WEBRTC-4.4.1.5-24, RFC8489-8.1-1). The constructor and `set_configuration` threw `ErrHost`
-  for it, although W3C webrtc-pc "validate an ICE server URL" has no condition that refuses it.
-  RFC 8489 section 8.1 ("A 'stuns' URI containing an IP address MUST be rejected") is now met
-  where the URI would be used: the engine's server-reflexive gathering sends it nothing, reports
-  it once with an `icecandidateerror` of code 701 and no local address, and completes.
-  `turns:` with an IP address is taken as before (RFC 5928 section 3 step 1). `rtci-ice`
-  `Url::parse_url` keeps the RFC 8489 rule; the peer connection reads its servers with
-  `Url::parse_url_lenient`.
 
 - **A remote answer that names a rid the offer did not offer is applied, not refused**
   (`conf/jsep-87-reanswer-altering-rids`; RFC 8851 section 6.4 step 1: "If no matching line
