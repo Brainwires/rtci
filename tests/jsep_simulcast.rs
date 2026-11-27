@@ -981,7 +981,14 @@ a=simulcast:recv foo;bar;baz
 fn wpt_answerer(
     offer: &str,
 ) -> Result<(RTCPeerConnection, RTCRtpSenderId), Box<dyn std::error::Error>> {
-    let mut pc = default_peer()?;
+    wpt_answerer_on(default_peer()?, offer)
+}
+
+/// [`wpt_answerer`] on the peer `pc`.
+fn wpt_answerer_on(
+    mut pc: RTCPeerConnection,
+    offer: &str,
+) -> Result<(RTCPeerConnection, RTCRtpSenderId), Box<dyn std::error::Error>> {
     pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(crlf(offer))?)?;
     let ids: Vec<_> = pc.get_transceivers().collect();
     assert_eq!(ids.len(), 1, "the offer creates one transceiver");
@@ -1065,10 +1072,22 @@ fn an_offered_pause_mark_leaves_the_proposed_encoding_active() -> TestResult {
 /// WPT `webrtc/protocol/simulcast-answer.html`, "Disabling encodings locally does not change
 /// the SDP": after the answer, encodings made inactive by `set_parameters` are still offered
 /// as they were (RFC 9429 section 5.2.2: the `a=simulcast` line "MUST stay the same"; without
-/// RFC 7728 no stream is marked paused, RFC 8853 section 5.3.2).
+/// RFC 7728 no stream is marked paused, RFC 8853 section 5.3.2). The peer states
+/// `with_rid_pause_marks(false)`, the RFC default: the `Chrome` profile (row
+/// `sdp.rid-pause-marks`) writes `~` for an inactive encoding, as libwebrtc does.
 #[test]
 fn encodings_made_inactive_leave_the_next_offer_alone() -> TestResult {
-    let (mut pc, sender) = wpt_answerer(WPT_SIMULCAST_RECV_OFFER)?;
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let peer = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_rid_pause_marks(false)
+                .build(),
+        )
+        .build(Instant::now())?;
+    let (mut pc, sender) = wpt_answerer_on(peer, WPT_SIMULCAST_RECV_OFFER)?;
     let answer = pc.create_answer(None)?;
     pc.set_local_description(Instant::now(), answer)?;
     let mut s = pc.rtp_sender(sender).expect("sender");
