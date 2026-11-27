@@ -328,18 +328,10 @@ fn unreliable_channel_loses_without_retransmitting() {
         at_end.get_num_forward_tsns(),
     );
     assert_eq!(unique.len(), got.len(), "no duplicates");
-    // A link that drops 10% of packets each way delivers about 90% of single-packet messages
-    // sent without retransmission (RFC 3758: an abandoned message is skipped with FORWARD-TSN,
-    // never re-sent). Fewer than 800 means the sender stalled or abandoned messages it never
-    // sent; more than 960 means the loss did not apply or something retransmitted.
-    assert!(
-        (800..=960).contains(&unique.len()),
-        "{} of 1000 delivered over a 10%-loss link; expected 800 to 960",
-        unique.len()
-    );
-    // "Without retransmitting", counted: no DATA chunk of the channel's messages went twice
-    // (max_retransmits 0, RFC 7496 3.1, RFC 8831 6.6), by T3-rtx or by Fast Retransmit, over the
-    // association's whole life. The association's partially reliable retransmissions are the
+    // "Without retransmitting", counted, first (the most specific check: a retransmission of the
+    // channel's DATA also pushes the delivery above the bound below): no DATA chunk of the
+    // channel's messages went twice (max_retransmits 0, RFC 7496 3.1, RFC 8831 6.6), by T3-rtx
+    // or by Fast Retransmit, over the association's whole life. The association's partially reliable retransmissions are the
     // channel's: its messages are the only partially reliable DATA sent. The reliable ones
     // are the DATA_CHANNEL_OPEN's (RFC 8832 5: sent reliably whatever the channel's
     // reliability), which goes again when it or its SACK is lost, after the first message too:
@@ -349,6 +341,15 @@ fn unreliable_channel_loses_without_retransmitting() {
         at_end.get_num_partially_reliable_retransmissions(),
         0,
         "DATA of the channel was sent again"
+    );
+    // A link that drops 10% of packets each way delivers about 90% of single-packet messages
+    // sent without retransmission (RFC 3758: an abandoned message is skipped with FORWARD-TSN,
+    // never re-sent). Fewer than 800 means the sender stalled or abandoned messages it never
+    // sent; more than 960 means the loss did not apply or something retransmitted.
+    assert!(
+        (800..=960).contains(&unique.len()),
+        "{} of 1000 delivered over a 10%-loss link; expected 800 to 960",
+        unique.len()
     );
     // Every message that did not arrive was given up by the sender and skipped with FORWARD
     // TSN (RFC 3758 3.5 A2, C3): what is lost is abandoned, not left outstanding. A message
