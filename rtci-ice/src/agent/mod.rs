@@ -3477,8 +3477,8 @@ impl Agent {
     /// still gathering and/or waiting for additional remote candidates)"; "completed": "If
     /// consent checks [RFC7675] subsequently fail on all successful candidate pairs, the state
     /// transitions to "failed"", which also waits for the PAC timer (`Disconnected` until
-    /// then). The pairs the nomination retired (RFC 8445 Section 8.1.2) are not "remaining to
-    /// be checked". The pair is no longer used: its consent transactions are discarded and it
+    /// then). The pairs the nomination took out of the checklist (RFC 8445 Section 8.1.2,
+    /// Failed since) are not "remaining to be checked". The pair is no longer used: its consent transactions are discarded and it
     /// is removed, so that nothing is sent or answered on it again (RFC 7675 Section 5.1); no
     /// other valid pair takes over without a nomination. The agent keeps its candidates and
     /// the other pairs, and fails once the indications are in and the PAC timer has expired
@@ -3505,19 +3505,19 @@ impl Agent {
         self.set_selected_pair(Some(now), None);
         self.remove_pair_at(now, pair_index);
         self.candidate_pairs[pair_index].consent_lost = true;
-        // Pairs the nomination retired (RFC 8445 Section 8.1.2) are not left to check: no
-        // check is started on them in this ICE session, and none of them could be nominated
-        // in it (Section 8.1.1: "the agent MUST NOT nominate another pair for same component
-        // of the data stream within the ICE session. Doing so requires an ICE restart").
+        // The pairs the nomination took out of the checklist are Failed (RFC 8445 Section
+        // 8.1.2, `conclude`): not left to check, and none of them could be nominated in this
+        // ICE session (Section 8.1.1: "the agent MUST NOT nominate another pair for same
+        // component of the data stream within the ICE session. Doing so requires an ICE
+        // restart").
         let to_check = !self.triggered_queue.is_empty()
             || self.candidate_pairs.iter().any(|p| {
-                !p.retired
-                    && matches!(
-                        p.state,
-                        CandidatePairState::Frozen
-                            | CandidatePairState::Waiting
-                            | CandidatePairState::InProgress
-                    )
+                matches!(
+                    p.state,
+                    CandidatePairState::Frozen
+                        | CandidatePairState::Waiting
+                        | CandidatePairState::InProgress
+                )
             });
         if to_check {
             self.update_connection_state(Some(now), ConnectionState::Checking);

@@ -113,16 +113,6 @@ pub struct CandidatePair {
     /// not answered either ("After consent is lost, the same ICE credentials MUST NOT be used
     /// on the affected 5-tuple again", RFC 7675 Section 5.1).
     pub(crate) consent_lost: bool,
-    /// The pair was still to be checked (Frozen, Waiting or In-Progress) when a pair was
-    /// nominated: RFC 8445 Section 8.1.2, "the ICE agent MUST remove all candidate pairs for
-    /// the same component from the checklist and from the triggered-check queue". It stays
-    /// listed (statistics), a request from the peer on it is still answered ("an agent MUST
-    /// continue to respond to any Binding request it might still receive [...] for any
-    /// remaining candidate pairs") and may trigger a check, but no ordinary check is started
-    /// on it in this ICE session, and it is not a pair left to check when consent on the
-    /// selected pair is lost. An ICE restart replaces it.
-    pub(crate) retired: bool,
-
     // STUN transaction stats
     /// Total number of STUN connectivity check requests sent (not including retransmissions).
     pub(crate) requests_sent: u64,
@@ -214,7 +204,6 @@ impl CandidatePair {
             nomination_pending: false,
             removed: false,
             consent_lost: false,
-            retired: false,
             // STUN transaction stats
             requests_sent: 0,
             requests_received: 0,

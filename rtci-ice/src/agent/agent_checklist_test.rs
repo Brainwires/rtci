@@ -1073,14 +1073,16 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
     let nominated_at = nominations[0].at;
 
     // After the nomination nothing more goes to 2 or 3: no ordinary check for 3, no
-    // retransmission for 2, and neither is failed by a timeout.
+    // retransmission for 2. Both are out of the checklist ("MUST remove all candidate pairs
+    // for the same component from the checklist"): Failed, by the nomination and not by a
+    // timeout (nothing was sent to them after it).
     assert!(
         requests_of(&out)
             .iter()
             .all(|s| s.to == remote_addr(1) || s.at <= nominated_at),
     );
-    assert_ne!(state_of(&a, 2), CandidatePairState::Failed);
-    assert_ne!(state_of(&a, 3), CandidatePairState::Failed);
+    assert_eq!(state_of(&a, 2), CandidatePairState::Failed);
+    assert_eq!(state_of(&a, 3), CandidatePairState::Failed);
     // What goes to 1 afterwards are consent checks: at least 4 seconds apart.
     let later: Vec<Duration> = requests_of(&out)
         .iter()
@@ -1869,15 +1871,15 @@ fn consent_lost_after_completion_does_not_check_the_pairs_the_nomination_retired
             addr(REMOTE_A),
             "{role}"
         );
+        // The second pair's check was not completed (at most its first request left) and the
+        // nomination took it out of the checklist (Section 8.1.2): Failed.
         let b = a.find_remote_candidate(addr(REMOTE_B)).unwrap();
         let b = a.candidate_pairs[a.find_pair(0, b).unwrap()];
         assert!(
-            matches!(
-                b.state,
-                CandidatePairState::Waiting | CandidatePairState::Frozen
-            ),
-            "{role}: the second pair was left unchecked by the nomination: {}",
-            b.state
+            b.requests_sent <= 1 && b.state == CandidatePairState::Failed,
+            "{role}: the second pair was taken out of the checklist unchecked: {} ({} sent)",
+            b.state,
+            b.requests_sent
         );
         let _ = timed_states(&mut a, start);
         let out = silent(&mut a, start, Duration::from_secs(1), PAC + LOOK + MS);
@@ -1898,6 +1900,141 @@ fn consent_lost_after_completion_does_not_check_the_pairs_the_nomination_retired
             failed.is_some_and(|at| by_next_look(at, PAC)),
             "{role}: failed as the PAC timer expires: {seen:?}"
         );
+    }
+}
+
+/// RFC 8445 Section 8.1.2 removes from the checklist the pairs a nomination leaves unchecked;
+/// a pair formed later is checked as any other. This one is formed after consent on the
+/// selected pair was lost while the peer had not signalled its end-of-candidates (the agent
+/// is `Disconnected`, W3C webrtc-pc 5.6.4: "consent checks [RFC7675] once successful, have
+/// now failed, but it is still gathering and/or waiting for additional remote candidates"),
+/// so it is `Checking` again ("(disconnected, new local candidates): checking") and the
+/// pair's check fails. Then:
+///
+/// - with the peer's end-of-candidates at 50 s: every pair of the checklist has failed and no
+///   candidate is to come (RFC 8445 Sections 7.2.5.4 and 8.1.2, RFC 8838 Section 8), the PAC
+///   timer expired at 39.5 s (RFC 8863), so the transport is "failed" (5.6.4) at the agent's
+///   next look after the indication;
+/// - without it: the checking timeout, `disconnected_timeout + failed_timeout` (30 s by
+///   default) from the new checks at 45 s, ends the checks, and the agent is "disconnected"
+///   again at 75 s, not "failed": the indication is still missing.
+///
+/// The pairs the nomination took out of the checklist (Failed since) hold neither: they are
+/// not checks in progress and they count as done for the checklist. Either role.
+#[test]
+fn a_pair_formed_after_consent_loss_fails_and_the_retired_pairs_do_not_hold_the_failure() {
+    const REMOTE_C: &str = "192.168.0.5:4000";
+    let new_checks = Duration::from_secs(45);
+    let end_of_candidates = Duration::from_secs(50);
+    let checking_timeout = new_checks + Duration::from_secs(30);
+    for controlling in [true, false] {
+        for with_end_of_candidates in [true, false] {
+            let case = format!(
+                "{}, {}",
+                if controlling {
+                    "controlling"
+                } else {
+                    "controlled"
+                },
+                if with_end_of_candidates {
+                    "end-of-candidates at 50 s"
+                } else {
+                    "no end-of-candidates"
+                }
+            );
+            let start = Instant::now();
+            let mut a = started_agent(start, config(controlling), &[REMOTE_A, REMOTE_B]);
+            a.set_local_gathering_complete();
+            if !controlling {
+                let nominate = peer_request(
+                    &a,
+                    vec![
+                        Box::new(AttrControlling(1)),
+                        Box::new(PriorityAttr(1000)),
+                        Box::new(UseCandidateAttr::new()),
+                    ],
+                );
+                deliver(&mut a, start, &nominate, REMOTE_A).unwrap();
+            }
+            let only_a = |s: &Sent| {
+                if s.to == addr(REMOTE_A) {
+                    Answer::Success(addr(LOCAL))
+                } else {
+                    Answer::Silence
+                }
+            };
+            run_with(
+                &mut a,
+                start,
+                Duration::ZERO,
+                Duration::from_secs(1),
+                only_a,
+            );
+            // Without the peer's end-of-candidates the transport is "connected", not
+            // "completed" (5.6.4), but the nomination completed the checklist.
+            assert_eq!(a.state(), ConnectionState::Connected, "{case}");
+            assert_eq!(a.checklist_state(), ChecklistState::Completed, "{case}");
+            let b = a.find_remote_candidate(addr(REMOTE_B)).unwrap();
+            assert!(
+                a.candidate_pairs[a.find_pair(0, b).unwrap()].requests_sent <= 1,
+                "{case}: the second pair was not checked to the end"
+            );
+            silent(&mut a, start, Duration::from_secs(1), new_checks);
+            assert_eq!(
+                a.state(),
+                ConnectionState::Disconnected,
+                "{case}: consent lost"
+            );
+            let _ = timed_states(&mut a, start);
+
+            a.add_remote_candidate(host(addr(REMOTE_C))).unwrap();
+            let refuse_c = |s: &Sent| {
+                if s.to == addr(REMOTE_C) {
+                    Answer::Error(CODE_BAD_REQUEST)
+                } else {
+                    Answer::Silence
+                }
+            };
+            let until = if with_end_of_candidates {
+                run_with(&mut a, start, new_checks, end_of_candidates, refuse_c);
+                a.set_remote_end_of_candidates();
+                end_of_candidates + LOOK + MS
+            } else {
+                checking_timeout + Duration::from_secs(5)
+            };
+            let from = if with_end_of_candidates {
+                end_of_candidates
+            } else {
+                new_checks
+            };
+            run_with(&mut a, start, from, until, refuse_c);
+            let seen = timed_states(&mut a, start);
+            assert_eq!(
+                seen.first().map(|(_, s)| *s),
+                Some(ConnectionState::Checking),
+                "{case}: the new pair is checked: {seen:?}"
+            );
+            if with_end_of_candidates {
+                let failed = seen
+                    .iter()
+                    .find(|(_, s)| *s == ConnectionState::Failed)
+                    .map(|(at, _)| *at);
+                assert!(
+                    failed.is_some_and(|at| by_next_look(at, end_of_candidates)),
+                    "{case}: failed at the next look after the end-of-candidates: {seen:?}"
+                );
+            } else {
+                assert_eq!(
+                    seen.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+                    vec![ConnectionState::Checking, ConnectionState::Disconnected],
+                    "{case}: {seen:?}"
+                );
+                assert!(
+                    by_next_look(seen[1].0, checking_timeout),
+                    "{case}: disconnected by the checking timeout counted from the new checks: {seen:?}"
+                );
+            }
+        }
     }
 }
 
