@@ -198,6 +198,20 @@ fn multicast_or_skip(test: &str) -> bool {
     false
 }
 
+/// The rtc peer's mDNS socket. On Windows it is given the default route's interface
+/// ([`mdns_egress_ip`]), so that it joins and sends there (`IP_MULTICAST_IF`) whatever the
+/// system's route for the group says: a host whose destination cache holds that route on
+/// loopback (left by any process that sent to the group from 127.0.0.1) otherwise sends every
+/// answer with source 127.0.0.1, and the upstream peer resolves the name to loopback
+/// (agent-test run 46049306566). Elsewhere the system's route, as before (`cargo.yml` points it
+/// at loopback on GitHub's macOS image).
+fn rtc_mdns_socket() -> MulticastSocket {
+    match (cfg!(windows), mdns_egress_ip()) {
+        (true, Some(std::net::IpAddr::V4(ip))) => MulticastSocket::new().with_interface(ip),
+        _ => MulticastSocket::new(),
+    }
+}
+
 /// Helper function to create a webrtc peer connection with QueryAndGather mDNS mode
 async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
     let mut media_engine = MediaEngine::default();
@@ -544,7 +558,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
     // Create RTC peer (answerer) with QueryOnly mode
     let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
-    let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
+    let mdns_socket = UdpSocket::from_std(rtc_mdns_socket().into_std()?)?;
     log::info!("RTC peer bound to {}", local_addr);
 
     let mut rtc_pc = create_rtc_peer_with_mdns(local_addr, MulticastDnsMode::QueryOnly, true)?;
@@ -708,7 +722,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
     // Create RTC peer with QueryAndGather mode
     let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
-    let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
+    let mdns_socket = UdpSocket::from_std(rtc_mdns_socket().into_std()?)?;
 
     let mut rtc_pc = create_rtc_peer_with_mdns(local_addr, MulticastDnsMode::QueryAndGather, true)?;
     log::info!(
@@ -816,7 +830,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
     // Create RTC peer (offerer) with QueryOnly mode
     let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
-    let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
+    let mdns_socket = UdpSocket::from_std(rtc_mdns_socket().into_std()?)?;
 
     let mut rtc_pc = create_rtc_peer_with_mdns(local_addr, MulticastDnsMode::QueryOnly, false)?;
     log::info!("Created RTC peer (offerer) with QueryOnly mDNS mode");
@@ -995,7 +1009,7 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
     // Create RTC peer (offerer) with QueryAndGather mode
     let pc_socket = UdpSocket::bind((rtc_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
-    let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
+    let mdns_socket = UdpSocket::from_std(rtc_mdns_socket().into_std()?)?;
 
     let mut rtc_pc =
         create_rtc_peer_with_mdns(local_addr, MulticastDnsMode::QueryAndGather, false)?;

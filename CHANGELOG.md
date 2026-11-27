@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rtci_mdns::MulticastSocket::with_interface` sends by that interface**
+  (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`; RFC 6762 section 14). The socket
+  joined the group on the interface given but sent by the system's route for 224.0.0.251. On
+  Windows that route comes from the destination cache, and a process that sent to the group
+  from 127.0.0.1 leaves it on loopback after it has exited: every later datagram of such a
+  socket, on that host, left by loopback with source 127.0.0.1, and a peer that resolves a
+  `.local` name to the answer's source (or refuses an address record from another address)
+  got loopback or nothing (agent-test run 46049306566). It now sets `IP_MULTICAST_IF` to the
+  interface it joined on. `MulticastSocket::new()` without an interface is unchanged (the
+  system's route). Test `rtci-mdns/tests/multicast_interface.rs`, run on a Windows host put in
+  that state by `scripts/windows-poisoned-mdns-route.sh`.
+
 ### Tests
 
 - **The real-multicast mDNS tests probe the host first** (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`).
