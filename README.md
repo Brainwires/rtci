@@ -177,8 +177,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   let answer = RTCSessionDescription::answer(answer_sdp)?;
     //   pc.set_remote_description(Instant::now(), answer)?;
 
-    // 3. You own the socket.
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    // 3. You own the socket. Bind a concrete local address, the one you add as a host
+    //    candidate ("Feeding ICE Candidates"): `local_addr` below must be a local candidate's
+    //    address, and a socket bound to 0.0.0.0 reports 0.0.0.0:port, which none is.
+    let socket = UdpSocket::bind("192.168.1.100:0").await?;
     let local_addr = socket.local_addr()?;
     let mut buf = vec![0u8; 2000];
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(86400);
@@ -265,6 +267,40 @@ needed only when the engine is to run TCP (ICE-TCP candidates, TURN over TCP or 
 tagged `TransportProtocol::TCP` there is one the application framed itself, for a TCP candidate
 it added on its own.
 
+**The local address of a datagram.** The `local_addr` of a datagram given to `handle_read` is
+the address of the local *candidate* it arrived on, not necessarily the socket's own address:
+the ICE agent matches it exactly against its local candidates (RFC 8445 section 7.3.1.4) and
+discards anything else with "Discarded message, not a valid local candidate". Two cases trip
+ported code:
+
+- **A socket bound to the unspecified address** (`0.0.0.0:port`, `[::]:port`) must report the
+  concrete local address each datagram was received on (its destination address, from
+  `IP_PKTINFO` / `IPV6_RECVPKTINFO` or the platform's equivalent), which is the host
+  candidate's address; `socket.local_addr()` matches no host candidate. Or bind one socket per
+  local address, as `rtci-stream-driver`'s `PeerDriver` does (`PeerDriverConfig::addresses`).
+  A datagram that only "works" on `0.0.0.0:port` does so by accident: a server-reflexive
+  candidate whose related address is `0.0.0.0:port` matches it.
+- **A datagram relayed by a TURN allocation the application runs**
+  (`with_relay_gathering(RelayGathering::Application)`, relay candidate added with
+  `add_local_candidate`) carries `local_addr` = the relayed address (the relay candidate's
+  address), `peer_addr` = the peer from the Data indication or the channel. In the other
+  direction, a datagram from `poll_write` whose `transport.local_addr` is the relayed address
+  goes through the allocation (Send indication or ChannelData to `transport.peer_addr`), not
+  out of a socket. This is what the engine does for the allocations it runs itself.
+
+```text
+// wildcard-bound socket: the destination address of the datagram, not 0.0.0.0:port
+let local_addr = SocketAddr::new(destination_ip /* IP_PKTINFO */, socket.local_addr()?.port());
+// relayed by the application's TURN client
+pc.handle_read(TaggedBytesMut { now, message: payload, transport: TransportContext {
+    local_addr: relayed_addr, peer_addr: peer, transport_protocol: TransportProtocol::UDP, ecn: None } })?;
+// and out
+while let Some(msg) = pc.poll_write() {
+    if msg.transport.local_addr == relayed_addr { turn.send_to(&msg.message, msg.transport.peer_addr)?; }
+    else { socket_of(msg.transport.local_addr).send_to(&msg.message, msg.transport.peer_addr)?; }
+}
+```
+
 **Streams** (`rtci::shared::stream`): the engine names its TCP connections and listeners by id
 and the application only owns the sockets. After each input:
 
@@ -340,7 +376,9 @@ routes between connections: by the ufrag the first Binding request names (RFC 84
 
 Because RTC does no I/O, it also does no candidate gathering: **you** bind the sockets, so **you** tell the connection
 which local candidates exist. Build them with the `rtci-ice` candidate constructors and hand each one to
-`add_local_candidate`:
+`add_local_candidate`. A host candidate's address is a concrete local address, and it is the `local_addr` of every
+datagram you then feed for it (see "The local address of a datagram" above: not `0.0.0.0:port` for a wildcard-bound
+socket; the relayed address for a datagram relayed by your own TURN client):
 
 ```rust,no_run
 use rtci::peer_connection::RTCPeerConnectionBuilder;

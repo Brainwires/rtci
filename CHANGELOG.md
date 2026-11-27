@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/multi_transport_rtc2rtc.rs::the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`:
   round trip 100 ms, 453 ms off against 703 ms on), and no browser issues or offers a ticket.
   Audit row RFC5764-3-4: `partial` to `setting`.
+- **ICE: a datagram on an unspecified local address says why it is discarded.** A datagram
+  whose `local_addr` is `0.0.0.0:port` / `[::]:port` and matches no local candidate is
+  discarded as before (`Error::ErrUnhandledStunpacket`, same WARN level), with a log line that
+  names the unspecified address and the rule instead of "Discarded message, not a valid local
+  candidate". No matching change: a datagram that matched a candidate before still does.
+  `agent_checklist_test.rs::test_a_request_on_an_unspecified_local_address_is_discarded_and_the_log_says_why`.
 
 ### Features
 
@@ -644,6 +650,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default keeps the SHOULD, as OpenSSL does, and `StrictRfc` does not change it; and RFC 8446
   section 4.2.3, which `ConfigBuilder::with_insecure_hashes(true)` lets an application break by
   listing an MD5 scheme (an opt-in). Tests only, no engine change.
+- **The local address of a fed datagram** (`conf/docs-5-local-address-of-fed-datagrams`;
+  consumer-reported on 0.2.0 with application-run TURN): the `local_addr` of a datagram given
+  to `handle_read` is the address of the local candidate it arrived on, which the ICE agent
+  matches exactly (RFC 8445 section 7.3.1.4). A datagram relayed by a TURN allocation the
+  application runs (`RelayGathering::Application`) carries the relayed address, and a datagram
+  from `poll_write` whose `local_addr` is the relayed address goes through that allocation
+  (Send indication / ChannelData), as the engine does for its own allocations; a socket bound
+  to `0.0.0.0` / `[::]` reports the concrete address each datagram was received on
+  (`IP_PKTINFO` / `IPV6_RECVPKTINFO`), not its own. In the README ("Driving the Engine", "The
+  local address of a datagram"; "Feeding ICE Candidates"), on `RTCPeerConnection`'s and the ICE
+  `Agent`'s `handle_read` / `poll_write`, on `RelayGathering::Application` and on
+  `TransportContext::local_addr`. The README's and the crate documentation's event-loop
+  examples bind a concrete address instead of `0.0.0.0:0`.
 
 ### Testing
 
