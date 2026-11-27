@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Releasing: what the 0.2.1 publish ran into** (`docs/releasing.md`): `cargo generate-lockfile`
+  is an explicit step after the dry run (the dry run left no `Cargo.lock` on the current
+  toolchain); a release script must not test first-parent membership with `rev-list | grep -q`
+  under `pipefail` (SIGPIPE refused master's tip); and a patch release's generated page is
+  corrected by hand, since git-cliff files `!`-marked behaviour-change commits under "Breaking
+  changes".
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
