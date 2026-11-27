@@ -1687,8 +1687,25 @@ fn two_lite_agents_close_nothing_while_the_updated_offer_is_awaited() -> Result<
         tcp_announced(&peers[0]) && tcp_announced(&peers[1])
     })
     .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
-    let udp = udp_host(&peers[0]);
-    peers[1].pc.add_remote_candidate(udp)?;
+    // The offerer's UDP candidate as it announced it (with its sdpMid), as the trickle would
+    // have carried it.
+    let udp = peers[0]
+        .events
+        .iter()
+        .find_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(ev) => ev
+                .candidate
+                .as_ref()
+                .filter(|c| !c.end_of_candidates)
+                .and_then(|c| c.to_json().ok())
+                .filter(|init| init.candidate.contains(" udp ")),
+            _ => None,
+        })
+        .expect("the offerer announced its UDP candidate");
+    peers[1]
+        .pc
+        .add_remote_candidate(udp)
+        .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
     let mark = until_the_update_is_due(&mut peers, &mut net, true)
         .map_err(|e| anyhow::anyhow!("{e}{}", lite_diagnostics(&mut peers, &net)))?;
     let selected = |p: &Peer| {
