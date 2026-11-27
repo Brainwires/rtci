@@ -1525,6 +1525,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "a NAT keep-alive need of the deployment",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_turn_reallocation_delay",
+        class: NotGovernedClass::Input,
+        note: "a TURN server that keeps a deleted allocation's 5-tuple after answering (coturn: about a second); zero, RFC 8656 section 8.2, in every profile",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_host_acceptance_min_wait",
         class: NotGovernedClass::Input,
         note: "nomination wait for host pairs",

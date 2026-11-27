@@ -435,6 +435,7 @@ pub struct SettingEngine {
     pub(crate) timeout: Timeout,
     pub(crate) data_channel: DataChannel,
     pub(crate) turn_allocation_refresh_interval_cap: Option<Duration>,
+    pub(crate) turn_reallocation_delay: Duration,
     pub(crate) candidates: Candidates,
     pub(crate) ice: IceBehaviour,
     pub(crate) multicast_dns: MulticastDNS,
@@ -675,6 +676,7 @@ impl SettingEngine {
             timeout: Default::default(),
             data_channel: Default::default(),
             turn_allocation_refresh_interval_cap: Default::default(),
+            turn_reallocation_delay: Duration::ZERO,
             candidates: Default::default(),
             ice: Default::default(),
             multicast_dns: Default::default(),
@@ -814,6 +816,13 @@ impl SettingEngine {
     /// the server.
     pub fn turn_allocation_refresh_interval_cap(&self) -> Option<Duration> {
         self.turn_allocation_refresh_interval_cap
+    }
+
+    /// How long after the release of one of its TURN allocations over UDP the engine waits
+    /// before it allocates again from the same local address to the same server
+    /// ([`SettingEngineBuilder::with_turn_reallocation_delay`]; zero by default).
+    pub fn turn_reallocation_delay(&self) -> Duration {
+        self.turn_reallocation_delay
     }
 
     /// The SOFTWARE of the ICE agent's STUN messages, in the form of
@@ -1029,6 +1038,25 @@ impl SettingEngineBuilder {
     /// one second are rounded up by the TURN client.
     pub fn with_turn_allocation_refresh_interval_cap(mut self, cap: Duration) -> Self {
         self.0.turn_allocation_refresh_interval_cap = Some(cap);
+        self
+    }
+
+    /// Waits `delay` after the release of one of the engine's TURN allocations over UDP has
+    /// ended before allocating again on the same 5-tuple (the same local address to the same
+    /// server address), e.g. a restart with new TURN credentials and one UDP socket.
+    ///
+    /// The engine always waits for the server's answer to the release (its Refresh of
+    /// LIFETIME 0) before it allocates on that 5-tuple again: until then the allocation is
+    /// the 5-tuple's and an Allocate is refused with 437 (RFC 8656 section 7.2), after which
+    /// the client leaves the server alone for two minutes (section 7.4). RFC 8656 section 8.2
+    /// has the server delete the allocation at once, so zero (the default) is the RFC's
+    /// behaviour. Some servers keep the 5-tuple a little longer after answering: coturn turns
+    /// a requested lifetime of zero into a one-second timer (`refresh_relay_connection`) and
+    /// answers 437 until it fires; two seconds is enough there. It does not cover a new peer
+    /// connection on the socket of one that was closed: the new one does not know of the
+    /// old one's release (see the README, "re-allocating on the same socket after a release").
+    pub fn with_turn_reallocation_delay(mut self, delay: Duration) -> Self {
+        self.0.turn_reallocation_delay = delay;
         self
     }
 
@@ -3852,6 +3880,19 @@ mod tests {
             SettingEngine::default().multicast_dns.mode,
             MulticastDnsMode::QueryOnly
         );
+    }
+
+    #[test]
+    fn test_turn_reallocation_delay() {
+        assert_eq!(
+            SettingEngine::default().turn_reallocation_delay(),
+            Duration::ZERO
+        );
+        let delay = Duration::from_secs(2);
+        let setting_engine = SettingEngineBuilder::new()
+            .with_turn_reallocation_delay(delay)
+            .build();
+        assert_eq!(setting_engine.turn_reallocation_delay(), delay);
     }
 
     #[test]

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **An engine TURN link allocates again on a 5-tuple it released only once the server has
+  answered the release** (RFC 8656 sections 2.2, 7.2 step 2 and 7.4). One UDP socket and an ICE
+  restart with new TURN credentials (break before make) sent the Refresh of LIFETIME 0 and the new
+  Allocate back to back; with the release lost or late, the server still had the allocation, the
+  Allocate met a 437, and the engine (one socket, nothing else to try) left the server alone for
+  two minutes, so the restart's generation had no relayed candidate. The Allocate now waits for
+  the release transaction to end (answered, 437 or timed out). No 437 is ever retried on the
+  refused 5-tuple: section 7.4's "SHOULD NOT try to create another allocation on the server for 2
+  minutes" stands. turn-9.
+
+### Added
+
+- **`SettingEngineBuilder::with_turn_reallocation_delay(Duration)`**: how long after a release of
+  an engine TURN allocation over UDP has ended the engine waits before allocating on the same
+  5-tuple again. Zero by default (RFC 8656 section 8.2: the server deletes the allocation when it
+  answers). coturn answers a Refresh of LIFETIME 0 but keeps the allocation one second more
+  (`refresh_relay_connection` floors the lifetime at 1 s) and answers an Allocate meanwhile with
+  437; 2 s covers it. A behaviour-profile "application input" row. turn-9.
+
+### Documentation
+
+- README and `rtci_turn::client::Relay::close`: "re-allocating on the same socket after a
+  release", for engine-run and application-run TURN: what RFC 8656 7.4 has a client do on 437
+  (another local address, three at most, then two minutes without the server; never the refused
+  5-tuple again), coturn's one-second hold after a confirmed release, and the remedies (wait
+  after `OnTurnAllocationReleased`, or another UDP socket) for a new peer connection on a
+  closed one's socket. turn-9.
+
+### Testing
+
+- `tests/turn_reallocate_after_release.rs` (5 tests) with a coturn-like `release_linger` in
+  `tests/common/turn_server.rs` (a released allocation kept for a second, an Allocate on its
+  5-tuple answered 437 before authentication): a one-socket restart whose release is lost once
+  allocates only after the release is answered (no 437); against coturn without the delay the
+  restart meets one 437, `OnTurnRequestRejected` is raised, no Allocate is retried for 130 s,
+  and a restart after the two minutes allocates; with a 2 s delay no 437; a new peer connection
+  on a just-released socket meets the 437 (no retry), and allocates after the hold or from a
+  second socket. turn-9.
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;

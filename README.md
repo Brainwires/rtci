@@ -131,6 +131,32 @@ socket is free for another connection, whose Allocate on the same 5-tuple would 
 refused with 437 while the old allocation lives (up to its lifetime, 10 minutes by default).
 Dropping a connection without `close()` sends nothing.
 
+**Re-allocating on the same socket after a release.** A TURN allocation is its 5-tuple's (RFC
+8656 section 2.2), and an Allocate on a 5-tuple that still has one is refused with 437 (section
+7.2). On a 437 the client "SHOULD pick another client transport address", tries three, and then
+"SHOULD NOT try to create another allocation on the server for 2 minutes" (section 7.4), so no
+client retries on the refused 5-tuple. RFC 8656 section 8.2 has the server delete an allocation
+as soon as it answers the Refresh of LIFETIME 0; coturn does not: it answers, keeps the
+allocation for one more second (`refresh_relay_connection` floors the lifetime at 1 s) and
+answers an Allocate on that 5-tuple meanwhile with 437.
+- *Engine-run TURN* (`RelayGathering::Engine`, the default): within one peer connection (an ICE
+  restart with new TURN credentials and one UDP socket) the engine allocates again on a released
+  5-tuple only once the server has answered the release, and
+  `SettingEngineBuilder::with_turn_reallocation_delay` makes it wait longer after that answer
+  (2 s covers coturn; the default, zero, is RFC 8656's). On a 437 it raises
+  `OnTurnRequestRejected { method: "Allocate", error_code: 437, .. }`, moves the Allocate to
+  another UDP host candidate's base of the transport if there is one (up to three), and
+  otherwise leaves that server alone for two minutes: that ICE generation has no relayed
+  candidate from it, and an ICE restart after the two minutes allocates again. A *new* peer
+  connection on the socket of one that was closed does not know of the old one's release:
+  after `OnTurnAllocationReleased` wait for the server's hold (2 s for coturn) before it
+  gathers, or give it another UDP socket (a second host candidate) as well.
+- *Application-run TURN* (`RelayGathering::Application`, your own `rtci::turn::client::Client`):
+  the same rules are yours. Delete with `Relay::close` and wait for
+  `Event::AllocationReleased`, then for the server's hold, before an `allocate` from the same
+  local address to the same server; on an `AllocateError` with code 437, allocate from another
+  socket, or leave the server for two minutes.
+
 `handle_event` is also part of the trait, but `RTCEvent` is currently uninhabited: no value of it can be constructed,
 so there is nothing to call it with. It exists so the signature is already right when the first inbound event variant
 is added.
