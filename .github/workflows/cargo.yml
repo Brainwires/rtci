@@ -140,7 +140,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
+      # Not on our own Windows runners: every job there starts from a fresh account, so the
+      # key (it hashes CARGO_HOME, under that account) never matches ("No cache found"), and
+      # saving the ~460 MB cache uploads at about 0.2 MB/s from the guest: the post step ran 36
+      # minutes and hit this job's limit after every test had passed (run 45956791846). A
+      # GitHub-hosted job restores (~17 s) and saves (~2.5 min) as before.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: runner.os != 'Windows' || runner.environment == 'github-hosted'
       # On GitHub's macOS image the multicast route leads to an interface that cannot carry it:
       # an mDNS send fails with "No route to host" and the mDNS interop tests time out. Both
       # peers of those tests are on this machine, so the route is moved to loopback. Our own
