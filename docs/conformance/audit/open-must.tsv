@@ -105,9 +105,7 @@ RFC9429-5.2.2-16	E	S	jsep	`conflict`: both forms tested, the governing specifica
 RFC9429-5.5-1	B	S	jsep	Implemented (check_next_signaling_state is a whitelist), no test refuses setLocal(offer) in have-remote-offer or a pranswer state (audit-3 sweep)
 RFC9429-5.5-2	B	S	jsep	Implemented, no test refuses a local answer / pranswer in stable or have-local-offer; needs the last-created answer in a refusing state (e.g. after a rollback) so the 5.4 check does not mask it (audit-3 sweep)
 RFC9429-5.5-3	B	S	jsep	As 5.5-1 / 5.5-2: a test that a local description of the wrong type for the state stops with an error (audit-3 sweep)
-RFC9147-5.8.1-2	B	S	dtls-srtp	A test whose client Finished retransmission reaches the server just before 240 s after completion and is still acknowledged (audit-7 sweep6)
 RFC6347-4.2.1-8	E	S	dtls-srtp	Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2)
-RFC6347-4.2.4-5	C	M	dtls-srtp	Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6)
 RFC9429-5.3.1-16	A	S	jsep (running)	`setting`: since 0.3.0 the default answers with the offered formats only (jsep-95; the 5.3.1 MAY bullet, every browser); with_answer_offered_formats_only(false) / StrictRfc add the others; closes only if the default changes back or the RFC is corrected (draft erratum handoff/erratum-rfc9429-5.3.1.md)
 
 RFC8445-10-1	E	S	jsep (jsep-98)	`conflict` (jsep-98): as RFC8839-4.3.2-3; offers always say `ice2`

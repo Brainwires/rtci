@@ -56,13 +56,13 @@ WebRTC uses); every row names the code and the test that proves it. From
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5098 | 5093 (99.9 %) | 5055 (99.2 %) |
+| MUST | 5098 | 5095 (99.9 %) | 5057 (99.2 %) |
 | SHOULD | 988 | 925 (93.6 %) | 919 (93.0 %) |
 | MAY | 605 | 503 (83.1 %) | 501 (82.8 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. 5 MUST rows are open (1 untested,
-4 partial, 0 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+browser or a deployed peer cannot interoperate with it by default. 3 MUST rows are open (0 untested,
+3 partial, 0 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by
 the owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a
 MUST"), each with the setting that gives the RFC form (the `StrictRfc` profile sets all three): the H.264
