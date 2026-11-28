@@ -654,6 +654,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the one carrying the data, never paired or signalled again, dropped at the next restart; a
   restart staged, abandoned or taken back does not cut the current session's path). Tests on an in-memory coturn-like server
   (`tests/common/turn_server.rs`). turn-5.
+- `Error::dom_exception_name` names the errors it returned `None` for, as webrtc-pc does (audit
+  row WEBRTC-4.5.1-1 `partial` -> `tested`): `InvalidModificationError` for
+  `ErrModifyingCertificates`, `ErrModifyingBundlePolicy`, `ErrModifyingRTCPMuxPolicy`,
+  `ErrModifyingICECandidatePoolSize` (set the configuration) and `ErrSDPDoesNotMatchOffer` /
+  `ErrSDPDoesNotMatchAnswer` (setLocalDescription); `InvalidAccessError` for
+  `ErrCertificateExpired` and `ErrNoTurnCredentials`; `SyntaxError` for `ErrNoIceServerUrls`,
+  `ErrSchemeType`, `ErrInvalidUrl`, `ErrStunQuery`, `ErrInvalidQuery`, `ErrProtoType`;
+  `InvalidStateError` for `ErrNoRemoteDescription`; `OperationError` for
+  `ErrIceCandidateMediaSectionNotFound` and `ErrIceCandidateUsernameFragmentMismatch`
+  (addIceCandidate). Test `tests/jsep_w3c_errors.rs::every_refusal_of_the_configuration_and_the_candidates_has_its_w3c_name`.
+- **W3C "validate an ICE server URL": a TURN username or credential that is not an RFC 8265
+  OpaqueString is refused** (`conf/w3c-1-must-rows-sweep4`; webrtc-pc 4.4.1.5, "fail to conform
+  to [RFC8489] section 14.3 and [RFC8265] section 4.1 ... throw an InvalidAccessError"; audit
+  row WEBRTC-4.4.1.5-23). In 0.2.0 the credential was checked for control characters only, so
+  one with a default-ignorable code point (U+00AD SOFT HYPHEN, say) was taken and failed later,
+  when the TURN key was derived; the username was checked for its length only. Both now go
+  through `stun::opaque::opaque_string`: `set_configuration` and the constructor refuse them with
+  `Error::InvalidAccessError`. A host or port of an ICE server url that does not parse is now
+  `Error::ErrInvalidUrl` (W3C SyntaxError, "hostAndPortURL is failure") instead of `Error::Url`.
 
 ### Known limits
 
@@ -730,6 +749,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5-tuple again), coturn's one-second hold after a confirmed release, and the remedies (wait
   after `OnTurnAllocationReleased`, or another UDP socket) for a new peer connection on a
   closed one's socket. turn-9.
+- webrtc-pc rows of audit sweep 4 (`conf/w3c-1-must-rows-sweep4`): tests for WEBRTC-4.4.1.4-7
+  (a local description of a type the signaling state does not take), 4.4.2-46 (the pranswer
+  branch of [[LastCreatedAnswer]]), 4.8.3-2 (the url of `icecandidateerror`), each `untested`
+  -> `tested`, mutation-checked. Tests for 5.5-3 (a DTLS transport fails once), 6.1.2-3 (a
+  received SCTP SHUTDOWN closes the transport) and 6.2.8-1 (a message on a closing channel is
+  discarded) pass, but the mutation of each clause's code survived, so those rows stay
+  `untested` (notes say why).
+  WEBRTC-5.6.4-2 / 5.6.4-9 stay `partial` and are listed under "Standing departures from a
+  MUST" in `docs/conformance.md`: ICE "failed" without the end-of-candidates indication, by the
+  timer that bounds checking (RFC 8863 section 5 permits it, W3C does not; Chrome does the
+  same). WEBRTC-5.2-33 `tested` -> `missing`: replaceTrack never refuses a track outside the
+  negotiated envelope, which webrtc-pc defines by examples the engine can see (a track whose
+  codec is not negotiated, an audio track of another channel count). Open MUST rows 57 -> 53.
 
 ### Testing
 

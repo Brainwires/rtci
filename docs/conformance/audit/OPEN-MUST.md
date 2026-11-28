@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5758; `n/a` (the clause does not bind this engine): 662; rows that
   apply: 5096.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5085 of 5096 (99.8 %).
-- Tested as the default (`tested`): 5050 of 5096 (99.1 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 8.
-- Open (not tested in any form): 11: 5 untested, 5 partial, 1 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5089 of 5096 (99.9 %).
+- Tested as the default (`tested`): 5054 of 5096 (99.2 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 8.
+- Open (not tested in any form): 7: 1 untested, 4 partial, 2 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 27 | 20 |
-| B | implemented, lacking a test that fails without it | 5 | 0 |
-| C | partly implemented | 3 | 0 |
-| D | not implemented | 1 | 0 |
+| B | implemented, lacking a test that fails without it | 1 | 0 |
+| C | partly implemented | 2 | 0 |
+| D | not implemented | 2 | 0 |
 | E | cannot be met or observed inside this engine | 10 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 46 | 26 |
+| all | | 42 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 9 rows, 7 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 5 rows, 2 of size S, 2 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -38,8 +38,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 1 | 1 | 0 | 1 | 0 | 3 | 2 | 1 | 0 |
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
-| ice | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
-| jsep | 2 | 1 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
+| media | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 1 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 
@@ -77,13 +76,9 @@ Sorted by class, then owner, size and ID.
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC9147-5.8.1-2 | `rfc9147.md` | In addition, for at least twice the default MSL defined for ... | untested | B | A test whose client Finished retransmission reaches the server just before 240 s after completion and is still acknowledged (audit-7 sweep6) | S | dtls-srtp |
-| WEBRTC-4.4.1.5-23 | `w3c-webrtc-pc.md` | TURN username over RFC 8489 14.3 length, or credential failing RFC ... | untested | B | A test that a TURN credential with a control character is refused with InvalidAccessError (the username length half is tested) (audit-5 sweep) | S | ice |
-| WEBRTC-4.8.3-2 | `w3c-webrtc-pc.md` | icecandidateerror: url of the failing STUN/TURN server | untested | B | A test that the icecandidateerror event carries the url it was reported with (audit-5 sweep) | S | ice |
-| WEBRTC-4.4.1.4-7 | `w3c-webrtc-pc.md` | A type invalid for the signaling state rejects with InvalidStateError | untested | B | A test that a local description of a type invalid for the state (a local answer in stable or have-local-offer, a local offer in have-remote-offer) is refused with InvalidStateError; the remote half is tested (audit-5 sweep) | S | jsep |
-| WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
 | RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
-| WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep) | S | jsep |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
+| WEBRTC-5.2-33 | `w3c-webrtc-pc.md` | replaceTrack: InvalidModificationError when the track cannot be sent ... | missing | D | replaceTrack refuses nothing with InvalidModificationError: refuse, while sending, a track whose codings name no codec the sender negotiated, or an audio track whose channel count is not the negotiated codec's (coordinator decision first: it changes replace_track, whose PT rewrite applications may rely on) (w3c-1) | M | media |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC6347-4.2.1-8 | `rfc6347.md` | Server uses the same version in HelloVerifyRequest as in ServerHello | partial | E | Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2) | S | dtls-srtp |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Tested (default provider ring, optimised build, x86-64 Linux with the oldest supported compiler and stable, AArch64 macOS, CI job key_residue): no key an SRTP session derives is found in any form in the dead stack frames of the thread after building, packets, re-keying or tearing down, nor (Linux) anywhere else in the process after the teardown; either provider, unoptimised and optimised builds, the same compilers: building and tearing down leave nothing on the stack (the overwrite is 128 KiB deep unoptimised, 32 KiB optimised) and every heap copy is erased. Not met or not shown: the AWS-LC provider's packet path leaves HMAC-SHA1 states and a GHASH table entry in dead stack frames for every packet (its own frames; known_limit_with_aws_lc_the_packet_path_leaves_keys_in_dead_stack_frames, ignored); the packet path in unoptimised builds measured, not asserted (rustc 1.99.1 leaves per-packet AES-CTR round keys); CPU registers and what saves them (signal frames, lazy thread-local set-up); Windows and other architectures not measured; a provider deeper than the overwrite; DTLS secrets on the stack scrubbed, not measured. Closes by the AWS-LC packet path erased or the provider taken out of the claim, and the owner accepting the remaining items as outside the clause for an engine | M | dtls-srtp / crypto |

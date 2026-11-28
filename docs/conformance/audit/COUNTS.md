@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5050 | 27 | 8 | 5 | 5 | 1 | 0 | 662 | 5758 |
+| MUST | 5054 | 27 | 8 | 1 | 4 | 2 | 0 | 662 | 5758 |
 | SHOULD | 918 | 3 | 3 | 1 | 40 | 23 | 0 | 324 | 1312 |
 | MAY | 501 | 1 | 1 | 11 | 21 | 70 | 0 | 177 | 782 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6541 | 31 | 12 | 18 | 69 | 95 | 0 | 1164 | 7930 |
+| all | 6545 | 31 | 12 | 14 | 68 | 96 | 0 | 1164 | 7930 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5096 | 5085 | 99.8 | 5050 | 99.1 |
+| MUST | 5096 | 5089 | 99.9 | 5054 | 99.2 |
 | SHOULD | 988 | 924 | 93.5 | 918 | 92.9 |
 | MAY | 605 | 503 | 83.1 | 501 | 82.8 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
@@ -345,7 +345,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `w3c-webrtc-extensions.md` | MUST | 59 | 0 | 0 | 0 | 0 | 0 | 0 | 14 | 73 |
 | `w3c-webrtc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `w3c-webrtc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `w3c-webrtc-pc.md` | MUST | 862 | 0 | 0 | 4 | 1 | 0 | 0 | 62 | 929 |
+| `w3c-webrtc-pc.md` | MUST | 866 | 0 | 0 | 0 | 0 | 1 | 0 | 62 | 929 |
 | `w3c-webrtc-pc.md` | SHOULD | 4 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 10 |
 | `w3c-webrtc-pc.md` | MAY | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 11 | 18 |
 | `w3c-webrtc-priority.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 14 |
