@@ -114,5 +114,36 @@ class AuditNamesTest(unittest.TestCase):
         self.assertIn("gone_away_test", errors[0])
 
 
+class ScanTest(unittest.TestCase):
+    """The hidden-test half: what `scan_file` reports for one file."""
+
+    def scan(self, text: str) -> list:
+        tree = Tree()
+        try:
+            tree.write("crate/tests/t.rs", text)
+            saved, gate.ROOT = gate.ROOT, tree.root
+            try:
+                findings: list = []
+                gate.scan_file(tree.root / "crate/tests/t.rs", findings, {})
+            finally:
+                gate.ROOT = saved
+            return [(f.kind, f.test) for f in findings]
+        finally:
+            tree.close()
+
+    def test_a_test_ignored_on_one_platform_is_reported_as_ignored(self) -> None:
+        text = (
+            "#[test]\n#[cfg_attr(\n    windows,\n    ignore = \"a reason\"\n)]\nfn only_off_windows() {}\n\n"
+            "#[test]\n#[cfg_attr(target_os = \"macos\", ignore)]\nfn not_on_macos() {}\n"
+        )
+        self.assertEqual(
+            self.scan(text), [("ignored", "only_off_windows"), ("ignored", "not_on_macos")]
+        )
+
+    def test_other_cfg_attrs_are_not_ignores(self) -> None:
+        text = "#[test]\n#[cfg_attr(windows, allow(unused))]\nfn runs_everywhere() {}\n"
+        self.assertEqual(self.scan(text), [])
+
+
 if __name__ == "__main__":
     unittest.main()

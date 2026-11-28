@@ -410,6 +410,7 @@ The driver also has the socket choices a server makes:
 | One UDP port for many peer connections | `sockets::UfragMux`: register every `pc.ice_username_fragments()` entry after each local description; `route(from, datagram)` picks the connection |
 | One passive ICE-TCP port for many peer connections | `DriverConfig::shared_passive`, `sockets::accept_by_ufrag`, then `StreamDriver::adopt_shared` on the connection the first check names |
 | Which local addresses get candidates | `sockets::AddressFilter` (`bind_addresses`, `include_loopback`, `include_link_local`, `interface_filter`, `ip_filter`) and `local_addresses()` |
+| mDNS on loopback on Windows (off by default: it leaves the group's route on loopback for the whole host) | `PeerDriverConfig::mdns_on_loopback_on_windows` |
 | SRV / NAPTR lookups and per-family answers | feature `dns-records` (hickory-resolver) |
 | A server behind a 1:1 NAT | `SettingEngineBuilder::with_nat_1to1_ips(vec![external_ip], RTCIceCandidateType::Host)` (or `Srflx` to add a server-reflexive candidate beside each host one); it applies to the engine's TCP candidates too |
 

@@ -10,13 +10,13 @@ mod common;
 
 use common::{Peer, Result, negotiate, run_until};
 use rtci::ice::mdns::MulticastDnsMode;
-use rtci::mdns::{MDNS_PORT, MdnsRateLimit};
+use rtci::mdns::{MDNS_MULTICAST_IPV4, MDNS_PORT, MdnsRateLimit};
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::transport::RTCIceCandidateType;
 use rtci_stream_driver::peer::PeerDriverConfig;
 use rtci_stream_driver::runtime::mock::LinkConfig;
 use rtci_stream_driver::runtime::{MockRuntime, Runtime};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -296,5 +296,83 @@ fn two_drivers_send_their_mdns_within_one_shared_budget_on_virtual_time() -> Res
         a.driver.pc().connection_state(),
         b.driver.pc().connection_state()
     );
+    Ok(())
+}
+
+/// What two publishing drivers whose only address is 127.0.0.1 did on the mock network.
+struct OnLoopback {
+    /// Datagrams sent to the IPv4 mDNS group from 127.0.0.1.
+    group_from_loopback: usize,
+    /// Whether the IPv4 mDNS socket of each was bound and usable.
+    available: (bool, bool),
+    /// Both connected over the peer's resolved name.
+    up: bool,
+}
+
+/// Two drivers on 127.0.0.1 with `mdns_on_loopback_on_windows` as given, run to a connection
+/// over each other's resolved `.local` name (at most 2000 rounds).
+fn drivers_on_loopback(mdns_on_loopback_on_windows: bool) -> Result<OnLoopback> {
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let runtime = MockRuntime::new();
+    let shared: Arc<dyn Runtime> = Arc::new(runtime.clone());
+    let config = || PeerDriverConfig {
+        mdns_on_loopback_on_windows,
+        ..PeerDriverConfig::on(vec![LOOPBACK])
+    };
+    let mut a = Peer::with_config(shared.clone(), publishing(), config())?;
+    let mut b = Peer::with_config(shared, publishing(), config())?;
+    let up = resolve_and_connect(&runtime, &mut a, &mut b)?;
+    let group_from_loopback = runtime
+        .net()
+        .log()
+        .iter()
+        .filter(|d| d.to == SocketAddr::from((MDNS_MULTICAST_IPV4, MDNS_PORT)))
+        .filter(|d| d.from.ip() == LOOPBACK)
+        .count();
+    Ok(OnLoopback {
+        group_from_loopback,
+        available: (
+            a.driver.mdns_available(false),
+            b.driver.mdns_available(false),
+        ),
+        up,
+    })
+}
+
+/// With `PeerDriverConfig::mdns_on_loopback_on_windows` (and on every system other than
+/// Windows whatever it says), drivers on loopback announce and answer their names on the IPv4
+/// group from 127.0.0.1, resolve each other's and connect: the baseline of the next test, which
+/// varies only the setting.
+#[test]
+fn drivers_asked_for_mdns_on_loopback_send_it_there_and_connect() -> Result<()> {
+    let run = drivers_on_loopback(true)?;
+    assert!(
+        run.group_from_loopback > 0,
+        "mDNS went to the group from 127.0.0.1"
+    );
+    assert_eq!(run.available, (true, true), "both IPv4 mDNS sockets bound");
+    assert!(run.up, "connected over the resolved loopback names");
+    Ok(())
+}
+
+/// The 0.3.0 default on Windows: a driver sends no mDNS to the IPv4 group from a loopback
+/// address and binds no IPv4 mDNS socket for loopback-only addresses, since on Windows that
+/// traffic leaves the group's destination-cache route on loopback for the whole host
+/// (`peer` module documentation). On other systems the default changes nothing: the same
+/// exchange as the test above.
+#[test]
+fn by_default_drivers_on_loopback_send_no_mdns_there_on_windows_only() -> Result<()> {
+    let run = drivers_on_loopback(false)?;
+    if cfg!(windows) {
+        assert_eq!(
+            run.group_from_loopback, 0,
+            "no mDNS to the group from 127.0.0.1"
+        );
+        assert_eq!(run.available, (false, false), "no IPv4 mDNS socket");
+    } else {
+        assert!(run.group_from_loopback > 0, "unchanged off Windows");
+        assert_eq!(run.available, (true, true));
+        assert!(run.up);
+    }
     Ok(())
 }
