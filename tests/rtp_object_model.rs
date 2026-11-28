@@ -244,6 +244,38 @@ fn add_transceiver_refuses_a_rid_that_is_not_rfc_8851_syntax() -> TestResult {
     Ok(())
 }
 
+/// W3C addTransceiver: a rid "that does not conform to the grammar requirements specified in
+/// Section 10 of [RFC8851]" is a TypeError; erratum 7132 (Verified) corrects that grammar to
+/// `rid-id = 1*255(alpha-numeric)`, so a rid with `-` or `_`, or of more than 255
+/// characters, is one too. 255 alphanumerics are taken.
+#[test]
+fn add_transceiver_refuses_a_rid_outside_the_corrected_grammar_with_a_type_error() -> TestResult {
+    for rid in ["a-b".to_owned(), "a_b".to_owned(), "a".repeat(256)] {
+        let mut pc = default_peer()?;
+        let result = pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            init(
+                RTCRtpTransceiverDirection::Sendonly,
+                vec![with_rid("a"), with_rid(&rid)],
+            ),
+        );
+        assert!(
+            matches!(result, Err(Error::TypeError(_))),
+            "rid {rid:?}: {result:?}"
+        );
+        assert_eq!(pc.get_transceivers().count(), 0);
+    }
+    let mut pc = default_peer()?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        init(
+            RTCRtpTransceiverDirection::Sendonly,
+            vec![with_rid("a"), with_rid(&"b".repeat(255))],
+        ),
+    )?;
+    Ok(())
+}
+
 #[test]
 fn add_transceiver_refuses_out_of_range_encodings() -> TestResult {
     let mut pc = default_peer()?;

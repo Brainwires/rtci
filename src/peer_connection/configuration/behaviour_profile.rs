@@ -1395,6 +1395,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "webrtc-extensions 7 icecandidatepairnominate; off in every profile (Chrome does not ship the event)",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_published_rid_id_grammar",
+        class: NotGovernedClass::Same,
+        note: "off: received rid-ids follow RFC 8851 10 as corrected by erratum 7132, 1*255(alpha-numeric). libwebrtc is stricter (modules/rtp_rtcp/include/rtp_rtcp_defines.cc @ a222406d: IsLegalRsidName takes 1 to kMidRsidMaxSize 16 alphanumerics; pc/webrtc_sdp.cc discards a malformed a=rid line), and Firefox refuses '-' and '_' and more than 255 (dom/media/webrtc/sdp/SdpAttribute.cpp, CheckRidValidity, citing eid7132); no browser in the fixtures writes another rid",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_ice_unauthenticated_requests",
         class: NotGovernedClass::Same,
         note: "RFC 8489 9.1.3 error responses; libwebrtc answers 400 / 401 as well",

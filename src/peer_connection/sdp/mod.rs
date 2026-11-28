@@ -349,6 +349,7 @@ use crate::rtp_transceiver::{
     },
 };
 use ice::candidate::{Candidate, unmarshal_candidate};
+use sdp::attribute::RidIdGrammar;
 use sdp::description::common::{Address, ConnectionInformation};
 use sdp::description::media::*;
 use sdp::description::session::*;
@@ -781,7 +782,12 @@ pub(crate) fn track_details_for_rid<'a>(
 }
 
 /// extract all TrackDetails from an SDP.
-pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails> {
+///
+/// Rid-ids are read with `rid_ids` (`SettingEngine::rid_id_grammar`).
+pub(crate) fn track_details_from_sdp(
+    s: &SessionDescription,
+    rid_ids: RidIdGrammar,
+) -> Vec<TrackDetails> {
     let mut incoming_tracks = vec![];
 
     for media in &s.media_descriptions {
@@ -948,7 +954,7 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
             // The streams the remote side sends: its `send` rids. A `recv` rid is one of this
             // endpoint's own streams, which the remote side takes.
-            let rids: Vec<SimulcastRid> = get_rids(media)
+            let rids: Vec<SimulcastRid> = get_rids(media, rid_ids)
                 .into_iter()
                 .filter(|rid| rid.direction == SimulcastDirection::Send)
                 .collect();
@@ -1084,7 +1090,7 @@ fn track_details_from_sdp_pairs_repair_flows_by_lookup() {
     }
     let desc = SessionDescription::default().with_media(media);
 
-    let tracks = track_details_from_sdp(&desc);
+    let tracks = track_details_from_sdp(&desc, RidIdGrammar::Corrected);
 
     assert_eq!(tracks.len(), PRIMARIES as usize);
     for (i, track) in tracks.iter().enumerate() {
@@ -1115,7 +1121,10 @@ fn groups_of_three_ids_name_one_source_and_its_flows() {
             format!("{ssrc} msid:stream track"),
         );
     }
-    let tracks = track_details_from_sdp(&SessionDescription::default().with_media(media));
+    let tracks = track_details_from_sdp(
+        &SessionDescription::default().with_media(media),
+        RidIdGrammar::Corrected,
+    );
     assert_eq!(tracks.len(), 1, "{tracks:?}");
     assert_eq!(tracks[0].ssrc, Some(4));
     assert_eq!(tracks[0].rtx_ssrc, Some(14));
@@ -1148,7 +1157,7 @@ fn get_rids_orders_and_pauses_by_lookup() {
         format!("send {}", list.join(";")),
     );
 
-    let rids = get_rids(&simulcast);
+    let rids = get_rids(&simulcast, RidIdGrammar::Corrected);
 
     assert_eq!(rids.len(), RIDS);
     for (position, rid) in rids.iter().enumerate() {
@@ -1165,7 +1174,7 @@ fn get_rids_orders_and_pauses_by_lookup() {
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         format!("send {}", list.join(";")),
     );
-    let rids = get_rids(&repeated);
+    let rids = get_rids(&repeated, RidIdGrammar::Corrected);
     assert_eq!(rids.len(), RIDS);
     assert!(
         rids.iter()
@@ -4161,7 +4170,14 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
 /// (`SettingEngineBuilder::with_strict_sdp_attribute_grammar`: webrtc-rs 0.17.x ends an
 /// `a=rtcp-fb` without parameters with a space, against RFC 4585 section 4.2's
 /// `rtcp-fb-param`; Pion did before v4.1.5).
-pub(crate) fn check_attribute_lines(desc: &SessionDescription, strict: bool) -> Result<()> {
+///
+/// `a=simulcast` is checked with `rid_ids` (`SettingEngine::rid_id_grammar`), the rid-id
+/// grammar `section_rids` reads it with.
+pub(crate) fn check_attribute_lines(
+    desc: &SessionDescription,
+    strict: bool,
+    rid_ids: RidIdGrammar,
+) -> Result<()> {
     // RFC 8866 section 6.7: "At most one occurrence of "a=recvonly", "a=sendrecv",
     // "a=sendonly", or "a=inactive" MAY appear at session level, and at most one MAY appear
     // in each media description": a level with two is ambiguous, and refused.
@@ -4194,6 +4210,12 @@ pub(crate) fn check_attribute_lines(desc: &SessionDescription, strict: bool) -> 
                     ATTR_KEY_SSRC.to_owned(),
                     Some(format!("{id} msid-ignored")),
                 ))?;
+            }
+            _ if a.key == SDP_ATTRIBUTE_SIMULCAST => {
+                sdp::attribute::Simulcast::parse_with(
+                    a.value.as_deref().unwrap_or_default(),
+                    rid_ids,
+                )?;
             }
             _ => sdp::attribute::check_attribute(a)?,
         }
@@ -5728,7 +5750,7 @@ fn get_rids_uses_each_layers_first_alternative_once() {
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         "recv foo,bar;1,2".to_owned(),
     );
-    let ids: Vec<(String, bool)> = get_rids(&simulcast)
+    let ids: Vec<(String, bool)> = get_rids(&simulcast, RidIdGrammar::Corrected)
         .into_iter()
         .map(|r| (r.id, r.simulcast))
         .collect();
@@ -5740,7 +5762,11 @@ fn get_rids_uses_each_layers_first_alternative_once() {
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         "recv foo,bar;1,2;foo".to_owned(),
     );
-    assert!(get_rids(&repeated).iter().all(|r| !r.simulcast));
+    assert!(
+        get_rids(&repeated, RidIdGrammar::Corrected)
+            .iter()
+            .all(|r| !r.simulcast)
+    );
 }
 
 /// The extensions an offer adds back for a transceiver with an explicit list of header

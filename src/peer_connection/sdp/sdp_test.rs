@@ -478,7 +478,7 @@ fn test_track_details_from_sdp() -> Result<()> {
             ..Default::default()
         };
 
-        let tracks = track_details_from_sdp(&s);
+        let tracks = track_details_from_sdp(&s, RidIdGrammar::Corrected);
         assert_eq!(tracks.len(), 3);
         if track_details_for_ssrc(&tracks, 1000).is_some() {
             panic!("got the unknown track ssrc:1000 which should have been skipped");
@@ -537,7 +537,7 @@ fn test_track_details_from_sdp() -> Result<()> {
             ..Default::default()
         };
         assert_eq!(
-            track_details_from_sdp(&s).len(),
+            track_details_from_sdp(&s, RidIdGrammar::Corrected).len(),
             0,
             "inactive and recvonly tracks should be ignored"
         );
@@ -992,7 +992,7 @@ fn test_populate_sdp() -> Result<()> {
             .iter()
             .find(|desc| desc.media_name.media == "video")
             .expect("a video section");
-        let rids = get_rids(video);
+        let rids = get_rids(video, RidIdGrammar::Corrected);
         for id in ["ridkey", "ridpaused"] {
             let rid = rids
                 .iter()
@@ -1278,7 +1278,7 @@ fn test_get_rids() {
     );
     m.media_name.formats = vec!["97".to_owned()];
 
-    let rids = get_rids(&m);
+    let rids = get_rids(&m, RidIdGrammar::Corrected);
 
     let f = rids
         .iter()
@@ -1293,7 +1293,7 @@ fn test_get_rids() {
 
     // Without the format on the m= line, the line keeps no format and is discarded.
     m.media_name.formats = vec!["96".to_owned()];
-    assert!(get_rids(&m).is_empty());
+    assert!(get_rids(&m, RidIdGrammar::Corrected).is_empty());
 }
 
 #[test]

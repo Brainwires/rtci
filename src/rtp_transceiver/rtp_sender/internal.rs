@@ -1771,7 +1771,8 @@ pub(crate) fn validate_scalability_modes(
 
 /// W3C webrtc 5.1 `addTransceiver`, the steps that take `sendEncodings`:
 ///
-/// - a rid that is not `1*(alpha-numeric / "-" / "_")` (RFC 8851 section 10) is a `TypeError`,
+/// - a rid that is not `1*255(alpha-numeric)` (RFC 8851 section 10 as corrected by erratum
+///   7132) is a `TypeError`,
 ///   as are a rid on some encodings only and a repeated rid;
 /// - for audio `scaleResolutionDownBy` and `maxFramerate` are removed;
 /// - a `scaleResolutionDownBy` below 1.0 and a negative `maxFramerate` are `RangeError`s;
@@ -1786,10 +1787,8 @@ pub(crate) fn validate_send_encodings(
     kind: RtpCodecKind,
     encodings: &mut Vec<RTCRtpEncodingParameters>,
 ) -> Result<()> {
-    let is_rid = |rid: &str| {
-        rid.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    };
+    // An empty rid is no rid (the encoding has none).
+    let is_rid = |rid: &str| rid.is_empty() || sdp::attribute::RidIdGrammar::Corrected.admits(rid);
     if let Some(encoding) = encodings
         .iter()
         .find(|encoding| !is_rid(&encoding.rtp_coding_parameters.rid))

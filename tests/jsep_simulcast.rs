@@ -592,6 +592,157 @@ fn a_rid_that_is_not_alphanumeric_is_refused() -> TestResult {
     Ok(())
 }
 
+/// The rids `answerer`'s receiver exposes once it has answered the offer of a simulcast
+/// sender of f and h, with `extra` (CRLF-ended lines) added to the offer after its
+/// `a=simulcast` line.
+fn received_rids_with(
+    answerer: &mut RTCPeerConnection,
+    extra: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let (mut offerer, _) = simulcast_sender(&[("f", None), ("h", None)])?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    let sdp = edited(
+        &offer.sdp,
+        "a=simulcast:send f;h\r\n",
+        &format!("a=simulcast:send f;h\r\n{extra}"),
+    );
+    answerer.set_remote_description(now, RTCSessionDescription::offer(sdp)?)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer)?;
+    let receiver = answerer.get_receivers().next().expect("a receiver");
+    let receiver = answerer.rtp_receiver(receiver).expect("receiver");
+    Ok(receiver
+        .track()
+        .codings()
+        .iter()
+        .map(|c| c.rtp_coding_parameters.rid.clone())
+        .collect())
+}
+
+/// RFC 8851 section 10 as corrected by erratum 7132 (Verified): `rid-id =
+/// 1*255(alpha-numeric)`. A remote sender's rid of 255 alphanumerics is received.
+#[test]
+fn a_remote_rid_of_255_alphanumerics_is_received() -> TestResult {
+    let longest = "Az09".repeat(64)[..255].to_owned();
+    let (mut offerer, _) = simulcast_sender(&[("f", None), (&longest, None)])?;
+    let mut answerer = default_peer()?;
+    let (offer, _) = exchange(&mut offerer, &mut answerer)?;
+    assert!(offer.contains(&format!("a=rid:{longest} send")), "{offer}");
+    let receiver = answerer.get_receivers().next().expect("a receiver");
+    let receiver = answerer.rtp_receiver(receiver).expect("receiver");
+    let rids: Vec<String> = receiver
+        .track()
+        .codings()
+        .iter()
+        .map(|c| c.rtp_coding_parameters.rid.clone())
+        .collect();
+    assert_eq!(rids, vec!["f".to_owned(), longest]);
+    Ok(())
+}
+
+/// RFC 8851 section 6.2.2 step 1: "In the case of a syntax error, the 'a=rid' line is
+/// discarded"; under erratum 7132 a rid-id with `-` is a syntax error.
+#[test]
+fn a_remote_rid_line_whose_id_has_a_dash_is_discarded() -> TestResult {
+    let mut answerer = default_peer()?;
+    let rids = received_rids_with(&mut answerer, "a=rid:a-b send\r\n")?;
+    assert_eq!(rids, vec!["f", "h"]);
+    Ok(())
+}
+
+/// As above for `_`.
+#[test]
+fn a_remote_rid_line_whose_id_has_an_underscore_is_discarded() -> TestResult {
+    let mut answerer = default_peer()?;
+    let rids = received_rids_with(&mut answerer, "a=rid:a_b send\r\n")?;
+    assert_eq!(rids, vec!["f", "h"]);
+    Ok(())
+}
+
+/// As above for a rid-id of more than 255 characters (`1*255`).
+#[test]
+fn a_remote_rid_line_whose_id_is_longer_than_255_is_discarded() -> TestResult {
+    let mut answerer = default_peer()?;
+    let rids = received_rids_with(
+        &mut answerer,
+        &format!("a=rid:{} send\r\n", "a".repeat(256)),
+    )?;
+    assert_eq!(rids, vec!["f", "h"]);
+    Ok(())
+}
+
+/// RFC 8853 section 5.1 takes its `rid-id` from RFC 8851 (erratum 7132), and RFC 9429
+/// section 5.8: a line that is not well formed rejects the whole description, as
+/// `a_simulcast_line_that_repeats_a_rid_or_a_direction_refuses_the_description` does for the
+/// other faults of the line.
+#[test]
+fn a_simulcast_line_naming_a_rid_outside_the_grammar_refuses_the_description() -> TestResult {
+    for id in ["a-b".to_owned(), "a_b".to_owned(), "a".repeat(256)] {
+        let mut pc = default_peer()?;
+        let result = pc.set_remote_description(
+            Instant::now(),
+            remote_offer(
+                "sendonly",
+                &format!("a=rid:f send\na=rid:{id} send\na=simulcast:send f;{id}\n"),
+            )?,
+        );
+        assert!(
+            matches!(result, Err(Error::SdpInvalidValue(ref reason)) if reason.contains("a=simulcast")),
+            "{id}: {result:?}"
+        );
+    }
+    Ok(())
+}
+
+/// `SettingEngineBuilder::with_published_rid_id_grammar(true)` reads received rid-ids as RFC
+/// 8851 section 10 was published (`1*(alpha-numeric / "-" / "_")`, any length): the lines the
+/// corrected grammar discards are received, and an `a=simulcast` line naming them is applied.
+#[test]
+fn with_the_published_grammar_dashes_underscores_and_long_rids_are_taken() -> TestResult {
+    let published = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::default()
+                    .with_published_rid_id_grammar(true)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    let long = "a".repeat(256);
+    let mut answerer = published()?;
+    let rids = received_rids_with(
+        &mut answerer,
+        &format!("a=rid:a-b send\r\na=rid:a_b send\r\na=rid:{long} send\r\n"),
+    )?;
+    assert_eq!(
+        rids,
+        vec![
+            "f".to_owned(),
+            "h".to_owned(),
+            "a-b".to_owned(),
+            "a_b".to_owned(),
+            long.clone()
+        ]
+    );
+
+    for id in ["a-b".to_owned(), "a_b".to_owned(), long] {
+        let mut pc = published()?;
+        pc.set_remote_description(
+            Instant::now(),
+            remote_offer(
+                "sendonly",
+                &format!("a=rid:f send\na=rid:{id} send\na=simulcast:send f;{id}\n"),
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
 /// RFC 8851 section 6.1: "any payload type listed in 'pt=' MUST be one of the formats of the
 /// m= line": an encoding's `payload_types` keeps in the offer only the ones the section has,
 /// and the offerer's answer to an offer `~` it does not support is not applied as a pause

@@ -1246,7 +1246,7 @@ impl RTCPeerConnection {
                             } else {
                                 superseded_clear_extensions(media)?
                             },
-                            rid_map: get_rids(media),
+                            rid_map: get_rids(media, self.setting_engine.rid_id_grammar()),
                             answer_direction,
                             offered_protos: offered_protos(media),
                             offered_rtcp_rsize: Some(if include_unmatched {
@@ -2257,7 +2257,7 @@ impl RTCPeerConnection {
                 continue;
             };
             let mut rids: Vec<String> = vec![];
-            for rid in get_rids(media) {
+            for rid in get_rids(media, self.setting_engine.rid_id_grammar()) {
                 if rid.direction == SimulcastDirection::Recv
                     && rid.simulcast
                     && !rids.contains(&rid.id)
@@ -2364,14 +2364,14 @@ impl RTCPeerConnection {
             let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
                 continue;
             };
-            let offered_rids = get_rids(offered);
+            let offered_rids = get_rids(offered, self.setting_engine.rid_id_grammar());
             // RFC 8853 section 5.2 (a local answer: the offer's `recv` streams marked
             // paused) and section 5.3.3 (a remote answer: the answer's): the streams the
             // remote description marks `~` start paused.
             let remote_rids = if answer_is_local {
                 offered_rids.clone()
             } else {
-                get_rids(answered)
+                get_rids(answered, self.setting_engine.rid_id_grammar())
             };
             sender.set_initially_paused_rids(
                 remote_rids
@@ -2383,24 +2383,27 @@ impl RTCPeerConnection {
                     .collect(),
             );
             let formats = same_format(offered, answered);
-            let accepted: Vec<(String, RTCRtpRidRestrictions)> = get_rids(answered)
-                .into_iter()
-                .filter(|rid| rid.direction == ours && rid.simulcast)
-                .filter(|rid| {
-                    answer_is_local
-                        || offered_rids
-                            .iter()
-                            .find(|offered| {
-                                offered.id == rid.id
-                                    && offered.direction == SimulcastDirection::Send
-                            })
-                            .is_some_and(|offered| answered_rid_is_valid(offered, rid, &formats))
-                })
-                .map(|rid| {
-                    let restrictions = rid.to_restrictions();
-                    (rid.id, restrictions)
-                })
-                .collect();
+            let accepted: Vec<(String, RTCRtpRidRestrictions)> =
+                get_rids(answered, self.setting_engine.rid_id_grammar())
+                    .into_iter()
+                    .filter(|rid| rid.direction == ours && rid.simulcast)
+                    .filter(|rid| {
+                        answer_is_local
+                            || offered_rids
+                                .iter()
+                                .find(|offered| {
+                                    offered.id == rid.id
+                                        && offered.direction == SimulcastDirection::Send
+                                })
+                                .is_some_and(|offered| {
+                                    answered_rid_is_valid(offered, rid, &formats)
+                                })
+                    })
+                    .map(|rid| {
+                        let restrictions = rid.to_restrictions();
+                        (rid.id, restrictions)
+                    })
+                    .collect();
             sender.apply_simulcast_answer(&accepted, keep_rejected);
         }
     }
@@ -3113,7 +3116,7 @@ impl RTCPeerConnection {
         }
 
         let incoming_tracks = if let Some(parsed) = &remote_desc.parsed {
-            track_details_from_sdp(parsed)
+            track_details_from_sdp(parsed, self.setting_engine.rid_id_grammar())
         } else {
             vec![]
         };
