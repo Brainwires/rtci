@@ -541,6 +541,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- test-env interop: the `reflect video <codec>` cells name a browser that sends on a payload
+  type its offer does not have (`conf/test-4-reflect-cells-name-an-off-offer-format`), as
+  "chrome profile: audio and video both ways" already did, and log the payload types received
+  and sent, the PLIs forwarded and what the browser says it sends. Train-36 round 10d's
+  `reflect video VP8` [webkit] failure (test-env 46081695534) was such a switch: WebKit's offer
+  had VP8 on 96 with RTX on 97, the answer added VP9 on 98 (the 0.2.x answer form), WebKit sent
+  1285 of its 1292 packets on 98, and Rust, which may send only the offer's formats (RFC 3264
+  section 6.1), reflected 7 VP8 packets and then only RTX probe padding (75 packets, no payload,
+  which WebKit counts as `retransmittedPacketsReceived` with 0 bytes). The offered-only answers
+  of 0.3.0 (jsep-95) leave the browser no such format to switch to.
 - **The real-multicast mDNS tests probe the host first** (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`).
   `examples/stream-driver/tests/mdns.rs` and the two QueryAndGather tests of
   `tests/mdns_query_and_gather_interop.rs` resolve `.local` names over the host's mDNS group;
