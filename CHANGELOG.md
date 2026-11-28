@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The pull-request bench gate also fails a bench whose trees are separated**
+  (`conf/bench-2-gate-floor`; CI only, no engine change). The rule "slower in every round by more
+  than 20 % and by more than 25 ns" let `Interceptor/Pacer/write+poll` pass at ×1.07 to ×1.30 for
+  twelve rounds of train 36 (`conf/pacer-3-held-streams-purged`), because whether 25 ns was
+  reached depended on how fast the runner was; it failed once, on a fast runner, on the next
+  branch. `scripts/bench-compare.py` now also calls a bench slower when, over at least four
+  rounds of each tree, the head's fastest round is slower than the base's slowest by more than
+  5 % and 3 ns: the noise band is the base's own spread in the same job, whatever the runner's
+  speed. `scripts/bench-compare.sh` runs a bench that is separated after the usual two rounds
+  alone for four more alternating rounds (`BENCH_CONFIRM_ROUNDS`) before the verdict. The first
+  rule is unchanged.
+  Performance: bench-2
+
 ## [0.2.1] - 2026-11-27
 
 A patch release of the 0.2 line, compatible with 0.2.0 (no public item removed or changed;
