@@ -486,7 +486,7 @@ jobs:
         run: df -h
 
   rtci_crypto_custom_provider:
-    timeout-minutes: 20
+    timeout-minutes: 40
     name: rtci-crypto (no built-in, custom provider)
     runs-on: ubuntu-latest
     # No incremental cache and no debug info (panics still print file:line): the test build of
@@ -503,6 +503,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test downstream-style provider
         run: cargo test --package rtci-crypto --no-default-features --features test-support --test custom_provider --verbose
+      # The peer connection without a built-in provider: tests/no_builtin_crypto_provider.rs
+      # exists only then (`#![cfg(not(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]`)
+      # and ran 0 tests in every other job (run 46129791197). `--package`, not `--workspace`:
+      # a workspace build turns on what any member asks for.
+      - name: Peer connection without a built-in provider
+        run: cargo test --package rtci --no-default-features --test no_builtin_crypto_provider --verbose
       - name: Verify publishable package
         run: cargo package --package rtci-crypto --no-default-features
       - name: Disk left after the build

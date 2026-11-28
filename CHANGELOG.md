@@ -497,6 +497,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rtci` builds without a built-in crypto provider** (`conf/crypto-9-rtci-builds-without-a-built-in-provider`).
+  docs/crypto-provider-migration.md lists `--no-default-features` as "no built-in provider;
+  supply your own", but the crate did not compile that way: `RTCCertificate::from_key_pair`
+  takes an `rcgen::KeyPair`, which exists only with an rcgen crypto backend (turned on only by
+  `crypto-ring` / `crypto-aws-lc-rs`). It is now compiled only with a built-in provider (it
+  imported the key through the built-in default anyway); the default build is unchanged.
+  Without a provider, certificates come from the application's provider (`generate`,
+  `generate_certificate`, `generate_from_signing_key`, `from_pkcs8`, `from_signing_key`).
+  `tests/no_builtin_crypto_provider.rs`, which had run 0 tests in every job (and no longer
+  compiled: `build()` takes the time since), now runs in the job "rtci-crypto (no built-in,
+  custom provider)"; its row in docs/test-exclusions.md is gone. The other provider crates
+  (rtci-crypto, -dtls, -ice, -srtp, -stun, -turn, -sframe) already built their library without
+  defaults.
 - **`rtci_mdns::MulticastSocket::with_interface` sends by that interface**
   (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`; RFC 6762 section 14). The socket
   joined the group on the interface given but sent by the system's route for 224.0.0.251. On
@@ -866,8 +879,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/no_builtin_crypto_provider.rs` ran 0 tests in all eight jobs that build it, and cannot
   run: `rtci` does not compile without a built-in provider (`cargo check -p rtci
   --no-default-features`: `rcgen::KeyPair` at `src/peer_connection/certificate/mod.rs:553` needs
-  rcgen's `crypto` feature), although docs/crypto-provider-migration.md lists that build. Listed
-  as a known limit in `docs/test-exclusions.md`.
+  rcgen's `crypto` feature), although docs/crypto-provider-migration.md lists that build (fixed
+  by `conf/crypto-9-rtci-builds-without-a-built-in-provider`, under Fixed).
 - **rtci-video's feature-gated tests run in CI** (`conf/video-1-send-tests-run-and-pass`).
   Cargo skips a test target whose `required-features` are off without a word, and no job turned
   on `vp8`, `av1`, `isolation`, `libvpx`, `dav1d` or `openh264`: `send_rtc2rtc`, `codecs`,
