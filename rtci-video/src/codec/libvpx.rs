@@ -1,13 +1,22 @@
 //! VP8 and VP9 decode and encode with libvpx (feature `libvpx`), the reference implementation:
 //! C and assembly, BSD-3-Clause, **loaded at run time** (`dlopen`), so building this feature
-//! needs no library and no C toolchain; running it needs libvpx installed (Debian / Ubuntu:
-//! `libvpx12` or the version of the release; macOS: Homebrew `libvpx`; Windows: `vpx.dll`).
+//! needs no library and no C toolchain; running it needs libvpx 1.12.0 to 1.17.0 installed
+//! (Ubuntu 24.04: `libvpx9`, 1.14.0; Ubuntu 26.04: `libvpx12`, 1.16.0; macOS: Homebrew
+//! `libvpx`; Windows: `vpx.dll`).
 //!
-//! The binding is written here from libvpx's public headers (checked against 1.16.0). Every
-//! context is created through `vpx_codec_dec_init_ver` / `vpx_codec_enc_init_ver` with the ABI
-//! versions of those headers ([`DECODER_ABI_VERSION`], [`ENCODER_ABI_VERSION`]): libvpx refuses
-//! (`VPX_CODEC_ABI_MISMATCH`) a library whose structures differ, so a layout change is an
-//! error, not garbage. The encoder runs libvpx's real-time path (one pass, CBR, no look-ahead,
+//! The binding is written here from libvpx's public headers. Every context is created through
+//! `vpx_codec_dec_init_ver` / `vpx_codec_enc_init_ver` with an ABI version, which libvpx
+//! compares with its own and refuses (`VPX_CODEC_ABI_MISMATCH`) when they differ. libvpx raises
+//! its encoder ABI version in nearly every release (30 in 1.13, 34 in 1.14, 36 / 37 in 1.15, 39
+//! in 1.16 and 1.17), mostly for structures this binding never touches (the external rate
+//! control and TPL interfaces), so one number works with one release only. The binding
+//! therefore passes the encoder ABI version of the release that loaded, from
+//! [`ENCODER_ABI_VERSIONS`], and only for releases whose headers were compared with this
+//! binding: every structure, enumeration, constant and function type it uses is the same in
+//! libvpx 1.12.0 to 1.17.0 (the one difference, a field added to the PSNR packet in 1.16.0,
+//! is inside a union of fixed size the binding does not read). Any other release is refused
+//! before a structure is handed to it, with the release named. The decoder's ABI version is 12
+//! in all of them ([`DECODER_ABI_VERSION`]); libvpx's own check guards it on any release. The encoder runs libvpx's real-time path (one pass, CBR, no look-ahead,
 //! error resilient, key frames on request only), with libwebrtc's buffer and quantizer settings
 //! (`modules/video_coding/codecs/vp8/libvpx_vp8_encoder.cc @ a222406d`).
 //!
@@ -26,8 +35,36 @@ use crate::picture::{I420, I420Buffer};
 
 /// `VPX_DECODER_ABI_VERSION` of the headers this binding follows (3 + 4 + 5).
 pub const DECODER_ABI_VERSION: c_int = 12;
-/// `VPX_ENCODER_ABI_VERSION` of the headers this binding follows (18 + 9 + 7 + 5).
+/// `VPX_ENCODER_ABI_VERSION` of libvpx 1.16.0's headers (18 + 9 + 7 + 5).
 pub const ENCODER_ABI_VERSION: c_int = 39;
+
+/// `VPX_ENCODER_ABI_VERSION` of each libvpx release whose headers were compared with this
+/// binding (`vpx/vpx_encoder.h`, `vpx_codec.h`, `vpx_ext_ratectrl.h`, `vpx_tpl.h` at the
+/// release's tag): (major, minor, patch) and the number. The encoder refuses any other release.
+/// 15 + 9 + 1 (1.12); 15 + 9 + 6 (1.13); 16 + 9 + 7 + 2 (1.14); 18 + 9 + (5 + 4) (1.15.0);
+/// 18 + 9 + (6 + 4) (1.15.1, 1.15.2); 18 + 9 + (7 + 5) (1.16.0, 1.17.0).
+pub const ENCODER_ABI_VERSIONS: &[((u8, u8, u8), c_int)] = &[
+    ((1, 12, 0), 25),
+    ((1, 13, 0), 30),
+    ((1, 13, 1), 30),
+    ((1, 14, 0), 34),
+    ((1, 14, 1), 34),
+    ((1, 15, 0), 36),
+    ((1, 15, 1), 37),
+    ((1, 15, 2), 37),
+    ((1, 16, 0), 39),
+    ((1, 17, 0), 39),
+];
+
+/// The encoder ABI version of libvpx `release` (major, minor, patch), if the binding was
+/// checked against it.
+#[must_use]
+pub fn encoder_abi_version(release: (u8, u8, u8)) -> Option<c_int> {
+    ENCODER_ABI_VERSIONS
+        .iter()
+        .find(|(r, _)| *r == release)
+        .map(|(_, abi)| *abi)
+}
 
 /// The library names tried by [`VpxDecoder::new`] and [`VpxEncoder::new`], in order.
 #[cfg(target_os = "macos")]
@@ -222,6 +259,7 @@ impl<T> Slack<T> {
 }
 
 struct Api {
+    version_num: unsafe extern "C" fn() -> c_int,
     version_str: unsafe extern "C" fn() -> *const c_char,
     vp8_dx: Iface,
     vp9_dx: Iface,
@@ -260,9 +298,10 @@ impl Api {
     fn load(path: &OsStr) -> Result<Self, String> {
         // SAFETY: loading a library runs its initialisers; libvpx's are libvpx's own.
         let lib = unsafe { Library::new(path) }.map_err(|e| format!("libvpx: {e}"))?;
-        // SAFETY: each type is the declaration in libvpx 1.16.0's headers.
+        // SAFETY: each type is the declaration in libvpx 1.12.0 to 1.17.0's headers.
         unsafe {
             Ok(Self {
+                version_num: symbol(&lib, b"vpx_codec_version\0")?,
                 version_str: symbol(&lib, b"vpx_codec_version_str\0")?,
                 vp8_dx: symbol(&lib, b"vpx_codec_vp8_dx\0")?,
                 vp9_dx: symbol(&lib, b"vpx_codec_vp9_dx\0")?,
@@ -294,6 +333,31 @@ impl Api {
             }
         }
         Err(last)
+    }
+
+    /// The release that loaded: (major, minor, patch) of `vpx_codec_version()`.
+    fn release(&self) -> (u8, u8, u8) {
+        // SAFETY: takes nothing, returns an int.
+        let v = unsafe { (self.version_num)() };
+        (
+            ((v >> 16) & 0xff) as u8,
+            ((v >> 8) & 0xff) as u8,
+            (v & 0xff) as u8,
+        )
+    }
+
+    /// The encoder ABI version to pass this release, or why there is none.
+    fn encoder_abi(&self) -> Result<c_int, String> {
+        let release = self.release();
+        encoder_abi_version(release).ok_or_else(|| {
+            let (major, minor, patch) = release;
+            format!(
+                "libvpx {major}.{minor}.{patch} ({}): this binding's encoder structures were \
+                 checked against libvpx 1.12.0 to 1.17.0 only, and libvpx changes its encoder ABI \
+                 in nearly every release; refused rather than handed a layout it may not have",
+                self.version()
+            )
+        })
     }
 
     fn version(&self) -> String {
@@ -514,8 +578,8 @@ impl VpxEncoder {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidConfig`] when no libvpx loads, its ABI differs, or it refuses the
-    /// settings.
+    /// [`EncodeError::InvalidConfig`] when no libvpx loads, it is a release the binding was not
+    /// checked against ([`ENCODER_ABI_VERSIONS`]), or it refuses the settings.
     pub fn new(
         codec: VpxCodec,
         width: u32,
@@ -524,6 +588,8 @@ impl VpxEncoder {
         bitrate_bps: u32,
     ) -> Result<Self, EncodeError> {
         let api = Api::load_any().map_err(EncodeError::InvalidConfig)?;
+        // Before any structure reaches the library: `vpx_codec_enc_config_default` writes one.
+        let abi = api.encoder_abi().map_err(EncodeError::InvalidConfig)?;
         let api = Arc::new(api);
         // SAFETY: the interface functions take no arguments and return a static interface.
         let iface = unsafe {
@@ -566,8 +632,9 @@ impl VpxEncoder {
         cfg.rc_buf_optimal_sz = 600;
         cfg.kf_mode = KF_DISABLED;
         let mut ctx = zeroed_ctx();
-        // SAFETY: `ctx` and `cfg` are valid; the ABI version is the headers'.
-        let r = unsafe { (api.enc_init_ver)(&mut ctx.v, iface, &slack.v, 0, ENCODER_ABI_VERSION) };
+        // SAFETY: `ctx` and `cfg` are valid; `abi` is the loaded release's, whose structures are
+        // this binding's (`ENCODER_ABI_VERSIONS`).
+        let r = unsafe { (api.enc_init_ver)(&mut ctx.v, iface, &slack.v, 0, abi) };
         if r != 0 {
             return Err(EncodeError::InvalidConfig(format!(
                 "vpx_codec_enc_init: {r} ({})",
@@ -720,5 +787,28 @@ impl VideoEncoder for VpxEncoder {
 
     fn implementation_name(&self) -> &str {
         &self.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_encoder_abi_version_is_the_loaded_releases() {
+        // libvpx 1.14.0 (Ubuntu 24.04) is 34: passing 1.16's 39 there failed every encoder
+        // with VPX_CODEC_ABI_MISMATCH (cargo run 46148529023).
+        assert_eq!(encoder_abi_version((1, 14, 0)), Some(34));
+        assert_eq!(encoder_abi_version((1, 16, 0)), Some(ENCODER_ABI_VERSION));
+        assert_eq!(encoder_abi_version((1, 17, 0)), Some(39));
+        assert_eq!(encoder_abi_version((1, 15, 0)), Some(36));
+        assert_eq!(encoder_abi_version((1, 15, 2)), Some(37));
+    }
+
+    #[test]
+    fn a_release_the_binding_was_not_checked_against_has_no_encoder_abi_version() {
+        assert_eq!(encoder_abi_version((1, 11, 0)), None);
+        assert_eq!(encoder_abi_version((1, 16, 1)), None);
+        assert_eq!(encoder_abi_version((1, 18, 0)), None);
     }
 }
