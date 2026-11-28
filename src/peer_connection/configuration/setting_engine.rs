@@ -692,7 +692,8 @@ impl SettingEngine {
             disable_sdp_tls_id: Default::default(),
             dtls_new_association_without_ice_restart: Default::default(),
             msid_removal_ends_track: Default::default(),
-            unoffered_feedback_refused: Default::default(),
+            // RFC 9429 section 5.11: such an answer "MUST result in an error".
+            unoffered_feedback_refused: true,
             stopping_transceiver_rejected_in_answer: Default::default(),
             dtls_use_srtp_only_with_media: Default::default(),
             accept_lowercase_fingerprints: Default::default(),
@@ -2319,7 +2320,8 @@ impl SettingEngineBuilder {
     }
 
     /// Refuses a remote answer whose media section has an `a=rtcp-fb` line its offer did not
-    /// have. The default is `false`; the `StrictRfc` behaviour profile sets it.
+    /// have. The default is `true` (the `Rfc`, `StrictRfc` and `Performance` behaviour
+    /// profiles); the `Chrome` profile sets `false`.
     ///
     /// RFC 9429 section 5.11: "If the 'm=' section references RTCP feedback mechanisms that
     /// were not present in the corresponding 'm=' section in the offer, this indicates a
@@ -2328,10 +2330,22 @@ impl SettingEngineBuilder {
     /// [`Error::ErrAnswerDoesNotMatchOffer`](shared::error::Error::ErrAnswerDoesNotMatchOffer)
     /// for such an answer and leaves the offer pending.
     ///
-    /// **This default does not follow RFC 9429 section 5.11** (owner decision; `docs/conformance.md`,
-    /// "Standing departures from a MUST"): the answer is applied, the extra feedback is logged
-    /// and never enabled, since what is negotiated is the intersection with this endpoint's own
-    /// feedback for the format. libwebrtc does the same: it raises no error and intersects.
+    /// With `false` the answer is applied, the extra feedback is logged and never enabled,
+    /// since what is negotiated is the intersection with this endpoint's own feedback for the
+    /// format. That is libwebrtc's form: it raises no error for such an answer and intersects.
+    /// No recorded answer of a browser or of the interop peers (Pion, aiortc, str0m,
+    /// webrtc-rs 0.17) carries such a line.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// // Apply such answers as libwebrtc does.
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_unoffered_feedback_refused(false)
+    ///     .build();
+    /// ```
     pub fn with_unoffered_feedback_refused(mut self, refused: bool) -> Self {
         self.0.unoffered_feedback_refused = refused;
         self

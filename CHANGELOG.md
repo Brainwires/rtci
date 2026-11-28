@@ -214,6 +214,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `additional_codec_sent_rtc2rtc.rs`, `offerer_sends_answers_preferred_format.rs`; the new
   default is asserted by `jsep_answer_offered_formats_only.rs` and
   `additional_codec_sent_rtc2rtc.rs::by_default_the_answer_is_h264_on_63_alone_and_it_is_sent`.
+- **A remote answer with `a=rtcp-fb` its offer did not have is refused by default** (RFC 9429
+  section 5.11: "If the 'm=' section references RTCP feedback mechanisms that were not present
+  in the corresponding 'm=' section in the offer, this indicates a negotiation problem and MUST
+  result in an error"; RFC 4585 section 4.2: "The answerer MUST NOT add feedback parameters").
+  `SettingEngineBuilder::with_unoffered_feedback_refused` now defaults to `true` (it was
+  `false` in 0.2.x, where such an answer was applied and the extra feedback never enabled):
+  `set_remote_description` returns `ErrAnswerDoesNotMatchOffer` naming the line and leaves the
+  offer pending. The check compares mechanisms: an answer that restates the parameters of
+  `trr-int`, `ccm pause` (RFC 7728 section 9.1) or `ccm tmmbr`'s `smaxpr` (RFC 5104 section 7.2),
+  as this engine's own answers do, is not refused for them. This changes what a 0.2 application sees, so it belongs to the next minor
+  release, 0.3.0. The lenient form stays: `with_unoffered_feedback_refused(false)`, which the
+  `Chrome` behaviour profile now sets (`jsep.unoffered-feedback-refused`: `Rfc` `true`,
+  `Chrome` `false`, `StrictRfc` `true`, `Performance` `true`), as libwebrtc applies such answers
+  (pc/sdp_offer_answer.cc @ a222406d checks no feedback in a remote answer). No answer recorded
+  from Chromium, Firefox, WebKit, Pion v4.2.29, aiortc 1.16.0, str0m 0.26.0 or webrtc-rs 0.17
+  carries such a line (`scripts/answer-feedback-evidence.py` over the interop matrix's recorded
+  descriptions); webrtc-rs 0.17 can write one when its application sets codec preferences with
+  feedback the offer lacked. Audit row RFC9429-5.11-6 `partial` -> `tested`; the standing
+  departure from RFC 9429 section 5.11 is withdrawn from `docs/conformance.md`. Tests:
+  `tests/jsep_answer_feedback_profile.rs` (the default refuses, under `Rfc`, `StrictRfc`,
+  `Performance` and with no profile named; `Chrome` and the setting `false` apply), and the
+  refusal case in `a_remote_answer_that_does_not_answer_the_offer_changes_nothing`;
+  `pause_and_tmmbr_parameters_of_the_answer_are_the_offered_mechanisms`.
 
 ### Changed
 

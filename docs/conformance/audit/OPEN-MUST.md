@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5757; `n/a` (the clause does not bind this engine): 662; rows that
   apply: 5095.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5083 of 5095 (99.8 %).
-- Tested as the default (`tested`): 5048 of 5095 (99.1 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 8.
-- Open (not tested in any form): 12: 5 untested, 6 partial, 1 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5084 of 5095 (99.8 %).
+- Tested as the default (`tested`): 5049 of 5095 (99.1 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 8.
+- Open (not tested in any form): 11: 5 untested, 5 partial, 1 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 27 | 20 |
 | B | implemented, lacking a test that fails without it | 5 | 0 |
-| C | partly implemented | 4 | 1 |
+| C | partly implemented | 3 | 0 |
 | D | not implemented | 1 | 0 |
 | E | cannot be met or observed inside this engine | 10 | 6 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 47 | 27 |
+| all | | 46 | 26 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 10 rows, 8 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 9 rows, 7 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 0 rows:
 
@@ -40,7 +40,6 @@ become `setting` only if such a cell is named, or close when the default changes
 | dtls-srtp / crypto | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 0 |
 | ice | 2 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
 | jsep | 2 | 1 | 0 | 0 | 0 | 3 | 3 | 0 | 0 |
-| jsep (running) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 
@@ -84,7 +83,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.2-46 | `w3c-webrtc-pc.md` | setLocalDescription(answer or pranswer) with SDP different from ... | untested | B | A test that setLocalDescription(pranswer) with SDP other than the last created answer is refused (the answer branch is tested) (audit-5 sweep) | S | jsep |
 | RFC6347-4.2.4-5 | `rfc6347.md` | In FINISHED, the last-flight sender answers a repeat of the peer's ... | partial | C | Answer repeats for at least 240 s after FINISHED (a time bound, the count budget only beyond it), with a test of an 8th repeat inside 240 s (audit-7 sweep6) | M | dtls-srtp |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Error::dom_exception_name for the errors it maps to None (ErrModifying* InvalidModificationError, ErrNoTurnCredentials / ErrCertificateExpired InvalidAccessError, ICE URL errors SyntaxError, ErrNoRemoteDescription InvalidStateError, the addIceCandidate OperationErrors), with tests (audit-5 sweep) | S | jsep |
-| RFC9429-5.11-6 | `rfc9429.md` | RTCP feedback in the answer that the offer did not have is an error | partial | C | Owner decision, a standing departure: this default does not follow RFC 9429 section 5.11 (an answer with a=rtcp-fb the offer lacked is applied, the feedback never enabled); the RFC form is `SettingEngineBuilder::with_unoffered_feedback_refused(true)`, set by `StrictRfc`. Closes as `setting` only if a peer that sends such answers is named | S | jsep (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision 2026-11-26, a standing departure: this default does not follow RFC 6184 section 7.2 (PDON starts at the DON before the earliest buffered one, not 0, which would deliver a DON 0 last); the RFC form is `MediaEngine::set_h264_literal_pdon(true)`, set by `StrictRfc` (`H264DeinterleavingBuffer::with_literal_pdon(true)` in rtci-rtp) | S | media (media-25) |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC6347-4.2.1-8 | `rfc6347.md` | Server uses the same version in HelloVerifyRequest as in ServerHello | partial | E | Cannot be met: RFC 6347 4.2.1 contradicts itself (SHOULD DTLS 1.0 in the HelloVerifyRequest, MUST the ServerHello version). Coordinator ruling 2026-11-26: the default keeps the SHOULD, as OpenSSL does; the MUST form is with_hello_verify_request_version(PROTOCOL_VERSION1_2), StrictRfc not on it; listed under Standing departures from a MUST (dtlsrows2) | S | dtls-srtp |
