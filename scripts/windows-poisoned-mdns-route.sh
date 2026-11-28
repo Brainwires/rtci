@@ -31,6 +31,48 @@ clean() {
   fi
 }
 show before
+# For the multicast_interface tests' "CANNOT PROVE HERE" line: the group's answer and interface
+# before this script moved the route.
+RTCI_GROUP_ANSWER_BEFORE=$(answer)
+RTCI_GROUP_INTERFACE_BEFORE=$(netsh interface ipv4 show destinationcache address=224.0.0.251 2>&1 | awk -F': ' '/Interface/ {print $2; exit}' | tr -d '\r')
+export RTCI_GROUP_ANSWER_BEFORE RTCI_GROUP_INTERFACE_BEFORE
+# Where an unconnected send to the group (a socket bound to 0.0.0.0:0, no IP_MULTICAST_IF) leaves
+# on this host: the source a receiver joined on each interface sees, or "nowhere". Printed on
+# every run after the poisoning, so the data on what decides it accumulates per host shape.
+unconnected_send() {
+  python - <<'PY'
+import socket as k, time
+addrs = sorted({a[4][0] for a in k.getaddrinfo(k.gethostname(), None, k.AF_INET)} | {'127.0.0.1'})
+receivers = []
+for ip in addrs:
+    r = k.socket(k.AF_INET, k.SOCK_DGRAM)
+    r.setsockopt(k.SOL_SOCKET, k.SO_REUSEADDR, 1)
+    r.bind(('0.0.0.0', 5353))
+    try:
+        r.setsockopt(k.IPPROTO_IP, k.IP_ADD_MEMBERSHIP, k.inet_aton('224.0.0.251') + k.inet_aton(ip))
+    except OSError as e:
+        print('### unconnected send: cannot join on %s: %s' % (ip, e)); r.close(); continue
+    r.settimeout(0.05)
+    receivers.append((ip, r))
+msg = bytes([0x7e, 0x5d, 0x84]) + bytes(9)
+s = k.socket(k.AF_INET, k.SOCK_DGRAM)
+s.bind(('0.0.0.0', 0))
+seen = {}
+until = time.time() + 1.5
+while time.time() < until and len(seen) < len(receivers):
+    s.sendto(msg, ('224.0.0.251', 5353))
+    for ip, r in receivers:
+        try:
+            while True:
+                data, src = r.recvfrom(1500)
+                if data == msg:
+                    seen.setdefault(ip, src[0])
+        except OSError:
+            pass
+print('### unconnected send after poisoning: ' + ', '.join(
+    'receiver on %s: %s' % (ip, seen.get(ip, 'nowhere')) for ip, _ in receivers))
+PY
+}
 trap clean EXIT
 trap 'exit 130' INT TERM
 status=0
@@ -50,7 +92,18 @@ if [ "$(answer)" != 127.0.0.1 ]; then
   echo '### PRECONDITION NOT MET: the route for 224.0.0.251 is not on loopback'
   exit 1
 fi
-cargo test -p rtci-mdns --test multicast_interface -- --ignored --nocapture || status=1
+unconnected_send || echo '### unconnected send after poisoning: the diagnostic failed'
+log=$(mktemp)
+cargo test -p rtci-mdns --test multicast_interface -- --ignored --nocapture 2>&1 | tee "$log"
+[ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+# A host where the sends test could not tell the fix apart says so on the run's face.
+if cannot=$(grep -m1 '### CANNOT PROVE HERE' "$log"); then
+  echo "::warning title=mDNS send side not proven on this host::${cannot#\#\#\# }"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    echo "WARNING: ${cannot#\#\#\# }" >> "$GITHUB_STEP_SUMMARY"
+  fi
+fi
+rm -f "$log"
 for cmd in "$@"; do
   echo "### run: $cmd"
   bash -c "$cmd" || status=1

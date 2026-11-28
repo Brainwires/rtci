@@ -119,11 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `on_windows_a_socket_without_an_interface_hears_the_default_route` (a `new()` receiver gets
   what a sender given the default route's interface sends), run by
   `scripts/windows-poisoned-mdns-route.sh` on a host whose route is on loopback. Each first
-  asserts its precondition on the host it runs on: a socket made as 0.2's `new()` must not get
-  the datagram through there, else it fails with "PRECONDITION" (on one hosted image shape, whose
-  group answer before the poisoning was "vEthernet (nat)", a sender without `IP_MULTICAST_IF`
-  still left by the default route: agent-test run 46124346568). The file's tests run one at a
-  time.
+  checks its precondition on the host it runs on: a socket made as 0.2's `new()` must not get
+  the datagram through there. The listening test asserts it ("PRECONDITION"). The sends test
+  cannot: on one hosted image shape, whose group answer before the poisoning was "vEthernet
+  (nat)", a sender without `IP_MULTICAST_IF` still left by the default route (agent-test run
+  46124346568), so there it prints `### CANNOT PROVE HERE: ...`, which the script raises as a
+  warning on the run, and still asserts that `new()` sends by the default route. The script also
+  prints, after poisoning, where an unconnected send to the group actually arrives (per joined
+  interface, or "nowhere"). The file's tests run one at a time.
 - **RTCP session: a NACK larger than the MTU is split; a repeated TMMBR waits for a Regular
   packet** (`conf/rtcp-session-3-split-nack-regular-tmmbr`). (1) RFC 3550 section 6.1: "If the overall
   length of a compound packet would exceed the MTU of the network path, it SHOULD be segmented
