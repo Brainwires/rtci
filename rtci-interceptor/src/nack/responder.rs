@@ -1604,7 +1604,8 @@ impl NackResponderInterceptor {
 
     /// Gives up the repair of everything sent so far on the video streams among `ssrcs` and
     /// asks the application for a key frame of each (a Picture Loss Indication with sender
-    /// SSRC 0 marked [`Attribute::DeliverToApplication`], as the pacer's flush does). The
+    /// SSRC 0 marked [`Attribute::DeliverToApplication`], as the pacer's flush does, and
+    /// carrying [`LocalKeyFrameRequest::RepairGivenUp`](crate::LocalKeyFrameRequest)). The
     /// reserve those repairs held is released: the retransmissions made so far no longer count
     /// as in use. Audio streams are left as they are.
     fn give_up(&mut self, now: Instant, ssrcs: &[u32]) {
@@ -1637,7 +1638,10 @@ impl NackResponderInterceptor {
                         media_ssrc: ssrc,
                     },
                 )]))
-                .with(Attribute::DeliverToApplication),
+                .with(Attribute::DeliverToApplication)
+                .with(Attribute::Custom(std::sync::Arc::new(
+                    crate::LocalKeyFrameRequest::RepairGivenUp,
+                ))),
             });
         }
     }

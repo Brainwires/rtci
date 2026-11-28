@@ -552,6 +552,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   437; 2 s covers it. Observed live by a consumer (2026-11-27, production coturn, two
   back-to-back restarts): an Allocate about 140 ms after a confirmed release got 437, one 3.0 s
   later succeeded, both times. A behaviour-profile "application input" row. turn-9.
+- **Where a key-frame request came from** (`conf/kfr-1-key-frame-request-origin`; a fork
+  addition, webrtc-encoded-transform 6.4 `keyframerequest` has no origin). Not breaking: new
+  event variant (the enum is `#[non_exhaustive]`), new types. `OnKeyFrameRequest { sender, rid
+  }` is raised for a remote Picture Loss Indication or Full Intra Request and also for the
+  engine's own requests (a PLI with sender SSRC 0: the pacer's discard, the pacer's flush,
+  including the video streams that had nothing queued and so get no `OnPacerDiscard`, and the
+  NACK responder's give-up), and an application could not tell them apart.
+  `RTCPeerConnectionEvent::OnKeyFrameRequestOrigin(RTCKeyFrameRequestEvent { sender, rid, origin
+  })` now follows every `OnKeyFrameRequest`, with `RTCKeyFrameRequestOrigin::
+  RemotePictureLossIndication`, `RemoteFullIntraRequest` or `Local(LocalKeyFrameRequest)`
+  (`PacerDiscard`, `PacerFlush`, `RepairGivenUp`; `is_remote()`). The origin is carried from
+  where the request is made: the pacer and the NACK responder attach
+  `rtci_interceptor::LocalKeyFrameRequest` (`Attribute::Custom`) to the PLIs they put on the
+  read leg, and a request without it is the remote peer's, whatever its sender SSRC (an SSRC is
+  any 32-bit number, RFC 3550 section 8.1, so 0 is not proof of a local request). At a flush,
+  the requests of the streams whose media was discarded say `PacerFlush` too. SLI and RPSI are
+  still delivered as `RTCMessage::RtcpPacket` only and raise neither event. FORK.md row; audit
+  row ENCTRANS-6.4-1 note.
+  - **Planned for 0.3.0 (breaking):** the two events become one. A field cannot be added to
+    the struct variant `OnKeyFrameRequest { sender, rid }` within 0.2.x: a pattern that names
+    its fields without `..` (as `rtci-video`'s and this repository's tests do) or a literal
+    that builds it would stop compiling. 0.3.0 is to make it `OnKeyFrameRequest(
+    RTCKeyFrameRequestEvent)` (the struct is `#[non_exhaustive]`, so later fields are not
+    breaking) and drop `OnKeyFrameRequestOrigin`. Until then, read the origin from
+    `OnKeyFrameRequestOrigin` and ignore `OnKeyFrameRequest`, or keep using `OnKeyFrameRequest`
+    alone as before.
 - **Each spatial layer of an SVC picture is its own SFrame ciphertext** (RFC 9605 section
   6.1.3: "the sender MUST encapsulate each layer in a different SFrame ciphertext";
   `conf/sframe-2-svc-layer-per-ciphertext`; API additions only, nothing changes for an
