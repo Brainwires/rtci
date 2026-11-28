@@ -127,6 +127,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// `SettingEngineBuilder::with_source_departure_ends_track`: a remote track whose SSRCs
     /// have all left (BYE, RTP timeout) ends instead of being muted (RFC 8830 section 3).
     source_departure_ends_track: bool,
+    /// `SettingEngineBuilder::with_rtp_timeout_mutes_track`: a remote source that timed out
+    /// mutes its track as a BYE does.
+    rtp_timeout_mutes_track: bool,
     /// The sequence number of the packet whose MID last moved each SSRC to another m=
     /// section (RFC 7941 section 4.2.6). Bounded by `MAX_REMOTE_CNAMES`.
     mid_moves: HashMap<SSRC, u16>,
@@ -145,6 +148,12 @@ impl InterceptorHandlerContext {
     /// `SettingEngineBuilder::with_source_departure_ends_track`.
     pub(crate) fn with_source_departure_ending_tracks(mut self, ends: bool) -> Self {
         self.source_departure_ends_track = ends;
+        self
+    }
+
+    /// `SettingEngineBuilder::with_rtp_timeout_mutes_track`.
+    pub(crate) fn with_rtp_timeout_muting(mut self, mutes: bool) -> Self {
+        self.rtp_timeout_mutes_track = mutes;
         self
     }
 
@@ -194,6 +203,7 @@ impl Default for InterceptorHandlerContext {
             srtp_keyed: Default::default(),
             newly_bound: None,
             source_departure_ends_track: false,
+            rtp_timeout_mutes_track: false,
             mid_moves: Default::default(),
             departed_sources: Default::default(),
             reporting_ssrc: None,
@@ -792,18 +802,20 @@ impl<'a> InterceptorHandler<'a> {
                 continue;
             };
             for &source in &goodbye.sources {
-                self.source_left(now, source);
+                self.source_left(now, source, false);
             }
         }
     }
 
     /// A remote source has left the session: by a BYE (RFC 3550 6.6), or by the RTP timeout
-    /// (RFC 3550 6.3.5: nothing heard from it for five report intervals; the RTCP session's
-    /// `SourceTimedOut`). RFC 8830 section 3: a track whose SSRCs are all gone "has ended";
-    /// W3C webrtc 9.3, which governs track state under this API (RFC 9429 defers to it), has
-    /// the track muted (`OnMute`) instead, and only negotiation ends a remote track. Its next
-    /// RTP packet unmutes it.
-    fn source_left(&mut self, now: Instant, source: SSRC) {
+    /// (`timed_out`; RFC 3550 6.3.5: nothing heard from it for five report intervals; the RTCP
+    /// session's `SourceTimedOut`). RFC 8830 section 3: a track whose SSRCs are all gone "has
+    /// ended"; W3C webrtc 9.3, which governs track state under this API (RFC 9429 defers to
+    /// it), has the track muted (`OnMute`) instead when the SSRC "is removed due to reception
+    /// of a BYE", and only negotiation ends a remote track. Its next RTP packet unmutes it. A
+    /// timeout mutes nothing (Candidate Correction 57, w3c/webrtc-pc PR #3082, removed "or via
+    /// timeout"), unless `with_rtp_timeout_mutes_track`.
+    fn source_left(&mut self, now: Instant, source: SSRC, timed_out: bool) {
         // The source left, whether it was a stream of its own or a contributor to a mixer's
         // (a CSRC): no receiver lists it any more.
         for transceiver in self.rtp_transceivers.iter_mut() {
@@ -847,6 +859,9 @@ impl<'a> InterceptorHandler<'a> {
                 }
                 return;
             }
+        }
+        if timed_out && !self.ctx.rtp_timeout_mutes_track {
+            return;
         }
         let track = receiver.track_mut();
         if track.muted() || track.ready_state() == MediaStreamTrackState::Ended {
@@ -955,8 +970,9 @@ impl<'a> InterceptorHandler<'a> {
                     });
                 }
             }
-            // RFC 3550 6.3.5: the remote source timed out; it is gone as after a BYE.
-            RtcpSessionEvent::SourceTimedOut { ssrc } => self.source_left(now, *ssrc),
+            // RFC 3550 6.3.5: the remote source timed out; it is gone as after a BYE, but its
+            // track is not muted for it (W3C webrtc-pc Candidate Correction 57).
+            RtcpSessionEvent::SourceTimedOut { ssrc } => self.source_left(now, *ssrc, true),
             // RFC 8108 6.1: the SSRC the first stream is to be sent on.
             RtcpSessionEvent::ReportingSsrc { ssrc } => self.ctx.reporting_ssrc = *ssrc,
             _ => {}

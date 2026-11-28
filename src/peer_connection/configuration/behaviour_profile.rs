@@ -1520,6 +1520,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "off: a later remote offer asking a simulcast sender for rids outside its envelope is applied and answered within it (W3C webrtc-pc Candidate Correction 37, PR #2794, 2022-12-08), as libwebrtc does: pc/sdp_offer_answer.cc @ a222406d has no rid check that fails a remote description, and w3c/webrtc-pc#2762 (resolution 2022-10-18) records that Chrome and Safari never fail it; on is the uncorrected Recommendation's InvalidAccessError",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_rtp_timeout_mutes_track",
+        class: NotGovernedClass::Same,
+        note: "off: a remote SSRC that times out (RFC 3550 6.3.5) leaves its track unmuted (W3C webrtc-pc Candidate Correction 57, PR #3082, 2025-10-23: only a BYE mutes); no browser mutes on the RTP timeout: w3c/webrtc-pc#3077 (henbos, 2025-09-30, of the timeout sentence: \"This is demonstrably not implemented\"; Chrome's muting of a video track whose frames stop is a frame-rate heuristic, not this rule); on is the uncorrected Recommendation's muting",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_ignore_rid_pause_for_recv",
         class: NotGovernedClass::Same,
         note: "applies with rid pause marks only",

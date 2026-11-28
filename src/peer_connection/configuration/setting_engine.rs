@@ -462,6 +462,8 @@ pub struct SettingEngine {
     pub(crate) msid_appdata_change_renews_track: bool,
     /// RFC 8830 section 3: a remote track whose SSRCs have all left (BYE, timeout) ends.
     pub(crate) source_departure_ends_track: bool,
+    /// [`SettingEngineBuilder::with_rtp_timeout_mutes_track`].
+    pub(crate) rtp_timeout_mutes_track: bool,
     /// RFC 9429 section 5.3.1: an answer rejects the section of a transceiver stopped after
     /// the offer arrived.
     pub(crate) stopping_transceiver_rejected_in_answer: bool,
@@ -758,6 +760,7 @@ impl SettingEngine {
             // Train 11's fields, at the value the derive gave them.
             msid_appdata_change_renews_track: Default::default(),
             source_departure_ends_track: Default::default(),
+            rtp_timeout_mutes_track: Default::default(),
             bundled_fingerprints_agree: Default::default(),
             cryptex_required_on_every_bundled_section: Default::default(),
             dtls_connection_id_length: Default::default(),
@@ -2433,6 +2436,22 @@ impl SettingEngineBuilder {
     /// once every SSRC it receives has left; one that is heard again before then has not.
     pub fn with_source_departure_ends_track(mut self, ends: bool) -> Self {
         self.0.source_departure_ends_track = ends;
+        self
+    }
+
+    /// Mutes a remote track when one of its SSRCs times out (RFC 3550 section 6.3.5: nothing
+    /// heard from it for five report intervals), as a BYE does. The default is `false`.
+    ///
+    /// W3C webrtc-pc Candidate Correction 57 (w3c/webrtc-pc PR #3082, 2025-10-23, "RTCP
+    /// timeout is not a reason to mute a remote track", fixing #3077) took "or via timeout"
+    /// out of section 9.3: the track is muted when an SSRC "is removed due to reception of a
+    /// BYE". By default a timed-out source is forgotten (no receiver lists it) and its track
+    /// stays as it is. `true` takes the form of the Recommendation of 13 March 2025 without
+    /// its candidate corrections ("removed either due to reception of a BYE or via timeout").
+    /// [`SettingEngineBuilder::with_source_departure_ends_track`] ends the track when all its
+    /// SSRCs have left, by BYE or timeout, whatever this says.
+    pub fn with_rtp_timeout_mutes_track(mut self, mutes: bool) -> Self {
+        self.0.rtp_timeout_mutes_track = mutes;
         self
     }
 
