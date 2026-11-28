@@ -133,3 +133,35 @@ pub fn scrub_stack() {
     std::hint::black_box(&mut area);
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
+
+/// How much stack [`scrub_record_stack`] overwrites: 48 KiB, in an unoptimised build only.
+///
+/// The deepest record-key form measured in an unoptimised build lay 31,288 bytes below the
+/// DTLS key residue measurement's floor (rustc 1.89, the AES-CCM records step,
+/// `rtci-dtls/tests/key_residue.rs`, run 46015302538). Every record call's own frame lies below
+/// that floor, so what the record work leaves lies less than that below the call. 48 KiB is
+/// that depth times 1.5, for other compilers and call paths; it is paid in unoptimised builds
+/// only.
+#[cfg(debug_assertions)]
+const SCRUB_RECORD_STACK_BYTES: usize = 48 * 1024;
+
+/// Overwrites the stack below the caller's frame after one record's work with RustCrypto's AES,
+/// in an unoptimised build (`debug_assertions`); in an optimised build it is not compiled.
+///
+/// At opt-level 0 the AES-NI intrinsics of the `aes` crate are calls whose vector arguments go
+/// through stack copies, so every block encrypted or decrypted leaves round keys (round key 0
+/// is the key) and AES states in stack temporaries; an optimised build keeps them in registers.
+/// Measured: on Windows a DTLS 1.2 AES-CCM write key left there was carried into a freed heap
+/// block by the unwritten bytes of a handshake message moved into a map (docs/key-erasure.md);
+/// with the `aes` and `ccm` crates optimised, with the portable AES, in an optimised build, or
+/// with an overwrite after each AES-CCM call, it was not (runs 46026969169, 46026978042).
+#[cfg(debug_assertions)]
+#[inline(never)]
+pub(crate) fn scrub_record_stack() {
+    let mut area = std::mem::MaybeUninit::<[u8; SCRUB_RECORD_STACK_BYTES]>::uninit();
+    // SAFETY: the pointer is to a local buffer of exactly `SCRUB_RECORD_STACK_BYTES` bytes,
+    // written as bytes and never read as anything else.
+    unsafe { std::ptr::write_bytes(area.as_mut_ptr().cast::<u8>(), 0, SCRUB_RECORD_STACK_BYTES) };
+    std::hint::black_box(&mut area);
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}

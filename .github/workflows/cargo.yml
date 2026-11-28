@@ -368,13 +368,16 @@ jobs:
   # residue measurement (rtci-srtp/tests/key_residue.rs) in an UNOPTIMISED and an OPTIMISED
   # build, with the workspace's rust-version (the oldest supported compiler) and with stable.
   # In every build it asserts that building and tearing down leave no key form in a dead stack
-  # frame; in the optimised one it also asserts that the ring provider's packet path leaves
-  # none (docs/key-erasure.md). How deep an unoptimised build's frames go depends on the
+  # frame, and that the ring provider's packet path leaves none (in an unoptimised build
+  # because rtci-crypto overwrites the stack after each RustCrypto AES record operation there;
+  # docs/key-erasure.md). How deep an unoptimised build's frames go depends on the
   # compiler (rustc 1.99.1 went past the 32 KiB that used to be overwritten), so the oldest
   # one is measured too. x86-64 Linux, with the whole process searched, and AArch64 macOS.
+  # The DTLS measurement (rtci-dtls/tests/key_residue.rs) runs in the same builds: every step of
+  # DTLS 1.2 and 1.3 associations, the export and resumption included.
   key_residue:
-    timeout-minutes: 30
-    name: SRTP key residue (${{ matrix.os }}, ${{ matrix.toolchain }}, ${{ matrix.profile }})
+    timeout-minutes: 45
+    name: SRTP and DTLS key residue (${{ matrix.os }}, ${{ matrix.toolchain }}, ${{ matrix.profile }})
     strategy:
       fail-fast: false
       matrix:
@@ -412,6 +415,20 @@ jobs:
         run: |
           rustc --version
           cargo test $RELEASE --package rtci-srtp --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
+      - name: No DTLS key is left in a dead stack frame
+        # The AES-CCM record path (RustCrypto's AES in rtci-crypto) is asserted in an optimised
+        # build from rustc 1.99.1 on, where it was measured to leave no key; rustc 1.89 left
+        # one round key (docs/key-erasure.md), and the versions between are unmeasured: for a
+        # compiler older than 1.99.1 the test prints the AES-CCM forms instead (as
+        # scripts/key-residue-report.sh does).
+        shell: bash
+        run: |
+          version=$(rustc --version | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')
+          if [ "$(printf '%s\n' "$version" 1.99.1 | sort -V | head -1)" != 1.99.1 ]; then
+            echo "rustc $version is older than 1.99.1: AES-CCM record path printed, not asserted"
+            export RTCI_KEY_RESIDUE_CCM_KNOWN_LIMIT=1
+          fi
+          cargo test $RELEASE --package rtci-dtls --features crypto-aws-lc-rs --test key_residue --verbose -- --nocapture
       - name: HMAC-SHA1 computed in the keyed object (RFC 2202, object reuse)
         run: cargo test $RELEASE --package rtci-crypto --features crypto-aws-lc-rs --test hmac_sha1_vectors --verbose
 
