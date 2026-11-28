@@ -734,3 +734,184 @@ fn an_expired_rest_credential_is_reported_when_the_server_refuses_it() -> Result
     );
     Ok(())
 }
+
+/// The messages sent since `world.sent` was last cleared that were lost or later than
+/// `MAX_DELAY`.
+fn late(world: &World) -> Vec<(String, Option<Duration>)> {
+    world
+        .delays()
+        .into_iter()
+        .filter(|(_, d)| d.is_none_or(|d| d > MAX_DELAY))
+        .collect()
+}
+
+/// A rotation whose restart offer is rolled back (RFC 9429 section 5.7: "any resources
+/// allocated by the abandoned local description are discarded"; W3C setLocalDescription of a
+/// rollback): the offer was applied with the second socket's host candidate, then taken back.
+/// The current session goes on as before: the old relayed path keeps carrying the data (no
+/// message lost or late), the old allocation is not released, the connection stays connected.
+/// A later restart (the configuration already has the new servers) then completes as a
+/// rotation does: the new allocation from the second socket takes over and the old one is
+/// released (`OnTurnAllocationReleased` for the first socket), again without loss.
+#[test]
+fn a_rolled_back_rotation_keeps_the_old_allocation_and_a_later_restart_releases_it() -> Result<()> {
+    rolled_back_rotation(true)
+}
+
+/// The same with both sockets bound from the start: the engine starts the new generation's
+/// links only once the restart offer is applied, so it withdraws the old relayed candidate
+/// from the new session, after the agent took its snapshot for a rollback. The rollback
+/// restores the old session without that withdrawal, and the engine has to withdraw the
+/// candidate again (on its next `start_turn_links`), or the later restart carries it into its
+/// session, nominates it again, and never releases the old allocation.
+#[test]
+fn a_rotation_rolled_back_after_its_links_started_still_releases_the_old_allocation_later()
+-> Result<()> {
+    rolled_back_rotation(false)
+}
+
+fn rolled_back_rotation(second_socket_while_staged: bool) -> Result<()> {
+    use rtci::peer_connection::sdp::RTCSessionDescription;
+    let (mut world, _) = if second_socket_while_staged {
+        connected(&[A_HOST])?
+    } else {
+        connected(&[A_HOST, A_HOST_2])?
+    };
+    let first_relay = world
+        .server
+        .allocations
+        .values()
+        .next()
+        .map(|al| al.relayed)
+        .expect("allocated");
+    world.ping_and_wait(Duration::from_secs(10))?;
+    let states_before: Vec<usize> = world.peers.iter().map(|p| p.states.len()).collect();
+    world.sent.clear();
+    let t0 = world.now;
+
+    // The rotation's offer, applied with the second socket, then rolled back.
+    let user = world.server.rest_username(world.now, VALID, "host");
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .rotate_ice_servers(now, vec![turn_server(&user)?])?;
+    world.trickle = false;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    if second_socket_while_staged {
+        world.peers[0].addrs.push(a(A_HOST_2));
+        world.peers[0]
+            .pc
+            .add_local_candidate(Peer::host(a(A_HOST_2))?)?;
+    }
+    world
+        .log
+        .push((world.now, "step: A applies the restart offer".to_owned()));
+    let now = world.now;
+    world.peers[0].pc.set_local_description(now, offer)?;
+    world.stream(Duration::from_millis(500))?;
+    world
+        .log
+        .push((world.now, "step: A rolls the offer back".to_owned()));
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .set_local_description(now, RTCSessionDescription::rollback(None)?)?;
+    // The abandoned generation's candidates are never sent.
+    world.peers[0].candidates.clear();
+    world.trickle = true;
+    world.stream(Duration::from_secs(8))?;
+    world.peers[0].candidates.clear();
+    let after_rollback = late(&world);
+    assert!(
+        after_rollback.is_empty(),
+        "{} of {} messages lost or late after the rollback; timeline (s):\n{}",
+        after_rollback.len(),
+        world.delays().len(),
+        world.timeline(t0)
+    );
+    assert!(
+        world.server.deleted.is_empty() && world.released().is_empty(),
+        "the old allocation carries the session and is not released: deleted {:?}, released {:?}\n{}",
+        world.server.deleted,
+        world.released(),
+        world.timeline(t0)
+    );
+    for (i, p) in world.peers.iter().enumerate() {
+        assert!(
+            p.states[states_before[i]..]
+                .iter()
+                .all(|s| *s == RTCPeerConnectionState::Connected),
+            "peer {i} stayed connected: {:?}",
+            &p.states[states_before[i]..]
+        );
+        assert!(!p.channel_closed);
+    }
+
+    // A later restart: the new servers are in the configuration already.
+    world.sent.clear();
+    let t1 = world.now;
+    world.peers[0].pc.restart_ice();
+    world.trickle = false;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.log.push((
+        world.now,
+        "step: A applies the later restart offer".to_owned(),
+    ));
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.stream(Duration::from_millis(500))?;
+    let now = world.now;
+    world.peers[1].pc.set_remote_description(now, offer)?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    let now = world.now;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.stream(Duration::from_millis(500))?;
+    let now = world.now;
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    world.stream(Duration::from_millis(500))?;
+    world
+        .log
+        .push((world.now, "step: candidates trickled".to_owned()));
+    world.trickle = true;
+    world.peers[0]
+        .pc
+        .add_remote_candidate(Peer::host(a(B_HOST))?)?;
+    let mut waited = Duration::ZERO;
+    while world.released().is_empty() && waited < Duration::from_secs(30) {
+        world.stream(Duration::from_secs(1))?;
+        waited += Duration::from_secs(1);
+    }
+    world.stream(Duration::from_secs(2))?;
+    assert_eq!(
+        world.released(),
+        vec![(a(A_HOST), Some(first_relay))],
+        "the later restart releases the old allocation\n{}",
+        world.timeline(t1)
+    );
+    let through_restart = late(&world);
+    assert!(
+        through_restart.is_empty(),
+        "{} messages lost or late through the later restart; timeline (s):\n{}",
+        through_restart.len(),
+        world.timeline(t1)
+    );
+    let live: Vec<_> = world
+        .server
+        .allocations
+        .iter()
+        .map(|(t, al)| (t.0, al.username.clone()))
+        .collect();
+    assert_eq!(live, vec![(a(A_HOST_2), user)]);
+    assert!(
+        !world
+            .server
+            .rejections
+            .iter()
+            .any(|r| r.1 == 437 || r.1 == 441)
+    );
+    Ok(())
+}
