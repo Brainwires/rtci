@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5049 | 27 | 8 | 5 | 5 | 1 | 0 | 662 | 5757 |
+| MUST | 5050 | 27 | 8 | 5 | 5 | 1 | 0 | 662 | 5758 |
 | SHOULD | 918 | 3 | 3 | 1 | 40 | 23 | 0 | 324 | 1312 |
 | MAY | 501 | 1 | 1 | 11 | 21 | 70 | 0 | 177 | 782 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6540 | 31 | 12 | 18 | 69 | 95 | 0 | 1164 | 7929 |
+| all | 6541 | 31 | 12 | 18 | 69 | 95 | 0 | 1164 | 7930 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5095 | 5084 | 99.8 | 5049 | 99.1 |
+| MUST | 5096 | 5085 | 99.8 | 5050 | 99.1 |
 | SHOULD | 988 | 924 | 93.5 | 918 | 92.9 |
 | MAY | 605 | 503 | 83.1 | 501 | 82.8 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
@@ -325,7 +325,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc9335.md` | MUST | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 23 |
 | `rfc9335.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9335.md` | MAY | 1 | 0 | 0 | 1 | 2 | 0 | 0 | 0 | 4 |
-| `rfc9429.md` | MUST | 280 | 12 | 4 | 0 | 0 | 0 | 0 | 13 | 309 |
+| `rfc9429.md` | MUST | 281 | 12 | 4 | 0 | 0 | 0 | 0 | 13 | 310 |
 | `rfc9429.md` | SHOULD | 11 | 0 | 1 | 0 | 1 | 0 | 0 | 6 | 19 |
 | `rfc9429.md` | MAY | 5 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 10 |
 | `rfc9443.md` | MUST | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 7 |
