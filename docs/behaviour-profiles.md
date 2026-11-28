@@ -281,13 +281,14 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_audio_redundancy` | WhenPreferred in every profile: a local audio stream is sent in RED (RFC 2198) only when the remote description lists RED ahead of the primary (RFC 3264 5.1, 6.1). libwebrtc the same: media/engine/webrtc_voice_engine.cc::WebRtcVoiceSendChannel::SetSendCodecs @ a222406d (lines 1507-1641) looks for RED only among the codecs before the send codec (lines 1610-1622: "RED codec needs to be negotiated before the actual codec they reference", for (i = 0; i < send_codec_position; ++i)) |
 | `SettingEngineBuilder::with_own_payload_types_in_answers` | off: an answer uses the offer's payload type numbers (RFC 3264 6.1 SHOULD). libwebrtc the same: pc/codec_vendor.cc::NegotiateCodecs @ a222406d (lines 801-...) "Use their ID, if available" (lines 846-848: negotiated.id = theirs->id), apt values remapped after (lines 853-) |
 
-## Application input: no default to choose (36)
+## Application input: no default to choose (37)
 
 | Setting | Note |
 |---|---|
 | `SettingEngineBuilder::with_ice_pacing_group` | a budget shared between the application's peer connections |
 | `SettingEngineBuilder::with_crypto_provider` | the cryptographic provider |
 | `SettingEngineBuilder::with_turn_allocation_refresh_interval_cap` | a NAT keep-alive need of the deployment |
+| `SettingEngineBuilder::with_turn_reallocation_delay` | a TURN server that keeps a deleted allocation's 5-tuple after answering (coturn: about a second); zero, RFC 8656 section 8.2, in every profile |
 | `SettingEngineBuilder::with_host_acceptance_min_wait` | nomination wait for host pairs |
 | `SettingEngineBuilder::with_srflx_acceptance_min_wait` | nomination wait for server-reflexive pairs |
 | `SettingEngineBuilder::with_prflx_acceptance_min_wait` | nomination wait for peer-reflexive pairs |

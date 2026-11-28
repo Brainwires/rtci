@@ -237,6 +237,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Performance` and with no profile named; `Chrome` and the setting `false` apply), and the
   refusal case in `a_remote_answer_that_does_not_answer_the_offer_changes_nothing`;
   `pause_and_tmmbr_parameters_of_the_answer_are_the_offered_mechanisms`.
+- **An engine TURN link allocates again on a 5-tuple it released only once the server has
+  answered the release** (RFC 8656 sections 2.2, 7.2 step 2 and 7.4). One UDP socket and an ICE
+  restart with new TURN credentials (break before make) sent the Refresh of LIFETIME 0 and the new
+  Allocate back to back; with the release lost or late, the server still had the allocation, the
+  Allocate met a 437, and the engine (one socket, nothing else to try) left the server alone for
+  two minutes, so the restart's generation had no relayed candidate. The Allocate now waits for
+  the release transaction to end (answered, 437 or timed out). No 437 is ever retried on the
+  refused 5-tuple: section 7.4's "SHOULD NOT try to create another allocation on the server for 2
+  minutes" stands. turn-9.
 
 ### Changed
 
@@ -371,6 +380,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `OnTurnRequestRejected { url, relay, method, error_code }`** (fork events, not W3C): an
   engine TURN allocation over UDP has been let go (the local address is free), and a TURN request
   was finally refused (for now: a 437 to an Allocate). turn-6.
+- **`SettingEngineBuilder::with_turn_reallocation_delay(Duration)`**: how long after a release of
+  an engine TURN allocation over UDP has ended the engine waits before allocating on the same
+  5-tuple again. Zero by default (RFC 8656 section 8.2: the server deletes the allocation when it
+  answers). coturn answers a Refresh of LIFETIME 0 but keeps the allocation one second more
+  (`refresh_relay_connection` floors the lifetime at 1 s) and answers an Allocate meanwhile with
+  437; 2 s covers it. Observed live by a consumer (2026-11-27, production coturn, two
+  back-to-back restarts): an Allocate about 140 ms after a confirmed release got 437, one 3.0 s
+  later succeeded, both times. A behaviour-profile "application input" row. turn-9.
 
 ### Fixed
 
@@ -700,6 +717,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   received at the session level is ignored ("MUST ignore it if received at the session level"):
   the offer is taken and no simulcast is negotiated (`a_session_level_simulcast_line_is_ignored`).
   Both `untested` -> `tested`. No engine change. Open MUST rows 30 -> 28.
+- README and `rtci_turn::client::Relay::close`: "re-allocating on the same socket after a
+  release", for engine-run and application-run TURN: what RFC 8656 7.4 has a client do on 437
+  (another local address, three at most, then two minutes without the server; never the refused
+  5-tuple again), coturn's one-second hold after a confirmed release, and the remedies (wait
+  after `OnTurnAllocationReleased`, or another UDP socket) for a new peer connection on a
+  closed one's socket. turn-9.
 
 ### Testing
 
@@ -873,6 +896,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reliable DCEP DATA_CHANNEL_OPEN (RFC 8832 section 5) went again after the first message (its
   SACK lost while the peer's DATA_CHANNEL_ACK opened the channel; run 46050142067). Unit test
   `a_reliable_message_sent_again_is_not_counted_as_a_partially_reliable_retransmission`.
+- `tests/turn_reallocate_after_release.rs` (5 tests) with a coturn-like `release_linger` in
+  `tests/common/turn_server.rs` (a released allocation kept for a second, an Allocate on its
+  5-tuple answered 437 before authentication): a one-socket restart whose release is lost once
+  allocates only after the release is answered (no 437); against coturn without the delay the
+  restart meets one 437, `OnTurnRequestRejected` is raised, no Allocate is retried for 130 s,
+  and a restart after the two minutes allocates; with a 2 s delay no 437; a new peer connection
+  on a just-released socket meets the 437 (no retry), and allocates after the hold or from a
+  second socket. turn-9.
 
 ## [0.2.1] - 2026-11-27
 

@@ -107,6 +107,10 @@ pub(crate) struct UdpAttempt {
     remote: SocketAddr,
     base: SocketAddr,
     client: turn::client::Client,
+    /// Its Allocate has gone out. Not yet while the engine is deleting an allocation of the
+    /// same 5-tuple (`EngineTurn::five_tuple_in_release`): the request waits for that release
+    /// to end.
+    sent: bool,
 }
 
 /// Who gathers relayed candidates from `turn:` servers over UDP. See
@@ -348,6 +352,9 @@ pub(crate) struct EngineTurn {
     /// until). A link does not allocate from such a base to that server again for two
     /// minutes.
     mismatched: Vec<(SocketAddr, SocketAddr, Instant)>,
+    /// 5-tuples whose release ended: (base, server, the instant a new Allocate may leave from
+    /// it: the end plus `SettingEngine::turn_reallocation_delay`).
+    freed: Vec<(SocketAddr, SocketAddr, Instant)>,
 }
 
 impl EngineTurn {
@@ -371,6 +378,7 @@ impl EngineTurn {
             application_relays: vec![],
             releases: vec![],
             mismatched: vec![],
+            freed: vec![],
         }
     }
 
@@ -398,6 +406,21 @@ impl EngineTurn {
         self.mismatched
             .iter()
             .any(|(b, s, until)| *b == base && *s == server && now < *until)
+    }
+
+    /// Whether an allocation of the 5-tuple (`base`, `server`) is being deleted at `now`: a
+    /// release of it is under way (`UdpRelease`), or ended less than the reallocation delay
+    /// before. Until the server has answered the Refresh of LIFETIME 0 the allocation is the
+    /// 5-tuple's, and an Allocate on it would be refused with 437 (RFC 8656 section 7.2, step
+    /// 2), after which the client leaves the server alone for two minutes (section 7.4).
+    fn five_tuple_in_release(&self, base: SocketAddr, server: SocketAddr, now: Instant) -> bool {
+        self.releases
+            .iter()
+            .any(|r| !r.done && r.base == base && r.server == server)
+            || self
+                .freed
+                .iter()
+                .any(|(b, s, at)| *b == base && *s == server && now < *at)
     }
 
     /// Whether `server` is held back at `now`.
@@ -595,7 +618,9 @@ fn release_udp_allocation(
         return;
     }
     let url = link.url_string();
-    for a in link.udp_attempts.drain(..) {
+    // An Allocate that never left (it waited for a release of its 5-tuple) has nothing to
+    // follow.
+    for a in link.udp_attempts.drain(..).filter(|a| a.sent) {
         releases.push(UdpRelease {
             url: a.url,
             base: a.base,
@@ -1834,6 +1859,24 @@ impl RTCPeerConnection {
         if let Some(t) = self.turn_releases_poll_timeout() {
             next = Some(next.map_or(t, |n| n.min(t)));
         }
+        // The end of a reallocation delay an Allocate waits for.
+        let turn = &self.streams.turn;
+        let waits = |base: SocketAddr, server: SocketAddr| {
+            turn.links.iter().any(|l| {
+                l.udp_attempts
+                    .iter()
+                    .any(|a| !a.sent && a.base == base && a.remote == server)
+            })
+        };
+        if let Some(t) = turn
+            .freed
+            .iter()
+            .filter(|(b, s, _)| waits(*b, *s))
+            .map(|(_, _, at)| *at)
+            .min()
+        {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
         next
     }
 
@@ -1842,6 +1885,7 @@ impl RTCPeerConnection {
         // A DTLS link whose base was added before the local description starts now.
         self.start_turn_links();
         self.turn_releases_handle_timeout(now);
+        self.start_waiting_udp_attempts(now);
         if self.streams.turn.links.is_empty() {
             return;
         }
@@ -2454,6 +2498,9 @@ impl RTCPeerConnection {
                 r.done = true;
             }
         }
+        let delay = self.setting_engine.turn_reallocation_delay;
+        self.streams.turn.freed.retain(|(_, _, at)| now < *at);
+        let mut ended = false;
         let mut i = 0;
         while i < self.streams.turn.releases.len() {
             if !self.streams.turn.releases[i].done {
@@ -2462,6 +2509,13 @@ impl RTCPeerConnection {
             }
             let r = self.streams.turn.releases.remove(i);
             debug!("{}: released from {}", r.url, r.base);
+            ended = true;
+            if !delay.is_zero() {
+                self.streams
+                    .turn
+                    .freed
+                    .push((r.base, r.server, now + delay));
+            }
             self.pipeline_context.event_outs.push_back(
                 crate::peer_connection::event::RTCPeerConnectionEvent::OnTurnAllocationReleased {
                     url: r.url,
@@ -2469,6 +2523,10 @@ impl RTCPeerConnection {
                     relayed_address: r.relay,
                 },
             );
+        }
+        // An Allocate that waited for one of these 5-tuples leaves now.
+        if ended {
+            self.start_waiting_udp_attempts(now);
         }
     }
 
@@ -2566,8 +2624,13 @@ impl RTCPeerConnection {
             software: self.setting_engine.turn_software(),
             ..Default::default()
         };
+        // The 5-tuple's previous allocation is still being deleted: the Allocate waits for
+        // the release to end (`start_waiting_udp_attempts`).
+        let sent = !self.streams.turn.five_tuple_in_release(base, addr, now);
         let mut client = match turn::client::Client::new(config, provider).and_then(|mut c| {
-            c.allocate(now)?;
+            if sent {
+                c.allocate(now)?;
+            }
             Ok(c)
         }) {
             Ok(client) => client,
@@ -2576,6 +2639,11 @@ impl RTCPeerConnection {
                 return false;
             }
         };
+        if !sent {
+            debug!(
+                "TURN over UDP to {addr}: the allocation from {base} is being deleted; the Allocate waits"
+            );
+        }
         while let Some(t) = client.poll_write() {
             self.pipeline_context.write_outs.push_back(TaggedBytesMut {
                 now,
@@ -2590,8 +2658,59 @@ impl RTCPeerConnection {
                 remote: addr,
                 base,
                 client,
+                sent,
             });
         true
+    }
+
+    /// Sends the Allocates that waited for a release of their 5-tuple, once it has ended (and
+    /// the reallocation delay after it is over). One that cannot be sent fails its address.
+    pub(crate) fn start_waiting_udp_attempts(&mut self, now: Instant) {
+        if self.is_closed() {
+            return;
+        }
+        let mut failed = false;
+        for index in 0..self.streams.turn.links.len() {
+            let mut i = 0;
+            while i < self.streams.turn.links[index].udp_attempts.len() {
+                let a = &self.streams.turn.links[index].udp_attempts[i];
+                if a.sent
+                    || self
+                        .streams
+                        .turn
+                        .five_tuple_in_release(a.base, a.remote, now)
+                {
+                    i += 1;
+                    continue;
+                }
+                let a = &mut self.streams.turn.links[index].udp_attempts[i];
+                if let Err(err) = a.client.allocate(now) {
+                    debug!("TURN client for {}: {err}", a.remote);
+                    self.streams.turn.links[index].udp_attempts.remove(i);
+                    if let Some(race) = self.streams.turn.links[index].race.as_mut() {
+                        race.failed();
+                    }
+                    failed = true;
+                    continue;
+                }
+                a.sent = true;
+                debug!(
+                    "TURN over UDP to {}: the 5-tuple is free; Allocate sent",
+                    a.remote
+                );
+                while let Some(t) = a.client.poll_write() {
+                    self.pipeline_context.write_outs.push_back(TaggedBytesMut {
+                        now,
+                        transport: udp_context(a.base, a.remote),
+                        message: t.message,
+                    });
+                }
+                i += 1;
+            }
+        }
+        if failed {
+            self.drive_turn_races(now);
+        }
     }
 
     /// The racing Allocates over UDP: their retransmissions leave, and one that timed out (or
@@ -2727,10 +2846,11 @@ impl RTCPeerConnection {
             return;
         }
         let winner = link.udp_attempts.remove(position);
-        self.streams
-            .turn
-            .udp_losers
-            .extend(std::mem::take(&mut link.udp_attempts));
+        self.streams.turn.udp_losers.extend(
+            std::mem::take(&mut link.udp_attempts)
+                .into_iter()
+                .filter(|a| a.sent),
+        );
         if let Some(race) = link.race.as_mut() {
             race.succeeded();
         }
