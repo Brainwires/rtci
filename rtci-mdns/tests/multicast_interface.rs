@@ -5,6 +5,15 @@
 //! 224.0.0.251 has been left on loopback (the destination-cache entry a process that sent to
 //! the group from 127.0.0.1 leaves behind), where a socket that followed the route sent with
 //! source 127.0.0.1.
+//!
+//! The Windows tests of `new()` first assert their own precondition on the host they run on: a
+//! socket made as 0.2's `new()` made it (joined on `INADDR_ANY`, no `IP_MULTICAST_IF`) must NOT
+//! get the datagram through (the sends case: it does not reach a receiver on the network
+//! interface; the listening case: it does not hear a sender on it). A host where it does cannot
+//! tell the fix apart, and the test fails with "PRECONDITION" rather than pass: agent-test run
+//! 46124346568 (a host whose group answer was "vEthernet (nat)" before the poisoning) let the
+//! mutated sender through, so the precondition is not the same on every hosted image. The tests
+//! of this file run one at a time (they share the group).
 
 use rtci_mdns::{MDNS_MULTICAST_IPV4, MDNS_PORT, MulticastSocket};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,9 +29,43 @@ fn default_route_v4() -> Ipv4Addr {
     }
 }
 
+/// One test at a time on the group: a test's sockets must not see another's sends.
+static GROUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    GROUP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A socket made as 0.2's `MulticastSocket::new()` made it on Windows: port 5353 shared, bound to
+/// 0.0.0.0, joined on `INADDR_ANY`, TTL 255, no `IP_MULTICAST_IF` (it follows the group's route).
+#[cfg(windows)]
+fn as_0_2_new() -> std::net::UdpSocket {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+    socket.set_reuse_address(true).unwrap();
+    socket.set_multicast_ttl_v4(255).unwrap();
+    socket
+        .bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, MDNS_PORT)).into())
+        .unwrap();
+    socket
+        .join_multicast_v4(&MDNS_MULTICAST_IPV4, &Ipv4Addr::UNSPECIFIED)
+        .unwrap();
+    socket.into()
+}
+
 /// Sends a datagram of this process from `sender` to the mDNS group until `receiver` gets it, at
 /// most 3 s, and returns the source it came from.
 fn source_seen(sender: &std::net::UdpSocket, receiver: &std::net::UdpSocket) -> IpAddr {
+    source_seen_within(sender, receiver, Duration::from_secs(3))
+        .expect("the datagram came back to the receiver")
+}
+
+/// As [`source_seen`], `None` when nothing arrived `within`.
+fn source_seen_within(
+    sender: &std::net::UdpSocket,
+    receiver: &std::net::UdpSocket,
+    within: Duration,
+) -> Option<IpAddr> {
     receiver.set_nonblocking(false).unwrap();
     receiver
         .set_read_timeout(Some(Duration::from_millis(200)))
@@ -36,7 +79,7 @@ fn source_seen(sender: &std::net::UdpSocket, receiver: &std::net::UdpSocket) -> 
     .to_be_bytes();
     let message = [nonce[2], nonce[3], 0x84, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut buf = [0u8; 1500];
-    let until = Instant::now() + Duration::from_secs(3);
+    let until = Instant::now() + within;
     let mut from = None;
     while Instant::now() < until && from.is_none() {
         sender.send_to(&message, group).unwrap();
@@ -47,12 +90,13 @@ fn source_seen(sender: &std::net::UdpSocket, receiver: &std::net::UdpSocket) -> 
             }
         }
     }
-    from.expect("the datagram came back to the receiver")
+    from
 }
 
 #[test]
 #[ignore = "real multicast on the host's mDNS group; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows)"]
 fn a_socket_given_an_interface_sends_from_it_whatever_the_group_route() {
+    let _group = one_at_a_time();
     let interface = default_route_v4();
     let sender: std::net::UdpSocket = MulticastSocket::new()
         .with_interface(interface)
@@ -79,12 +123,23 @@ fn a_socket_given_an_interface_sends_from_it_whatever_the_group_route() {
 #[test]
 #[ignore = "real multicast on the host's mDNS group; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows)"]
 fn on_windows_a_socket_without_an_interface_sends_by_the_default_route() {
+    let _group = one_at_a_time();
     let interface = default_route_v4();
-    let sender: std::net::UdpSocket = MulticastSocket::new().into_std().unwrap();
     let receiver: std::net::UdpSocket = MulticastSocket::new()
         .with_interface(interface)
         .into_std()
         .unwrap();
+    let control = source_seen_within(&as_0_2_new(), &receiver, Duration::from_secs(2));
+    println!(
+        "### precondition: a 0.2-style sender reached the receiver on {interface}: {control:?}"
+    );
+    assert!(
+        control.is_none(),
+        "PRECONDITION: on this host a sender made as 0.2's new() (no IP_MULTICAST_IF) reached the \
+         receiver on {interface} from {control:?}: it does not send by the poisoned route, so this \
+         test cannot tell the fix apart"
+    );
+    let sender: std::net::UdpSocket = MulticastSocket::new().into_std().unwrap();
     let from = source_seen(&sender, &receiver);
     println!("### new() sent, default route {interface}, received from {from}");
     assert_eq!(
@@ -103,11 +158,20 @@ fn on_windows_a_socket_without_an_interface_sends_by_the_default_route() {
 #[test]
 #[ignore = "real multicast on the host's mDNS group; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows)"]
 fn on_windows_a_socket_without_an_interface_hears_the_default_route() {
+    let _group = one_at_a_time();
     let interface = default_route_v4();
     let sender: std::net::UdpSocket = MulticastSocket::new()
         .with_interface(interface)
         .into_std()
         .unwrap();
+    let control = source_seen_within(&sender, &as_0_2_new(), Duration::from_secs(2));
+    println!("### precondition: a 0.2-style receiver heard the sender on {interface}: {control:?}");
+    assert!(
+        control.is_none(),
+        "PRECONDITION: on this host a receiver made as 0.2's new() (joined on INADDR_ANY) heard the \
+         sender on {interface} from {control:?}: its join is not on the poisoned route, so this \
+         test cannot tell the fix apart"
+    );
     let receiver: std::net::UdpSocket = MulticastSocket::new().into_std().unwrap();
     let from = source_seen(&sender, &receiver);
     println!("### new() received from {from}, default route {interface}");
