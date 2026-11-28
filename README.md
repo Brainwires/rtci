@@ -49,7 +49,7 @@ whole session reproducible in a test without a socket or a sleep.
 
 ## Status
 
-As of 2026-11-26 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
+As of 2026-11-26 the workspace is audited clause by clause against 113 specifications (the W3C WebRTC
 API, statistics, extensions, encoded transform and SVC specifications, and the IETF RFCs and drafts
 WebRTC uses); every row names the code and the test that proves it. From
 [docs/conformance/audit/COUNTS.md](docs/conformance/audit/COUNTS.md), of the rows that bind this engine:
