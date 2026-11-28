@@ -1097,6 +1097,135 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
     );
 }
 
+/// Section 8.1.2: once a pair is nominated, "the ICE agent MUST remove all candidate pairs for
+/// the same component from the checklist and from the triggered-check queue", Frozen pairs
+/// included. Here two remote candidates share a foundation, so at the nomination the second of
+/// them is still Frozen (Section 6.1.2.6: its foundation's first pair is still being checked);
+/// the nomination takes it out of the checklist as Failed, it is never checked, and the
+/// pair's stats say `failed`. Either role: the controlling agent concludes on the success
+/// response to its nomination, the controlled one on the peer's USE-CANDIDATE request.
+#[test]
+fn a_pair_still_frozen_at_the_nomination_is_taken_out_of_the_checklist() {
+    for controlling in [true, false] {
+        let role = if controlling {
+            "controlling"
+        } else {
+            "controlled"
+        };
+        let start = Instant::now();
+        let mut a = bare_agent(
+            start,
+            AgentConfig {
+                failed_timeout: Some(Duration::ZERO),
+                ..config(controlling)
+            },
+        );
+        a.add_remote_candidate(remote(1, 500, "own")).unwrap();
+        a.add_remote_candidate(remote(2, 400, "shared")).unwrap();
+        a.add_remote_candidate(remote(3, 300, "shared")).unwrap();
+        a.start_connectivity_checks(
+            start,
+            controlling,
+            REMOTE_UFRAG.to_owned(),
+            REMOTE_PWD.to_owned(),
+        )
+        .unwrap();
+        assert_eq!(state_of(&a, 3), CandidatePairState::Frozen, "{role}");
+
+        // 1's ordinary checks are answered; a nomination is not answered yet, 2 and 3 never.
+        let before = run_with(&mut a, start, Duration::ZERO, 200 * MS, |s| {
+            if s.to == remote_addr(1) && !s.message.contains(ATTR_USE_CANDIDATE) {
+                Answer::Success(addr(LOCAL))
+            } else {
+                Answer::Silence
+            }
+        });
+        // The precondition: nothing nominated yet, 1 succeeded, 2 still being checked and so
+        // 3, of the same foundation, still Frozen.
+        assert!(a.get_selected_candidate_pair().is_none(), "{role}");
+        assert_eq!(a.checklist_state(), ChecklistState::Running, "{role}");
+        assert_eq!(state_of(&a, 1), CandidatePairState::Succeeded, "{role}");
+        assert!(
+            matches!(
+                state_of(&a, 2),
+                CandidatePairState::Waiting | CandidatePairState::InProgress
+            ),
+            "{role}: {}",
+            state_of(&a, 2)
+        );
+        assert_eq!(
+            state_of(&a, 3),
+            CandidatePairState::Frozen,
+            "{role}: Frozen just before the nomination"
+        );
+        assert!(
+            !requests_of(&before).iter().any(|s| s.to == remote_addr(3)),
+            "{role}: a Frozen pair is not checked"
+        );
+
+        // The nomination.
+        let at = start + 200 * MS;
+        if controlling {
+            let nomination = requests_of(&before)
+                .into_iter()
+                .find(|s| s.message.contains(ATTR_USE_CANDIDATE))
+                .expect("controlling: the nomination was sent")
+                .message
+                .transaction_id;
+            let response = peer_response(BINDING_SUCCESS, nomination, addr(LOCAL), None);
+            deliver(&mut a, at, &response, "10.0.0.1:5000").unwrap();
+        } else {
+            let nominate = peer_request(
+                &a,
+                vec![
+                    Box::new(AttrControlling(1)),
+                    Box::new(PriorityAttr(1000)),
+                    Box::new(UseCandidateAttr::new()),
+                ],
+            );
+            deliver(&mut a, at, &nominate, "10.0.0.1:5000").unwrap();
+        }
+        assert_eq!(
+            a.get_selected_candidate_pair().unwrap().1.addr(),
+            remote_addr(1),
+            "{role}"
+        );
+        assert_eq!(a.checklist_state(), ChecklistState::Completed, "{role}");
+        assert_eq!(
+            state_of(&a, 3),
+            CandidatePairState::Failed,
+            "{role}: the pair Frozen at the nomination is out of the checklist"
+        );
+        assert_eq!(state_of(&a, 2), CandidatePairState::Failed, "{role}");
+
+        // Its stats say so.
+        let three = a.find_remote_candidate(remote_addr(3)).unwrap();
+        let three_id = a.remote_candidates[three].id().to_string();
+        let stats = a.get_candidate_pairs_stats(at);
+        let stat = stats
+            .iter()
+            .find(|s| s.remote_candidate_id == three_id)
+            .expect("the pair's stats");
+        assert_eq!(stat.state, CandidatePairState::Failed, "{role}");
+        assert_eq!(stat.state.to_string(), "failed", "{role}");
+
+        // Never checked afterwards: nothing goes to 3 (its foundation has nothing in flight
+        // any more, which would otherwise unfreeze it) nor to 2.
+        let after = run_with(&mut a, start, 200 * MS, Duration::from_secs(10), |s| {
+            if s.to == remote_addr(1) {
+                Answer::Success(addr(LOCAL))
+            } else {
+                Answer::Silence
+            }
+        });
+        assert!(
+            requests_of(&after).iter().all(|s| s.to == remote_addr(1)),
+            "{role}: a check on a pair the nomination took out of the checklist"
+        );
+        assert_eq!(state_of(&a, 3), CandidatePairState::Failed, "{role}");
+    }
+}
+
 /// Section 8.1.1: the nomination the controlling agent queued is sent, also when a second
 /// success response for the same pair arrives before Ta starts it. Here the pair's first
 /// check is cancelled by the peer's request (Section 7.3.1.4) and checked again, and both
