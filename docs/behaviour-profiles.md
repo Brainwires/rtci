@@ -11,8 +11,7 @@ engine and libwebrtc (Chrome), choose differently:
 - **`Rfc`**: the engine's defaults, unchanged. The RFCs' behaviour, and the interoperable
   form where a named browser or deployed peer cannot take the RFC's (the audit's `setting`
   verdict, `docs/conformance/audit/RULES.md`), except the standing departures from the RFC
-  text listed in `docs/conformance.md`, which the owner decided (`h264.literal-pdon`: this
-  default does not follow RFC 6184 section 7.2; `cb.packet-size`: nor RFC 8083 section 3).
+  text listed in `docs/conformance.md`, which the owner decided (`h264.literal-pdon`: this default does not follow RFC 6184 section 7.2.2; `jsep.answer-offered-formats-only`: nor RFC 9429 section 5.3.1; `cb.packet-size`: nor RFC 8083 section 3).
 - **`Chrome`**: libwebrtc's choice wherever the engine and libwebrtc both do a thing and
   choose differently (a timer, an order, a form on the wire, a lenient or strict acceptance
   rule). It never turns off a capability the engine has and Chrome lacks: those are the same
@@ -363,6 +362,8 @@ What Chrome does that no setting of the engine can express, and what it would ta
   listed there as documented differences); rtc to rtc connections with data and media
   between profiles, and the `StrictRfc` refusals.
 - `scripts/behaviour-profiles.py --check` (a Python gate of `cargo.yml`): this document is
-  what the code says.
+  what the code says, every standing departure from a MUST of `docs/conformance.md` has a
+  governed behaviour whose `StrictRfc` value differs from its `Rfc` one, and README's
+  sentence on those departures names each of them with the right count.
 - The browser matrix runs the core scenarios with the Rust peer under `Chrome`
   (`examples/interop-peer`, `profile=chrome`).

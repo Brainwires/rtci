@@ -602,6 +602,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- README names every default that departs from a MUST by the owner's decision, three since
+  jsep-94 removed the RFC 9429 5.11 feedback item and jsep-95 added RFC 9429 5.3.1 (answers list
+  only the offered formats): RFC 6184 7.2.2, RFC 9429 5.3.1 and RFC 8083 3, each with the setting
+  that gives the RFC form (`conf/docs-6-readme-names-every-default-that-departs-from-a-must`).
+  `docs/behaviour-profiles.md` lists the same three. `scripts/behaviour-profiles.py --check` now
+  derives them from docs/conformance.md's table, checks that `StrictRfc` selects each RFC form,
+  and fails when README's sentence misses one or its count words ("Three", "sets all three").
 - **Draft-work register** (`docs/conformance/draft-work.md`, `conf/audit-8-draft-work-register`):
   for each `conflict` row, standing departure and recorded ambiguity, the clauses in conflict,
   what the maintainers' current draft work says (W3C webrtc-pc candidate corrections, PRs and
