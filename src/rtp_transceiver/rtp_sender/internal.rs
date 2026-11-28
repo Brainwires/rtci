@@ -581,6 +581,43 @@ impl RTCRtpSenderInternal {
     /// what was negotiated: one of the send codecs, or any before negotiation. A coding that
     /// names no codec, or one that was not negotiated, leaves the encoding's codec alone (the
     /// envelope `replaceTrack` stays in). The SSRCs and rids are the sender's and stay.
+    /// W3C `replaceTrack`: whether a track with `codings` "can be sent immediately by the
+    /// sender without violating the sender's already-negotiated envelope". The engine encodes
+    /// nothing, so what it can see of the envelope is the codec each coding says its source
+    /// produces: every coding that names one must name a codec of [[SendCodecs]] by mime type,
+    /// clock rate and channel count (webrtc-pc: "Sources that also encode ... might be unable
+    /// to produce the negotiated codec", "An audio track having a different number of
+    /// channels"). A coding without a codec, or a sender with nothing negotiated, is within it;
+    /// a coding's clock rate or channel count of 0 is not compared.
+    pub(crate) fn within_negotiated_envelope(&self, codings: &[RTCRtpEncodingParameters]) -> bool {
+        if self.send_codecs.is_empty() {
+            return true;
+        }
+        codings.iter().all(|coding| {
+            let codec = &coding.codec;
+            codec.mime_type.is_empty()
+                || self.send_codecs.iter().any(|negotiated| {
+                    let n = &negotiated.rtp_codec;
+                    // A negotiated audio codec without a channel count has one (RFC 8866
+                    // section 6.6: "the default value is one"); a coding that names none says
+                    // nothing about its channels.
+                    let negotiated_channels = match n.channels {
+                        0 if n
+                            .mime_type
+                            .get(..6)
+                            .is_some_and(|p| p.eq_ignore_ascii_case("audio/")) =>
+                        {
+                            1
+                        }
+                        channels => channels,
+                    };
+                    n.mime_type.eq_ignore_ascii_case(&codec.mime_type)
+                        && (codec.clock_rate == 0 || codec.clock_rate == n.clock_rate)
+                        && (codec.channels == 0 || codec.channels == negotiated_channels)
+                })
+        })
+    }
+
     pub(crate) fn adopt_coding_codecs(&mut self, codings: &[RTCRtpEncodingParameters]) {
         for (i, encoding) in self.send_encodings.iter_mut().enumerate() {
             let rid = &encoding.rtp_coding_parameters.rid;

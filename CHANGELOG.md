@@ -673,6 +673,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through `stun::opaque::opaque_string`: `set_configuration` and the constructor refuse them with
   `Error::InvalidAccessError`. A host or port of an ICE server url that does not parse is now
   `Error::ErrInvalidUrl` (W3C SyntaxError, "hostAndPortURL is failure") instead of `Error::Url`.
+- **Behaviour change (0.3.0): `RTCRtpSender::replace_track` refuses a track the sender cannot
+  send within its negotiated envelope** (`conf/w3c-2-replace-track-envelope`; webrtc-pc
+  replaceTrack, "determine if withTrack can be sent immediately by the sender without violating
+  the sender's already-negotiated envelope, and if it cannot ... InvalidModificationError"; audit
+  row WEBRTC-5.2-33 `missing` -> `tested`). While the transceiver is sending (currentDirection
+  sendrecv or sendonly), a track any of whose codings names a codec that matches none of the
+  sender's negotiated codecs by mime type, clock rate and channel count fails with
+  `Error::InvalidModificationError`, and the sender keeps its track. In 0.2.0 such a track was
+  taken and its packets were relabelled with a negotiated codec's payload type (a VP9 stream
+  sent as VP8). A track whose codings name no codec, and any replacement before negotiation, are
+  taken as before. Tests `rtp_sender_test.rs::test_rtp_sender_replace_track_invalid_codec_change`
+  (it asserted the relabelling before), `test_rtp_sender_replace_track_with_another_channel_count_is_refused`,
+  `test_rtp_sender_replace_track_before_negotiation_takes_any_codec`.
 
 ### Known limits
 
