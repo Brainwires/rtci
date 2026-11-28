@@ -676,7 +676,7 @@ governed_behaviours! {
         id: "jsep.answer-ice-options",
         setting: "SettingEngineBuilder::with_answer_ice_options",
         clause: "RFC 8840 4.1.3, RFC 8445 10, RFC 8839 4.3.2 (every answer `trickle ice2`) against RFC 9429 5.3.1 (\"only included if such an option was present in the offer\"; spec-issues row 28)",
-        rfc: AnswerIceOptions::Always => "Always",
+        rfc: AnswerIceOptions::AsOffered => "AsOffered",
         chrome: AnswerIceOptions::TrickleAlways => "TrickleAlways",
         strict_rfc: AnswerIceOptions::Always => "Always",
         chrome_source: "libwebrtc p2p/base/transport_description_factory.cc::TransportDescriptionFactory::CreateAnswer @ a222406d: desc->AddOption(ICE_OPTION_TRICKLE) whatever the offer had; no ice2 anywhere in libwebrtc (the engine keeps its ice2 as offered: a profile never turns a capability off)",

@@ -3213,8 +3213,11 @@ impl RTCPeerConnection {
             // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
         }
-        // `SettingEngineBuilder::with_answer_ice_options`; no line for no option (RFC 8839
-        // section 5.6: one or more tags).
+        // Offers say `trickle ice2`, lite agents' too. An answer says what
+        // `SettingEngineBuilder::with_answer_ice_options` gives: by default RFC 9429 section
+        // 5.3.1's form, each of the two only "if such an option was present in the offer",
+        // against RFC 8840 section 4.1.3 and RFC 8445 section 10 (`answer_ice_options`;
+        // spec-issues row 28). No line for no option (RFC 8839 section 5.6: one or more tags).
         let ice_options = params.ice_options.join(" ");
         // RFC 8839 section 5.6: "session-level or media-level".
         if ice_options.is_empty() {

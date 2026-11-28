@@ -656,7 +656,10 @@ pub enum AnswerIceOptions {
     /// [RFC8840], Section 4.1.3 and the "ice2" option as specified in [RFC8445], Section 10,
     /// is only included if such an option was present in the offer". An offer with neither
     /// gets no `a=ice-options` line (the attribute has at least one option, RFC 8839 section
-    /// 5.6); a browser's offer (`trickle`) gets `trickle`.
+    /// 5.6); a browser's offer (`trickle`) gets `trickle`. The default: RFC 9429 governs a JSEP
+    /// endpoint, and its working group made the condition on `trickle` deliberate
+    /// (`rtcweb-wg/jsep#23`).
+    #[default]
     AsOffered,
     /// libwebrtc's answer: `trickle` whatever the offer had
     /// (`p2p/base/transport_description_factory.cc`, `TransportDescriptionFactory::CreateAnswer`,
@@ -666,8 +669,9 @@ pub enum AnswerIceOptions {
     /// RFC 8840 section 4.1.3 ("In any case, the Answerer MUST include the
     /// "ice-options:trickle" attribute"), RFC 8445 section 10 ("An agent compliant to this
     /// specification MUST inform the peer about the compliance using the 'ice2' option") and
-    /// RFC 8839 section 4.3.2: every answer says `trickle ice2`.
-    #[default]
+    /// RFC 8839 section 4.3.2: every answer says `trickle ice2`. The `StrictRfc` profile's
+    /// value (the RFC form of the `conflict` rows RFC8839-4.3.2-3, RFC8839-4.2.1.5-1 and
+    /// RFC8445-10-1).
     Always,
 }
 
@@ -2739,8 +2743,11 @@ impl SettingEngineBuilder {
     }
 
     /// What an answer's `a=ice-options` line says ([`AnswerIceOptions`]). The default is
-    /// [`AnswerIceOptions::Always`] (`Rfc`, `StrictRfc` and `Performance` profiles); the
-    /// `Chrome` profile sets [`AnswerIceOptions::TrickleAlways`].
+    /// [`AnswerIceOptions::AsOffered`], RFC 9429 section 5.3.1 (`Rfc` and `Performance`
+    /// profiles): an answer to a browser's offer says `trickle` alone, one to an offer
+    /// without the line has none. The `Chrome` profile sets
+    /// [`AnswerIceOptions::TrickleAlways`], the `StrictRfc` profile
+    /// [`AnswerIceOptions::Always`] (`docs/conformance/spec-issues.md` row 28).
     pub fn with_answer_ice_options(mut self, options: AnswerIceOptions) -> Self {
         self.0.answer_ice_options = options;
         self

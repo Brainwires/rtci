@@ -374,8 +374,10 @@ fn transport_state_events_come_before_the_connection_events_they_cause() -> Resu
 /// candidate value whose candidate property is set to an empty string or by
 /// canTrickleIceCandidates being set to false." The answerer receives an offer without
 /// `a=ice-options:trickle` (`canTrickleIceCandidates` false) and ends its own gathering; the
-/// offerer is told nothing. The link is cut: the answerer's transport fails, the offerer's
-/// stays "disconnected".
+/// offerer does not end its gathering (its answer, which repeats only the options the offer
+/// had, RFC 9429 section 5.3.1, says no `trickle` either, so the offerer has the remote
+/// indication but not its own). The link is cut: the answerer's transport fails, the
+/// offerer's stays "disconnected".
 #[test]
 fn a_peer_that_cannot_trickle_is_the_indication_that_no_candidate_is_to_come() -> Result<()> {
     let start = Instant::now();

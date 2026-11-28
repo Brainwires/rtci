@@ -7257,9 +7257,11 @@ a=rtcp-mux\r\n";
     /// Appendix B: an ICE-lite agent capable of Trickle ICE "would indicate support for Trickle
     /// ICE". A lite agent of this engine takes trickled candidates (`add_remote_candidate` at
     /// any time) and trickles its own (its TCP candidates come after its description), so its
-    /// offer and its answer say `trickle ice2` as a full agent's do, and the full peer does not
-    /// take the lite agent's description for every candidate it will have (W3C webrtc-pc
-    /// 5.6.4: `canTrickleIceCandidates` true).
+    /// offer says `trickle ice2` as a full agent's does, and so does its answer to an offer that
+    /// has both (an answer has each only when the offer did, RFC 9429 section 5.3.1,
+    /// `tests/jsep_answer_ice_options.rs`); the full peer then does not take the lite agent's
+    /// description for every candidate it will have (W3C webrtc-pc 5.6.4:
+    /// `canTrickleIceCandidates` true).
     #[test]
     fn a_lite_agent_says_trickle_in_its_offer_and_its_answer() {
         let lite_pc = || {
