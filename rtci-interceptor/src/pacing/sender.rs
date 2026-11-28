@@ -1074,6 +1074,8 @@ impl PacerInterceptor {
 
     /// Counts a packet of a stream that may not send as dropped (a retransmission for
     /// [`RetransmissionsLeft`] too).
+    #[cold]
+    #[inline(never)]
     fn drop_not_sending(&mut self, packet: &TaggedPacket) {
         if packet.message.has(&Attribute::Retransmission) && !Self::is_padding(packet) {
             self.retransmission_dropped(packet);
@@ -1086,6 +1088,13 @@ impl PacerInterceptor {
     /// padding, and what was released for the next interceptor but has not gone to it) is
     /// dropped, without a key-frame request or a [`PacerDiscard`]: nothing is asked of a
     /// source that is not to send.
+    ///
+    /// Out of line and cold on purpose: `enqueue` looks for the notice on every packet written
+    /// and finds it once per applied answer. Inlined there, this body made `handle_write`'s
+    /// frame twice the size and the `Interceptor/Pacer/write+poll` benchmark slower
+    /// (docs/performance.md, "pacer-4").
+    #[cold]
+    #[inline(never)]
     fn stop_streams(&mut self, now: Instant, ssrcs: &[u32]) {
         self.not_sending = ssrcs.iter().copied().collect();
         if self.not_sending.is_empty() {
@@ -1457,8 +1466,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
         let now = msg.now;
         let rtp = matches!(msg.message.packet, Packet::Rtp(_));
-        let not_sending = msg.message.custom::<StreamsNotSending>().is_some();
-        self.enqueue(msg)?;
+        // Nothing here borrows `msg` before it moves into `enqueue`: a borrow (the search for
+        // the `StreamsNotSending` notice was one) makes the move a copy of every packet
+        // written (224 bytes on x86-64). `enqueue` looks for the notice and says whether it
+        // applied one.
+        let not_sending = self.enqueue(msg)?;
         if rtp || not_sending {
             self.tell_application_ward(now);
         }
@@ -1485,31 +1497,35 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 }
 
 impl PacerInterceptor {
-    /// A packet written: released, queued, or discarded.
-    fn enqueue(&mut self, msg: TaggedPacket) -> Result<(), Error> {
+    /// A packet written: released, queued, or discarded; whether it carried a
+    /// [`StreamsNotSending`] notice (applied first, see [`Self::stop_streams`]).
+    fn enqueue(&mut self, msg: TaggedPacket) -> Result<bool, Error> {
         // No estimate is read here. It was, once — but the congestion controller sits wire-*ward*
         // of the pacer, so on the write leg it never sees a packet before this interceptor does and
         // the branch had no possible producer. If an application-set target is ever wanted it comes
         // back with its own `RTCEvent` variant, and a test.
 
         // The streams that may not send from now on: what waits of them goes.
-        if let Some(notice) = msg.message.custom::<StreamsNotSending>() {
-            let ssrcs = notice.ssrcs.clone();
-            self.stop_streams(msg.now, &ssrcs);
-        }
+        let not_sending = match msg.message.custom::<StreamsNotSending>() {
+            Some(notice) => {
+                self.stop_streams(msg.now, &notice.ssrcs);
+                true
+            }
+            None => false,
+        };
 
         // RTCP is control traffic and mostly time-sensitive — feedback is only useful while it is
         // fresh — so it is not paced.
         if matches!(msg.message.packet, Packet::Rtcp(_)) {
             self.write_queue.push_back(msg);
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // A stream that may not send (`StreamsNotSending`): written after its direction
         // changed (a retransmission, padding, FEC), it does not leave.
         if self.is_not_sending(&msg) {
             self.drop_not_sending(&msg);
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // A flow the circuit breaker ceased (RFC 8083 section 4.5): its packets are dropped
@@ -1520,7 +1536,7 @@ impl PacerInterceptor {
         if matches!(&msg.message.packet, Packet::Rtp(rtp) if self.ceased.contains(&rtp.header.ssrc))
         {
             self.released.push_back(msg);
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // Keeping the budget current at enqueue time is what lets `poll_timeout` compute a
@@ -1537,7 +1553,7 @@ impl PacerInterceptor {
                 self.pacer.consume(bits);
             }
             self.release(msg, bits);
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // Padding waits behind every other packet, and nothing waits behind it.
@@ -1546,7 +1562,7 @@ impl PacerInterceptor {
         // was asked for): it would only leave late.
         if padding && self.probe.is_none() && self.ended_cluster_asked == Some(msg.now) {
             self.padding_discarded += 1;
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // The rest of a frame already discarded is worth nothing either.
@@ -1558,7 +1574,7 @@ impl PacerInterceptor {
                 std::slice::from_ref(&msg),
                 LocalKeyFrameRequest::PacerDiscard,
             );
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
@@ -1569,7 +1585,7 @@ impl PacerInterceptor {
             let bits = Self::bits_of(&msg);
             if self.try_spend(bits) {
                 self.release(msg, bits);
-                return Ok(());
+                return Ok(not_sending);
             }
         }
 
@@ -1582,7 +1598,7 @@ impl PacerInterceptor {
                 let cluster = self.probe.as_ref().map(|probe| probe.cluster);
                 self.padding.push_back((cluster, msg));
             }
-            return Ok(());
+            return Ok(not_sending);
         }
 
         // A retransmission of a packet whose retransmission already waits adds nothing but a
@@ -1590,7 +1606,7 @@ impl PacerInterceptor {
         // pacer queue", `rtp_packet_history.cc`).
         if !new_media && self.retransmission_waits(&msg) {
             self.duplicate_retransmissions += 1;
-            return Ok(());
+            return Ok(not_sending);
         }
 
         if self.queue.len() >= self.queue_limit {
@@ -1611,7 +1627,7 @@ impl PacerInterceptor {
                             std::slice::from_ref(&msg),
                             LocalKeyFrameRequest::PacerDiscard,
                         );
-                        return Ok(());
+                        return Ok(not_sending);
                     }
                 }
                 _ => {
@@ -1673,11 +1689,11 @@ impl PacerInterceptor {
                 self.release_due(now);
             }
             self.follow_queue(now);
-            return Ok(());
+            return Ok(not_sending);
         }
         self.queue.push_back(msg);
         self.follow_queue(now);
-        Ok(())
+        Ok(not_sending)
     }
 
     /// Releases what the budget allows at `now`, and drops what waited the bound.
