@@ -1067,6 +1067,22 @@ impl PacerInterceptor {
         }
     }
 
+    /// Applies the [`StreamsNotSending`] notice `packet` carries, if any (see
+    /// [`Self::stop_streams`]); whether it did. Out of line: the search calls through each
+    /// custom attribute's vtable, and inlined in `enqueue` it kept registers spilled on the
+    /// path of every packet.
+    #[cold]
+    #[inline(never)]
+    fn apply_notice(&mut self, packet: &TaggedPacket) -> bool {
+        match packet.message.custom::<StreamsNotSending>() {
+            Some(notice) => {
+                self.stop_streams(packet.now, &notice.ssrcs);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Whether `packet` is RTP of a stream that may not send ([`StreamsNotSending`]).
     fn is_not_sending(&self, packet: &TaggedPacket) -> bool {
         matches!(&packet.message.packet, Packet::Rtp(rtp) if self.not_sending.contains(&rtp.header.ssrc))
@@ -1506,13 +1522,7 @@ impl PacerInterceptor {
         // back with its own `RTCEvent` variant, and a test.
 
         // The streams that may not send from now on: what waits of them goes.
-        let not_sending = match msg.message.custom::<StreamsNotSending>() {
-            Some(notice) => {
-                self.stop_streams(msg.now, &notice.ssrcs);
-                true
-            }
-            None => false,
-        };
+        let not_sending = !msg.message.attributes.is_empty() && self.apply_notice(&msg);
 
         // RTCP is control traffic and mostly time-sensitive — feedback is only useful while it is
         // fresh — so it is not paced.
