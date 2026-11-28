@@ -4,7 +4,6 @@ use super::pacer::Pacer as LeakyBucket;
 use crate::Interceptor;
 use crate::StreamInfo;
 use crate::cc::probe::{ProbeFill, ProbePacket, ProbeRequest};
-use crate::keyframe::LocalKeyFrameRequest;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
@@ -416,9 +415,7 @@ impl PacerBuilder {
 /// stream, sender SSRC 0, marked [`Attribute::DeliverToApplication`]: the request a receiver
 /// that lost its picture sends, so an application that answers PLI with a key frame
 /// (`RTCMessage::RtcpPacket`, `RTCPeerConnectionEvent::OnKeyFrameRequest`) answers this too, at
-/// the target the frames it writes now are sized for. The request carries
-/// [`LocalKeyFrameRequest`] (`PacerDiscard`, or `PacerFlush` for the requests of a flush), so it
-/// can be told from a remote one (`RTCPeerConnectionEvent::OnKeyFrameRequestOrigin`).
+/// the target the frames it writes now are sized for.
 ///
 /// libwebrtc does not discard in its pacer: when the expected queue time passes 2 s it pauses
 /// the encoder (target zero to the encoder, `modules/congestion_controller/rtp/control_handler.cc`)
@@ -960,7 +957,7 @@ impl PacerInterceptor {
         let mut asked: HashSet<u32> = HashSet::new();
         for (ssrc, packets) in &streams {
             // `PacerDiscard`, and for a media stream the key-frame request.
-            self.discard(now, *ssrc, packets, LocalKeyFrameRequest::PacerFlush);
+            self.discard(now, *ssrc, packets);
             asked.insert(*ssrc);
         }
         let mut ssrcs: Vec<u32> = self.video.iter().copied().collect();
@@ -976,10 +973,7 @@ impl PacerInterceptor {
                         media_ssrc: *ssrc,
                     },
                 )]))
-                .with(Attribute::DeliverToApplication)
-                .with(Attribute::Custom(Arc::new(
-                    LocalKeyFrameRequest::PacerFlush,
-                ))),
+                .with(Attribute::DeliverToApplication),
             });
         }
         self.read_queue.push_back(TaggedPacket {
@@ -1170,20 +1164,13 @@ impl PacerInterceptor {
         self.queue = kept;
         let bits: f64 = discarded.iter().map(Self::bits_of).sum();
         self.queued_bits = (self.queued_bits - bits).max(0.0);
-        self.discard(now, ssrc, &discarded, LocalKeyFrameRequest::PacerDiscard);
+        self.discard(now, ssrc, &discarded);
     }
 
     /// Counts the discard of `packets` (new media of the stream `ssrc`, oldest first) and tells
     /// the chain application-ward: the NACK responder and the application through
-    /// [`PacerDiscard`], and the application a key frame is needed (the request carrying
-    /// `why`, [`LocalKeyFrameRequest`]).
-    fn discard(
-        &mut self,
-        now: Instant,
-        ssrc: u32,
-        packets: &[TaggedPacket],
-        why: LocalKeyFrameRequest,
-    ) {
+    /// [`PacerDiscard`], and the application a key frame is needed.
+    fn discard(&mut self, now: Instant, ssrc: u32, packets: &[TaggedPacket]) {
         let mut sequence_numbers = Vec::with_capacity(packets.len());
         let mut octets = 0usize;
         let mut frames = 0u32;
@@ -1233,8 +1220,7 @@ impl PacerInterceptor {
                         media_ssrc: ssrc,
                     },
                 )]))
-                .with(Attribute::DeliverToApplication)
-                .with(Attribute::Custom(Arc::new(why))),
+                .with(Attribute::DeliverToApplication),
             });
         }
     }
@@ -1552,12 +1538,7 @@ impl PacerInterceptor {
         // The rest of a frame already discarded is worth nothing either.
         let new_media = !padding && !msg.message.has(&Attribute::Retransmission);
         if new_media && let Some(ssrc) = self.continues_discard(&msg) {
-            self.discard(
-                msg.now,
-                ssrc,
-                std::slice::from_ref(&msg),
-                LocalKeyFrameRequest::PacerDiscard,
-            );
+            self.discard(msg.now, ssrc, std::slice::from_ref(&msg));
             return Ok(());
         }
 
@@ -1605,12 +1586,7 @@ impl PacerInterceptor {
                 QueueOverflow::Drop if !retransmission => {
                     self.discard_stream_of(msg.now, 0);
                     if new_media && let Some(ssrc) = self.continues_discard(&msg) {
-                        self.discard(
-                            msg.now,
-                            ssrc,
-                            std::slice::from_ref(&msg),
-                            LocalKeyFrameRequest::PacerDiscard,
-                        );
+                        self.discard(msg.now, ssrc, std::slice::from_ref(&msg));
                         return Ok(());
                     }
                 }
