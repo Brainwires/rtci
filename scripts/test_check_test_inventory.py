@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Unit tests for the clause-audit half of scripts/check-test-inventory.py (`--check`): every
-backticked name in the Test cell of a MUST / SHOULD row names something in the tree. Small trees
-made for each case.
+"""Unit tests for scripts/check-test-inventory.py: the clause-audit half (`--check`: every
+backticked name in the Test cell of a MUST / SHOULD row names something in the tree), and the
+feature-gated targets (a `[[test]]` with `required-features` that no `cargo test` of cargo.yml
+runs). Small trees made for each case.
 
     python3 scripts/test_check_test_inventory.py
 """
@@ -112,6 +113,87 @@ class AuditNamesTest(unittest.TestCase):
         errors = self.tree.errors()
         self.assertEqual(len(errors), 1, errors)
         self.assertIn("gone_away_test", errors[0])
+
+
+MANIFEST = """[package]
+name = "video"
+
+[features]
+default = ["engine"]
+engine = ["dep:rtci"]
+vp8 = ["dep:vp8-decoder"]
+everything = ["vp8", "other/feature"]
+
+[[test]]
+name = "send"
+required-features = ["engine", "vp8"]
+
+[[test]]
+name = "plain"
+path = "tests/plain_calls.rs"
+"""
+
+
+class FeatureGatedTest(unittest.TestCase):
+    """`send` needs `engine` (a default) and `vp8`; `plain` needs nothing."""
+
+    def setUp(self) -> None:
+        self.tree = Tree()
+        self.tree.write("video/Cargo.toml", MANIFEST)
+
+    def tearDown(self) -> None:
+        self.tree.close()
+
+    def findings(self, *commands: str) -> list:
+        steps = "".join(f"      - run: {c}\n" for c in commands)
+        self.tree.write(".github/workflows/cargo.yml", "jobs:\n  a:\n    steps:\n" + steps)
+        found: list = []
+        gate.feature_gated_findings(self.tree.root, found)
+        return found
+
+    def assert_runs(self, *commands: str) -> None:
+        self.assertEqual(self.findings(*commands), [], commands)
+
+    def assert_unrun(self, *commands: str) -> None:
+        found = self.findings(*commands)
+        self.assertEqual([(f.kind, f.path, f.test) for f in found], [("feature-gated", "video/tests/send.rs", "*")])
+        self.assertIn("engine, vp8", found[0].detail)
+
+    def test_a_target_no_command_runs_is_a_finding(self) -> None:
+        self.assert_unrun("cargo test --workspace --verbose", "cargo build -p video --features vp8")
+
+    def test_the_package_with_the_feature_runs_it(self) -> None:
+        self.assert_runs("cargo test --package video --features vp8 --no-fail-fast")
+        self.assert_runs("cargo test -p video -F engine,vp8")
+        self.assert_runs("cargo test --workspace --features video/vp8")
+
+    def test_all_features_and_a_feature_that_implies_it_run_it(self) -> None:
+        self.assert_runs("cargo test -p video --all-features")
+        self.assert_runs("cargo test -p video --features everything")
+
+    def test_without_the_default_features_a_default_one_is_missing(self) -> None:
+        self.assert_unrun("cargo test -p video --no-default-features --features vp8")
+
+    def test_another_package_does_not_run_it(self) -> None:
+        self.assert_unrun("cargo test -p audio --features vp8", "cargo test --features vp8")
+
+    def test_the_target_selection_must_include_it(self) -> None:
+        self.assert_runs("cargo test -p video --features vp8 --test send --test other")
+        self.assert_runs("cargo test -p video --features vp8 --tests")
+        self.assert_unrun("cargo test -p video --features vp8 --test other")
+        self.assert_unrun("cargo test -p video --features vp8 --lib")
+
+    def test_a_name_filter_runs_only_part_of_it(self) -> None:
+        self.assert_unrun("cargo test -p video --features vp8 -- --ignored measure_")
+        self.assert_unrun("cargo test -p video --features vp8 some_test")
+        self.assert_runs("cargo test -p video --features vp8 -- --nocapture")
+
+    def test_continued_lines_and_chained_commands_are_read(self) -> None:
+        self.assert_runs("cargo test -p video \\\n          --features vp8 --verbose")
+        self.assert_runs("cargo check -p video && cargo test -p video --features vp8 | tee log")
+
+    def test_a_matrix_expression_is_left_out(self) -> None:
+        self.assert_runs("cargo test -p video --features vp8 ${{ matrix.args }}")
 
 
 if __name__ == "__main__":

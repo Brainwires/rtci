@@ -12,6 +12,13 @@ A test that never runs proves nothing and looks like coverage. This script fails
   ``target_os``, ``target_family``, ``target_arch``, ``target_env``), so it silently does not
   exist on some platform;
 
+* an integration test target with ``required-features`` (a ``[[test]]`` of a ``Cargo.toml``) that
+  no ``cargo test`` command in ``.github/workflows/cargo.yml`` runs: one that selects the package
+  (``--package`` / ``-p``, or ``--workspace``), turns every required feature on (the package's
+  default features unless ``--no-default-features``, ``--features``, ``--all-features``, each
+  feature's own implications) and runs the target (no target selection, ``--tests``, or
+  ``--test <name>``) with no test name filter; cargo skips such a target silently otherwise;
+
 unless ``docs/test-exclusions.md`` lists it with a reason and the test that covers the same
 behaviour. An exclusion row that no longer matches anything also fails, so the list cannot go
 stale.
@@ -38,12 +45,15 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXCLUSIONS = ROOT / "docs" / "test-exclusions.md"
+CARGO_WORKFLOW = Path(".github") / "workflows" / "cargo.yml"
 CONFORMANCE = [ROOT / "docs" / "conformance.md", *sorted((ROOT / "docs" / "conformance").glob("*.md"))]
 
 # Directories that hold no tests of the workspace: build output, fuzz crates (their own
@@ -62,7 +72,7 @@ PLATFORM_WORDS = re.compile(r"\b(windows|unix|target_os|target_family|target_arc
 
 @dataclass(frozen=True)
 class Finding:
-    kind: str  # ignored | commented | orphan | platform
+    kind: str  # ignored | commented | orphan | platform | feature-gated
     path: str  # relative to the repository root
     test: str  # the test (or module / "*")
     detail: str = ""
@@ -212,6 +222,165 @@ def orphan_test_files(files: list[Path], findings: list[Finding]) -> None:
         findings.append(Finding("orphan", relpath, "*", "no `mod` compiles this file"))
 
 
+@dataclass(frozen=True)
+class GatedTest:
+    """A ``[[test]]`` target with ``required-features``."""
+
+    package: str
+    name: str
+    path: str  # the test's source, relative to the repository root
+    required: frozenset[str]
+    defaults: frozenset[str]
+    features: dict  # the package's [features] table
+
+
+def gated_tests(root: Path) -> list[GatedTest]:
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        if "Cargo.toml" not in filenames:
+            continue
+        manifest = Path(dirpath) / "Cargo.toml"
+        try:
+            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+            continue
+        package = data.get("package", {}).get("name")
+        if not package:
+            continue
+        features = data.get("features", {})
+        for target in data.get("test", []):
+            required = target.get("required-features")
+            if not required:
+                continue
+            source = Path(dirpath) / target.get("path", f"tests/{target['name']}.rs")
+            out.append(
+                GatedTest(
+                    package=package,
+                    name=target["name"],
+                    path=source.resolve().relative_to(root.resolve()).as_posix(),
+                    required=frozenset(required),
+                    defaults=frozenset(features.get("default", [])),
+                    features=features,
+                )
+            )
+    return sorted(out, key=lambda t: (t.package, t.name))
+
+
+def cargo_test_commands(workflow_text: str) -> list[list[str]]:
+    """The arguments after each `cargo test` of a workflow (shell continuations joined, the
+    command cut at `;`, `&&`, `||`, `|`, `>`). A token that holds a GitHub expression (a matrix
+    value) is left out: it cannot be read here."""
+    text = re.sub(r"\\\n\s*", " ", workflow_text)
+    commands = []
+    for line in text.splitlines():
+        for m in re.finditer(r"\bcargo\s+test\b(?P<rest>[^\n]*)", line):
+            rest = re.split(r";|&&|\|\||\||>|'|\"", m.group("rest"))[0]
+            rest = re.sub(r"\$\{\{[^}]*\}\}", " ", rest)
+            try:
+                commands.append(shlex.split(rest))
+            except ValueError:
+                continue
+    return commands
+
+
+def enabled_features(test: GatedTest, chosen: set[str], defaults: bool, every: bool) -> set[str]:
+    if every:
+        return set(test.features)
+    pending = list(chosen | (set(test.defaults) if defaults else set()))
+    enabled: set[str] = set()
+    while pending:
+        feature = pending.pop()
+        if feature in enabled:
+            continue
+        enabled.add(feature)
+        for implied in test.features.get(feature, []):
+            if "/" not in implied and not implied.startswith("dep:"):
+                pending.append(implied)
+    return enabled
+
+
+def command_runs(args: list[str], test: GatedTest) -> bool:
+    """Whether `cargo test <args>`, run at the repository root, runs `test` whole."""
+    packages: set[str] = set()
+    workspace = False
+    chosen: set[str] = set()
+    defaults = True
+    every = False
+    tests: set[str] = set()
+    all_tests = False
+    other_targets = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = args[i + 1] if i + 1 < len(args) else ""
+        if arg == "--":
+            # Arguments for the test harness: a name filter runs part of each target.
+            if any(not a.startswith("-") for a in args[i + 1 :]):
+                return False
+            break
+        if arg in ("-p", "--package"):
+            packages.add(value)
+            i += 2
+            continue
+        if arg.startswith("--package="):
+            packages.add(arg.split("=", 1)[1])
+        elif arg in ("--workspace", "--all"):
+            workspace = True
+        elif arg in ("-F", "--features"):
+            chosen |= {f for f in re.split(r"[,\s]+", value) if f}
+            i += 2
+            continue
+        elif arg.startswith("--features="):
+            chosen |= {f for f in re.split(r"[,\s]+", arg.split("=", 1)[1]) if f}
+        elif arg == "--all-features":
+            every = True
+        elif arg == "--no-default-features":
+            defaults = False
+        elif arg == "--test":
+            tests.add(value)
+            i += 2
+            continue
+        elif arg == "--tests":
+            all_tests = True
+        elif arg in ("--lib", "--bins", "--bin", "--examples", "--example", "--benches", "--bench", "--doc"):
+            other_targets = True
+        elif arg in ("--target", "--target-dir", "--manifest-path", "--exclude", "--profile", "-j", "--jobs"):
+            i += 2
+            continue
+        elif not arg.startswith("-"):
+            # A test name filter before `--`.
+            return False
+        i += 1
+    if not (test.package in packages or workspace or (not packages and test.package == "rtci")):
+        return False
+    # `pkg/feature` turns a feature of that package on; a bare name, one of the selected ones.
+    own = {f.split("/", 1)[1] for f in chosen if f.startswith(test.package + "/")}
+    own |= {f for f in chosen if "/" not in f}
+    if not test.required <= enabled_features(test, own, defaults, every):
+        return False
+    if tests:
+        return test.name in tests
+    return all_tests or not other_targets
+
+
+def feature_gated_findings(root: Path, findings: list[Finding]) -> None:
+    workflow = root / CARGO_WORKFLOW
+    text = workflow.read_text(encoding="utf-8") if workflow.exists() else ""
+    commands = cargo_test_commands(text)
+    for test in gated_tests(root):
+        if not any(command_runs(args, test) for args in commands):
+            findings.append(
+                Finding(
+                    "feature-gated",
+                    test.path,
+                    "*",
+                    f"[[test]] {test.name} of {test.package} needs {', '.join(sorted(test.required))}:"
+                    f" no cargo test in {CARGO_WORKFLOW.as_posix()} runs it",
+                )
+            )
+
+
 def parse_table(path: Path) -> list[list[str]]:
     rows = []
     if not path.exists():
@@ -315,6 +484,7 @@ def main() -> int:
     for path in files:
         scan_file(path, findings, tests)
     orphan_test_files(files, findings)
+    feature_gated_findings(ROOT, findings)
 
     if "--list" in sys.argv:
         print("| Kind | File | Test | Reason | Covered by |")

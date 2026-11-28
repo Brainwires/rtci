@@ -103,7 +103,7 @@ jobs:
       - id: pick
         uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
-          jobs: test_macos=macos-arm64 test_windows=windows-x64
+          jobs: test_macos=macos-arm64 test_windows=windows-x64 video_codecs=linux-x64
           vars: ${{ toJSON(vars) }}
           runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
@@ -273,6 +273,74 @@ jobs:
         run: |
           cargo test --package rtci --features chrome-defaults --lib behaviour_profile --verbose
           cargo test --package rtci --features chrome-defaults --test behaviour_profiles --verbose
+
+  # rtci-video's codec features, off by default (docs/video-pipeline.md 4.6, 4.9): no other job
+  # turns them on, and cargo skips a test target whose `required-features` are off without a
+  # word, so the send pipeline's call tests (`send_rtc2rtc`, feature `vp8`) went unrun from the
+  # crate's landing to v0.2.1 (scripts/check-test-inventory.py now fails on such a target).
+  # `vp8`, `av1` and `isolation` are pure Rust and need no system package. `libvpx`, `dav1d`
+  # and `openh264` load their library at run time (dlopen): building needs nothing, running
+  # needs the libraries, installed or downloaded here (docs/video-pipeline.md 4.9 proposed this
+  # job). On our Linux pool first (the runners job's pick), GitHub's ubuntu-latest when it is
+  # busy; a fork's pull request runs `video_codecs_fork`.
+  video_codecs:
+    name: rtci-video, every feature (codecs, isolation, system-library backends)
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').video_codecs || 'ubuntu-latest' }}
+    # Self-hosted only for a push or a same-repository pull request; never for
+    # pull_request_target.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps: &video-codecs-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      # GitHub's runners only, as in test_platforms (the cache buys our runners nothing).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: runner.environment == 'github-hosted'
+      - name: libvpx and libdav1d for the run-time-loaded backends
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libvpx-dev libdav1d-dev
+      # Cisco's binary, fetched for the test and never kept (the "separately downloaded" case of
+      # docs/video-pipeline.md 4.1): Cisco serves it over plain HTTP, and the backend loads a
+      # file only if its SHA-256 is one Cisco published.
+      - name: Cisco's OpenH264 binary
+        run: |
+          curl -sSf --retry 3 -o "$RUNNER_TEMP/libopenh264.so.bz2" http://ciscobinary.openh264.org/libopenh264-2.6.0-linux64.8.so.bz2
+          bunzip2 -f "$RUNNER_TEMP/libopenh264.so.bz2"
+          echo "OPENH264_LIBRARY=$RUNNER_TEMP/libopenh264.so" >> "$GITHUB_ENV"
+      - name: Every feature's tests (the codecs, the child-process decoder, the send and receive calls)
+        run: cargo test --package rtci-video --all-features --no-fail-fast --verbose
+      - name: The interop peer's video scenario builds
+        run: cargo build --package rtci-video-interop --features pipeline --verbose
+      - name: Disk left after the build
+        if: always()
+        run: df -h
+
+  # A pull request from a fork: the same on GitHub's runner only.
+  video_codecs_fork:
+    name: rtci-video codec features (fork pull request)
+    # runners-first: a fork's pull request must never reach our pools (scripts/check-workflow-pins.py; as test_platforms_fork)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps: *video-codecs-steps
 
   # The same for `performance-defaults` (BehaviourProfile::Performance as the default).
   performance_defaults:

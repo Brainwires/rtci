@@ -856,6 +856,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **rtci-video's feature-gated tests run in CI** (`conf/video-1-send-tests-run-and-pass`).
+  Cargo skips a test target whose `required-features` are off without a word, and no job turned
+  on `vp8`, `av1`, `isolation`, `libvpx`, `dav1d` or `openh264`: `send_rtc2rtc`, `codecs`,
+  `isolated`, `libvpx`, `dav1d` and `openh264` had not run in any CI job since the crate
+  landed. A new `cargo.yml` job (`video_codecs`, our Linux pool first; `video_codecs_fork` for a
+  fork's pull request) installs libvpx and libdav1d, downloads Cisco's OpenH264 binary and runs
+  `cargo test -p rtci-video --all-features`, and builds the interop peer's `pipeline` scenario.
+  `scripts/check-test-inventory.py` now fails on a `[[test]]` with `required-features` that no
+  `cargo test` of `cargo.yml` runs whole (kind `feature-gated` in `docs/test-exclusions.md`).
+  Run by hand, two tests of `send_rtc2rtc` failed on v0.2.1 and on train 36 (agent-test runs
+  46137495578, 46137469211, 46136031324): they asserted the pacer's behaviour before
+  `conf/flush-1r-backlog-flush-at-collapse` (train 32), which made the default pacer flush its
+  backlog at a capacity collapse instead of pausing the source. Not an engine regression: the
+  tests were stale. `video_keeps_playing_through_a_capacity_cap_that_comes_and_goes` (the
+  default chain) now asserts what the engine's own default-chain test asserts of a flush (a
+  discard within a second of the drop, none before it, a key frame within 150 ms, no pause)
+  and a picture no older than 2 s (measured 0.92 to 0.94 s, against 10.2 to 11.7 s with the
+  backlog kept); `a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second` asks
+  for `PacerBacklog::Keep`, the setting that pauses, and keeps its assertions.
+  `scripts/dev/run-at-commits.sh` runs one command at several commits (one verdict line each)
+  to find which commit changed a test's outcome in one CI run.
 - test-env interop: the `reflect video <codec>` cells name a browser that sends on a payload
   type its offer does not have (`conf/test-4-reflect-cells-name-an-off-offer-format`), as
   "chrome profile: audio and video both ways" already did, and log the payload types received

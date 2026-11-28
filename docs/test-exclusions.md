@@ -11,7 +11,10 @@ fails it too. The real-network environment's tests (`tests/testenv_*.rs`) are `#
 their reason in the attribute and need no row: `scripts/test-env/run.sh` runs them.
 
 Kinds: `ignored` (`#[ignore]`), `commented` (a commented-out `#[test]`), `orphan` (a `*_test.rs`
-no `mod` compiles), `platform` (a test or test module behind a platform `cfg`).
+no `mod` compiles), `platform` (a test or test module behind a platform `cfg`), `feature-gated`
+(a `[[test]]` target with `required-features` that no `cargo test` command of `cargo.yml` runs
+whole: cargo skips such a target without a word; rtci-video's `send_rtc2rtc` went unrun that way
+until the `video_codecs` job).
 
 To remove a row, make the test run where it does not (drop the attribute or the `cfg`, add the
 `mod`), then delete the row; the script tells you when a row has gone stale.
