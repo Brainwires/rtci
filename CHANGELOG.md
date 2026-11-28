@@ -689,6 +689,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **rtci-video's libvpx encoder works with the libvpx a system has, from 1.12.0 to 1.17.0**
+  (`conf/video-3-libvpx-abi`). The binding passed libvpx 1.16.0's encoder ABI version (39) to
+  every library it loaded, and libvpx raises that number in nearly every release (30 in 1.13,
+  34 in 1.14, 36 / 37 in 1.15, 39 in 1.16 and 1.17), so on Ubuntu 24.04 (libvpx 1.14.0) every
+  encoder failed with "vpx_codec_enc_init: 3 (ABI version mismatch)" (cargo run 46148529023,
+  our Linux pool; the same job passed on GitHub's 26.04 image, libvpx 1.16.0). The encoder now
+  reads the loaded release (`vpx_codec_version`) and passes that release's ABI version, from a
+  table of the releases whose headers were compared with the binding: every structure,
+  enumeration, constant and function type it uses is the same from 1.12.0 to 1.17.0. Any other
+  release is refused before a structure reaches it, naming the release. The decoder was not
+  affected (ABI 12 in every one of them). `ENCODER_ABI_VERSIONS` and `encoder_abi_version` are
+  new. CI: a job `libvpx_releases` runs the backend's tests on ubuntu-24.04 and ubuntu-latest,
+  and the codec job prints the libvpx it tested.
 - **`rtci_mdns::MulticastSocket::with_interface` sends by that interface**
   (`conf/ci-3-mdns-tests-do-not-depend-on-host-multicast`; RFC 6762 section 14). The socket
   joined the group on the interface given but sent by the system's route for 224.0.0.251. On
