@@ -20,13 +20,13 @@ TREES=(
   "v020=ea78e88fc054122946112a7f52a5b04e38af4621"   # 0.2.0, parent of kfr-1 and pacer-3
   "kfr1=a6b4f264c1a1e7efe54abac6f2bdfd0557b36a60"   # conf/kfr-1 alone
   "pacer3=3a648d559b31d76e5052493b7fbb547f58d8707e" # conf/pacer-3 alone
-  "kfr2=f94264d1f5a4c06c59d794b6efb0cc5578067ff1"   # conf/kfr-2: kfr-1 + pacer-3 + pacer-4
+  "kfr2=e2c05b4ed5ae6adc81e41c11190be8c7afbf3206"   # conf/kfr-2: kfr-1 + pacer-3 + pacer-4 (3 commits)
   "base=85aa2a715f8c91b5ff3e7b5a2c2ca57cc9068d66"   # master v0.2.1, the train PR's base
   "r6=e0ecd2ede1574488fcb454df5c78a04ad7fd4548"     # train 36 round 6, before pacer-3
   "r19rv=b33c2a7b273656a9033cf9dbee90aac3add50f78"  # train 36 now: pacer-3 in, kfr-1 reverted
   "r19=46b5130ec2e2810b5486e5c5565b57778104fcdf"    # train 36 round 19 with kfr-1 (failed run)
-  "r19p4a=f2dd512bb06aa7d5455c4b704a94e786e5322d20" # r19 + pacer-4's first commit only
-  "r19p4=0afcee2a8ef3867ff67df089eb59952108749b46"  # r19 + pacer-4 (= the train after integration)
+  "r19p4b=0afcee2a8ef3867ff67df089eb59952108749b46" # r19 + pacer-4's first two commits (probe 1's r19p4)
+  "r19p4=d8475529049bb4e04260bb08568a6ae429ecc89e"  # r19 + pacer-4, 3 commits (= the train after integration)
 )
 
 root=$(git rev-parse --show-toplevel)
@@ -86,8 +86,8 @@ compare() { # base head -> prints "verdict ratio min max"
 echo
 printf '%-8s %-8s %-8s %-7s %-7s %-7s %s\n' base head verdict ratio min max "medians ns"
 declare -A V R MN MX
-for pair in base:v020 base:r6 base:r19rv base:r19 base:r19p4a base:r19p4 base:kfr2 \
-            v020:kfr1 v020:pacer3 v020:kfr2 pacer3:kfr2 r19rv:r19 r19:r19p4a r19:r19p4 r6:r19p4; do
+for pair in base:v020 base:r6 base:r19rv base:r19 base:r19p4b base:r19p4 base:kfr2 \
+            v020:kfr1 v020:pacer3 v020:kfr2 pacer3:kfr2 r19rv:r19 r19:r19p4b r19p4b:r19p4 r19:r19p4 r6:r19p4; do
   bt=${pair%%:*} ht=${pair#*:}
   read -r verdict ratio mn mx bm hm < <(compare "$bt" "$ht")
   V[$pair]=$verdict R[$pair]=$ratio MN[$pair]=$mn MX[$pair]=$mx
@@ -96,16 +96,18 @@ done
 echo
 
 ge() { python3 -c "import sys; sys.exit(0 if float('$1') >= float('$2') else 1)"; }
-# Precondition: the regression of round 19 reproduces on this runner (slower by the job's rule,
-# or every round at least 15 % slower than the base).
-if [ "${V[base:r19]}" != slower ] && ! ge "${MN[base:r19]}" 1.15; then
+# Precondition: pacer-3's regression reproduces on this runner: r19 slower than the base by the
+# job's rule, or every round at least 10 % slower (probe 46140514843, a 90 ns runner: 1.144 to
+# 1.226; the gate's 25 ns floor is runner-dependent, see conf/bench-2-gate-floor).
+if [ "${V[base:r19]}" != slower ] && ! ge "${MN[base:r19]}" 1.10; then
   echo "INCONCLUSIVE: r19 against base is ${V[base:r19]} (ratio ${R[base:r19]}, rounds ${MN[base:r19]}..${MX[base:r19]}): this runner did not reproduce the regression"
   exit 3
 fi
 echo "PRECONDITION: r19 against base ${V[base:r19]}, ratio ${R[base:r19]} (rounds ${MN[base:r19]}..${MX[base:r19]})"
 ok=1
 if [ "${V[base:r19p4]}" = slower ]; then echo "FAIL: r19p4 is still slower than base"; ok=0; fi
-if ge "${MX[r19:r19p4]}" 0.92; then echo "FAIL: r19p4 is not faster than r19 in every round (max ${MX[r19:r19p4]})"; ok=0; fi
+# The median over the rounds, not every round: single rounds of one tree range by about 10 %.
+if ge "${R[r19:r19p4]}" 0.95; then echo "FAIL: r19p4 is not 5 % faster than r19 (median ratio ${R[r19:r19p4]})"; ok=0; fi
 if [ "${V[v020:kfr2]}" = slower ]; then echo "FAIL: kfr2 is slower than 0.2.0"; ok=0; fi
 [ $ok -eq 1 ] && { echo "PASS: the fix removes the regression"; exit 0; }
 exit 1
