@@ -57,8 +57,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key expansion per packet).
   Performance: zeroize-3
 
+### Breaking changes
+
+- **stream driver: on Windows a `PeerDriver` sends no IPv4 mDNS on loopback unless asked**
+  (`conf/mdns-4-windows-poisoned-route-and-loopback-default`). SemVer-visible: `rtci-stream-driver`'s
+  `PeerDriverConfig` (an exhaustive struct) has a new public field,
+  `mdns_on_loopback_on_windows: bool`, so a struct literal without `..PeerDriverConfig::on(..)`
+  no longer compiles; and a default changes on Windows. On Windows a socket joined to
+  224.0.0.251 on the loopback interface that sends to the group there leaves the group's
+  destination-cache entry on loopback (source 127.0.0.1) after the process has exited, and every
+  later process on the host then sends its mDNS from 127.0.0.1, where nobody on the network hears
+  it, until an administrator deletes the entry (measured on Windows 11 and on GitHub's Windows
+  image, ci-3: agent-test runs 46045692164, 46049295359, 46049306566). 0.2 did exactly that for
+  every driver given 127.0.0.1 with mDNS on, and only logged a warning. Now, on Windows and by
+  default (`mdns_on_loopback_on_windows: false`), the driver does not join the IPv4 group on a
+  loopback interface and sends no message about a loopback address's name to the group (each
+  is dropped and counted in `unsent_datagrams`); a driver whose only IPv4 addresses are loopback
+  binds no IPv4 mDNS socket (`mdns_available(false)` is `false`) and tells the connection its
+  IPv4 names cannot be published, so its loopback candidates go out under unpublished `.local`
+  names (or not at all with `with_multicast_dns_fail_closed`). Rules: RFC 8445 section 5.1.1.1
+  ("Addresses from a loopback interface MUST NOT be included in the candidate addresses";
+  loopback candidates are for local use); RFC 6762 asks no mDNS on loopback;
+  draft-ietf-mmusic-mdns-ice-candidates says nothing of loopback. Upgrade: an application or
+  test that runs drivers on loopback on Windows and wants their names resolved sets
+  `mdns_on_loopback_on_windows: true` (0.2's behaviour, with the warning) and cleans the entry
+  when done (`netsh interface ipv4 delete destinationcache interface=<loopback index>
+  address=224.0.0.251`). IPv6 (ff02::fb on ::1) is unchanged: not measured to leave a route.
+  Other systems: no change, the field is ignored. Tests: `peer.rs` unit tests (the address and
+  route choice, on every platform); `mdns_virtual_time.rs`:
+  `drivers_asked_for_mdns_on_loopback_send_it_there_and_connect` (baseline) and
+  `by_default_drivers_on_loopback_send_no_mdns_there_on_windows_only` (varies only the setting;
+  its Windows branch runs in every Windows job's virtual-time step); on a real Windows host
+  `mdns.rs::by_default_drivers_on_loopback_leave_the_group_route_off_loopback` asserts the
+  group's route is off loopback before, and still off loopback after, default drivers on
+  127.0.0.1, run by `scripts/windows-poisoned-mdns-route.sh` before it moves the route.
+
 ### Behaviour changes
 
+- **`rtci_mdns::MulticastSocket::new()` on Windows joins and sends on the default route's interface**
+  (`conf/mdns-4-windows-poisoned-route-and-loopback-default`; RFC 6762 section 14). Without `with_interface` the socket
+  joined on `INADDR_ANY` and sent by the system's route for 224.0.0.251, which on Windows comes
+  from the destination cache: on a host where any process had sent to the group from 127.0.0.1
+  (see the stream driver entry under Breaking changes) it sent from 127.0.0.1 and nobody on the
+  network heard it, silently. On Windows, when neither an interface nor a local IPv4 address
+  (`with_multicast_local_ipv4`) is given, it now joins the group on the default route's
+  interface (the local address of a UDP socket connected to 192.0.2.1:9, which sends nothing)
+  and sets `IP_MULTICAST_IF` to it, as `with_interface` with that address would. The join
+  moved too: on such a host a join on `INADDR_ANY` also lands on loopback, and a socket that
+  sent by the network interface but stayed joined on `INADDR_ANY` never heard its own datagrams
+  (agent-test run 46123619860, the interop probe). A default route on loopback or none leaves
+  `INADDR_ANY` and the system's route. Where the system's route for the group was not the
+  default route's interface (a hosted image answered 172.25.176.1, "vEthernet (nat)", for the
+  group and 10.1.0.100 for the default route), the socket now uses the default route's.
+  Linux, macOS and other systems: unchanged (GitHub's macOS image routes the group to lo0 on
+  purpose). Not SemVer-breaking (no API change). **Limit:** on a multi-homed Windows host whose
+  mDNS link is not the default route's, the system's route might have been right where the
+  default route is wrong; `with_interface` is the answer there, and its documentation says so.
+  Tests: `socket.rs` unit tests of the choice (every platform);
+  `multicast_interface.rs::on_windows_a_socket_without_an_interface_sends_by_the_default_route`
+  (receiver joined on the default route's interface, the source must be that interface) and
+  `on_windows_a_socket_without_an_interface_hears_the_default_route` (a `new()` receiver gets
+  what a sender given the default route's interface sends), run by
+  `scripts/windows-poisoned-mdns-route.sh` on a host whose route is on loopback. Each first
+  checks its precondition on the host it runs on: a socket made as 0.2's `new()` must not get
+  the datagram through there. The listening test asserts it ("PRECONDITION"). The sends test
+  cannot: on one hosted image shape, whose group answer before the poisoning was "vEthernet
+  (nat)", a sender without `IP_MULTICAST_IF` still left by the default route (agent-test run
+  46124346568), so there it prints `### CANNOT PROVE HERE: ...`, which the script raises as a
+  warning on the run, and still asserts that `new()` sends by the default route. The script also
+  prints, after poisoning, where an unconnected send to the group actually arrives (per joined
+  interface, or "nowhere"). The file's tests run one at a time.
 - **RTCP session: a NACK larger than the MTU is split; a repeated TMMBR waits for a Regular
   packet** (`conf/rtcp-session-3-split-nack-regular-tmmbr`). (1) RFC 3550 section 6.1: "If the overall
   length of a compound packet would exceed the MTU of the network path, it SHOULD be segmented
@@ -514,10 +582,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket, on that host, left by loopback with source 127.0.0.1, and a peer that resolves a
   `.local` name to the answer's source (or refuses an address record from another address)
   got loopback or nothing (agent-test run 46049306566). It now sets `IP_MULTICAST_IF` to the
-  interface it joined on. **Limit:** `MulticastSocket::new()` without an interface is
-  unchanged and still sends by the system's route, so on such a Windows host it still sends
-  from 127.0.0.1 and fails silently; the `with_interface` documentation says so and tells a
-  Windows application to pass the interface of the address it publishes. Test
+  interface it joined on. **Limit:** `MulticastSocket::new()` without an interface was
+  unchanged and still sent by the system's route, so on such a Windows host it still sent
+  from 127.0.0.1 and failed silently; lifted on Windows by `conf/mdns-4-windows-poisoned-route-and-loopback-default`
+  (Behaviour changes: it now sends by the default route's interface there). Test
   `rtci-mdns/tests/multicast_interface.rs`, run on a Windows host put in that state by
   `scripts/windows-poisoned-mdns-route.sh` (which also runs the interop and driver mDNS tests
   there and deletes the entry again from an EXIT trap): a new step of `cargo.yml`'s platform
@@ -869,6 +937,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **The driver's loopback mDNS test shows as ignored on Windows, not as passed**
+  (`conf/mdns-4-windows-poisoned-route-and-loopback-default`). `examples/stream-driver/tests/mdns.rs`:
+  `drivers_on_loopback_resolve_each_other_on_the_loopback_interface` returned `Ok(())` at once on
+  Windows after printing "SKIPPED", so `cargo test` counted it as passed; it is now
+  `#[cfg_attr(windows, ignore = "...")]`, sets `mdns_on_loopback_on_windows`, and
+  `scripts/windows-poisoned-mdns-route.sh` runs it with `--ignored` on GitHub-hosted Windows
+  (then prints the route). Its dormant post-condition moved to the new default test (Breaking
+  changes). `scripts/check-test-inventory.py` now also lists a `#[cfg_attr(<condition>, ignore)]`
+  test as ignored (it saw only `#[ignore]` and `#[cfg(...)]`), with unit tests in
+  `scripts/test_check_test_inventory.py`; `docs/test-exclusions.md` has the new rows. The
+  remaining skips that count as passes are runtime probes (no multicast on the host), which an
+  attribute cannot express: listed in the branch's handoff note, unchanged.
 - test-env interop: the `reflect video <codec>` cells name a browser that sends on a payload
   type its offer does not have (`conf/test-4-reflect-cells-name-an-off-offer-format`), as
   "chrome profile: audio and video both ways" already did, and log the payload types received

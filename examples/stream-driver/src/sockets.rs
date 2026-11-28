@@ -157,7 +157,8 @@ pub struct AddressFilter {
     /// departs from that rule, for local use and tests only). On Windows a driver with mDNS on a loopback address leaves a
     /// destination-cache route for 224.0.0.251 via loopback after the process exits, and the
     /// system then routes the group by loopback for other processes until the entry is deleted
-    /// (`peer` module documentation).
+    /// (`peer` module documentation), so on Windows a `PeerDriver` sends no mDNS on loopback
+    /// unless `PeerDriverConfig::mdns_on_loopback_on_windows` asks.
     pub include_loopback: bool,
     /// IPv6 link-local addresses too (off by default).
     pub include_link_local: bool,

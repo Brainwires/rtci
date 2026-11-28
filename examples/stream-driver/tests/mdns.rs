@@ -65,7 +65,8 @@ fn mdns_egress_ip() -> Option<IpAddr> {
 /// 224.0.0.251:5353 and its local address. On Windows a process that joined the group on
 /// loopback and sent to it there leaves this answer at 127.0.0.1 for every process after it has
 /// exited (hosted Windows, agent-test run 46049295359; the `netsh` joins table entry alone does
-/// not move it): the Windows post-condition of the loopback test.
+/// not move it): the Windows pre- and post-condition of
+/// `by_default_drivers_on_loopback_leave_the_group_route_off_loopback`.
 fn group_answer() -> Option<IpAddr> {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
@@ -191,7 +192,25 @@ struct Side {
 }
 
 impl Side {
+    /// A driver on `ip` with `PeerDriverConfig::on`'s defaults (the rate limit aside).
     fn new(ip: IpAddr, limit: Option<MdnsRateLimit>) -> Result<Self> {
+        Self::with_config(PeerDriverConfig {
+            mdns_rate_limit: limit,
+            ..PeerDriverConfig::on(vec![ip])
+        })
+    }
+
+    /// As [`new`](Self::new), asking for mDNS on loopback on Windows
+    /// (`PeerDriverConfig::mdns_on_loopback_on_windows`).
+    fn asking_for_loopback_mdns(ip: IpAddr, limit: Option<MdnsRateLimit>) -> Result<Self> {
+        Self::with_config(PeerDriverConfig {
+            mdns_rate_limit: limit,
+            mdns_on_loopback_on_windows: true,
+            ..PeerDriverConfig::on(vec![ip])
+        })
+    }
+
+    fn with_config(config: PeerDriverConfig) -> Result<Self> {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
@@ -203,13 +222,7 @@ impl Side {
             .with_setting_engine(settings.build())
             .build(Instant::now())?;
         Ok(Self {
-            driver: PeerDriver::new(
-                pc,
-                PeerDriverConfig {
-                    mdns_rate_limit: limit,
-                    ..PeerDriverConfig::on(vec![ip])
-                },
-            ),
+            driver: PeerDriver::new(pc, config),
             outgoing: vec![],
             signalled: vec![],
         })
@@ -334,25 +347,22 @@ async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() ->
 /// them on the loopback interface, resolve each other's, and connect. (Sent on the default
 /// interface, as 0.2.0-dev did before, the answers came from another address and were
 /// refused: the names never resolved.)
+///
+/// On Windows the drivers send no mDNS on loopback unless asked
+/// (`PeerDriverConfig::mdns_on_loopback_on_windows`, set here), and what they then send leaves the
+/// group's destination-cache route on loopback for the whole host after this process (`netsh
+/// interface ipv4 show destinationcache address=224.0.0.251`; agent-test runs 46045692164,
+/// 46049295359): on a runner that lives on (a self-hosted Windows VM) the next job's mDNS would
+/// leave by loopback. So it is ignored there, and `scripts/windows-poisoned-mdns-route.sh` runs it
+/// on GitHub-hosted Windows, whose runner is thrown away, and deletes the entry afterwards.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: mDNS on loopback leaves the group's destination-cache route on loopback for the whole host; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows), which deletes the entry"
+)]
 async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> Result<()> {
     let _group = MDNS_GROUP_IN_USE.lock().await;
     let ip = IpAddr::from(Ipv4Addr::LOCALHOST);
-    // On Windows mDNS sent on loopback leaves the group's destination-cache route on loopback
-    // after this process (`netsh interface ipv4 show destinationcache address=224.0.0.251`),
-    // and every process then gets 127.0.0.1 for the group (agent-test runs 46045692164,
-    // 46049295359; the fleet's Windows PC): on a runner that lives on (our self-hosted Windows
-    // VM) the next job's mDNS tests would bind loopback. Not run there;
-    // the same exchange on loopback's rules runs on virtual time
-    // (`mdns_virtual_time.rs::drivers_whose_link_is_not_the_default_multicast_interface_resolve_each_other`).
-    if cfg!(windows) {
-        println!(
-            "SKIPPED drivers_on_loopback_resolve_each_other_on_the_loopback_interface: on \
-             Windows mDNS on loopback leaves the group's destination-cache route on loopback \
-             for the whole host"
-        );
-        return Ok(());
-    }
     if !multicast_or_skip(
         "drivers_on_loopback_resolve_each_other_on_the_loopback_interface",
         ip,
@@ -360,9 +370,8 @@ async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> R
         return Ok(());
     }
     let limit = MdnsRateLimit::default();
-    let answer_before = group_answer();
-    let mut a = Side::new(ip, Some(limit.clone()))?;
-    let mut b = Side::new(ip, Some(limit))?;
+    let mut a = Side::asking_for_loopback_mdns(ip, Some(limit.clone()))?;
+    let mut b = Side::asking_for_loopback_mdns(ip, Some(limit))?;
     let up = connect(&mut a, &mut b, Duration::from_secs(30)).await?;
     assert_only_local_names("a", &a, ip);
     assert_only_local_names("b", &b, ip);
@@ -376,16 +385,53 @@ async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> R
         b.driver.mdns_datagrams_sent(),
         b.driver.mdns_datagrams_received()
     );
-    // Windows post-condition, should the test run there again: once the drivers (and their
-    // mDNS sockets) are gone, the host's answer for the group is not left at loopback (see
-    // `group_answer`), unless it was loopback before.
+    Ok(())
+}
+
+/// The 0.3.0 default on Windows: drivers given only 127.0.0.1 send no mDNS on loopback, so once
+/// they are gone the host's answer for the group ([`group_answer`]) is where it was, not
+/// 127.0.0.1. The precondition is asserted: the answer must not be loopback before (a host left
+/// in that state proves nothing), and the drivers must have had mDNS to send (the engine's
+/// probes and announcements of their names, dropped by the driver: unsent). Needs a host whose
+/// route for the group is not on loopback, so it is ignored and
+/// `scripts/windows-poisoned-mdns-route.sh` runs it on GitHub-hosted Windows before it changes
+/// the route.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "needs a Windows host whose route for 224.0.0.251 is not on loopback; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows) before it moves the route"]
+async fn by_default_drivers_on_loopback_leave_the_group_route_off_loopback() -> Result<()> {
+    let _group = MDNS_GROUP_IN_USE.lock().await;
+    let ip = IpAddr::from(Ipv4Addr::LOCALHOST);
+    let before = group_answer();
+    assert!(
+        before.is_some_and(|ip| !ip.is_loopback()),
+        "PRECONDITION: the host's answer for the group is {before:?} before the test; it must not \
+         be loopback, or the test proves nothing"
+    );
+    // `PeerDriverConfig::on`'s default, not set here: what is tested is the default itself.
+    let mut a = Side::new(ip, Some(MdnsRateLimit::default()))?;
+    let mut b = Side::new(ip, Some(MdnsRateLimit::default()))?;
+    let _ = connect(&mut a, &mut b, Duration::from_secs(5)).await?;
+    let seen = [("a", &a), ("b", &b)].map(|(who, side)| {
+        (
+            who,
+            side.driver.unsent_datagrams(),
+            side.driver.mdns_available(false),
+        )
+    });
     drop((a, b));
-    if cfg!(windows) && answer_before.is_some_and(|ip| !ip.is_loopback()) {
-        let after = group_answer();
+    let after = group_answer();
+    println!("### group answer before {before:?}, after the default drivers on loopback {after:?}");
+    assert!(
+        after.is_some_and(|ip| !ip.is_loopback()),
+        "the default drivers on loopback left the group's answer at {after:?} (was {before:?})"
+    );
+    for (who, unsent, available) in seen {
         assert!(
-            after.is_some_and(|ip| !ip.is_loopback()),
-            "the loopback test left the group's answer at {after:?} (was {answer_before:?})"
+            unsent > 0,
+            "{who}: the connection had mDNS for its loopback name to send"
         );
+        assert!(!available, "{who}: no IPv4 mDNS socket for loopback only");
     }
     Ok(())
 }

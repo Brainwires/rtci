@@ -3,8 +3,9 @@
 
 A test that never runs proves nothing and looks like coverage. This script fails when it finds:
 
-* a test with ``#[ignore]``, except in ``tests/testenv_*.rs`` (the real-network environment
-  runs those) where the attribute must carry its reason (``#[ignore = "..."]``);
+* a test with ``#[ignore]`` or ``#[cfg_attr(<condition>, ignore)]``, except in
+  ``tests/testenv_*.rs`` (the real-network environment runs those) where the attribute must
+  carry its reason (``#[ignore = "..."]``);
 * a commented-out ``#[test]`` / ``#[tokio::test]``;
 * a ``*_test.rs`` file under a crate's ``src/`` that no ``mod`` declaration (or ``#[path]``)
   compiles;
@@ -52,6 +53,9 @@ SKIP_DIRS = {"target", ".git", "fuzz", "node_modules", "artifacts", "corpus"}
 
 TEST_ATTR = re.compile(r"#\[\s*(?:tokio::test|async_std::test|test|rstest|test_case)\b[^\]]*\]")
 IGNORE_ATTR = re.compile(r"#\[\s*ignore\s*(=\s*\"(?P<reason>[^\"]*)\")?\s*\]")
+# `#[cfg_attr(windows, ignore = "...")]`: ignored where the condition holds (shown as ignored
+# there, not as passed), so listed like a plain `#[ignore]`.
+CFG_ATTR_IGNORE = re.compile(r"#\[\s*cfg_attr\s*\(.*,\s*ignore\s*(=\s*\"(?P<reason>[^\"]*)\")?\s*,?\s*\)\s*\]")
 FN_DEF = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;")
 PATH_ATTR = re.compile(r"#\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
@@ -163,7 +167,7 @@ def scan_file(path: Path, findings: list[Finding], tests: dict[str, set[str]]) -
             if fn and TEST_ATTR.search(joined):
                 name = fn.group("name")
                 tests.setdefault(name, set()).add(relpath)
-                ignore = IGNORE_ATTR.search(joined)
+                ignore = IGNORE_ATTR.search(joined) or CFG_ATTR_IGNORE.search(joined)
                 if ignore:
                     if not (is_testenv and ignore.group("reason")):
                         findings.append(Finding("ignored", relpath, name, ignore.group(0)))
