@@ -1068,6 +1068,8 @@ impl PacerInterceptor {
 
     /// Counts a packet of a stream that may not send as dropped (a retransmission for
     /// [`RetransmissionsLeft`] too).
+    #[cold]
+    #[inline(never)]
     fn drop_not_sending(&mut self, packet: &TaggedPacket) {
         if packet.message.has(&Attribute::Retransmission) && !Self::is_padding(packet) {
             self.retransmission_dropped(packet);
@@ -1080,6 +1082,13 @@ impl PacerInterceptor {
     /// padding, and what was released for the next interceptor but has not gone to it) is
     /// dropped, without a key-frame request or a [`PacerDiscard`]: nothing is asked of a
     /// source that is not to send.
+    ///
+    /// Out of line and cold on purpose: `enqueue` looks for the notice on every packet written
+    /// and finds it once per applied answer. Inlined there, this body made `handle_write`'s
+    /// frame twice the size and the `Interceptor/Pacer/write+poll` benchmark slower
+    /// (docs/performance.md, "pacer-4").
+    #[cold]
+    #[inline(never)]
     fn stop_streams(&mut self, now: Instant, ssrcs: &[u32]) {
         self.not_sending = ssrcs.iter().copied().collect();
         if self.not_sending.is_empty() {
@@ -1480,8 +1489,7 @@ impl PacerInterceptor {
 
         // The streams that may not send from now on: what waits of them goes.
         if let Some(notice) = msg.message.custom::<StreamsNotSending>() {
-            let ssrcs = notice.ssrcs.clone();
-            self.stop_streams(msg.now, &ssrcs);
+            self.stop_streams(msg.now, &notice.ssrcs);
         }
 
         // RTCP is control traffic and mostly time-sensitive — feedback is only useful while it is
