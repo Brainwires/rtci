@@ -3175,17 +3175,21 @@ impl RTCPeerConnection {
 
         // RFC 8445 section 10: "an agent compliant to this specification MUST inform the
         // peer about the compliance using the 'ice2' option" (RFC 8839 section 5.6:
-        // `a=ice-options`), lite agents included.
-        let ice_options = if params.is_ice_lite {
+        // `a=ice-options`), lite agents included. `trickle` too: this side accepts trickled
+        // candidates (`add_remote_candidate` at any time after the remote description) and
+        // trickles its own (JSEP RFC 9429 §5.2.1 / §5.3.1), and RFC 8840 §4: "Trickle ICE
+        // Agents MUST indicate support for Trickle ICE by including the ice-option "trickle"
+        // within all SDP Offers and Answers". A lite agent is one as well: it takes trickled
+        // candidates and trickles its own (its TCP candidates come after the description),
+        // and RFC 8838 Appendix B has an ICE-lite agent capable of Trickle ICE "indicate
+        // support for Trickle ICE". Without it the full peer takes the lite agent's
+        // description for all its candidates (W3C webrtc-pc 5.6.4, `canTrickleIceCandidates`
+        // false) and may report "failed" before the trickled ones arrive.
+        if params.is_ice_lite {
             // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
-            "ice2"
-        } else {
-            // JSEP RFC 8829 §5.2.1 / §5.3.1: this side accepts trickled candidates
-            // (`add_remote_candidate` at any time after the remote description), so it says so
-            // (RFC 8840 §4.1.1). A lite agent has no checks to trickle into.
-            "trickle ice2"
-        };
+        }
+        let ice_options = "trickle ice2";
         // RFC 8839 section 5.6: "session-level or media-level".
         if params.ice_options_in_media_sections {
             for media in &mut d.media_descriptions {

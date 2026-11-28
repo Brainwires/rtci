@@ -292,6 +292,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtcp_session_rtc2rtc.rs::an_sdes_cname_other_than_the_declared_one_leaves_the_ssrc_undeclared`,
   `a_flowing_stream_whose_sdes_contradicts_its_declared_cname_keeps_flowing`,
   `an_sdes_cname_that_matches_the_declared_one_changes_nothing`.
+- **A lite agent's descriptions say `a=ice-options:trickle ice2`, not `ice2` alone**
+  (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`; RFC 8840 section 4: "Trickle
+  ICE Agents MUST indicate support for Trickle ICE by including the ice-option "trickle" within
+  all SDP Offers and Answers"; RFC 8838 Appendix B: an ICE-lite agent capable of Trickle ICE
+  "would indicate support for Trickle ICE"). A lite agent of this engine takes trickled
+  candidates and trickles its own (its TCP candidates come after the description), yet its
+  offers and answers said it could not, so a full peer took the lite agent's description for
+  every candidate it would have (W3C webrtc-pc 5.6.4, `canTrickleIceCandidates` false) and
+  could report "failed" before the trickled TCP candidates arrived. A peer of a lite `rtci`
+  agent now sees `canTrickleIceCandidates` true and waits for its end-of-candidates. Test
+  `a_lite_agent_says_trickle_in_its_offer_and_its_answer`; `test_set_lite` updated. Audit
+  RFC8838-3-3, RFC8445-10-1, RFC8839-4.2.1.5-1, RFC9429-5.2.1-11 (notes).
 
 ### Changed
 
@@ -827,6 +839,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same). WEBRTC-5.2-33 `tested` -> `missing`: replaceTrack never refuses a track outside the
   negotiated envelope, which webrtc-pc defines by examples the engine can see (a track whose
   codec is not negotiated, an audio track of another channel count; fixed on `conf/w3c-2-replace-track-envelope`). Open MUST rows 57 -> 53.
+- `rtci-stream-driver`: `AddressFilter::include_loopback` quotes RFC 8445 section 5.1.1.1 as it
+  is, "Addresses from a loopback interface MUST NOT be included in the candidate addresses"
+  (it said SHOULD NOT), and says that turning it on departs from that rule
+  (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`).
 
 ### Testing
 
@@ -1025,6 +1041,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temporal modes only. `RTCRtpSFrameEncryptor::transform` no longer copies each frame to look for
   layers when no spatial mode is declared (output unchanged). The `sframe_transform` module docs
   now say how an application hands layer frames.
+- rtci-ice: `a_pair_still_frozen_at_the_nomination_is_taken_out_of_the_checklist` (both roles;
+  RFC 8445 section 8.1.2), the agent-level test with a pair still Frozen at the nomination
+  (two remote candidates of one foundation, the first still being checked): Frozen just
+  before, Failed after, `failed` in its stats, never checked
+  (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`). Before, only the stream
+  driver's `virtual_time` test caught a retirement that skipped Frozen pairs.
 
 ## [0.2.1] - 2026-11-27
 
