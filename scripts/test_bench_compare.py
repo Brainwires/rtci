@@ -246,6 +246,36 @@ class Separation(unittest.TestCase):
         self.assertFalse(results[0].fails)
 
 
+class LayoutBias(unittest.TestCase):
+    """Train 36 round 22 (run 46160736903): rtci-stun identical in base and head, yet one runner
+    measured the head's `BenchmarkAlternateServer_AddTo` x1.12 slower in all six rounds of the same
+    two binaries. The rule cannot tell that from a cost; the shell relinks with the functions
+    shuffled for the confirmation rounds (row bench-3), and those rounds decide."""
+
+    base_round_22 = [51.0, 51.0, 50.0, 50.0, 50.0, 51.0]
+    head_round_22 = [57.0, 57.0, 56.0, 56.0, 56.0, 56.0]
+
+    def test_the_same_binaries_measured_six_times_are_separated(self):
+        r = bc.compare([{"A": v} for v in self.base_round_22], [{"A": v} for v in self.head_round_22])[0]
+        self.assertEqual(("slower", "separation"), (r.verdict, r.by))
+
+    def test_rounds_with_the_layout_moved_that_overlap_clear_it(self):
+        # Two rounds of the original binaries, then four relinked rounds in which the head is
+        # sometimes faster: no separation over the six.
+        base = self.base_round_22[:2] + [52.0, 50.0, 51.0, 53.0]
+        head = self.head_round_22[:2] + [50.0, 54.0, 51.0, 52.0]
+        r = bc.compare([{"A": v} for v in base], [{"A": v} for v in head])[0]
+        self.assertEqual("same", r.verdict)
+        self.assertIsNone(r.separated)
+
+    def test_a_cost_in_the_code_stays_separated_under_every_layout(self):
+        # Train 36's pacer (round 8, base 89-90 ns): the head beyond the base whatever the layout.
+        base = [90.0, 89.0, 92.0, 88.0, 91.0, 90.0]
+        head = [102.0, 117.0, 104.0, 100.0, 106.0, 103.0]
+        r = bc.compare([{"P": v} for v in base], [{"P": v} for v in head])[0]
+        self.assertEqual(("slower", "separation"), (r.verdict, r.by))
+
+
 class Main(unittest.TestCase):
     def write(self, directory, name, text):
         path = Path(directory) / name
