@@ -230,8 +230,8 @@ jobs:
         run: python3 scripts/check-fuzz-registry.py
       - name: Actions pinned, self-hosted runners kept from fork pull requests
         run: python3 scripts/check-workflow-pins.py
-      - name: Clause audit counts agree with the tables (COUNTS.md up to date)
-        run: python3 scripts/audit-count.py --check
+      - name: Clause audit counts agree with the tables (COUNTS.md and README's figures up to date)
+        run: python3 scripts/test_audit_count.py && python3 scripts/audit-count.py --check
       - name: Old crate names stay out (the rename to rtci, docs/rename.md)
         run: python3 scripts/rename-to-rtci.py --check
       - name: Every open MUST row of the audit has a class (OPEN-MUST.md up to date)

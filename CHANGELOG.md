@@ -725,6 +725,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- README's status figures are checked (`conf/docs-7-readme-counts-are-checked`):
+  `scripts/audit-count.py --check` (cargo.yml's gate job) now fails when README.md's status
+  table (MUST / SHOULD / MAY rows), its "N MUST rows are open (...)" sentence or its "audited
+  ... against N specifications" differs from what the audit gives, naming the line and both
+  figures (train 36 round 16 shipped a README with 11 open MUST rows against the audit's 6).
+  The patterns are those the train integrator's README updater writes. The check found one
+  stale figure: 111 specifications, the audit has 113 (corrected). Self-test
+  `scripts/test_audit_count.py` (the tree agrees; one changed figure fails, named).
 - README names every default that departs from a MUST by the owner's decision, three since
   jsep-94 removed the RFC 9429 5.11 feedback item and jsep-95 added RFC 9429 5.3.1 (answers list
   only the offered formats): RFC 6184 7.2.2, RFC 9429 5.3.1 and RFC 8083 3, each with the setting
