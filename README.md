@@ -134,6 +134,16 @@ socket is free for another connection, whose Allocate on the same 5-tuple would 
 refused with 437 while the old allocation lives (up to its lifetime, 10 minutes by default).
 Dropping a connection without `close()` sends nothing.
 
+TURN credentials that expire (a TURN REST API username, `<expiry>:<id>`) are rotated on a live
+connection with `rotate_ice_servers(now, servers)` and one offer / answer round: the peer sees an
+ICE restart (same connection, new ice-ufrag, same DTLS fingerprint). For no gap, bind a second
+UDP socket and add its host candidate after `create_offer` and before `set_local_description`
+of the restart offer: the new allocation is made from it, the old one relays until the new pair
+carries the data and is then deleted, and `OnTurnAllocationReleased` names the old socket, which
+the application may then close. With one socket the old allocation is released first
+(`OnTurnAllocationReplacedInPlace`). After the restart, re-send your host candidates to the peer
+(a candidate kept across the restart is not announced again).
+
 `handle_event` is also part of the trait, but `RTCEvent` is currently uninhabited: no value of it can be constructed,
 so there is nothing to call it with. It exists so the signature is already right when the first inbound event variant
 is added.

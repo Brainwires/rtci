@@ -131,6 +131,11 @@ impl TurnServer {
         }
     }
 
+    /// The virtual instant the server's clock starts at.
+    pub fn start(&self) -> Instant {
+        self.start
+    }
+
     /// The unix time at virtual instant `now`.
     pub fn unix(&self, now: Instant) -> u64 {
         self.start_unix + now.saturating_duration_since(self.start).as_secs()

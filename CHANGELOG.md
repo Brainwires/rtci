@@ -350,6 +350,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StrictRfc` and `Chrome` profiles (and the `chrome-defaults` feature): their later offers keep
   the rejected streams; API addition only. Tests
   `tests/jsep_rejected_rids.rs` (both values, an answer without simulcast, re-acceptance).
+- **`RTCPeerConnection::rotate_ice_servers(now, ice_servers)`** (fork convenience): new STUN /
+  TURN servers now (`set_configuration` + an ICE restart, W3C "set the configuration" and RFC
+  9429 section 4.1.18), for rotating TURN credentials on a long session without a new
+  connection: one offer / answer round; the DTLS association and the data channels stay; the
+  allocation in use relays until the restart has its pair and is then deleted
+  (`OnTurnAllocationReleased` names the local address now free). A host candidate the
+  application adds on a second UDP socket before applying the restart offer gives the new
+  allocation its own 5-tuple (RFC 8656 section 2.2) and no gap; with one socket the old one is
+  released first and `OnTurnAllocationReplacedInPlace { url, local_address }` says so. Tested
+  end to end against an in-memory server that checks REST username expiry on every request.
+  turn-7.
+- **`rtci_turn::rest::rest_username_expiry(username, separator)`**: when a TURN REST API
+  username (draft-uberti-behave-turn-rest-00, coturn `use-auth-secret`) expires; a pure helper
+  the engine never uses. turn-7.
+- **`OnTurnRequestRejected` for every finally refused TURN request** of the engine's links
+  (Allocate with any code, Refresh, CreatePermission, ChannelBind): the warning an application
+  gets when, say, a REST credential has expired. turn-7.
+- **`RTCPeerConnectionEvent::OnTurnAllocationReleased { url, local_address, relayed_address }`
+  and `OnTurnRequestRejected { url, relay, method, error_code }`** (fork events, not W3C): an
+  engine TURN allocation over UDP has been let go (the local address is free), and a TURN request
+  was finally refused (for now: a 437 to an Allocate). turn-6.
 
 ### Fixed
 
@@ -577,6 +598,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/early_media_rtc2rtc.rs::a_format_a_later_offer_adds_is_received_as_that_format_before_the_answer`
   found no VP9). Test
   `tests/rtp_object_model.rs::get_capabilities_is_the_same_after_a_negotiation_that_narrowed_the_formats`.
+- **`icecandidateerror` for the servers the engine gathers from itself** (W3C webrtc-pc 4.8.3):
+  a TURN Allocate refused with a code, a TURN or STUN server no address of which answered (701,
+  once per URL), a STUN error response. Nothing was raised before. turn-7.
+- **`close()` releases the engine's TURN allocations reliably** (RFC 8656 section 8, RFC 8489
+  section 6.2.1). It sent one Refresh of LIFETIME 0 per established UDP allocation and never
+  drove the TURN client again: a lost datagram or a 438 left the allocation for its lifetime, an
+  Allocate under way at `close()` was not followed (its allocation stayed), and the next peer
+  connection on the same socket was refused with 437 and held the server back for two minutes.
+  The release is now a transaction run to its end, after `close()` too: a closed connection
+  serves `poll_write`, `handle_read`, `poll_timeout` and `handle_timeout` for those
+  transactions only, until `poll_timeout()` is `None` (README: what to do after `close()`);
+  an Allocate under way is followed and an allocation it makes is deleted. The same applies to
+  every other release of an engine allocation (a removed transport, a restart's retired link).
+  A 437 to an Allocate has the link allocate from another UDP base of the transport, up to
+  three (RFC 8656 section 7.4), and raises `OnTurnRequestRejected`. turn-6.
+- **An ICE restart with new TURN credentials no longer deletes the allocation that carries the
+  data** (RFC 8445 sections 9 and 5.1.1.4). `set_configuration` with new credentials for a
+  `turn:` server and an ICE restart (the W3C recipe for new servers) deleted the engine's
+  allocation with a Refresh of LIFETIME 0 as soon as the restart offer was applied, while the
+  agent still sent on the relayed path until the restart selected its pair: relayed data stopped
+  for the whole offer / answer exchange. The link is now kept, refreshed and relaying until the
+  agent no longer uses that path (the restart's pair is selected and the previous path's grace
+  is over), then deleted. The new allocation needs another 5-tuple (RFC 8656 section 2.2; an
+  Allocate on one in use is answered 437): it is made from another UDP base of the transport
+  when there is one (a second socket of the application, a host candidate added while the
+  restart is staged); with one base and the same server the old allocation is deleted first
+  (break before make, as before). A restart that keeps the local candidates kept the old relayed
+  candidate in the new session, which then paired and nominated it again: it is withdrawn from
+  the new session (new `rtci_ice::Agent::withdraw_local_candidate`: its pairs removed except
+  the one carrying the data, never paired or signalled again, dropped at the next restart; a
+  restart staged, abandoned or taken back does not cut the current session's path). Tests on an in-memory coturn-like server
+  (`tests/common/turn_server.rs`). turn-5.
 
 ### Known limits
 

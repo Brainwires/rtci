@@ -799,6 +799,20 @@ pub enum RTCPeerConnectionEvent {
         /// The relayed address, when an allocation had been made.
         relayed_address: Option<std::net::SocketAddr>,
     },
+    /// A new ICE generation needed an allocation on a server from the only UDP base the
+    /// transport has, which the allocation the previous generation uses holds (an allocation is
+    /// its 5-tuple's, RFC 8656 section 2.2): that one was released first, so the relayed path
+    /// is broken until the new generation selects a pair (break before make). An application
+    /// that adds a host candidate on a second local address while the restart is staged
+    /// (before `set_local_description` of the restart offer, or of the answer to one) gets the
+    /// new allocation from there instead, and data keeps flowing. Not a W3C event: a fork
+    /// addition.
+    OnTurnAllocationReplacedInPlace {
+        /// The server's URL (`turn:host:port?transport=udp`).
+        url: String,
+        /// The local address both allocations use.
+        local_address: std::net::SocketAddr,
+    },
     /// A request of one of the engine's TURN links was finally refused by the server (after
     /// the retries the TURN client makes: 401 or 438 once more, RFC 8489 section 9.2.5), or,
     /// for an Allocate, refused with 437 (Allocation Mismatch, RFC 8656 section 7.4: the

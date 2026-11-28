@@ -4353,6 +4353,36 @@ impl RTCPeerConnection {
         Ok(())
     }
 
+    /// New STUN / TURN servers for the connection, in use from now: `set_configuration` with
+    /// `ice_servers` in place of the configuration's list, and an ICE restart (W3C
+    /// "set the configuration": "If a script wants this to happen immediately, it should do
+    /// an ICE restart"; RFC 9429 section 4.1.18). The next `create_offer` restarts ICE; the
+    /// application then runs one offer / answer exchange. A fork convenience (FORK.md), for
+    /// rotating TURN credentials on a long session: a TURN server with new credentials is a
+    /// new allocation (RFC 8656 section 5), and the engine keeps the allocation in use
+    /// relaying until the restart has its own pair (RFC 8445 section 9), then releases it
+    /// (`OnTurnAllocationReleased`). A second allocation needs another 5-tuple (RFC 8656
+    /// section 2.2): an application that adds a UDP host candidate on a second local address
+    /// before applying the restart offer (or the answer to one) gets the new allocation from
+    /// there and no gap; with one socket the old allocation is released first
+    /// (`OnTurnAllocationReplacedInPlace`). The DTLS association and the data channels stay.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_configuration`].
+    pub fn rotate_ice_servers(
+        &mut self,
+        now: Instant,
+        ice_servers: Vec<crate::peer_connection::transport::RTCIceServer>,
+    ) -> Result<()> {
+        self.pipeline_context.observe(now);
+        let mut configuration = self.configuration.clone();
+        configuration.ice_servers = ice_servers;
+        self.set_configuration(configuration)?;
+        self.restart_ice();
+        Ok(())
+    }
+
     /// Creates a new data channel with the given label.
     ///
     /// The returned handle borrows the peer connection. To reach the channel again later,

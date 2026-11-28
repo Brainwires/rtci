@@ -140,6 +140,8 @@ struct Probe {
     /// open while the mapped address may be used (RFC 8489 section 6.2.2), until ICE of its
     /// transport has completed.
     kept: Option<(StreamId, SocketAddr)>,
+    /// The last error response a server address gave (code, reason), for `icecandidateerror`.
+    error: Option<(u16, String)>,
 }
 
 impl Probe {
@@ -283,6 +285,7 @@ impl EngineSrflx {
                 discovery: None,
                 ufrag: ufrag.to_owned(),
                 kept: None,
+                error: None,
             });
         }
         found
@@ -578,6 +581,14 @@ impl RTCPeerConnection {
                         probe.url, probe.base
                     );
                     probe.state = ProbeState::Done;
+                    // W3C webrtc-pc 4.8.3: the server's error code, or 701 when no address
+                    // of it answered.
+                    let (code, text) = probe.error.clone().unwrap_or((
+                        crate::peer_connection::event::ICE_SERVER_UNREACHABLE,
+                        "no address of the server answered".to_owned(),
+                    ));
+                    let (transport, base, url) = (probe.transport, probe.base, probe.url_string());
+                    self.report_engine_gathering_error(transport, Some(base), url, code, text);
                 }
             }
         }
@@ -700,6 +711,13 @@ impl RTCPeerConnection {
                         Some(mapped) => Outcome::Mapped(mapped),
                         None => {
                             debug!("{}: Binding error or no mapped address", a.server);
+                            let mut code = stun::error_code::ErrorCodeAttribute::default();
+                            if stun::message::Getter::get_from(&mut code, &response).is_ok() {
+                                probe.error = Some((
+                                    code.code.0,
+                                    String::from_utf8_lossy(&code.reason).into_owned(),
+                                ));
+                            }
                             Outcome::Failed
                         }
                     },
