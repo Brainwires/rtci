@@ -721,6 +721,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| s.w3c_simulcast_answer,
     },
     {
+        id: "jsep.rejected-rids-kept-in-offers",
+        setting: "SettingEngineBuilder::with_rejected_rids_kept_in_offers",
+        clause: "RFC 9429 5.2.2 (W3C webrtc-pc 4.4.1.6, createOffer)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc::UpdateSimulcastLayerStatusInSender @ a222406d (\"The simulcast envelope cannot be changed, only the status of the streams\"): a layer the answer leaves out goes to RtpSenderBase::DisableEncodingLayers (pc/rtp_sender.cc), which, once the sender has an SSRC, sets it active=false and lists it in disabled_rids_ (hidden from GetParameters only); GetMediaDescriptionOptionsForTransceiver builds the next offer from GetParametersInternalWithAllLayers, so it keeps the layer's a=rid line and lists it paused (~rid); a later answer that lists it sets it active again",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_rejected_rids_kept_in_offers(v),
+        read: |s: &SettingEngine| s.rejected_rids_kept_in_offers,
+    },
+    {
         id: "sdp.rid-pause-marks",
         setting: "SettingEngineBuilder::with_rid_pause_marks",
         clause: "RFC 8853 5.2, 5.3.2",

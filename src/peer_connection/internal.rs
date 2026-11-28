@@ -2343,6 +2343,9 @@ impl RTCPeerConnection {
         } else {
             SimulcastDirection::Recv
         };
+        // RFC 9429 section 5.2.2 (`with_rejected_rids_kept_in_offers`): the streams a remote
+        // answer rejects stay in this endpoint's later offers.
+        let keep_rejected = !answer_is_local && self.setting_engine.rejected_rids_kept_in_offers;
         let transceiver_by_mid =
             RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
         for (offered, answered) in offer
@@ -2398,7 +2401,7 @@ impl RTCPeerConnection {
                     (rid.id, restrictions)
                 })
                 .collect();
-            sender.apply_simulcast_answer(&accepted);
+            sender.apply_simulcast_answer(&accepted, keep_rejected);
         }
     }
 
@@ -2929,6 +2932,30 @@ impl RTCPeerConnection {
                 && !transceiver_stopped
             {
                 sender.rebind_local_streams(&self.media_engine, &mut self.interceptor);
+                // A simulcast stream an earlier answer rejected and this one accepts again
+                // (`with_rejected_rids_kept_in_offers`) is sent from now on: its outbound
+                // statistics start (the streams that have them keep theirs).
+                if self.setting_engine.rejected_rids_kept_in_offers {
+                    for (encoding_index, coding) in sender.track().codings().iter().enumerate() {
+                        if let Some(ssrc) = coding.rtp_coding_parameters.ssrc
+                            && !sender.is_removed_ssrc(ssrc)
+                        {
+                            outbound_streams_to_create.push((
+                                ssrc,
+                                kind,
+                                mid.clone(),
+                                coding.rtp_coding_parameters.rid.clone(),
+                                encoding_index as u32,
+                                coding
+                                    .rtp_coding_parameters
+                                    .rtx
+                                    .as_ref()
+                                    .map(|rtx| rtx.ssrc),
+                                transceiver_id,
+                            ));
+                        }
+                    }
+                }
                 continue;
             }
 

@@ -2097,14 +2097,25 @@ impl RTCPeerConnection {
         if direction.has_send()
             && let Some(sender) = transceiver.sender()
         {
-            let encodings = sender.send_encodings();
+            // An offer also lists the streams remote answers rejected, should the sender keep
+            // them for it (`with_rejected_rids_kept_in_offers`, RFC 9429 section 5.2.2: the
+            // a=rid and a=simulcast lines "MUST stay the same").
+            let encodings: Vec<(_, bool)> = if is_offer {
+                sender.offered_encodings()
+            } else {
+                sender
+                    .send_encodings()
+                    .iter()
+                    .map(|encoding| (encoding, false))
+                    .collect()
+            };
             let is_simulcast = encodings.len() > 1
                 && encodings
                     .iter()
-                    .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
+                    .all(|(encoding, _)| !encoding.rtp_coding_parameters.rid.is_empty());
             if is_simulcast {
                 let mut lines = 0;
-                for encoding in encodings {
+                for (encoding, rejected) in encodings {
                     let coding = &encoding.rtp_coding_parameters;
                     let (rid, listed) = if is_offer {
                         (
@@ -2138,7 +2149,10 @@ impl RTCPeerConnection {
                     media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), line);
                     lines += 1;
                     if listed {
+                        // A rejected stream is not sent: paused, in RFC 8853 section 5.3.4's
+                        // "current pause state".
                         let paused = !encoding.active
+                            || rejected
                             || (!is_offer && rid.paused && !ignore_rid_pause_for_recv);
                         send_sc_list.push(sc_id(&coding.rid, paused));
                     }
