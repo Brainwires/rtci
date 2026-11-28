@@ -59,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **A lite agent's descriptions say `a=ice-options:trickle ice2`, not `ice2` alone**
+  (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`; RFC 8840 section 4: "Trickle
+  ICE Agents MUST indicate support for Trickle ICE by including the ice-option "trickle" within
+  all SDP Offers and Answers"; RFC 8838 Appendix B: an ICE-lite agent capable of Trickle ICE
+  "would indicate support for Trickle ICE"). A lite agent of this engine takes trickled
+  candidates and trickles its own (its TCP candidates come after the description), yet its
+  offers and answers said it could not, so a full peer took the lite agent's description for
+  every candidate it would have (W3C webrtc-pc 5.6.4, `canTrickleIceCandidates` false) and
+  could report "failed" before the trickled TCP candidates arrived. A peer of a lite `rtci`
+  agent now sees `canTrickleIceCandidates` true and waits for its end-of-candidates. Test
+  `a_lite_agent_says_trickle_in_its_offer_and_its_answer`; `test_set_lite` updated. Audit
+  RFC8838-3-3, RFC8445-10-1, RFC8839-4.2.1.5-1, RFC9429-5.2.1-11 (notes).
 - **RTCP session: a NACK larger than the MTU is split; a repeated TMMBR waits for a Regular
   packet** (`conf/rtcp-session-3-split-nack-regular-tmmbr`). (1) RFC 3550 section 6.1: "If the overall
   length of a compound packet would exceed the MTU of the network path, it SHOULD be segmented
@@ -725,6 +737,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- `rtci-stream-driver`: `AddressFilter::include_loopback` quotes RFC 8445 section 5.1.1.1 as it
+  is, "Addresses from a loopback interface MUST NOT be included in the candidate addresses"
+  (it said SHOULD NOT), and says that turning it on departs from that rule
+  (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`).
 - README names every default that departs from a MUST by the owner's decision, three since
   jsep-94 removed the RFC 9429 5.11 feedback item and jsep-95 added RFC 9429 5.3.1 (answers list
   only the offered formats): RFC 6184 7.2.2, RFC 9429 5.3.1 and RFC 8083 3, each with the setting
@@ -778,6 +794,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- rtci-ice: `a_pair_still_frozen_at_the_nomination_is_taken_out_of_the_checklist` (both roles;
+  RFC 8445 section 8.1.2), the agent-level test with a pair still Frozen at the nomination
+  (two remote candidates of one foundation, the first still being checked): Frozen just
+  before, Failed after, `failed` in its stats, never checked
+  (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`). Before, only the stream
+  driver's `virtual_time` test caught a retirement that skipped Frozen pairs.
 - test-env interop: the `reflect video <codec>` cells name a browser that sends on a payload
   type its offer does not have (`conf/test-4-reflect-cells-name-an-off-offer-format`), as
   "chrome profile: audio and video both ways" already did, and log the payload types received

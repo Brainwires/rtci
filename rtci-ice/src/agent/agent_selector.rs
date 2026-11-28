@@ -2163,7 +2163,8 @@ impl Agent {
     /// (Section 2.5), so none of its pairs fails by a check. With no pair yet its pair comes
     /// from the peer: a full peer's check (a peer-reflexive pair, RFC 8838 Appendix B), or, a
     /// lite peer, a candidate it still sends (the engine trickles its TCP candidates once their
-    /// listeners are bound, whatever the description said). Its checking timeout still ends
+    /// listeners are bound; a peer's description without `trickle` does not stop it from
+    /// sending one). Its checking timeout still ends
     /// it, with the indications that no candidate is to come.
     pub(crate) fn update_checklist_failure(&mut self, now: Instant) {
         if self.lite

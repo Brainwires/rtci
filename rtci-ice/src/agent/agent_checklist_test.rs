@@ -1624,9 +1624,10 @@ fn an_empty_checklist_that_no_check_fills_fails_when_the_pac_timer_expires() {
 ///   8838 Appendix B: "the connectivity checks would be enough for the ICE-lite implementation
 ///   to discover all potentially useful candidates as peer-reflexive"); its checking timeout
 ///   (`disconnected_timeout + failed_timeout`, 30 s) still fails it when none comes;
-/// - with a lite peer whose description cannot trickle (a lite description has no
-///   `a=ice-options:trickle`), a candidate the peer still sends (the engine's TCP candidates,
-///   trickled once their listeners are bound) forms the pair, selected without checks (Section
+/// - with a lite peer whose description cannot trickle (no `a=ice-options:trickle`: the
+///   engine's lite descriptions had none before ice-36, another implementation's may have
+///   none), a candidate the peer still sends (the engine's TCP candidates, trickled once
+///   their listeners are bound) forms the pair, selected without checks (Section
 ///   8.2). Before this the agent failed the empty checklist at its first look (train 36 round
 ///   10, run 46038516696:
 ///   `two_lite_agents_connect_over_tcp_from_an_active_candidate_in_the_offer`).
