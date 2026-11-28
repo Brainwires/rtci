@@ -36,6 +36,8 @@ Codecs (phase two), all opt-in; the default build decodes no video:
 - `libvpx` (VP8, VP9), `dav1d` (AV1) and `openh264` (H.264 with Cisco's binary): C libraries
   loaded at run time, so the build needs none of them; the application installs libvpx or
   libdav1d, or obtains Cisco's OpenH264 binary under Cisco's conditions (see `codec::openh264`).
+  libvpx 1.12.0 to 1.17.0 (the releases the binding was checked against; any other is refused
+  by name).
   For AV1 from untrusted peers, `dav1d` is the robust decoder.
 - `isolation`: runs a decoder in a child process, so a decoder that aborts, crashes or hangs
   costs one frame instead of the application.

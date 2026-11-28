@@ -311,6 +311,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libvpx-dev libdav1d-dev
+          dpkg-query -W -f='tested against ${Package} ${Version}\n' libvpx-dev libdav1d-dev
       # Cisco's binary, fetched for the test and never kept (the "separately downloaded" case of
       # docs/video-pipeline.md 4.1): Cisco serves it over plain HTTP, and the backend loads a
       # file only if its SHA-256 is one Cisco published.
@@ -341,6 +342,41 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps: *video-codecs-steps
+
+  # The libvpx backend against each libvpx release CI can install, whatever pool the job above
+  # lands on (our Linux pool is Ubuntu 24.04, libvpx 1.14.0; GitHub's ubuntu-latest is 26.04,
+  # libvpx 1.16.0 today). The binding passes each release its own encoder ABI version and
+  # refuses a release it was not checked against (rtci-video/src/codec/libvpx.rs,
+  # `ENCODER_ABI_VERSIONS`): when ubuntu-latest moves to an unchecked libvpx this job says so
+  # by name. GitHub-hosted only, so a fork's pull request runs it as it is.
+  libvpx_releases:
+    name: rtci-video libvpx backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # runners-first: the image is what is under test (it fixes the libvpx release); our pool has one image and cannot give 26.04's libvpx
+        os: [ ubuntu-24.04, ubuntu-latest ]
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: libvpx of this image
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libvpx-dev
+          dpkg-query -W -f='tested against ${Package} ${Version}\n' libvpx-dev
+      - name: The libvpx backend's tests and the binding's unit tests
+        run: |
+          cargo test --package rtci-video --features libvpx,vp8 --test libvpx --no-fail-fast --verbose
+          cargo test --package rtci-video --features libvpx --lib codec::libvpx --verbose
 
   # The same for `performance-defaults` (BehaviourProfile::Performance as the default).
   performance_defaults:
