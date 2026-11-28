@@ -1034,6 +1034,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a restart after the two minutes allocates; with a 2 s delay no 437; a new peer connection
   on a just-released socket meets the 437 (no retry), and allocates after the hold or from a
   second socket. turn-9.
+- **One SFrame ciphertext per layer: temporal drops, the descriptor-to-layer match, and the
+  counter-test** (RFC 9605 sections 6.1.3 and 4.2; `conf/sframe-4-one-ciphertext-per-layer`, on
+  `conf/sframe-2-svc-layer-per-ciphertext`; no API change). New rtc-to-rtc tests in
+  `tests/encoded_frame_metadata_rtc2rtc.rs`:
+  `a_forwarder_drops_temporal_layers_of_sframe_encrypted_{vp9,av1}_l2t3` (a keyless forwarder
+  drops T2, or T1 and T2, for a receiver of either spatial layer; every forwarded ciphertext
+  decrypts, to exactly the layer frames of that decode target) and
+  `one_ciphertext_over_{a_vp9_superframe,an_av1_temporal_unit}_does_not_survive_a_layer_drop`
+  (the access unit as one ciphertext, split between the two layers' descriptor frames, fails
+  authentication once layer 1 is dropped). The spatial forwarder tests now also check that each
+  forwarded frame decrypts to the layer its Dependency Descriptor names, and that the layer
+  ciphertexts carry the sender's key id and consecutive counters. Unit tests: without a spatial
+  mode (none declared, VP8 / H.264 / VP9 temporal modes) or per packet, `transform` and
+  `transform_access_unit` give byte for byte the frame encrypted as it is; VP8 and H.264 take
+  temporal modes only. `RTCRtpSFrameEncryptor::transform` no longer copies each frame to look for
+  layers when no spatial mode is declared (output unchanged). The `sframe_transform` module docs
+  now say how an application hands layer frames.
 
 ## [0.2.1] - 2026-11-27
 
