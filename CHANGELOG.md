@@ -274,6 +274,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application had to ask for (W3C's own text: "it should do an ICE restart"). Behaviour change
   for every application that calls `set_configuration` with other servers on a negotiated
   connection. jsep-85.
+- **Behaviour change (0.3.0): a `stuns:` ICE server URL whose host is an IP address is taken by the
+  configuration**
+  (`conf/w3c-4-stuns-url-with-ip-address-is-accepted-at-configuration`; audit rows
+  WEBRTC-4.4.1.5-24, RFC8489-8.1-1). The constructor and `set_configuration` threw `ErrHost`
+  for it, although W3C webrtc-pc "validate an ICE server URL" has no condition that refuses it.
+  RFC 8489 section 8.1 ("A 'stuns' URI containing an IP address MUST be rejected") is now met
+  where the URI would be used: the engine's server-reflexive gathering sends it nothing, reports
+  it once with an `icecandidateerror` of code 701 and no local address, and completes. The code
+  701 is our choice (W3C 4.8.3 names no code for a server the client rejects without asking it).
+  Not done: an `icecandidateerror` for a server the engine cannot reach. `turns:` with an IP
+  address is taken as before (RFC 5928 section 3 step 1). `rtci-ice` `Url::parse_url` keeps the
+  RFC 8489 rule; the peer connection reads its servers with `Url::parse_url_lenient`.
 
 ### Added
 
@@ -383,10 +395,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`OnTurnRequestRejected` for every finally refused TURN request** of the engine's links
   (Allocate with any code, Refresh, CreatePermission, ChannelBind): the warning an application
   gets when, say, a REST credential has expired. turn-7.
-- **`RTCPeerConnectionEvent::OnTurnAllocationReleased { url, local_address, relayed_address }`
-  and `OnTurnRequestRejected { url, relay, method, error_code }`** (fork events, not W3C): an
-  engine TURN allocation over UDP has been let go (the local address is free), and a TURN request
-  was finally refused (for now: a 437 to an Allocate). turn-6.
 - **`SettingEngineBuilder::with_turn_reallocation_delay(Duration)`**: how long after a release of
   an engine TURN allocation over UDP has ended the engine waits before allocating on the same
   5-tuple again. Zero by default (RFC 8656 section 8.2: the server deletes the allocation when it
@@ -625,35 +633,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`icecandidateerror` for the servers the engine gathers from itself** (W3C webrtc-pc 4.8.3):
   a TURN Allocate refused with a code, a TURN or STUN server no address of which answered (701,
   once per URL), a STUN error response. Nothing was raised before. turn-7.
-- **`close()` releases the engine's TURN allocations reliably** (RFC 8656 section 8, RFC 8489
-  section 6.2.1). It sent one Refresh of LIFETIME 0 per established UDP allocation and never
-  drove the TURN client again: a lost datagram or a 438 left the allocation for its lifetime, an
-  Allocate under way at `close()` was not followed (its allocation stayed), and the next peer
-  connection on the same socket was refused with 437 and held the server back for two minutes.
-  The release is now a transaction run to its end, after `close()` too: a closed connection
-  serves `poll_write`, `handle_read`, `poll_timeout` and `handle_timeout` for those
-  transactions only, until `poll_timeout()` is `None` (README: what to do after `close()`);
-  an Allocate under way is followed and an allocation it makes is deleted. The same applies to
-  every other release of an engine allocation (a removed transport, a restart's retired link).
-  A 437 to an Allocate has the link allocate from another UDP base of the transport, up to
-  three (RFC 8656 section 7.4), and raises `OnTurnRequestRejected`. turn-6.
-- **An ICE restart with new TURN credentials no longer deletes the allocation that carries the
-  data** (RFC 8445 sections 9 and 5.1.1.4). `set_configuration` with new credentials for a
-  `turn:` server and an ICE restart (the W3C recipe for new servers) deleted the engine's
-  allocation with a Refresh of LIFETIME 0 as soon as the restart offer was applied, while the
-  agent still sent on the relayed path until the restart selected its pair: relayed data stopped
-  for the whole offer / answer exchange. The link is now kept, refreshed and relaying until the
-  agent no longer uses that path (the restart's pair is selected and the previous path's grace
-  is over), then deleted. The new allocation needs another 5-tuple (RFC 8656 section 2.2; an
-  Allocate on one in use is answered 437): it is made from another UDP base of the transport
-  when there is one (a second socket of the application, a host candidate added while the
-  restart is staged); with one base and the same server the old allocation is deleted first
-  (break before make, as before). A restart that keeps the local candidates kept the old relayed
-  candidate in the new session, which then paired and nominated it again: it is withdrawn from
-  the new session (new `rtci_ice::Agent::withdraw_local_candidate`: its pairs removed except
-  the one carrying the data, never paired or signalled again, dropped at the next restart; a
-  restart staged, abandoned or taken back does not cut the current session's path). Tests on an in-memory coturn-like server
-  (`tests/common/turn_server.rs`). turn-5.
 - `Error::dom_exception_name` names the errors it returned `None` for, as webrtc-pc does (audit
   row WEBRTC-4.5.1-1 `partial` -> `tested`): `InvalidModificationError` for
   `ErrModifyingCertificates`, `ErrModifyingBundlePolicy`, `ErrModifyingRTCPMuxPolicy`,
@@ -774,7 +753,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timer that bounds checking (RFC 8863 section 5 permits it, W3C does not; Chrome does the
   same). WEBRTC-5.2-33 `tested` -> `missing`: replaceTrack never refuses a track outside the
   negotiated envelope, which webrtc-pc defines by examples the engine can see (a track whose
-  codec is not negotiated, an audio track of another channel count). Open MUST rows 57 -> 53.
+  codec is not negotiated, an audio track of another channel count; fixed on `conf/w3c-2-replace-track-envelope`). Open MUST rows 57 -> 53.
 
 ### Testing
 
