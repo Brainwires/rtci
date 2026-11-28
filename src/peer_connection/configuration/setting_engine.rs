@@ -492,6 +492,8 @@ pub struct SettingEngine {
     pub(crate) bundle_only_sections_in_browser_form: bool,
     /// [`SettingEngineBuilder::with_answer_offered_formats_only`].
     pub(crate) answer_offered_formats_only: bool,
+    /// [`SettingEngineBuilder::with_answer_ice_options`].
+    pub(crate) answer_ice_options: AnswerIceOptions,
     /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
     /// connection gets ICE credentials of its own. The derived default `false` shares the first
     /// transport's.
@@ -646,6 +648,37 @@ pub struct SettingEngine {
     pub(crate) dtls_flight_interval: DtlsFlightInterval,
 }
 
+/// What an answer's `a=ice-options` line says of the `trickle` and `ice2` options
+/// ([`SettingEngineBuilder::with_answer_ice_options`]). RFC 9429 section 5.3.1 and RFC 8840
+/// section 4.1.3, RFC 8445 section 10 and RFC 8839 section 4.3.2 disagree
+/// (`docs/conformance/spec-issues.md` row 28). Offers always say `trickle ice2` (RFC 9429
+/// sections 5.2.1 and 5.2.2); other options of the offer are never echoed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum AnswerIceOptions {
+    /// RFC 9429 section 5.3.1: the line, "with the "trickle" option as specified in
+    /// [RFC8840], Section 4.1.3 and the "ice2" option as specified in [RFC8445], Section 10,
+    /// is only included if such an option was present in the offer". An offer with neither
+    /// gets no `a=ice-options` line (the attribute has at least one option, RFC 8839 section
+    /// 5.6); a browser's offer (`trickle`) gets `trickle`. The default: RFC 9429 governs a JSEP
+    /// endpoint, and its working group made the condition on `trickle` deliberate
+    /// (`rtcweb-wg/jsep#23`).
+    #[default]
+    AsOffered,
+    /// libwebrtc's answer: `trickle` whatever the offer had
+    /// (`p2p/base/transport_description_factory.cc`, `TransportDescriptionFactory::CreateAnswer`,
+    /// `desc->AddOption(ICE_OPTION_TRICKLE)`). libwebrtc never writes `ice2`; this engine is
+    /// RFC 8445 compliant and keeps saying so where the offer did (`ice2` as offered).
+    TrickleAlways,
+    /// RFC 8840 section 4.1.3 ("In any case, the Answerer MUST include the
+    /// "ice-options:trickle" attribute"), RFC 8445 section 10 ("An agent compliant to this
+    /// specification MUST inform the peer about the compliance using the 'ice2' option") and
+    /// RFC 8839 section 4.3.2: every answer says `trickle ice2`. The `StrictRfc` profile's
+    /// value (the RFC form of the `conflict` rows RFC8839-4.3.2-3, RFC8839-4.2.1.5-1 and
+    /// RFC8445-10-1).
+    Always,
+}
+
 /// How the first DTLS retransmission timer of a peer connection's handshake is chosen
 /// ([`SettingEngineBuilder::with_dtls_flight_interval`]). The timer doubles on each
 /// retransmission either way (RFC 9147 section 5.8.2, RFC 6347 section 4.2.4.1).
@@ -710,6 +743,7 @@ impl SettingEngine {
             rtcp_mux_only_in_subsequent_offers: false,
             bundle_only_sections_in_browser_form: false,
             answer_offered_formats_only: true,
+            answer_ice_options: AnswerIceOptions::default(),
             unique_transport_credentials: Default::default(),
             separate_fec_sessions: false,
             explicit_rollback_only: Default::default(),
@@ -2727,6 +2761,17 @@ impl SettingEngineBuilder {
     /// present in the codec preferences").
     pub fn with_answer_offered_formats_only(mut self, offered_only: bool) -> Self {
         self.0.answer_offered_formats_only = offered_only;
+        self
+    }
+
+    /// What an answer's `a=ice-options` line says ([`AnswerIceOptions`]). The default is
+    /// [`AnswerIceOptions::AsOffered`], RFC 9429 section 5.3.1 (`Rfc` and `Performance`
+    /// profiles): an answer to a browser's offer says `trickle` alone, one to an offer
+    /// without the line has none. The `Chrome` profile sets
+    /// [`AnswerIceOptions::TrickleAlways`], the `StrictRfc` profile
+    /// [`AnswerIceOptions::Always`] (`docs/conformance/spec-issues.md` row 28).
+    pub fn with_answer_ice_options(mut self, options: AnswerIceOptions) -> Self {
+        self.0.answer_ice_options = options;
         self
     }
 

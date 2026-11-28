@@ -137,7 +137,11 @@ def standing_departures(rows):
             errors.append(f"conformance.md: a departure row without 'RFC <n> section <s>': {clause}")
             continue
         number, sec = m.group(1), m.group(2)
-        row = next((r for r in rows if r["clause"].startswith(f"RFC {number} {sec}")), None)
+        # Several departures may share a clause (RFC 9429 5.3.1: jsep-95 and jsep-98): the
+        # governed row is the one of that clause whose setting the departure names.
+        candidates = [r for r in rows if r["clause"].startswith(f"RFC {number} {sec}")]
+        row = next((r for r in candidates if r["setting"].rsplit("::", 1)[-1] in line),
+                   candidates[0] if candidates else None)
         if row is None:
             errors.append(f"conformance.md: RFC {number} section {sec} is a standing departure "
                           "but no governed behaviour names that clause")

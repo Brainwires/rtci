@@ -177,6 +177,7 @@ mod rejected_mline_tests {
             write_ssrc_attributes_for_simulcast: false,
             ice_pacing: None,
             ice_options_in_media_sections: false,
+            ice_options: vec!["trickle", "ice2"],
             ls_groups: vec![],
             selected_destination: None,
             remote_candidates: vec![],
@@ -327,6 +328,7 @@ use crate::peer_connection::configuration::RTCBundlePolicy;
 use crate::peer_connection::configuration::media_engine::{
     MediaEngine, RTCPacketTime, is_rtcp_conflicting_payload_type, local_extension_ids,
 };
+use crate::peer_connection::configuration::setting_engine::AnswerIceOptions;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::{
     RTCDtlsFingerprint, parse_fingerprint_attribute,
@@ -604,6 +606,25 @@ pub(crate) fn remote_ice_pacing(desc: &SessionDescription) -> Option<std::time::
 
 /// The ICE options a description states (`a=ice-options`, RFC 8839 section 5.6), at session
 /// level and in its media sections, each once, in order.
+/// The options of an answer's `a=ice-options` line under `setting`, given the offer's
+/// options (`remote_ice_options`): `trickle` first, then `ice2` (RFC 9429 section 5.3.1 for
+/// [`AnswerIceOptions::AsOffered`]).
+pub(crate) fn answer_ice_options(
+    setting: AnswerIceOptions,
+    offered: &[String],
+) -> Vec<&'static str> {
+    let offered = |option: &str| offered.iter().any(|o| o == option);
+    let (trickle, ice2) = match setting {
+        AnswerIceOptions::AsOffered => (offered("trickle"), offered("ice2")),
+        AnswerIceOptions::TrickleAlways => (true, offered("ice2")),
+        AnswerIceOptions::Always => (true, true),
+    };
+    [(trickle, "trickle"), (ice2, "ice2")]
+        .into_iter()
+        .filter_map(|(on, option)| on.then_some(option))
+        .collect()
+}
+
 pub(crate) fn remote_ice_options(desc: &SessionDescription) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let values = desc
@@ -2789,6 +2810,9 @@ pub(crate) struct PopulateSdpParams {
     /// `SettingEngineBuilder::with_ice_options_in_media_sections`: `a=ice-options` after each
     /// section's `a=ice-pwd` instead of at session level.
     pub(crate) ice_options_in_media_sections: bool,
+    /// The options of the `a=ice-options` line, in order (empty: no line): `trickle ice2` in an
+    /// offer; in an answer as `SettingEngineBuilder::with_answer_ice_options` says.
+    pub(crate) ice_options: Vec<&'static str>,
     /// In an offer, the `a=group:LS` groups of the most recent answer; in an answer, the
     /// offer's (RFC 9429 sections 5.2.2, 5.3.1).
     pub(crate) ls_groups: Vec<Vec<String>>,
@@ -3189,22 +3213,29 @@ impl RTCPeerConnection {
             // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
         }
-        let ice_options = "trickle ice2";
+        // Offers say `trickle ice2`, lite agents' too. An answer says what
+        // `SettingEngineBuilder::with_answer_ice_options` gives: by default RFC 9429 section
+        // 5.3.1's form, each of the two only "if such an option was present in the offer",
+        // against RFC 8840 section 4.1.3 and RFC 8445 section 10 (`answer_ice_options`;
+        // spec-issues row 28). No line for no option (RFC 8839 section 5.6: one or more tags).
+        let ice_options = params.ice_options.join(" ");
         // RFC 8839 section 5.6: "session-level or media-level".
-        if params.ice_options_in_media_sections {
+        if ice_options.is_empty() {
+            // Nothing to say: no line.
+        } else if params.ice_options_in_media_sections {
             for media in &mut d.media_descriptions {
                 if let Some(at) = media.attributes.iter().position(|a| a.key == "ice-pwd") {
                     media.attributes.insert(
                         at + 1,
                         sdp::description::common::Attribute::new(
                             ATTR_KEY_ICE_OPTIONS.to_owned(),
-                            Some(ice_options.to_owned()),
+                            Some(ice_options.clone()),
                         ),
                     );
                 }
             }
         } else {
-            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), ice_options.to_owned());
+            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), ice_options);
         }
         // RFC 8445 section 14.2: an agent that wants a Ta other than the default "MUST
         // indicate the proposed value to its peer"; RFC 8839 section 5.5: `a=ice-pacing`, in

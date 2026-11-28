@@ -26,8 +26,8 @@ use crate::peer_connection::sdp::{
     unknown_media_name,
 };
 use crate::peer_connection::sdp::{
-    described_ssrcs, is_lite_set, ls_groups, media_packet_time, media_rtcp_xr, remote_candidates,
-    share_bundle_destination,
+    answer_ice_options, described_ssrcs, is_lite_set, ls_groups, media_packet_time, media_rtcp_xr,
+    remote_candidates, share_bundle_destination,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
@@ -928,6 +928,7 @@ impl RTCPeerConnection {
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.stated_ice_pacing(),
             ice_options_in_media_sections: self.setting_engine.ice_options_in_media_sections,
+            ice_options: vec!["trickle", "ice2"],
             ls_groups: vec![],
             selected_destination,
             remote_candidates,
@@ -1455,6 +1456,17 @@ impl RTCPeerConnection {
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.stated_ice_pacing(),
             ice_options_in_media_sections: self.setting_engine.ice_options_in_media_sections,
+            ice_options: if include_unmatched {
+                vec!["trickle", "ice2"]
+            } else {
+                answer_ice_options(
+                    self.setting_engine.answer_ice_options,
+                    &remote_parsed
+                        .as_ref()
+                        .map(remote_ice_options)
+                        .unwrap_or_default(),
+                )
+            },
             ls_groups: if include_unmatched {
                 [
                     &self.current_local_description,

@@ -304,6 +304,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent now sees `canTrickleIceCandidates` true and waits for its end-of-candidates. Test
   `a_lite_agent_says_trickle_in_its_offer_and_its_answer`; `test_set_lite` updated. Audit
   RFC8838-3-3, RFC8445-10-1, RFC8839-4.2.1.5-1, RFC9429-5.2.1-11 (notes).
+- **An answer's `a=ice-options` says `trickle` and `ice2` only when the offer did** (RFC 9429
+  section 5.3.1: the line, "with the "trickle" option ... and the "ice2" option ..., is only
+  included if such an option was present in the offer"; `conf/jsep-98-answer-ice-options-conflict`).
+  Answers to browsers (which offer `trickle` alone) now say `a=ice-options:trickle`; an answer to
+  an offer without the line (webrtc-rs 0.17, RFC 5245 peers) has none; answers to `rtci` are
+  unchanged (`trickle ice2`), and offers always say `trickle ice2` (5.2.1, 5.2.2). Until now
+  every answer said `trickle ice2`, the form of RFC 8840 section 4.1.3 ("In any case, the
+  Answerer MUST include the "ice-options:trickle" attribute"), RFC 8445 section 10 and RFC 8839
+  sections 4.2.1.5 / 4.3.2, which contradict RFC 9429 here (`docs/conformance/spec-issues.md`
+  row 28, `draft-work.md` #24): RFC 9429 governs a JSEP endpoint and its working group made the
+  condition on `trickle` deliberate (`rtcweb-wg/jsep#23`). New setting
+  `SettingEngineBuilder::with_answer_ice_options(AnswerIceOptions)`: `AsOffered` (default, `Rfc`,
+  `Performance`), `TrickleAlways` (`Chrome`: libwebrtc's `CreateAnswer` adds `trickle` whatever
+  the offer had; `ice2` as offered), `Always` (`StrictRfc`, the other texts' form). 35 pinned
+  browser answers (`tests/fixtures/browser-sdp-answers/`) lose `ice2`, the 4 webrtc-rs 0.17 ones
+  their `a=ice-options` line; nothing else in them changes. Consequence, recorded in row 28: an
+  answerer whose answer said `trickle` alone says `trickle ice2` in its later offer, a change
+  RFC 8839 section 4.4.1.1.1 forbids outside a restart; libwebrtc and Firefox do not check it, an
+  `rtci` peer does (RFC 8839 4.4.2.1) but never sees it from another `rtci` peer, whose offers
+  carry both options. Audit: RFC9429-5.3.1-43 (new, `tested`; split from 5.3.1-2), RFC8839-4.3.2-3,
+  RFC8839-4.2.1.5-1, RFC8445-10-1 (`conflict`); open MUST rows unchanged (6).
+  `scripts/behaviour-profiles.py` matches a standing departure to its governed row by the
+  setting it names (two rows share RFC 9429 5.3.1). Tests `tests/jsep_answer_ice_options.rs`.
 
 ### Changed
 

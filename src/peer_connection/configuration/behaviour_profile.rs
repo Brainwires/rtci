@@ -78,7 +78,7 @@ use std::time::Duration;
 use crate::peer_connection::configuration::interceptor_registry::DefaultInterceptorOptions;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::configuration::setting_engine::{
-    DtlsFlightInterval, SctpMaxMessageSize, SettingEngine, SettingEngineBuilder,
+    AnswerIceOptions, DtlsFlightInterval, SctpMaxMessageSize, SettingEngine, SettingEngineBuilder,
 };
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 
@@ -671,6 +671,18 @@ governed_behaviours! {
         evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_answer_offered_formats_only(v),
         read: |s: &SettingEngine| s.answer_offered_formats_only,
+    },
+    {
+        id: "jsep.answer-ice-options",
+        setting: "SettingEngineBuilder::with_answer_ice_options",
+        clause: "RFC 8840 4.1.3, RFC 8445 10, RFC 8839 4.3.2 (every answer `trickle ice2`) against RFC 9429 5.3.1 (\"only included if such an option was present in the offer\"; spec-issues row 28)",
+        rfc: AnswerIceOptions::AsOffered => "AsOffered",
+        chrome: AnswerIceOptions::TrickleAlways => "TrickleAlways",
+        strict_rfc: AnswerIceOptions::Always => "Always",
+        chrome_source: "libwebrtc p2p/base/transport_description_factory.cc::TransportDescriptionFactory::CreateAnswer @ a222406d: desc->AddOption(ICE_OPTION_TRICKLE) whatever the offer had; no ice2 anywhere in libwebrtc (the engine keeps its ice2 as offered: a profile never turns a capability off)",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_answer_ice_options(v),
+        read: |s: &SettingEngine| s.answer_ice_options,
     },
     {
         id: "jsep.stopping-transceiver-rejected-in-answer",
