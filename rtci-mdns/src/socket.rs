@@ -134,8 +134,8 @@ impl MulticastSocket {
     /// 224.0.0.251. On Windows that route comes from the destination cache, and a process that
     /// sent to the group from 127.0.0.1 leaves it on loopback after it exits, so on Windows a
     /// socket built without an interface (and without a local address of its own,
-    /// [`with_multicast_local_ipv4`](Self::with_multicast_local_ipv4)) sends by the interface of
-    /// the default route instead (see [`into_std`](Self::into_std)). On a Windows host with
+    /// [`with_multicast_local_ipv4`](Self::with_multicast_local_ipv4)) joins and sends on the
+    /// interface of the default route instead (see [`into_std`](Self::into_std)). On a Windows host with
     /// several interfaces whose mDNS link is not the default route's, pass the interface of
     /// the address the application publishes.
     ///
@@ -166,13 +166,15 @@ impl MulticastSocket {
     /// - Joined to the mDNS multicast group (224.0.0.251), on [`with_interface`]'s interface when
     ///   one is given, and sending by that interface (`IP_MULTICAST_IF`), whatever the system's
     ///   route for the group says
-    /// - Without an interface: joined on the default interface (`INADDR_ANY`); on Windows, unless
-    ///   [`with_multicast_local_ipv4`] names a local address, sending by the interface of the
-    ///   default route (the address a UDP socket connected to 192.0.2.1, a documentation address,
-    ///   takes; nothing is sent there), not by the system's route for the group, which a
-    ///   process that sent to the group from 127.0.0.1 leaves on loopback for the whole host.
-    ///   Where the default route's address is unspecified or loopback, or there is none, the
-    ///   system's route as before. Elsewhere the system's route for the group
+    /// - Without an interface: on Windows, unless [`with_multicast_local_ipv4`] names a local
+    ///   address, joined and sending on the interface of the default route (the address a UDP
+    ///   socket connected to 192.0.2.1, a documentation address, takes; nothing is sent there),
+    ///   as if [`with_interface`] had named it: the system's route for the group, which both a
+    ///   join on `INADDR_ANY` and a send without `IP_MULTICAST_IF` follow there, is left on
+    ///   loopback for the whole host by any process that sent to the group from 127.0.0.1.
+    ///   Where the default route's address is unspecified or loopback, or there is none, and on
+    ///   other systems: joined on the default interface (`INADDR_ANY`), sending by the system's
+    ///   route for the group
     /// - IP TTL 255 on what it sends (RFC 6762 section 11)
     ///
     /// [`with_interface`]: Self::with_interface
@@ -240,35 +242,39 @@ impl MulticastSocket {
         // Bind to the specified address
         socket.bind(&multicast_local_addr.into())?;
 
-        // Join the mDNS multicast group
-        let iface = self.interface.unwrap_or(Ipv4Addr::UNSPECIFIED);
-        socket.join_multicast_v4(&MDNS_MULTICAST_IPV4, &iface)?;
-        // RFC 6762 section 14: what the socket sends leaves by the interface it joined on, not
-        // by the system's route for the group. On Windows that route comes from the destination
-        // cache, which a process that sent to the group from loopback leaves on loopback after
-        // it has exited (source 127.0.0.1, `netsh interface ipv4 show destinationcache`): every
-        // datagram of a socket without `IP_MULTICAST_IF` then leaves by loopback, with source
-        // 127.0.0.1, and a receiver that takes an address record only from the address it names
-        // refuses the answers. So without an interface, on Windows, the socket sends by the
-        // default route's interface (`multicast_if`); the join stays on `INADDR_ANY`. Elsewhere
-        // it keeps the system's route (GitHub's macOS image routes the group to lo0 on purpose).
+        // RFC 6762 section 14: the socket joins the group on the interface it sends by, and what
+        // it sends leaves by that interface (`IP_MULTICAST_IF`), not by the system's route for
+        // the group. On Windows that route comes from the destination cache, which a process
+        // that sent to the group from loopback leaves on loopback after it has exited (source
+        // 127.0.0.1, `netsh interface ipv4 show destinationcache`): a socket without
+        // `IP_MULTICAST_IF` then sends by loopback with source 127.0.0.1, and a join on
+        // `INADDR_ANY` lands on loopback too (agent-test run 46123619860: a socket joined on
+        // `INADDR_ANY` and sending by the network interface no longer heard its own datagrams).
+        // So without an interface, on Windows, the socket joins and sends on the default route's
+        // interface (`multicast_if`). Elsewhere it keeps `INADDR_ANY` and the system's route
+        // (GitHub's macOS image routes the group to lo0 on purpose).
         let bound_unspecified = self
             .multicast_local_ipv4
             .is_none_or(|ip| ip.is_unspecified());
-        if let Some(sending) = multicast_if(
+        let iface = multicast_if(
             self.interface,
             cfg!(windows) && bound_unspecified,
             default_route_v4,
-        ) {
-            socket.set_multicast_if_v4(&sending)?;
+        );
+        socket.join_multicast_v4(
+            &MDNS_MULTICAST_IPV4,
+            &iface.unwrap_or(Ipv4Addr::UNSPECIFIED),
+        )?;
+        if let Some(iface) = iface {
+            socket.set_multicast_if_v4(&iface)?;
         }
 
         Ok(socket.into())
     }
 }
 
-/// The interface a socket's multicast leaves by (`IP_MULTICAST_IF`), or `None` for the system's
-/// route for the group: the interface given; without one, where `default_route_instead` (on
+/// The interface a socket joins the group on and its multicast leaves by (`IP_MULTICAST_IF`), or
+/// `None` for `INADDR_ANY` and the system's route for the group: the interface given; without one, where `default_route_instead` (on
 /// Windows, a socket bound to the unspecified address), the default route's
 /// ([`default_route_v4`]) unless that is unspecified or loopback.
 fn multicast_if(

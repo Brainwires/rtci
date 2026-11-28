@@ -192,16 +192,25 @@ struct Side {
 }
 
 impl Side {
+    /// A driver on `ip` with `PeerDriverConfig::on`'s defaults (the rate limit aside).
     fn new(ip: IpAddr, limit: Option<MdnsRateLimit>) -> Result<Self> {
-        Self::with_loopback_mdns(ip, limit, false)
+        Self::with_config(PeerDriverConfig {
+            mdns_rate_limit: limit,
+            ..PeerDriverConfig::on(vec![ip])
+        })
     }
 
-    /// As [`new`](Self::new), with `PeerDriverConfig::mdns_on_loopback_on_windows` as given.
-    fn with_loopback_mdns(
-        ip: IpAddr,
-        limit: Option<MdnsRateLimit>,
-        mdns_on_loopback_on_windows: bool,
-    ) -> Result<Self> {
+    /// As [`new`](Self::new), asking for mDNS on loopback on Windows
+    /// (`PeerDriverConfig::mdns_on_loopback_on_windows`).
+    fn asking_for_loopback_mdns(ip: IpAddr, limit: Option<MdnsRateLimit>) -> Result<Self> {
+        Self::with_config(PeerDriverConfig {
+            mdns_rate_limit: limit,
+            mdns_on_loopback_on_windows: true,
+            ..PeerDriverConfig::on(vec![ip])
+        })
+    }
+
+    fn with_config(config: PeerDriverConfig) -> Result<Self> {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
@@ -213,14 +222,7 @@ impl Side {
             .with_setting_engine(settings.build())
             .build(Instant::now())?;
         Ok(Self {
-            driver: PeerDriver::new(
-                pc,
-                PeerDriverConfig {
-                    mdns_rate_limit: limit,
-                    mdns_on_loopback_on_windows,
-                    ..PeerDriverConfig::on(vec![ip])
-                },
-            ),
+            driver: PeerDriver::new(pc, config),
             outgoing: vec![],
             signalled: vec![],
         })
@@ -368,8 +370,8 @@ async fn drivers_on_loopback_resolve_each_other_on_the_loopback_interface() -> R
         return Ok(());
     }
     let limit = MdnsRateLimit::default();
-    let mut a = Side::with_loopback_mdns(ip, Some(limit.clone()), true)?;
-    let mut b = Side::with_loopback_mdns(ip, Some(limit), true)?;
+    let mut a = Side::asking_for_loopback_mdns(ip, Some(limit.clone()))?;
+    let mut b = Side::asking_for_loopback_mdns(ip, Some(limit))?;
     let up = connect(&mut a, &mut b, Duration::from_secs(30)).await?;
     assert_only_local_names("a", &a, ip);
     assert_only_local_names("b", &b, ip);
@@ -406,6 +408,7 @@ async fn by_default_drivers_on_loopback_leave_the_group_route_off_loopback() -> 
         "PRECONDITION: the host's answer for the group is {before:?} before the test; it must not \
          be loopback, or the test proves nothing"
     );
+    // `PeerDriverConfig::on`'s default, not set here: what is tested is the default itself.
     let mut a = Side::new(ip, Some(MdnsRateLimit::default()))?;
     let mut b = Side::new(ip, Some(MdnsRateLimit::default()))?;
     let _ = connect(&mut a, &mut b, Duration::from_secs(5)).await?;

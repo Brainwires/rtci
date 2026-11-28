@@ -1,6 +1,6 @@
 //! `MulticastSocket::with_interface`: what the socket sends leaves by that interface (RFC 6762
 //! section 14), not by the system's route for the group; and on Windows `MulticastSocket::new()`
-//! without an interface sends by the default route's interface. Real multicast: ignored by
+//! without an interface joins and sends on the default route's interface. Real multicast: ignored by
 //! default, run by `scripts/windows-poisoned-mdns-route.sh` on a Windows host whose route for
 //! 224.0.0.251 has been left on loopback (the destination-cache entry a process that sent to
 //! the group from 127.0.0.1 leaves behind), where a socket that followed the route sent with
@@ -20,8 +20,8 @@ fn default_route_v4() -> Ipv4Addr {
     }
 }
 
-/// Sends a datagram of this process from `sender` to the mDNS group until `receiver` (joined on
-/// the default route's interface) gets it, at most 3 s, and returns the source it came from.
+/// Sends a datagram of this process from `sender` to the mDNS group until `receiver` gets it, at
+/// most 3 s, and returns the source it came from.
 fn source_seen(sender: &std::net::UdpSocket, receiver: &std::net::UdpSocket) -> IpAddr {
     receiver.set_nonblocking(false).unwrap();
     receiver
@@ -92,4 +92,24 @@ fn on_windows_a_socket_without_an_interface_sends_by_the_default_route() {
         IpAddr::V4(interface),
         "MulticastSocket::new() sent by the system's route for the group, not by the default route"
     );
+}
+
+/// On Windows a socket built without an interface also listens on the default route's
+/// interface: a datagram sent there (by a socket given that interface, as a peer on the network
+/// sends) reaches it. On the host the script prepared a join on `INADDR_ANY` lands on loopback
+/// and hears nothing from the network (agent-test run 46123619860: the interop probe, a `new()`
+/// socket that sent by the network interface, never heard itself). Windows only, as above.
+#[cfg(windows)]
+#[test]
+#[ignore = "real multicast on the host's mDNS group; run by scripts/windows-poisoned-mdns-route.sh (cargo.yml, GitHub-hosted Windows)"]
+fn on_windows_a_socket_without_an_interface_hears_the_default_route() {
+    let interface = default_route_v4();
+    let sender: std::net::UdpSocket = MulticastSocket::new()
+        .with_interface(interface)
+        .into_std()
+        .unwrap();
+    let receiver: std::net::UdpSocket = MulticastSocket::new().into_std().unwrap();
+    let from = source_seen(&sender, &receiver);
+    println!("### new() received from {from}, default route {interface}");
+    assert_eq!(from, IpAddr::V4(interface));
 }

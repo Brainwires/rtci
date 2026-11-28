@@ -309,16 +309,13 @@ struct OnLoopback {
     up: bool,
 }
 
-/// Two drivers on 127.0.0.1 with `mdns_on_loopback_on_windows` as given, run to a connection
-/// over each other's resolved `.local` name (at most 2000 rounds).
-fn drivers_on_loopback(mdns_on_loopback_on_windows: bool) -> Result<OnLoopback> {
-    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// Two drivers on 127.0.0.1 configured by `config` (one each), run to a connection over each
+/// other's resolved `.local` name (at most 2000 rounds).
+fn drivers_on_loopback(config: impl Fn() -> PeerDriverConfig) -> Result<OnLoopback> {
     let runtime = MockRuntime::new();
     let shared: Arc<dyn Runtime> = Arc::new(runtime.clone());
-    let config = || PeerDriverConfig {
-        mdns_on_loopback_on_windows,
-        ..PeerDriverConfig::on(vec![LOOPBACK])
-    };
     let mut a = Peer::with_config(shared.clone(), publishing(), config())?;
     let mut b = Peer::with_config(shared, publishing(), config())?;
     let up = resolve_and_connect(&runtime, &mut a, &mut b)?;
@@ -345,7 +342,10 @@ fn drivers_on_loopback(mdns_on_loopback_on_windows: bool) -> Result<OnLoopback> 
 /// varies only the setting.
 #[test]
 fn drivers_asked_for_mdns_on_loopback_send_it_there_and_connect() -> Result<()> {
-    let run = drivers_on_loopback(true)?;
+    let run = drivers_on_loopback(|| PeerDriverConfig {
+        mdns_on_loopback_on_windows: true,
+        ..PeerDriverConfig::on(vec![LOOPBACK])
+    })?;
     assert!(
         run.group_from_loopback > 0,
         "mDNS went to the group from 127.0.0.1"
@@ -362,7 +362,8 @@ fn drivers_asked_for_mdns_on_loopback_send_it_there_and_connect() -> Result<()> 
 /// exchange as the test above.
 #[test]
 fn by_default_drivers_on_loopback_send_no_mdns_there_on_windows_only() -> Result<()> {
-    let run = drivers_on_loopback(false)?;
+    // `PeerDriverConfig::on`'s default, not set here: what is tested is the default itself.
+    let run = drivers_on_loopback(|| PeerDriverConfig::on(vec![LOOPBACK]))?;
     if cfg!(windows) {
         assert_eq!(
             run.group_from_loopback, 0,

@@ -94,22 +94,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
-- **`rtci_mdns::MulticastSocket::new()` on Windows sends by the default route's interface**
+- **`rtci_mdns::MulticastSocket::new()` on Windows joins and sends on the default route's interface**
   (`conf/mdns-4-windows-poisoned-route-and-loopback-default`; RFC 6762 section 14). Without `with_interface` the socket
   joined on `INADDR_ANY` and sent by the system's route for 224.0.0.251, which on Windows comes
   from the destination cache: on a host where any process had sent to the group from 127.0.0.1
   (see the stream driver entry under Breaking changes) it sent from 127.0.0.1 and nobody on the
   network heard it, silently. On Windows, when neither an interface nor a local IPv4 address
-  (`with_multicast_local_ipv4`) is given, it now sets `IP_MULTICAST_IF` to the default route's
-  interface (the local address of a UDP socket connected to 192.0.2.1:9, which sends nothing);
-  the join stays on `INADDR_ANY`. A default route on loopback or none leaves the system's route.
+  (`with_multicast_local_ipv4`) is given, it now joins the group on the default route's
+  interface (the local address of a UDP socket connected to 192.0.2.1:9, which sends nothing)
+  and sets `IP_MULTICAST_IF` to it, as `with_interface` with that address would. The join
+  moved too: on such a host a join on `INADDR_ANY` also lands on loopback, and a socket that
+  sent by the network interface but stayed joined on `INADDR_ANY` never heard its own datagrams
+  (agent-test run 46123619860, the interop probe). A default route on loopback or none leaves
+  `INADDR_ANY` and the system's route. Where the system's route for the group was not the
+  default route's interface (a hosted image answered 172.25.176.1, "vEthernet (nat)", for the
+  group and 10.1.0.100 for the default route), the socket now uses the default route's.
   Linux, macOS and other systems: unchanged (GitHub's macOS image routes the group to lo0 on
   purpose). Not SemVer-breaking (no API change). **Limit:** on a multi-homed Windows host whose
   mDNS link is not the default route's, the system's route might have been right where the
   default route is wrong; `with_interface` is the answer there, and its documentation says so.
   Tests: `socket.rs` unit tests of the choice (every platform);
   `multicast_interface.rs::on_windows_a_socket_without_an_interface_sends_by_the_default_route`
-  (receiver joined on the default route's interface, the source must be that interface), run by
+  (receiver joined on the default route's interface, the source must be that interface) and
+  `on_windows_a_socket_without_an_interface_hears_the_default_route` (a `new()` receiver gets
+  what a sender given the default route's interface sends), run by
   `scripts/windows-poisoned-mdns-route.sh` on a host whose route is on loopback.
 - **RTCP session: a NACK larger than the MTU is split; a repeated TMMBR waits for a Regular
   packet** (`conf/rtcp-session-3-split-nack-regular-tmmbr`). (1) RFC 3550 section 6.1: "If the overall

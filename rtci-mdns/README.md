@@ -20,8 +20,9 @@ the mDNS group for applications that want one. The root crate (`rtci`) uses it f
 candidates. The crate documentation has query and responder examples.
 
 `MulticastSocket::with_interface` joins and sends on that interface (`IP_MULTICAST_IF`, RFC
-6762 section 14). Without one the socket sends by the system's route for 224.0.0.251, except
-on Windows, where it sends by the default route's interface: there the group's route comes
+6762 section 14). Without one the socket joins on `INADDR_ANY` and sends by the system's route
+for 224.0.0.251, except on Windows, where it joins and sends on the default route's interface:
+there the group's route comes
 from a destination cache that any process which sent to the group from 127.0.0.1 leaves on
 loopback for the whole host. A Windows host whose mDNS link is not the default route's should
 pass the interface.
