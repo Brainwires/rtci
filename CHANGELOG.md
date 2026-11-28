@@ -571,6 +571,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a forwarder with no key drops spatial layer 1 by the Dependency Descriptor and the receiver
   decrypts exactly the layer-0 access unit of every picture. RFC9605-6.1.3-1 `tested` (was
   `missing`, open-must class D).
+- **Where a key-frame request came from** (`conf/kfr-1-key-frame-request-origin`; a fork
+  addition, webrtc-encoded-transform 6.4 `keyframerequest` has no origin). Not breaking: new
+  event variant (the enum is `#[non_exhaustive]`), new types. `OnKeyFrameRequest { sender, rid
+  }` is raised for a remote Picture Loss Indication or Full Intra Request and also for the
+  engine's own requests (a PLI with sender SSRC 0: the pacer's discard, the pacer's flush,
+  including the video streams that had nothing queued and so get no `OnPacerDiscard`, and the
+  NACK responder's give-up), and an application could not tell them apart.
+  `RTCPeerConnectionEvent::OnKeyFrameRequestOrigin(RTCKeyFrameRequestEvent { sender, rid, origin
+  })` now follows every `OnKeyFrameRequest`, with `RTCKeyFrameRequestOrigin::
+  RemotePictureLossIndication`, `RemoteFullIntraRequest` or `Local(LocalKeyFrameRequest)`
+  (`PacerDiscard`, `PacerFlush`, `RepairGivenUp`; `is_remote()`). The origin is carried from
+  where the request is made: the pacer and the NACK responder attach
+  `rtci_interceptor::LocalKeyFrameRequest` (`Attribute::Custom`) to the PLIs they put on the
+  read leg, and a request without it is the remote peer's, whatever its sender SSRC (an SSRC is
+  any 32-bit number, RFC 3550 section 8.1, so 0 is not proof of a local request). At a flush,
+  the requests of the streams whose media was discarded say `PacerFlush` too. SLI and RPSI are
+  still delivered as `RTCMessage::RtcpPacket` only and raise neither event. FORK.md row; audit
+  row ENCTRANS-6.4-1 note.
+  - **Planned for 0.3.0 (breaking):** the two events become one. A field cannot be added to
+    the struct variant `OnKeyFrameRequest { sender, rid }` within 0.2.x: a pattern that names
+    its fields without `..` (as `rtci-video`'s and this repository's tests do) or a literal
+    that builds it would stop compiling. 0.3.0 is to make it `OnKeyFrameRequest(
+    RTCKeyFrameRequestEvent)` (the struct is `#[non_exhaustive]`, so later fields are not
+    breaking) and drop `OnKeyFrameRequestOrigin`. Until then, read the origin from
+    `OnKeyFrameRequestOrigin` and ignore `OnKeyFrameRequest`, or keep using `OnKeyFrameRequest`
+    alone as before.
 
 ### Fixed
 
@@ -833,6 +859,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taken as before. Tests `rtp_sender_test.rs::test_rtp_sender_replace_track_invalid_codec_change`
   (it asserted the relabelling before), `test_rtp_sender_replace_track_with_another_channel_count_is_refused`,
   `test_rtp_sender_replace_track_before_negotiation_takes_any_codec`.
+- **`rtci` builds without a built-in crypto provider** (`conf/crypto-9-rtci-builds-without-a-built-in-provider`).
+  docs/crypto-provider-migration.md lists `--no-default-features` as "no built-in provider;
+  supply your own", but the crate did not compile that way: `RTCCertificate::from_key_pair`
+  takes an `rcgen::KeyPair`, which exists only with an rcgen crypto backend (turned on only by
+  `crypto-ring` / `crypto-aws-lc-rs`). It is now compiled only with a built-in provider (it
+  imported the key through the built-in default anyway); the default build is unchanged.
+  Without a provider, certificates come from the application's provider (`generate`,
+  `generate_certificate`, `generate_from_signing_key`, `from_pkcs8`, `from_signing_key`).
+  `tests/no_builtin_crypto_provider.rs`, which had run 0 tests in every job (and no longer
+  compiled: `build()` takes the time since), now runs in the job "rtci-crypto (no built-in,
+  custom provider)"; its row in docs/test-exclusions.md is gone. The other provider crates
+  (rtci-crypto, -dtls, -ice, -srtp, -stun, -turn, -sframe) already built their library without
+  defaults.
 
 ### Known limits
 
@@ -1150,6 +1189,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, Failed after, `failed` in its stats, never checked
   (`conf/ice-36-followups-frozen-pair-lite-trickle-loopback-doc`). Before, only the stream
   driver's `virtual_time` test caught a retirement that skipped Frozen pairs.
+- **Test files gated by a crate-level `#![cfg(feature …)]` are accounted for**
+  (`conf/video-2-cfg-gated-tests-are-accounted-for`). Compiled without its feature such a file
+  builds and runs 0 tests, which passes. `scripts/check-test-inventory.py`'s `feature-gated`
+  finding now covers them (the cfg evaluated against each `cargo test` of `cargo.yml`, matrix
+  values expanded). Of the eleven such files, ten run with their features in at least one job
+  (counted in train-36 run 46129791197: e.g. `cross_provider` 4 tests in "rtci-crypto (ring +
+  aws-lc-rs)", `mdns_budget` 1 in the default test job's runtime step).
+  `tests/no_builtin_crypto_provider.rs` ran 0 tests in all eight jobs that build it, and cannot
+  run: `rtci` does not compile without a built-in provider (`cargo check -p rtci
+  --no-default-features`: `rcgen::KeyPair` at `src/peer_connection/certificate/mod.rs:553` needs
+  rcgen's `crypto` feature), although docs/crypto-provider-migration.md lists that build (fixed
+  by `conf/crypto-9-rtci-builds-without-a-built-in-provider`, under Fixed).
+- **rtci-video's feature-gated tests run in CI** (`conf/video-1-send-tests-run-and-pass`).
+  Cargo skips a test target whose `required-features` are off without a word, and no job turned
+  on `vp8`, `av1`, `isolation`, `libvpx`, `dav1d` or `openh264`: `send_rtc2rtc`, `codecs`,
+  `isolated`, `libvpx`, `dav1d` and `openh264` had not run in any CI job since the crate
+  landed. A new `cargo.yml` job (`video_codecs`, our Linux pool first; `video_codecs_fork` for a
+  fork's pull request) installs libvpx and libdav1d, downloads Cisco's OpenH264 binary and runs
+  `cargo test -p rtci-video --all-features`, and builds the interop peer's `pipeline` scenario.
+  `scripts/check-test-inventory.py` now fails on a `[[test]]` with `required-features` that no
+  `cargo test` of `cargo.yml` runs whole (kind `feature-gated` in `docs/test-exclusions.md`).
+  Run by hand, two tests of `send_rtc2rtc` failed on v0.2.1 and on train 36 (agent-test runs
+  46137495578, 46137469211, 46136031324): they asserted the pacer's behaviour before
+  `conf/flush-1r-backlog-flush-at-collapse` (train 32), which made the default pacer flush its
+  backlog at a capacity collapse instead of pausing the source. Not an engine regression: the
+  tests were stale. `video_keeps_playing_through_a_capacity_cap_that_comes_and_goes` (the
+  default chain) now asserts what the engine's own default-chain test asserts of a flush (a
+  discard within a second of the drop, none before it, a key frame within 150 ms, no pause)
+  and a picture no older than 2 s (measured 0.92 to 0.94 s, against 10.2 to 11.7 s with the
+  backlog kept); `a_pacer_pause_stops_the_encoder_and_the_video_resumes_within_a_second` asks
+  for `PacerBacklog::Keep`, the setting that pauses, and keeps its assertions.
+  `scripts/dev/run-at-commits.sh` runs one command at several commits (one verdict line each)
+  to find which commit changed a test's outcome in one CI run.
 
 ## [0.2.1] - 2026-11-27
 
