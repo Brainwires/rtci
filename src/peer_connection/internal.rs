@@ -120,6 +120,12 @@ pub(super) struct DescriptionSnapshot {
     last_stable_state: Option<LastStableState>,
     pending_remote_transport: Option<PendingRemoteTransport>,
     events: usize,
+    /// The remote description's declared CNAMEs and the declarations found contradicted
+    /// (`InterceptorHandlerContext::declared_cnames`, `contradicted_declarations`).
+    declared_cnames: (
+        std::collections::HashMap<SSRC, String>,
+        std::collections::HashMap<SSRC, String>,
+    ),
 }
 
 /// The ICE agent configuration the connection's settings make, for each of its transports.
@@ -1841,6 +1847,13 @@ impl RTCPeerConnection {
             last_stable_state: self.last_stable_state.clone(),
             pending_remote_transport: self.pending_remote_transport.clone(),
             events: self.pipeline_context.event_outs.len(),
+            declared_cnames: {
+                let ctx = &self.pipeline_context.interceptor_handler_context;
+                (
+                    ctx.declared_cnames.clone(),
+                    ctx.contradicted_declarations.clone(),
+                )
+            },
         }
     }
 
@@ -1878,6 +1891,8 @@ impl RTCPeerConnection {
         }
         self.pending_remote_transport = snapshot.pending_remote_transport;
         self.pipeline_context.event_outs.truncate(snapshot.events);
+        let ctx = &mut self.pipeline_context.interceptor_handler_context;
+        (ctx.declared_cnames, ctx.contradicted_declarations) = snapshot.declared_cnames;
         self.pipeline_context
             .interceptor_handler_context
             .ssrc_owners
@@ -3125,6 +3140,17 @@ impl RTCPeerConnection {
             vec![]
         };
         let appdata_names_the_track = self.setting_engine.msid_appdata_change_renews_track;
+        // RFC 5576 section 6.1: the CNAME each SSRC is declared with, against what its RTCP
+        // SDES names (`handler/declared_cname.rs`).
+        self.pipeline_context
+            .interceptor_handler_context
+            .set_declared_cnames(
+                remote_desc
+                    .parsed
+                    .as_ref()
+                    .map(sdp::declared_cnames)
+                    .unwrap_or_default(),
+            );
 
         for incoming_track in incoming_tracks.into_iter() {
             if let Some(transceiver) = self.rtp_transceivers.iter_mut().find(|transceiver| {
@@ -3137,6 +3163,19 @@ impl RTCPeerConnection {
             {
                 // The MediaStreams the track is in, one per `a=msid` line (RFC 8830 section 2).
                 receiver.set_streams(incoming_track.stream_ids.clone());
+
+                // RFC 5576 section 6.1: a declaration its source's SDES contradicted is not
+                // applied again to the stream it established, which keeps flowing as it is.
+                let ctx = &self.pipeline_context.interceptor_handler_context;
+                if incoming_track.ssrc.is_some_and(|ssrc| {
+                    ctx.declaration_contradicted(ssrc)
+                        && receiver
+                            .track()
+                            .get_codec_by_ssrc(ssrc)
+                            .is_some_and(|codec| !codec.mime_type.is_empty())
+                }) {
+                    continue;
+                }
 
                 if is_same_remote_track(receiver, &incoming_track, appdata_names_the_track) {
                     // Keep SSRCs and codecs learned from RTP; the sender may no longer attach
@@ -3280,6 +3319,21 @@ impl RTCPeerConnection {
                     receiver.adopt_early_codings(early);
                 }
             }
+        }
+
+        // RFC 5576 section 6.1: the declarations whose SSRC's SDES named another CNAME.
+        let mid_negotiated = self
+            .media_engine
+            .receive_header_extension_id(::sdp::extmap::SDES_MID_URI)
+            != 0;
+        let contradicted = self
+            .pipeline_context
+            .interceptor_handler_context
+            .withdraw_contradicted_declarations(&mut self.rtp_transceivers, mid_negotiated);
+        for ssrc in contradicted {
+            self.pipeline_context
+                .event_outs
+                .push_back(RTCPeerConnectionEvent::OnRemoteCnameMismatch(ssrc));
         }
 
         Ok(())

@@ -546,6 +546,25 @@ pub enum RTCPeerConnectionEvent {
     /// Not a W3C event: a fork addition.
     OnSsrcCollision(crate::rtp_transceiver::SSRC),
 
+    /// The remote source with this SSRC named another CNAME in its RTCP SDES than the remote
+    /// description declares for it (`a=ssrc:<ssrc> cname:`), once per SSRC and declared
+    /// CNAME; [`RTCPeerConnection::remote_rtcp_cname`](crate::peer_connection::RTCPeerConnection::remote_rtcp_cname)
+    /// gives the one it named.
+    ///
+    /// RFC 5576 section 6.1: the receiver "SHOULD assume there has been an SSRC collision and
+    /// that the description of the source that was carried in the SDP description is not
+    /// applicable to the actual source being received". A collision between remote sources:
+    /// no local SSRC moves (that is [`Self::OnSsrcCollision`]) and no negotiation is asked
+    /// for. The media keeps flowing: a stream already established stays on its track; one
+    /// not established yet that is its receiver's only stream is received from then on as
+    /// one of an SSRC the description does not mention (by its section, MID or payload type,
+    /// without the repair flows the description paired with it), where its packets can be
+    /// placed that way; a later description that still declares the SSRC with that CNAME is
+    /// not applied to it again.
+    ///
+    /// Not a W3C event: a fork addition.
+    OnRemoteCnameMismatch(crate::rtp_transceiver::SSRC),
+
     /// RTP media of this SSRC arrived that no media section or track could take, and was
     /// discarded: the first such packet of each SSRC (at most 64 SSRCs per connection are
     /// reported).
