@@ -7252,6 +7252,62 @@ a=rtcp-mux\r\n";
         assert!(answer.sdp.contains("a=ice-options:trickle ice2\r\n"));
     }
 
+    /// RFC 8840 section 4: "Trickle ICE Agents MUST indicate support for Trickle ICE by
+    /// including the ice-option "trickle" within all SDP Offers and Answers", and RFC 8838
+    /// Appendix B: an ICE-lite agent capable of Trickle ICE "would indicate support for Trickle
+    /// ICE". A lite agent of this engine takes trickled candidates (`add_remote_candidate` at
+    /// any time) and trickles its own (its TCP candidates come after its description), so its
+    /// offer and its answer say `trickle ice2` as a full agent's do, and the full peer does not
+    /// take the lite agent's description for every candidate it will have (W3C webrtc-pc
+    /// 5.6.4: `canTrickleIceCandidates` true).
+    #[test]
+    fn a_lite_agent_says_trickle_in_its_offer_and_its_answer() {
+        let lite_pc = || {
+            let mut me = MediaEngine::default();
+            me.register_default_codecs().unwrap();
+            RTCPeerConnectionBuilder::new()
+                .with_media_engine(me)
+                .with_setting_engine(SettingEngineBuilder::new().with_lite(true).build())
+                .build(Instant::now())
+                .unwrap()
+        };
+        let now = Instant::now();
+
+        // The lite agent offers.
+        let mut lite = lite_pc();
+        lite.add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let offer = lite.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=ice-lite\r\n"), "{}", offer.sdp);
+        assert!(
+            offer.sdp.contains("a=ice-options:trickle ice2\r\n"),
+            "the lite agent's offer: {}",
+            offer.sdp
+        );
+        let mut full = media_pc();
+        full.set_remote_description(now, offer).unwrap();
+        assert_eq!(full.can_trickle_ice_candidates(), Some(true));
+
+        // The lite agent answers.
+        let mut full = media_pc();
+        full.add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let offer = full.create_offer(None).unwrap();
+        full.set_local_description(now, offer.clone()).unwrap();
+        let mut lite = lite_pc();
+        lite.set_remote_description(now, offer).unwrap();
+        let answer = lite.create_answer(None).unwrap();
+        assert!(answer.sdp.contains("a=ice-lite\r\n"), "{}", answer.sdp);
+        assert!(
+            answer.sdp.contains("a=ice-options:trickle ice2\r\n"),
+            "the lite agent's answer: {}",
+            answer.sdp
+        );
+        lite.set_local_description(now, answer.clone()).unwrap();
+        full.set_remote_description(now, answer).unwrap();
+        assert_eq!(full.can_trickle_ice_candidates(), Some(true));
+    }
+
     /// RFC 8445 section 14.2: an agent that wants a Ta other than the default proposes it
     /// (`a=ice-pacing`, RFC 8839 section 5.5), and "Both agents MUST use the higher out of the
     /// two proposed values"; RFC 8445 section 10: both say `ice2`.
