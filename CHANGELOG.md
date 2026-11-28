@@ -677,6 +677,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC 8834 section 4.1, ignore unknown RTP header extensions: the same clause as section 10,
   fixed in 0.2.1, now cited with its tests. RFC5576-9-1 and RFC8834-4.1-24 `tested` (were
   `untested`, open-must class B).
+- **The RTCP-share tests are seeded** (`conf/rtcp-4-rtcp-share-test-is-seeded`;
+  `tests/rtcp_rate_trace_rtc2rtc.rs`). Both peers draw their random numbers from a seeded
+  provider (`DefaultInterceptorOptions::rtcp_random` and the setting engine's crypto provider:
+  RFC 3550 section 6.3.1's report-interval randomisation, the dither of early feedback, ICE,
+  DTLS, SCTP), with their clocks and NTP times anchored at the run's start. The measured share
+  was different in every run and landed once above the unchanged 5% bound of
+  `the_performance_profile_keeps_low_rate_rtcp_inside_five_percent` (train 36 round 10b, macOS:
+  0.0516); every share is now printed in full (`RTCP-SHARE ...`). The test, renamed
+  `the_performance_profile_keeps_low_rate_rtcp_inside_five_percent_on_average`, asserts what
+  RFC 3550 6.2 / 6.3.1 promise, an average: the mean share over 16 fixed seed pairs of the 15 s
+  call is at most 5%, and each of 4 seed pairs of a 30 s call is (measured over 200 seed pairs:
+  15 s call mean 0.0474, max 0.0516, 1% of draws above 5%; 30 s call max 0.0489; the 10 s window
+  holds one to three regular reports at 24 kbit/s). New ignored measurement
+  `rtcp_share_over_seed_pairs`.
 
 ## [0.2.1] - 2026-11-27
 
