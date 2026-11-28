@@ -898,6 +898,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom provider)"; its row in docs/test-exclusions.md is gone. The other provider crates
   (rtci-crypto, -dtls, -ice, -srtp, -stun, -turn, -sframe) already built their library without
   defaults.
+- `rtci-interceptor` (`conf/pacer-4-write-path-not-slower`): the pacer's write path no longer
+  pays for `StreamsNotSending`. The code that drops the held packets of a stream that stops
+  sending ran once per applied answer but was inlined into `handle_write`, which doubled that
+  function (536 → 1144 bytes of stack frame on x86-64) and made `Interceptor/Pacer/write+poll`
+  1.07 to 1.30 times slower than master on the pull-request bench job from the round it joined
+  the train; it is out of line and cold now, and the notice's SSRCs are no longer copied. The
+  search for the notice moved from `handle_write` into `enqueue`, which reports whether it
+  applied one: a borrow of the packet before it moved into `enqueue` made the compiled code copy
+  every packet written (224 bytes on x86-64). No change of behaviour.
+  Performance: pacer-4
 
 ### Known limits
 
