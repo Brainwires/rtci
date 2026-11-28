@@ -25,7 +25,7 @@ mod jsep_common;
 
 use std::time::Instant;
 
-use jsep_common::{TestResult, default_peer, media_sections};
+use jsep_common::{TestResult, default_peer, media_sections, peer_adding_formats};
 use rtci::peer_connection::RTCPeerConnection;
 use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_VP8};
 use rtci::peer_connection::sdp::RTCSessionDescription;
@@ -139,7 +139,8 @@ fn sent_format(
 #[test]
 fn the_offerer_sends_the_answers_first_format_although_its_preferences_left_it_out() -> TestResult {
     let mut pc1 = default_peer()?;
-    let mut pc2 = default_peer()?;
+    // The answerer adds its other formats (the setting).
+    let mut pc2 = peer_adding_formats()?;
     let (sender, offer) = vp8_only_offer(&mut pc1)?;
     pc2.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
     let answer = pc2.create_answer(None)?;
@@ -213,7 +214,8 @@ fn the_offerer_sends_a_format_only_the_answer_has() -> TestResult {
 #[test]
 fn the_offerers_next_offer_still_follows_its_preferences() -> TestResult {
     let mut pc1 = default_peer()?;
-    let mut pc2 = default_peer()?;
+    // The answerer adds its other formats (the setting).
+    let mut pc2 = peer_adding_formats()?;
     let (_, offer) = vp8_only_offer(&mut pc1)?;
     pc2.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
     let answer = pc2.create_answer(None)?;

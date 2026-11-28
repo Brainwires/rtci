@@ -2570,6 +2570,27 @@ impl MediaEngine {
         }
     }
 
+    /// The URIs of the header extensions registered for `typ` that `direction` allows, in
+    /// registration order, each once (W3C webrtc-pc 5.2 / 5.3 getCapabilities: the
+    /// implemented extensions, whatever was negotiated).
+    pub(crate) fn registered_header_extension_uris(
+        &self,
+        typ: RtpCodecKind,
+        direction: RTCRtpTransceiverDirection,
+    ) -> Vec<String> {
+        let mut uris: Vec<String> = vec![];
+        for e in &self.header_extensions {
+            if e.is_matching_direction(direction)
+                && (e.is_audio && typ == RtpCodecKind::Audio
+                    || e.is_video && typ == RtpCodecKind::Video)
+                && !uris.contains(&e.uri)
+            {
+                uris.push(e.uri.clone());
+            }
+        }
+        uris
+    }
+
     pub(crate) fn get_rtp_parameters_by_kind(
         &self,
         typ: RtpCodecKind,

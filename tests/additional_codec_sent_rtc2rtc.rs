@@ -54,7 +54,9 @@ struct Peer {
 impl Peer {
     /// `minimal`: VP8 and one H.264 format only (as a binding that registers few codecs), so
     /// the dynamic payload types are not all taken.
-    fn with_codecs(addr: &str, minimal: bool) -> Result<Self> {
+    /// `adds_formats`: the answer also lists the formats the offer lacks
+    /// (`with_answer_offered_formats_only(false)`, the default before 0.3.0).
+    fn with_codecs(addr: &str, minimal: bool, adds_formats: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         if minimal {
             for (mime, pt, fmtp) in [
@@ -83,8 +85,17 @@ impl Peer {
             media_engine.register_default_codecs()?;
         }
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
-        let pc = RTCPeerConnectionBuilder::new()
-            .with_configuration(RTCConfigurationBuilder::new().build())
+        // `adds_formats` false: no setting call at all, so the default is what is tested.
+        let mut builder = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build());
+        if adds_formats {
+            builder = builder.with_setting_engine(
+                rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                    .with_answer_offered_formats_only(false)
+                    .build(),
+            );
+        }
+        let pc = builder
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
@@ -188,15 +199,17 @@ impl World {
 
     /// pc1 offers VP8 only; pc2 answers the WPT's edit of that offer. Returns the world, pc1's
     /// sender and the answer's SDP.
+    /// The default codecs, the answer in the setting's form (formats added): the scenario the
+    /// tests below were proven with (runs 45990202513, 45991341490).
     fn connected() -> Result<(Self, RTCRtpSenderId, String)> {
-        Self::connected_with(false)
+        Self::connected_with(false, true)
     }
 
-    fn connected_with(minimal: bool) -> Result<(Self, RTCRtpSenderId, String)> {
+    fn connected_with(minimal: bool, adds_formats: bool) -> Result<(Self, RTCRtpSenderId, String)> {
         let mut world = World {
             peers: [
-                Peer::with_codecs("10.0.0.1:5000", minimal)?,
-                Peer::with_codecs("10.0.0.2:5000", minimal)?,
+                Peer::with_codecs("10.0.0.1:5000", minimal, adds_formats)?,
+                Peer::with_codecs("10.0.0.2:5000", minimal, adds_formats)?,
             ],
             now: Instant::now(),
         };
@@ -482,7 +495,8 @@ fn a_packet_written_with_the_offers_vp8_number_does_not_leave_with_it() -> Resul
 /// video section and pc1's send codecs.)
 #[test]
 fn with_free_payload_types_the_offerer_still_sends_the_answers_first_format() -> Result<()> {
-    let (mut world, sender, answer) = World::connected_with(true)?;
+    // The answer adds VP8 on a free number (the setting): the jsep-91 case.
+    let (mut world, sender, answer) = World::connected_with(true, true)?;
     let video: Vec<&str> = answer
         .lines()
         .skip_while(|l| !l.starts_with("m=video"))
@@ -526,5 +540,38 @@ fn with_free_payload_types_the_offerer_still_sends_the_answers_first_format() ->
         received.len() >= 4 && received.iter().all(|p| *p == 63),
         "pc2 receives H.264 on 63: {received:?}"
     );
+    Ok(())
+}
+
+/// The default answer (0.3.0: the offered formats only) to the WPT's edited offer is H.264 on 63
+/// alone, with either codec set; the offerer sends H.264 on 63.
+#[test]
+fn by_default_the_answer_is_h264_on_63_alone_and_it_is_sent() -> Result<()> {
+    for minimal in [false, true] {
+        let (mut world, sender, answer) = World::connected_with(minimal, false)?;
+        let m_line = answer
+            .lines()
+            .find(|l| l.starts_with("m=video"))
+            .expect("a video section")
+            .to_owned();
+        assert!(
+            m_line.ends_with(" 63"),
+            "minimal {minimal}: {m_line}\n{answer}"
+        );
+        let (pt, mime) = named_send_format(&mut world, sender);
+        assert_eq!((pt, mime.as_str()), (63, "video/h264"), "minimal {minimal}");
+        for seq in 1..=5u16 {
+            world.send(sender, seq, pt)?;
+        }
+        let received: Vec<u8> = world.peers[1]
+            .read_rtp
+            .iter()
+            .map(|h| h.payload_type)
+            .collect();
+        assert!(
+            received.len() >= 4 && received.iter().all(|p| *p == 63),
+            "minimal {minimal}: {received:?}"
+        );
+    }
     Ok(())
 }

@@ -15,7 +15,7 @@ mod jsep_common;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use jsep_common::{TRANSPORT, TestResult, crlf, default_peer, media_sections};
+use jsep_common::{TRANSPORT, TestResult, crlf, default_peer, media_sections, peer_adding_formats};
 use rtci::peer_connection::RTCPeerConnection;
 use rtci::peer_connection::sdp::RTCSessionDescription;
 
@@ -104,7 +104,7 @@ fn apply_offer(
 /// 98: it must take another number.
 #[test]
 fn an_answer_does_not_give_a_dropped_formats_number_to_a_format_it_adds() -> TestResult {
-    let mut pc = default_peer()?;
+    let mut pc = peer_adding_formats()?; // the setting: the answer adds formats
     let offer1 = offer(2, "96 98", &format!("{VP8}{H264_ON_98}"));
     let answer1 = apply_offer(&mut pc, &offer1)?;
     assert_eq!(
@@ -121,7 +121,7 @@ fn an_answer_does_not_give_a_dropped_formats_number_to_a_format_it_adds() -> Tes
 /// The same with a format this endpoint never accepted: offer 1 gave 98 to `foo`.
 #[test]
 fn an_answer_does_not_give_an_unaccepted_formats_number_to_a_format_it_adds() -> TestResult {
-    let mut pc = default_peer()?;
+    let mut pc = peer_adding_formats()?; // the setting: the answer adds formats
     let offer1 = offer(2, "96 98", &format!("{VP8}{FOO_ON_98}"));
     let answer1 = apply_offer(&mut pc, &offer1)?;
     assert_keeps_meanings(&[&offer1], &answer1, "answer 1");

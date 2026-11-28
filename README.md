@@ -56,9 +56,9 @@ WebRTC uses); every row names the code and the test that proves it. From
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5095 | 5081 (99.7 %) | 5049 (99.1 %) |
+| MUST | 5095 | 5081 (99.7 %) | 5048 (99.1 %) |
 | SHOULD | 988 | 924 (93.5 %) | 918 (92.9 %) |
-| MAY | 605 | 503 (83.1 %) | 502 (83.0 %) |
+| MAY | 605 | 503 (83.1 %) | 501 (82.8 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
 browser or a deployed peer cannot interoperate with it by default. 14 MUST rows are open (5 untested,
@@ -577,12 +577,13 @@ more than one m= section (nor, by the same rule, a `balanced` offer with two sec
 `SettingEngineBuilder::with_bundle_only_sections_in_browser_form(true)` alone, or `balanced`
 with one section of each type. Offers from browsers and answers are not affected.
 
-**Answers list formats the offer lacks by default.** Without codec preferences, an answer lists the offered formats
-this endpoint supports and then every other media format it has registered for the kind (RFC 9429 5.3.1, "MUST be
-added after all existing formats"; RFC 3264 6.1, MAY), and it receives on them. Browsers answer with the offered
-formats only, which the same RFC 9429 5.3.1 rule list allows ("MAY include formats that are locally supported but not
-present in the offer"), and web-platform-tests such as `webrtc/protocol/h265-level-id.https.html` assume it. The
-`Chrome` profile, or `SettingEngineBuilder::with_answer_offered_formats_only(true)` alone, answers in that form.
+**Answers list the offered formats only (since 0.3.0).** Without codec preferences, an answer lists the offered
+formats this endpoint supports, in the offer's order, as every browser answers (RFC 9429 5.3.1: the answer "MAY include
+formats that are locally supported but not present in the offer"). Up to 0.2.x it also listed every other media format
+registered for the kind after them, the literal reading of the bullet before ("MUST be added after all existing
+formats"), and received on them; `SettingEngineBuilder::with_answer_offered_formats_only(false)`, or the `StrictRfc`
+profile, still answers that way. The two bullets of RFC 9429 5.3.1 contradict each other; the choice and its reasons
+are a standing departure in [docs/conformance.md](docs/conformance.md).
 
 **At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
 `DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads

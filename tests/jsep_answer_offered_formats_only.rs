@@ -1,10 +1,11 @@
-//! `SettingEngineBuilder::with_answer_offered_formats_only` (the `Chrome` profile): an answer
-//! lists only the formats the offer has, in the offer's order, each repair format only with
-//! the primary it repairs (RFC 9429 section 5.3.1: the answer "MAY include formats that are
-//! locally supported but not present in the offer"; libwebrtc `pc/codec_vendor.cc`
-//! `NegotiateCodecs`). The default adds every other registered media format after the offered
-//! ones (RFC 9429 section 5.3.1: "Any currently available media formats that are not present
-//! in the current remote description MUST be added after all existing formats";
+//! `SettingEngineBuilder::with_answer_offered_formats_only`, `true` by default since 0.3.0 (the
+//! `Rfc`, `Chrome` and `Performance` profiles): an answer lists only the formats the offer has,
+//! in the offer's order, each repair format only with the primary it repairs (RFC 9429 section
+//! 5.3.1: the answer "MAY include formats that are locally supported but not present in the
+//! offer"; libwebrtc `pc/codec_vendor.cc` `NegotiateCodecs`). With `false` (the `StrictRfc`
+//! profile; the default up to 0.2.x) an answer adds every other registered media format after
+//! the offered ones (RFC 9429 section 5.3.1: "Any currently available media formats that are
+//! not present in the current remote description MUST be added after all existing formats";
 //! `tests/jsep_answer_unoffered_formats.rs`).
 //!
 //! The web-platform-tests scenario `webrtc/protocol/h265-level-id.https.html`, "Offer to send
@@ -159,29 +160,23 @@ fn without_the_setting_an_answer_adds_the_other_formats_after_the_offered_ones()
     Ok(())
 }
 
-/// A peer built without the call answers as the profile of the build does: the extra formats
-/// (`Rfc`, the default), or the offered ones only (`Chrome`, the `chrome-defaults` feature).
+/// A peer built without the call answers with the offered formats only (0.3.0 default: the
+/// `Rfc` profile, and the `Chrome` one under the `chrome-defaults` feature, both say `true`).
 #[test]
-fn the_default_is_the_profiles_and_without_a_profile_feature_adds_the_other_formats() -> TestResult
-{
+fn by_default_an_answer_lists_the_offered_formats_only() -> TestResult {
     let answer = answer_to(&mut build(SettingEngineBuilder::new())?, video_offer())?;
     let answered = formats(&media_sections(&answer)[0]);
-    if BehaviourProfile::compiled_default() == BehaviourProfile::Chrome {
-        assert_eq!(answered, vec!["100", "96", "97"], "{answer}");
-    } else {
-        assert!(answered.len() > 3, "{answer}");
-    }
+    assert_eq!(answered, vec!["100", "96", "97"], "{answer}");
     Ok(())
 }
 
 #[test]
-fn the_chrome_profile_answers_the_offered_formats_only_and_the_rfc_profiles_add_the_others()
--> TestResult {
+fn every_profile_but_strict_rfc_answers_the_offered_formats_only() -> TestResult {
     for (profile, offered_only) in [
         (BehaviourProfile::Chrome, true),
-        (BehaviourProfile::Rfc, false),
+        (BehaviourProfile::Rfc, true),
         (BehaviourProfile::StrictRfc, false),
-        (BehaviourProfile::Performance, false),
+        (BehaviourProfile::Performance, true),
     ] {
         let answer = answer_to(
             &mut build(SettingEngineBuilder::new().with_behaviour_profile(profile))?,
@@ -407,13 +402,15 @@ fn with_the_setting_the_h265_level_id_scenario_answers_one_h265_format() -> Test
     Ok(())
 }
 
-/// The same scenario with the default answerer: the answer lists H.265 and then the other
-/// registered video formats (one of them H.265 at most: the offered one). The offerer's send
-/// codecs are the answer's formats it can send, the answer's first leading (RFC 9429 section
-/// 5.11, RFC 3264 section 7: conf/jsep-91): H.265 at level-id 30 first, one codec per media
-/// format of the answer's m= line (its repair formats, RTX / RED / FEC, are not send codecs).
+/// The same scenario with an answerer in the setting's form (`peer(false)`, the default before
+/// 0.3.0): the answer lists H.265 and then the other registered video formats (one of them
+/// H.265 at most: the offered one). The offerer's send codecs are the answer's formats it can
+/// send, the answer's first leading (RFC 9429 section 5.11, RFC 3264 section 7: conf/jsep-91):
+/// H.265 at level-id 30 first, one codec per media format of the answer's m= line (its repair
+/// formats, RTX / RED / FEC, are not send codecs).
 #[test]
-fn by_default_the_h265_level_id_scenario_lists_the_answers_formats_h265_first() -> TestResult {
+fn with_added_formats_the_h265_level_id_scenario_lists_the_answers_formats_h265_first() -> TestResult
+{
     let (answer, codecs) = h265_level_id_scenario(&mut peer(false)?, &mut peer(false)?)?;
     let section = &media_sections(&answer)[0];
     let answered = formats(section);

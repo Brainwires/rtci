@@ -187,6 +187,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/webrtc_pc_transport_clauses_rtc2rtc.rs`, stream-driver `virtual_time.rs`); the
   consent timing tests measure the loss of consent by the media path, and "failed" then or at
   the PAC timer.
+- **An answer lists only the offered formats by default**
+  (`conf/jsep-95-answers-list-offered-formats-by-default`; owner decision 2026-11-27). Without
+  codec preferences an answer now lists the offered formats this endpoint supports, in the
+  offer's order, each repair format with its primary, and nothing else:
+  `SettingEngineBuilder::with_answer_offered_formats_only` defaults to `true` (the `Rfc`,
+  `Chrome` and `Performance` profiles; `StrictRfc` sets `false`). RFC 9429 section 5.3.1 says
+  both "Any currently available media formats that are not present in the current remote
+  description MUST be added after all existing formats" and "the media formats in the answer
+  MUST include at least one format that is present in the offer but MAY include formats that
+  are locally supported but not present in the offer"; the default now takes the second, as
+  every browser does (libwebrtc `pc/codec_vendor.cc` `NegotiateCodecs`), and is listed as a
+  standing departure from the first in docs/conformance.md (audit rows RFC9429-5.3.1-16 and
+  RFC3264-6.1-7: `setting`). Reasons: the added formats are live (WebKit switched its sender
+  to an added VP9, test-env run 45878070327), they become the offerer's send codecs (jsep-91),
+  they spend dynamic payload type numbers in the peer's session (RFC 3264 section 8.3.2), and
+  the web-platform-tests assume the offered form (`webrtc/protocol/h265-level-id.https.html`).
+  **Upgrading from 0.2.1:** answers shrink to the offered formats; an offerer that switched to
+  a format only the answer listed can no longer do so; `getParameters().codecs` of the remote
+  offerer lists fewer codecs. For the old form call
+  `SettingEngineBuilder::with_answer_offered_formats_only(false)` (or use the `StrictRfc`
+  profile). The pinned browser answers (`tests/fixtures/browser-sdp-answers/`) lose the added
+  formats. Tests that cover the added formats run with the setting:
+  `answer_added_formats_rtc2rtc.rs`, `jsep_answer_unoffered_formats.rs`,
+  `jsep_payload_type_meaning.rs` (answer side), `jsep_sframe_payload_types.rs`,
+  `additional_codec_sent_rtc2rtc.rs`, `offerer_sends_answers_preferred_format.rs`; the new
+  default is asserted by `jsep_answer_offered_formats_only.rs` and
+  `additional_codec_sent_rtc2rtc.rs::by_default_the_answer_is_h264_on_63_alone_and_it_is_sent`.
 
 ### Changed
 
@@ -475,6 +502,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_the_response_that_validated_another_pair_is_the_selected_pairs_consent` (a controlled
   agent selects a valid pair with a peer-reflexive local candidate; the one response is on the
   checked pair, the same 5-tuple).
+- **`get_capabilities(kind).header_extensions` lists the registered header extensions after a
+  negotiation too** (`conf/w3c-3-capabilities-list-registered-header-extensions`; W3C webrtc-pc
+  5.2 / 5.3: "the list of implemented header extensions for sending" / "for receiving", "the
+  most optimistic view"). From 0.1.0 a negotiation narrowed the list to the extensions the
+  answer accepted (an answer with MID alone left MID alone). Now the registered extensions of
+  the kind that the direction allows, once per URI, in registration order (before: by id).
+  Descriptions are not affected: later offers keep each extension's id (RFC 8285 section 6).
+  Test `tests/rtp_object_model.rs::get_capabilities_lists_the_registered_header_extensions_after_a_negotiation`.
+- **`RTCRtpSender::get_capabilities` / `RTCRtpReceiver::get_capabilities` list the implemented
+  formats after a negotiation too** (`conf/jsep-95-answers-list-offered-formats-by-default`; W3C
+  webrtc-pc 5.2 / 5.3: "the list of implemented send codecs", "the most optimistic view of the
+  codecs the user agent supports"). From 0.1.0 they returned the negotiated list once a kind was
+  negotiated, so a format left out of the last answer could no longer be found to put in codec
+  preferences; answers that added every registered format (up to 0.2.x) mostly hid it, and the
+  offered-only default made it visible
+  (`tests/early_media_rtc2rtc.rs::a_format_a_later_offer_adds_is_received_as_that_format_before_the_answer`
+  found no VP9). Test
+  `tests/rtp_object_model.rs::get_capabilities_is_the_same_after_a_negotiation_that_narrowed_the_formats`.
 
 ### Known limits
 
