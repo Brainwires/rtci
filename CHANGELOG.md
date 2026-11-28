@@ -91,6 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mdns.rs::by_default_drivers_on_loopback_leave_the_group_route_off_loopback` asserts the
   group's route is off loopback before, and still off loopback after, default drivers on
   127.0.0.1, run by `scripts/windows-poisoned-mdns-route.sh` before it moves the route.
+- **rtci-dtls: a client that verifies the server's certificate by name but has no name is
+  refused** (`conf/dtlssni-2-nameless-verifying-client-refused`, on top of
+  `conf/dtlssni-1-no-sni-from-peer-connection`; RFC 6066 section 3, RFC 6125: a certificate
+  is verified against the name the client meant to reach). `ConfigBuilder::build(true, None)`
+  with no `with_server_name`, no `with_insecure_skip_verify(true)` and no PSK returns
+  `Error::Other("a client that verifies the server's certificate needs a server name ...")`;
+  0.2.0 verified against a made-up `localhost` and sent it as SNI, with a warning. Breaking for
+  a stand-alone rtci-dtls caller that relied on that: a configuration that built now fails.
+  Migration: `with_server_name(<the server's DNS name>)` (`"localhost"` for a local test
+  server), or pass the remote address to `build`. The peer connection is not affected (it
+  verifies by fingerprint with `insecure_skip_verify`). Marked for 0.3.0: not for a 0.2.x
+  release. Tests that built such clients now name the server (`config_test.rs`).
 
 ### Behaviour changes
 
