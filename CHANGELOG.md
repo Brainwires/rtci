@@ -691,6 +691,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   15 s call mean 0.0474, max 0.0516, 1% of draws above 5%; 30 s call max 0.0489; the 10 s window
   holds one to three regular reports at 24 kbit/s). New ignored measurement
   `rtcp_share_over_seed_pairs`.
+- **The unreliable-channel netem test counts the channel's own retransmissions**
+  (`conf/sctp-29-unreliable-channel-test-counts-its-own-retransmissions`). New
+  `AssociationStats::get_num_partially_reliable_retransmissions` (rtci-sctp, additive): of the
+  retransmissions, the DATA chunks of messages with a lifetime or a retransmission limit (RFC
+  3758, RFC 7496). `testenv_impairment::unreliable_channel_loses_without_retransmitting` asserts
+  it is zero for the association's whole life (`maxRetransmits` 0, RFC 8831 section 6.6) instead
+  of comparing all retransmissions at the first message and at the end, which failed when the
+  reliable DCEP DATA_CHANNEL_OPEN (RFC 8832 section 5) went again after the first message (its
+  SACK lost while the peer's DATA_CHANNEL_ACK opened the channel; run 46050142067). Unit test
+  `a_reliable_message_sent_again_is_not_counted_as_a_partially_reliable_retransmission`.
 
 ## [0.2.1] - 2026-11-27
 
