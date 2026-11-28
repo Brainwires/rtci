@@ -498,6 +498,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone for four more alternating rounds (`BENCH_CONFIRM_ROUNDS`) before the verdict. The first
   rule is unchanged.
   Performance: bench-2
+- **The bench gate's confirmation rounds relink with the functions in another order**
+  (`conf/bench-3-separation-across-layouts`; CI only). On train 36 round 22 the stun shard failed
+  on `BenchmarkAlternateServer_AddTo` (51 -> 57 ns, x1.12 in all six rounds) although rtci-stun
+  is identical in base and head: a code-layout bias of that pair of binaries on that runner (the
+  same sources gave x0.98-1.00 on other runners), which re-measuring the same binaries repeats.
+  Each confirmation round now relinks both trees' bench executable with lld's
+  `--shuffle-sections` over `.text` (seed = the round): a cost in the code stays separated under
+  every order, an alignment accident does not. Without lld a separation is reported, not failed.
+  Performance: bench-3
 
 ### Added
 

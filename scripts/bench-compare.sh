@@ -17,6 +17,15 @@
 # for BENCH_CONFIRM_ROUNDS more alternating rounds before the verdict: two rounds are too few to
 # tell a separation from noise, and re-running a few benches costs seconds.
 #
+# Each confirmation round RELINKS both trees' bench executables with the functions in another
+# order (lld's --shuffle-sections over .text, seed = the round's number; row bench-3). The same
+# pair of binaries measured again repeats its code-layout bias: train 36's
+# `BenchmarkAlternateServer_AddTo` came out x1.08-1.12 slower, every round, on one kind of runner
+# and x0.98-1.00 on others for the very same sources (rtci-stun and everything it links unchanged
+# from round 5 to round 16), and the confirmation rounds of bench-2 confirmed it (run
+# 46160736903). A cost in the code survives the reordering; an alignment accident does not. When
+# the linker cannot shuffle (it is not lld), a separation is reported and does not fail the job.
+#
 # Environment (defaults in brackets): BENCH_ROUNDS [2], BENCH_CONFIRM_ROUNDS [4],
 # BENCH_WARMUP seconds [1], BENCH_MEASURE seconds [2], BENCH_OUT directory
 # [target/bench-compare-out], and any bench-compare.py option in BENCH_COMPARE_ARGS (for example
@@ -113,6 +122,38 @@ round() { # r [criterion filter]
   done
 }
 
+relink() { # tree crate bench seed copy-to: the bench executable linked with its functions shuffled
+  local exe
+  exe=$(cd "$1" && CARGO_TARGET_DIR=$(target_of "$1") cargo rustc --quiet --profile bench -p "$2" \
+          --bench "$3" --message-format=json -- -C "link-arg=-Wl,--shuffle-sections=.text*=$4" |
+        python3 -c 'import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == sys.argv[1]:
+        print(m["executable"])' "$3" | tail -1) || return 1
+  [ -n "$exe" ] && cp "$exe" "$5"
+}
+
+run_exe() { # tree executable output criterion-filter
+  (cd "$1" && "$2" --bench --output-format bencher --warm-up-time "$warmup" --measurement-time "$measure" \
+     --noplot "$4") >> "$3"
+}
+
+shuffled_round() { # r filter: every target relinked with seed r in both trees, then measured
+  : > "$out/base-$1.txt"
+  : > "$out/head-$1.txt"
+  for target in "${targets[@]}"; do
+    in_base "$target" || continue
+    crate=${target%%:*} bench=${target#*:}
+    echo "round $1 (functions shuffled, seed $1): $target ($((SECONDS - start)) s)"
+    relink "$root" "$crate" "$bench" "$1" "$out/exe-head" || return 1
+    relink "$base_dir" "$crate" "$bench" "$1" "$out/exe-base" || return 1
+    if [ $(($1 % 2)) -eq 0 ]; then run_exe "$root" "$out/exe-head" "$out/head-$1.txt" "$2"; fi
+    run_exe "$base_dir" "$out/exe-base" "$out/base-$1.txt" "$2"
+    if [ $(($1 % 2)) -eq 1 ]; then run_exe "$root" "$out/exe-head" "$out/head-$1.txt" "$2"; fi
+  done
+}
+
 round_files() { # first last
   base_files=() head_files=()
   for r in $(seq "$1" "$2"); do
@@ -133,13 +174,24 @@ round_files 1 "$rounds"
 # shellcheck disable=SC2086
 mapfile -t suspect < <(python3 "$root/scripts/bench-compare.py" --base "${base_files[@]}" \
   --head "${head_files[@]}" --suspects ${BENCH_COMPARE_ARGS:-})
+confirm_args=()
 if [ "${#suspect[@]}" -gt 0 ] && [ "$confirm_rounds" -gt 0 ]; then
-  echo "separated after $rounds rounds, measured again for $confirm_rounds rounds: ${suspect[*]}"
+  echo "separated after $rounds rounds, measured again for $confirm_rounds rounds with the functions shuffled: ${suspect[*]}"
   filter=$(python3 -c 'import re, sys; print("^(" + "|".join(re.escape(n) for n in sys.argv[1:]) + ")$")' "${suspect[@]}")
+  confirmed=yes
   for r in $(seq $((rounds + 1)) $((rounds + confirm_rounds))); do
-    round "$r" "$filter"
+    if ! shuffled_round "$r" "$filter"; then
+      confirmed=no
+      break
+    fi
   done
-  total=$((rounds + confirm_rounds))
+  if [ "$confirmed" = yes ]; then
+    total=$((rounds + confirm_rounds))
+  else
+    for r in $(seq $((rounds + 1)) $((rounds + confirm_rounds))); do rm -f "$out/base-$r.txt" "$out/head-$r.txt"; done
+    echo "::warning::the bench executables could not be relinked with their functions shuffled (is the linker lld?): a separation is reported, not failed"
+    confirm_args=(--separation-rounds 1000000)
+  fi
 fi
 echo "benchmarks ran for $((SECONDS - start)) s"
 for f in "$out"/base-*.txt "$out"/head-*.txt; do
@@ -154,4 +206,4 @@ summary=()
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && summary=(--summary "$GITHUB_STEP_SUMMARY")
 # shellcheck disable=SC2086
 python3 "$root/scripts/bench-compare.py" --base "${base_files[@]}" --head "${head_files[@]}" \
-  "${summary[@]}" ${BENCH_COMPARE_ARGS:-}
+  "${summary[@]}" "${confirm_args[@]}" ${BENCH_COMPARE_ARGS:-}
