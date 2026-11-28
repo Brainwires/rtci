@@ -856,6 +856,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **Test files gated by a crate-level `#![cfg(feature …)]` are accounted for**
+  (`conf/video-2-cfg-gated-tests-are-accounted-for`). Compiled without its feature such a file
+  builds and runs 0 tests, which passes. `scripts/check-test-inventory.py`'s `feature-gated`
+  finding now covers them (the cfg evaluated against each `cargo test` of `cargo.yml`, matrix
+  values expanded). Of the eleven such files, ten run with their features in at least one job
+  (counted in train-36 run 46129791197: e.g. `cross_provider` 4 tests in "rtci-crypto (ring +
+  aws-lc-rs)", `mdns_budget` 1 in the default test job's runtime step).
+  `tests/no_builtin_crypto_provider.rs` ran 0 tests in all eight jobs that build it, and cannot
+  run: `rtci` does not compile without a built-in provider (`cargo check -p rtci
+  --no-default-features`: `rcgen::KeyPair` at `src/peer_connection/certificate/mod.rs:553` needs
+  rcgen's `crypto` feature), although docs/crypto-provider-migration.md lists that build. Listed
+  as a known limit in `docs/test-exclusions.md`.
 - **rtci-video's feature-gated tests run in CI** (`conf/video-1-send-tests-run-and-pass`).
   Cargo skips a test target whose `required-features` are off without a word, and no job turned
   on `vp8`, `av1`, `isolation`, `libvpx`, `dav1d` or `openh264`: `send_rtc2rtc`, `codecs`,

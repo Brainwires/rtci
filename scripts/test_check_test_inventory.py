@@ -2,7 +2,8 @@
 """Unit tests for scripts/check-test-inventory.py: the clause-audit half (`--check`: every
 backticked name in the Test cell of a MUST / SHOULD row names something in the tree), and the
 feature-gated targets (a `[[test]]` with `required-features` that no `cargo test` of cargo.yml
-runs). Small trees made for each case.
+runs, or a test file whose crate-level `#![cfg]` names a feature that no command turns on).
+Small trees made for each case.
 
     python3 scripts/test_check_test_inventory.py
 """
@@ -194,6 +195,81 @@ class FeatureGatedTest(unittest.TestCase):
 
     def test_a_matrix_expression_is_left_out(self) -> None:
         self.assert_runs("cargo test -p video --features vp8 ${{ matrix.args }}")
+
+
+CRYPTO_MANIFEST = """[package]
+name = "crypto"
+
+[features]
+default = ["ring"]
+ring = []
+aws = []
+test-support = []
+"""
+
+
+class CrateCfgTest(unittest.TestCase):
+    """Test files gated by a crate-level `#![cfg(...)]` on a feature: compiled without it, the
+    target builds and runs 0 tests, so a command counts only if it turns the features on."""
+
+    def setUp(self) -> None:
+        self.tree = Tree()
+        self.tree.write("crypto/Cargo.toml", CRYPTO_MANIFEST)
+        self.tree.write("crypto/tests/plain.rs", "#[test]\nfn t() {}\n")
+        self.tree.write("crypto/tests/both.rs", '//! Doc.\n\n#![cfg(all(feature = "ring", feature = "aws"))]\n#[test]\nfn t() {}\n')
+        self.tree.write("crypto/tests/none.rs", '#![cfg(not(any(feature = "ring", feature = "aws")))]\n#[test]\nfn t() {}\n')
+        self.tree.write("crypto/tests/support.rs", '#![cfg(feature = "test-support")]\n#![cfg(unix)]\n#[test]\nfn t() {}\n')
+
+    def tearDown(self) -> None:
+        self.tree.close()
+
+    def unrun(self, workflow: str) -> list[str]:
+        self.tree.write(".github/workflows/cargo.yml", workflow)
+        found: list = []
+        gate.feature_gated_findings(self.tree.root, found)
+        self.assertTrue(all(f.kind == "feature-gated" for f in found))
+        return sorted(f.path.rsplit("/", 1)[-1] for f in found)
+
+    def test_default_features_leave_every_gated_file_unrun(self) -> None:
+        # Fails with a gate that knows only `required-features`: it reports nothing here.
+        self.assertEqual(
+            self.unrun("jobs:\n  a:\n    steps:\n      - run: cargo test --workspace\n"),
+            ["both.rs", "none.rs", "support.rs"],
+        )
+
+    def test_the_features_on_the_command_line_run_them(self) -> None:
+        workflow = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - run: cargo test -p crypto --features aws,test-support\n"
+            "      - run: cargo test -p crypto --no-default-features --test none\n"
+        )
+        self.assertEqual(self.unrun(workflow), [])
+
+    def test_a_feature_off_needs_the_package_by_name_not_the_workspace(self) -> None:
+        workflow = "jobs:\n  a:\n    steps:\n      - run: cargo test --workspace --no-default-features --features aws\n"
+        self.assertEqual(self.unrun(workflow), ["both.rs", "none.rs", "support.rs"])
+        workflow = "jobs:\n  a:\n    steps:\n      - run: cargo test --workspace --no-default-features\n"
+        self.assertIn("none.rs", self.unrun(workflow))
+
+    def test_matrix_values_are_expanded(self) -> None:
+        workflow = (
+            "jobs:\n"
+            "  lists:\n    strategy:\n      matrix:\n        backend: [ ring, aws ]\n"
+            "    steps:\n      - run: cargo test -p crypto --features ${{ matrix.backend }},test-support\n"
+            "  includes:\n    strategy:\n      matrix:\n        include:\n"
+            "          - name: none\n            args: --no-default-features\n"
+            "          - name: default\n            args: \"\"\n"
+            "    steps:\n      - run: cargo test -p crypto ${{ matrix.args }} --test none\n"
+        )
+        self.assertEqual(self.unrun(workflow), [])
+
+    def test_the_cfg_evaluator(self) -> None:
+        holds = gate.cfg_holds
+        self.assertTrue(holds('any(feature = "a", feature = "b")', {"b"}))
+        self.assertFalse(holds('all(feature = "a", feature = "b")', {"b"}))
+        self.assertTrue(holds('not(feature = "a")', set()))
+        self.assertTrue(holds('all(unix, feature = "a")', {"a"}))
+        self.assertTrue(holds('target_os = "linux"', set()))
 
 
 if __name__ == "__main__":
