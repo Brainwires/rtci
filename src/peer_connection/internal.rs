@@ -921,6 +921,7 @@ impl RTCPeerConnection {
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.stated_ice_pacing(),
             ice_options_in_media_sections: self.setting_engine.ice_options_in_media_sections,
+            answer_ice_options_as_offered: None,
             ls_groups: vec![],
             selected_destination,
             remote_candidates,
@@ -1448,6 +1449,19 @@ impl RTCPeerConnection {
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.stated_ice_pacing(),
             ice_options_in_media_sections: self.setting_engine.ice_options_in_media_sections,
+            // RFC 9429 section 5.3.1 form, with the setting: the offer's `trickle` / `ice2`.
+            answer_ice_options_as_offered: (!include_unmatched
+                && self.setting_engine.answer_ice_options_as_offered)
+                .then(|| {
+                    let offered = remote_parsed
+                        .as_ref()
+                        .map(remote_ice_options)
+                        .unwrap_or_default();
+                    ["trickle", "ice2"]
+                        .into_iter()
+                        .filter(|option| offered.iter().any(|o| o == option))
+                        .collect()
+                }),
             ls_groups: if include_unmatched {
                 [
                     &self.current_local_description,

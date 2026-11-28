@@ -107,6 +107,7 @@ fn params(
         write_ssrc_attributes_for_simulcast: false,
         ice_pacing: None,
         ice_options_in_media_sections: false,
+        answer_ice_options_as_offered: None,
         ls_groups: vec![],
         selected_destination: None,
         remote_candidates: vec![],

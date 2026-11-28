@@ -63,15 +63,18 @@ WebRTC uses); every row names the code and the test that proves it. From
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
 browser or a deployed peer cannot interoperate with it by default. 11 MUST rows are open (5 untested,
 5 partial, 1 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
-is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Three defaults depart from a MUST by
+is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Four defaults depart from a MUST by
 the owner's decision, not for interoperability, and are listed in docs/conformance.md ("Standing departures from a
-MUST"), each with the setting that gives the RFC form (the `StrictRfc` profile sets all three): the H.264
+MUST"), each with the setting that gives the RFC form (the `StrictRfc` profile sets all four): the H.264
 de-interleaving order (**this default does not follow RFC 6184 section 7.2**: PDON does not start at 0, which would
 deliver a stream's DON 0 last; `MediaEngine::set_h264_literal_pdon(true)`), the formats of an answer (RFC 9429
 section 5.3.1, whose "MUST be added after all existing formats" the next bullet's "MAY include formats that are
 locally supported but not present in the offer" contradicts: answers list only the offered formats;
-`SettingEngineBuilder::with_answer_offered_formats_only(false)`) and the RTP circuit breaker's packet size (RFC 8083
-section 3; `DefaultInterceptorOptions::circuit_breaker_packet_size`, the `LastFrames` form). Known issues are tracked
+`SettingEngineBuilder::with_answer_offered_formats_only(false)`), the ICE options of an answer (RFC 9429 section
+5.3.1 has `trickle` and `ice2` only if the offer had them, against RFC 8840 section 4.1.3, RFC 8445 section 10 and RFC
+8839 section 4.3.2: every answer says both; `SettingEngineBuilder::with_answer_ice_options_as_offered(true)`) and the
+RTP circuit breaker's packet size (RFC 8083 section 3; `DefaultInterceptorOptions::circuit_breaker_packet_size`, the
+`LastFrames` form). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/rtci/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
 

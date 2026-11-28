@@ -673,6 +673,18 @@ governed_behaviours! {
         read: |s: &SettingEngine| s.answer_offered_formats_only,
     },
     {
+        id: "jsep.answer-ice-options-as-offered",
+        setting: "SettingEngineBuilder::with_answer_ice_options_as_offered",
+        clause: "RFC 9429 5.3.1 (\"only included if such an option was present in the offer\"), against RFC 8840 4.1.3, RFC 8445 10, RFC 8839 4.3.2 (every answer); default departs from RFC 9429 (docs/conformance.md, spec-issues row 28)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc p2p/base/transport_description_factory.cc::TransportDescriptionFactory::CreateAnswer @ a222406d: desc->AddOption(ICE_OPTION_TRICKLE) whatever the offer had (and no ice2, which libwebrtc never writes)",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_answer_ice_options_as_offered(v),
+        read: |s: &SettingEngine| s.answer_ice_options_as_offered,
+    },
+    {
         id: "jsep.stopping-transceiver-rejected-in-answer",
         setting: "SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer",
         clause: "RFC 9429 5.3.1",

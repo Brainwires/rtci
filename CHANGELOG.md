@@ -289,6 +289,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SettingEngineBuilder::with_answer_ice_options_as_offered`** (`conf/jsep-98-answer-ice-options-conflict`;
+  `StrictRfc` sets it, `jsep.answer-ice-options-as-offered`): with `true` an answer's
+  `a=ice-options` has `trickle` and `ice2` each only when the offer has it, and no line for
+  neither, the form of RFC 9429 section 5.3.1 ("only included if such an option was present in
+  the offer"). The default (`false`) is unchanged: every answer says `trickle ice2`, as RFC 8840
+  section 4.1.3 ("In any case, the Answerer MUST include the "ice-options:trickle"
+  attribute"), RFC 8445 section 10 and RFC 8839 section 4.3.2 require. The texts contradict each
+  other and no erratum, bis or open jsep issue settles it (coordinator ruling 2026-11-28;
+  `docs/conformance/spec-issues.md` row 28, `draft-work.md` #24); `docs/conformance.md` lists the
+  default as a standing departure from RFC 9429 5.3.1 and README's sentence on those departures
+  now names four. Audit: new row RFC9429-5.3.1-43 (`partial`, class E: open MUST rows 6 -> 7),
+  RFC9429-5.3.1-2 split. Offers are not affected (5.2.1 / 5.2.2: `trickle ice2`), so under the
+  setting a later offer changes the options its answer stated (RFC 8839 4.4.1.1.1, recorded in
+  row 28). Tests `tests/jsep_answer_ice_options.rs` (both forms, a lite agent, two `rtci` peers,
+  the profiles). `scripts/behaviour-profiles.py` matches a departure to its governed row by the
+  setting it names when two departures share a clause.
 - **The default interceptor set can be given a start, a floor and a ceiling for its
   congestion controller** (`conf/ccstart-1-start-bitrate-option`; RFC 8836 section 2,
   requirement 4a, "history-based startup"). New `DefaultInterceptorOptions` fields
