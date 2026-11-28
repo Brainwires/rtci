@@ -2383,6 +2383,9 @@ impl RTCPeerConnection {
                     .collect(),
             );
             let formats = same_format(offered, answered);
+            // The connection's rid-id grammar, the one check_remote_description read this answer with:
+            // a=simulcast is parsed whole, so another grammar here would drop every stream of a line
+            // the checks let through (under with_published_rid_id_grammar), not only the odd rid.
             let accepted: Vec<(String, RTCRtpRidRestrictions)> =
                 get_rids(answered, self.setting_engine.rid_id_grammar())
                     .into_iter()

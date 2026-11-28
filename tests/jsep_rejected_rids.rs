@@ -418,3 +418,66 @@ fn a_rid_outside_the_grammar_never_reaches_the_simulcast_answer_and_the_rejected
     assert!(!next.contains("a-b"), "no a-b in the next offer\n{next}");
     Ok(())
 }
+
+/// The other side of the test above, where the grammar argument of that statement decides the
+/// outcome: with `with_published_rid_id_grammar(true)` (and the rejected rids kept), an answer
+/// whose `a=simulcast` names f, h and `a-b` (and rejects q) passes the refusal checks, which read
+/// the published grammar. The statement reads the same grammar, so the line parses: f and h are
+/// accepted, `a-b` matches no rid this endpoint offered and is not taken, q stays in the next
+/// offer. Read with the corrected grammar there instead, the whole `a=simulcast` line would fail
+/// to parse and be ignored: an answer without simulcast, which leaves the sender its first
+/// encoding only (h lost with the line).
+#[test]
+fn with_the_published_grammar_an_answer_naming_a_b_keeps_every_stream_it_accepts() -> TestResult {
+    let mut media_engine = MediaEngine::for_profile(BehaviourProfile::Rfc);
+    media_engine.register_default_codecs()?;
+    let mut offerer = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_behaviour_profile(BehaviourProfile::Rfc)
+                .with_rejected_rids_kept_in_offers(true)
+                .with_rid_pause_marks(false)
+                .with_w3c_simulcast_answer(false)
+                .with_published_rid_id_grammar(true)
+                .build(),
+        )
+        .build(Instant::now())?;
+    let sender = offerer.add_track(simulcast_track())?;
+    let mut answerer = peer(false, false)?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    answerer.set_remote_description(now, offer)?;
+    let local_answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, local_answer.clone())?;
+    let named = edited(
+        &edited(
+            &without_lines(&local_answer.sdp, &["a=rid:q recv max-width=320"]),
+            "a=simulcast:recv f;h;q",
+            "a=simulcast:recv f;h;a-b",
+        ),
+        "a=rid:h recv max-width=640\n",
+        "a=rid:h recv max-width=640\na=rid:a-b recv\n",
+    );
+    offerer.set_remote_description(now, RTCSessionDescription::answer(crlf(&named))?)?;
+    assert_eq!(
+        sent_rids(&mut offerer, sender),
+        strings(&["f", "h"]),
+        "the sender keeps every stream the answer accepted"
+    );
+    let next = offerer.create_offer(None)?.sdp;
+    assert_eq!(
+        (
+            section_lines(&next, "a=rid:"),
+            section_lines(&next, "a=simulcast:")
+        ),
+        (
+            strings(&FIRST_RID_LINES),
+            strings(&["a=simulcast:send f;h;q"])
+        ),
+        "the next offer keeps q\n{next}"
+    );
+    assert!(!next.contains("a-b"), "no a-b in the next offer\n{next}");
+    Ok(())
+}
