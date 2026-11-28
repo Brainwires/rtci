@@ -2803,19 +2803,24 @@ impl RTCPeerConnection {
             }
         }
 
-        // W3C webrtc-pc 4.4.1.6 ("If the description attempted to renegotiate RIDs ... reject p
-        // with a newly created InvalidAccessError") and 5.4.1 ("This simulcast envelope may be
-        // narrowed (reducing the number of layers) in subsequent renegotiation, but cannot be
-        // reexpanded"): once a sender has sent simulcast, a remote description whose section
-        // asks it for a stream (`a=simulcast` `recv` rid) outside its encodings renegotiates
-        // the RIDs. Only an offer can: in an answer, RFC 8851 section 6.4 step 1 governs ("If no
-        // matching line can be located in the offer, the "a=rid" line is ignored"), and
-        // `apply_negotiated_simulcast` keeps only the offered rids, so the envelope can only
-        // narrow there.
+        // W3C webrtc-pc Candidate Correction 37 (PR #2794, 2022-12-08: "Don't fail sRD(offer)
+        // over rid mismatch, just answer with unicast") removed the step that failed a remote
+        // offer asking a sender with a simulcast envelope for a stream (`a=simulcast` `recv`
+        // rid) outside its encodings. By default such an offer is applied: the encodings stay
+        // (`propose_send_encodings` replaces only a lone rid-less one), the answer leaves out
+        // the rids the sender lacks (`add_transceiver_sdp`) and applying it narrows the
+        // envelope (`apply_negotiated_simulcast`). `with_remote_rid_renegotiation_refused`
+        // keeps the uncorrected form, InvalidAccessError ("If the description attempted to
+        // renegotiate RIDs ... reject p"). An answer is never refused for its rids: RFC 8851
+        // section 6.4 step 1 ("If no matching line can be located in the offer, the "a=rid"
+        // line is ignored").
         let transceiver_by_mid =
             RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
         for media in &parsed.media_descriptions {
-            if answers || !is_live_rtp_section(media) {
+            if answers
+                || !self.setting_engine.remote_rid_renegotiation_refused
+                || !is_live_rtp_section(media)
+            {
                 continue;
             }
             let Some(sender) = get_mid_value(media)
@@ -2844,8 +2849,8 @@ impl RTCPeerConnection {
                 })
             {
                 log::warn!(
-                    "remote description renegotiates RIDs: rid {} is outside the simulcast \
-                     envelope (W3C webrtc-pc 4.4.1.6, 5.4.1)",
+                    "remote offer renegotiates RIDs: rid {} is outside the simulcast envelope \
+                     (with_remote_rid_renegotiation_refused)",
                     rid.id
                 );
                 return Err(Error::InvalidAccessError);
